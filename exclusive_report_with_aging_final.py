@@ -6,6 +6,11 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 
+# =========================================
+# Toggle: write the raw "Exclusive_Report" sheet?
+# =========================================
+WRITE_EXCLUSIVE_SHEET = False  # <-- leave False to skip that sheet
+
 # -------------------- helpers --------------------
 def sha1_short(path: str) -> str:
     h = hashlib.sha1()
@@ -148,14 +153,12 @@ def apply_styling(output_file: str):
     for ws in wb.worksheets:
         style_headers(ws)
         if ws.title == "Balance_Aging_Summary":
-            # Shade Grand Total row
             for r in range(2, ws.max_row + 1):
                 if ws.cell(row=r, column=1).value == "Grand Total":
                     for c in range(1, ws.max_column + 1):
                         cell = ws.cell(row=r, column=c)
                         cell.fill = TOTAL_FILL
                         cell.font = Font(bold=True)
-            # Shade last column
             last_col = ws.max_column
             for r in range(1, ws.max_row + 1):
                 cell = ws.cell(row=r, column=last_col)
@@ -191,9 +194,10 @@ def main():
     pivot_summary = build_balance_aging_summary(balance_df)
     insurance_totals = build_insurance_totals(df)
 
-    # Write all sheets + a Meta sheet
+    # Write sheets (skip "Exclusive_Report" if disabled)
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
+        if WRITE_EXCLUSIVE_SHEET:
+            df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
         insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
         pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
         balance_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
@@ -202,6 +206,7 @@ def main():
             "InputFile": os.path.basename(input_file),
             "InputSHA1": sha1_short(input_file),
             "GeneratedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Exclusive_Report_Written": WRITE_EXCLUSIVE_SHEET,
         }])
         meta.to_excel(writer, sheet_name="Meta", index=False)
 
