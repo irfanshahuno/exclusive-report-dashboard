@@ -3,8 +3,8 @@
 import os
 import sys
 import time
-import subprocess
 from pathlib import Path
+import subprocess
 
 import pandas as pd
 import streamlit as st
@@ -18,27 +18,35 @@ SCRIPT_PATH = (BASE_DIR / "exclusive_report_with_aging_final.py").resolve()
 REPORTS_DIR = (BASE_DIR / "reports").resolve()
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-uploaded = st.file_uploader("Upload Check .xlsx", type=["xlsx"])
+uploaded = st.file_uploader("Upload Check (.xlsx)", type=["xlsx"])
 
 def run_generator(input_path: Path, output_path: Path):
-    """Run the ETL script with robust settings and show any errors."""
+    """
+    Run the ETL script with robust settings and capture logs.
+    Uses the same python interpreter as Streamlit.
+    """
     cmd = [
-        sys.executable,            # use SAME interpreter running Streamlit
-        str(SCRIPT_PATH),          # absolute path to script
-        str(input_path),           # input .xlsx
-        "--out", str(output_path)  # explicit output path
+        sys.executable,             # same interpreter
+        str(SCRIPT_PATH),           # generator script
+        str(input_path),            # input .xlsx
+        "--out", str(output_path),  # output .xlsx
     ]
-    # Run from the app folder; capture output for debugging
     proc = subprocess.run(
         cmd,
         cwd=str(BASE_DIR),
         capture_output=True,
-        text=True
+        text=True,
     )
     return proc
 
+def sheet_exists(xls: pd.ExcelFile, name: str) -> bool:
+    try:
+        return name in xls.sheet_names
+    except Exception:
+        return False
+
 if uploaded is not None:
-    # 1) Save upload with a unique name so cache/locks can't trick us
+    # 1) Save upload with a unique name (avoids locking/caching issues)
     ts = int(time.time())
     in_path  = REPORTS_DIR / f"source_{ts}_{uploaded.name}"
     with open(in_path, "wb") as f:
@@ -51,7 +59,6 @@ if uploaded is not None:
 
     # 3) Run generator
     proc = run_generator(in_path, out_path)
-
     if proc.returncode != 0:
         st.error("Report generation failed.")
         with st.expander("Show error details"):
@@ -60,32 +67,41 @@ if uploaded is not None:
             st.code(f"STDERR:\n{proc.stderr or '(empty)'}")
         st.stop()
 
-    # 4) Clear any cached loaders before reading output
+    # 4) Clear any cached loaders (if you used them elsewhere)
     try:
         st.cache_data.clear()
     except Exception:
         pass
 
-    # 5) Load the workbook we just created
+    # 5) Open the workbook we just created
     try:
-        xls    = pd.ExcelFile(out_path, engine="openpyxl")
-        totals = pd.read_excel(xls, "Insurance_Totals")
-        meta   = pd.read_excel(xls, "Meta")
+        xls = pd.ExcelFile(out_path, engine="openpyxl")
     except Exception as e:
-        st.error(f"Could not read output workbook: {e}")
-        with st.expander("Debug info"):
-            st.write("Output path:", str(out_path))
+        st.error(f"Could not open generated workbook: {e}")
         st.stop()
 
-    st.success(f"Report generated from uploaded {uploaded.name}.")
-    st.caption(
-        f"Input: **{meta.loc[0,'InputFile']}** · "
-        f"SHA1: **{meta.loc[0,'InputSHA1']}** · "
-        f"Generated: **{meta.loc[0,'GeneratedAt']}**"
-    )
+    # --- Read Meta (always present)
+    try:
+        meta = pd.read_excel(xls, "Meta")
+        st.success(f"Report generated from uploaded {uploaded.name}.")
+        st.caption(
+            f"Input: **{meta.loc[0,'InputFile']}** · "
+            f"SHA1: **{meta.loc[0,'InputSHA1']}** · "
+            f"Generated: **{meta.loc[0,'GeneratedAt']}** · "
+            f"Exclusive_Report sheet written: **{bool(meta.loc[0,'Exclusive_Report_Written'])}**"
+        )
+    except Exception:
+        st.warning("Meta sheet missing; continuing…")
 
-    # ---------- KPIs (from Grand Total) ----------
-    if "Insurance" in totals.columns and (totals["Insurance"] == "Grand Total").any():
+    # --- Load required sheets safely
+    totals = None
+    if sheet_exists(xls, "Insurance_Totals"):
+        totals = pd.read_excel(xls, "Insurance_Totals")
+    else:
+        st.error("Sheet 'Insurance_Totals' not found. Cannot display KPIs.")
+
+    # KPIs from Grand Total (if available)
+    if totals is not None and "Insurance" in totals.columns and (totals["Insurance"] == "Grand Total").any():
         gt = totals[totals["Insurance"] == "Grand Total"].iloc[0]
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Net Amount", f"{gt['Net Amount']:,.2f}")
@@ -93,32 +109,56 @@ if uploaded is not None:
         c3.metric("Balance",    f"{gt['Balance']:,.2f}")
         c4.metric("Rejected",   f"{gt['Rejected']:,.2f}")
         c5.metric("Accepted",   f"{gt['Accepted']:,.2f}")
-    else:
-        st.warning("Grand Total row not found in Insurance_Totals.")
 
-    # ---------- Tabs / tables ----------
-    tabs = st.tabs(["Insurance Totals", "Balance Aging Summary", "Balance Aging Detail", "Exclusive Report"])
-    with tabs[0]:
-        st.dataframe(totals, use_container_width=True)
-    with tabs[1]:
-        try:
-            bal_summary = pd.read_excel(xls, "Balance_Aging_Summary")
-            st.dataframe(bal_summary, use_container_width=True)
-        except Exception as e:
-            st.warning(f"Could not load Balance_Aging_Summary: {e}")
-    with tabs[2]:
-        try:
-            bal_detail = pd.read_excel(xls, "Balance_Aging_Detail")
-            st.dataframe(bal_detail, use_container_width=True)
-        except Exception as e:
-            st.warning(f"Could not load Balance_Aging_Detail: {e}")
-    with tabs[3]:
-        try:
-            ex = pd.read_excel(xls, "Exclusive_Report")
-            st.dataframe(ex, use_container_width=True)
-        except Exception as e:
-            st.warning(f"Could not load Exclusive_Report: {e}")
+    # --- Build tabs dynamically based on which sheets exist
+    tab_labels = []
+    if totals is not None:
+        tab_labels.append("Insurance Totals")
+    if sheet_exists(xls, "Balance_Aging_Summary"):
+        tab_labels.append("Balance Aging Summary")
+    if sheet_exists(xls, "Balance_Aging_Detail"):
+        tab_labels.append("Balance Aging Detail")
+    # Exclusive_Report is optional — only show if present
+    if sheet_exists(xls, "Exclusive_Report"):
+        tab_labels.append("Exclusive Report")
+
+    if not tab_labels:
+        st.warning("No displayable sheets found.")
+        st.stop()
+
+    tabs = st.tabs(tab_labels)
+
+    t = 0
+    if totals is not None:
+        with tabs[t]:
+            st.dataframe(totals, use_container_width=True)
+        t += 1
+
+    if sheet_exists(xls, "Balance_Aging_Summary"):
+        with tabs[t]:
+            try:
+                bal_summary = pd.read_excel(xls, "Balance_Aging_Summary")
+                st.dataframe(bal_summary, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not load Balance_Aging_Summary: {e}")
+        t += 1
+
+    if sheet_exists(xls, "Balance_Aging_Detail"):
+        with tabs[t]:
+            try:
+                bal_detail = pd.read_excel(xls, "Balance_Aging_Detail")
+                st.dataframe(bal_detail, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not load Balance_Aging_Detail: {e}")
+        t += 1
+
+    if sheet_exists(xls, "Exclusive_Report"):
+        with tabs[t]:
+            try:
+                ex = pd.read_excel(xls, "Exclusive_Report")
+                st.dataframe(ex, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not load Exclusive_Report: {e}")
 
 else:
-    st.caption("Tip: After you upload, the app runs the generator with the **same Python** and reads the exact output file it wrote.")
-
+    st.caption("Upload your daily Excel to generate fresh KPIs and aging views. (The raw 'Exclusive_Report' tab is hidden when not written.)")
