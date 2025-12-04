@@ -1,99 +1,56 @@
 #!/usr/bin/env python3
 
-import os
-import sys
-import time
-import subprocess
+import os, sys, time, subprocess
 from pathlib import Path
-
 import pandas as pd
 import streamlit as st
 
-# ------------------------------------------
-# Page / Layout
-# ------------------------------------------
+# -------------------- Page --------------------
 st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layout="wide")
 st.title("📊 Exclusive Report with Aging — Dashboard")
 
-# ------------------------------------------
-# Paths
-# ------------------------------------------
-BASE_DIR    = Path(__file__).parent.resolve()
-SCRIPT_PATH = (BASE_DIR / "exclusive_report_with_aging_final.py").resolve()   # generator script
-REPORTS_DIR = (BASE_DIR / "reports").resolve()
+# -------------------- Paths --------------------
+BASE_DIR     = Path(__file__).parent.resolve()
+SCRIPT_PATH  = (BASE_DIR / "exclusive_report_with_aging_final.py").resolve()  # generator file
+REPORTS_DIR  = (BASE_DIR / "reports").resolve()
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_REPORT = REPORTS_DIR / "Exclusive_Report_with_Aging.xlsx"             # viewer reads this
 
-# This is the ONE file everyone will view
-DEFAULT_REPORT = REPORTS_DIR / "Exclusive_Report_with_Aging.xlsx"
-
-# ------------------------------------------
-# Mode: viewer (default) vs admin (?mode=admin)
-# ------------------------------------------
+# -------------------- Mode (viewer default) --------------------
 try:
-    params = st.query_params  # Streamlit ≥ 1.31
-    mode = (params.get("mode") or "viewer").lower()
+    qp = st.query_params
 except Exception:
-    # Fallback for older versions:
-    mode = "viewer"
-IS_ADMIN = (mode == "admin")
+    qp = {}
+raw_mode = None
+if isinstance(qp, dict):
+    v = qp.get("mode")
+    if isinstance(v, list) and v: raw_mode = v[0]
+    elif isinstance(v, str):      raw_mode = v
+MODE = (raw_mode or "viewer").strip().lower()
+IS_ADMIN = (MODE == "admin")
+st.caption(f"Mode: **{'Admin' if IS_ADMIN else 'Viewer'}** · Add `?mode=admin` to use the uploader.")
 
-st.caption(
-    f"Mode: **{'Admin' if IS_ADMIN else 'Viewer'}**  · "
-    "Tip: add `?mode=admin` to the URL for upload/regenerate."
-)
-
-# ------------------------------------------
-# Helpers
-# ------------------------------------------
+# -------------------- Helpers --------------------
 def run_generator(input_path: Path, output_path: Path):
-    """
-    Run the ETL script with robust settings and capture logs.
-    Uses the same python interpreter as Streamlit.
-    """
-    cmd = [
-        sys.executable,             # same interpreter
-        str(SCRIPT_PATH),           # generator script
-        str(input_path),            # input .xlsx
-        "--out", str(output_path),  # output .xlsx
-    ]
-    proc = subprocess.run(
-        cmd,
-        cwd=str(BASE_DIR),
-        capture_output=True,
-        text=True,
-    )
-    return proc
+    cmd = [sys.executable, str(SCRIPT_PATH), str(input_path), "--out", str(output_path)]
+    return subprocess.run(cmd, cwd=str(BASE_DIR), capture_output=True, text=True)
 
 def sheet_exists(xls: pd.ExcelFile, name: str) -> bool:
-    try:
-        return name in xls.sheet_names
-    except Exception:
-        return False
+    try: return name in xls.sheet_names
+    except: return False
 
-def open_current_report_or_fail() -> pd.ExcelFile:
-    if not DEFAULT_REPORT.exists():
-        st.error("No generated report found yet. Please upload in **admin mode** to create it.")
-        st.stop()
-    try:
-        return pd.ExcelFile(DEFAULT_REPORT, engine="openpyxl")
-    except Exception as e:
-        st.error(f"Could not open the latest report: {e}")
-        st.stop()
-
-def render_report(xls: pd.ExcelFile, info_text: str = "Loaded latest report."):
-    # Meta (optional but expected)
+def render_report(xls: pd.ExcelFile, info_text: str):
     try:
         meta = pd.read_excel(xls, "Meta")
         st.success(info_text)
         st.caption(
             f"Generated: **{meta.loc[0,'GeneratedAt']}** · "
             f"Input: **{meta.loc[0,'InputFile']}** · "
-            f"Exclusive_Report sheet written: **{bool(meta.get('Exclusive_Report_Written', pd.Series([False])).iloc[0])}**"
+            f"Exclusive_Report written: **{bool(meta.get('Exclusive_Report_Written', pd.Series([False])).iloc[0])}**"
         )
     except Exception:
         st.info(info_text)
 
-    # KPIs from Insurance_Totals
     if sheet_exists(xls, "Insurance_Totals"):
         totals = pd.read_excel(xls, "Insurance_Totals")
         if "Insurance" in totals.columns and (totals["Insurance"] == "Grand Total").any():
@@ -105,59 +62,55 @@ def render_report(xls: pd.ExcelFile, info_text: str = "Loaded latest report."):
             c4.metric("Rejected",   f"{gt['Rejected']:,.2f}")
             c5.metric("Accepted",   f"{gt['Accepted']:,.2f}")
     else:
-        st.error("Sheet **Insurance_Totals** not found; cannot show KPIs.")
+        st.error("Sheet 'Insurance_Totals' not found. Cannot show KPIs.")
 
-    # Build tabs dynamically
     labels = []
     if sheet_exists(xls, "Insurance_Totals"):       labels.append("Insurance Totals")
     if sheet_exists(xls, "Balance_Aging_Summary"):  labels.append("Balance Aging Summary")
     if sheet_exists(xls, "Balance_Aging_Detail"):   labels.append("Balance Aging Detail")
-    if sheet_exists(xls, "Exclusive_Report"):       labels.append("Exclusive Report")  # optional
-
+    if sheet_exists(xls, "Exclusive_Report"):       labels.append("Exclusive Report")
     if not labels:
-        st.warning("No displayable sheets found in the workbook.")
+        st.warning("No displayable sheets found.")
         return
 
     tabs = st.tabs(labels)
     i = 0
     if sheet_exists(xls, "Insurance_Totals"):
-        with tabs[i]:
-            st.dataframe(pd.read_excel(xls, "Insurance_Totals"), use_container_width=True)
-        i += 1
+        with tabs[i]: st.dataframe(pd.read_excel(xls, "Insurance_Totals"), use_container_width=True); i += 1
     if sheet_exists(xls, "Balance_Aging_Summary"):
-        with tabs[i]:
-            st.dataframe(pd.read_excel(xls, "Balance_Aging_Summary"), use_container_width=True)
-        i += 1
+        with tabs[i]: st.dataframe(pd.read_excel(xls, "Balance_Aging_Summary"), use_container_width=True); i += 1
     if sheet_exists(xls, "Balance_Aging_Detail"):
-        with tabs[i]:
-            st.dataframe(pd.read_excel(xls, "Balance_Aging_Detail"), use_container_width=True)
-        i += 1
+        with tabs[i]: st.dataframe(pd.read_excel(xls, "Balance_Aging_Detail"), use_container_width=True); i += 1
     if sheet_exists(xls, "Exclusive_Report"):
-        with tabs[i]:
-            st.dataframe(pd.read_excel(xls, "Exclusive_Report"), use_container_width=True)
+        with tabs[i]: st.dataframe(pd.read_excel(xls, "Exclusive_Report"), use_container_width=True)
 
-# ------------------------------------------
-# Viewer mode: just open & render the latest report
-# ------------------------------------------
+# -------------------- VIEWER (no upload UI) --------------------
 if not IS_ADMIN:
-    xls = open_current_report_or_fail()
+    if not DEFAULT_REPORT.exists():
+        st.error("No generated report found yet. Ask admin to upload in **admin mode**.")
+        st.stop()
+    try:
+        xls = pd.ExcelFile(DEFAULT_REPORT, engine="openpyxl")
+    except Exception as e:
+        st.error(f"Could not open report: {e}")
+        st.stop()
+
+    # (Optional) CSS safeguard to hide any accidental uploader widgets
+    st.markdown("<style>[data-testid='stFileUploader']{display:none!important;}</style>", unsafe_allow_html=True)
+
     render_report(xls, "Loaded latest report (viewer mode).")
     st.stop()
 
-# ------------------------------------------
-# Admin mode: upload -> generate -> overwrite DEFAULT_REPORT -> show
-# ------------------------------------------
+# -------------------- ADMIN (upload & regenerate) --------------------
 uploaded = st.file_uploader("Upload source Excel (.xlsx)", type=["xlsx"])
 if uploaded is None:
-    # Show whatever is currently the latest (if exists), so admin can see last state
     if DEFAULT_REPORT.exists():
-        xls = open_current_report_or_fail()
+        xls = pd.ExcelFile(DEFAULT_REPORT, engine="openpyxl")
         render_report(xls, "Showing current saved report. Upload to regenerate.")
     else:
         st.info("Upload an Excel file to generate the first report.")
     st.stop()
 
-# Save upload with a unique name
 ts = int(time.time())
 in_path = REPORTS_DIR / f"source_{ts}_{uploaded.name}"
 with open(in_path, "wb") as f:
@@ -174,11 +127,12 @@ if proc.returncode != 0:
         st.code(f"STDERR:\n{proc.stderr or '(empty)'}")
     st.stop()
 
-# Clear any cached loaders (if you used them elsewhere)
 try:
     st.cache_data.clear()
 except Exception:
     pass
 
-xls = open_current_report_or_fail()
-render_report(xls, "Report updated successfully (admin mode). Share the **viewer link** without ?mode=admin.")
+xls = pd.ExcelFile(DEFAULT_REPORT, engine="openpyxl")
+render_report(xls, "Report updated successfully (admin mode). Share the viewer link (no ?mode=admin).")
+
+
