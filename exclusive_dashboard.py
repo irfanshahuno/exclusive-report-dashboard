@@ -1,130 +1,121 @@
-import streamlit as st
-import pandas as pd
+import os
+import sys
+import io
+import subprocess
 from pathlib import Path
+import pandas as pd
+import streamlit as st
 
 st.set_page_config(page_title="Exclusive Report Dashboard", layout="wide")
-st.title("📊 Exclusive Report Dashboard")
 
-DATA_XLSX = Path("Check3.xlsx")
-DATA_PARQ = Path("Check3.parquet")
-DATA_CSV  = Path("Check3.csv")
+# ---- Simple password gate (set DASH_PASS in Streamlit secrets) ----
+PASS = os.environ.get("DASH_PASS", "")
+if PASS:
+    if "ok" not in st.session_state:
+        st.session_state.ok = False
+    if not st.session_state.ok:
+        st.title("🔐 Exclusive Report — Login")
+        pwd = st.text_input("Enter password", type="password")
+        if st.button("Login"):
+            if pwd == PASS:
+                st.session_state.ok = True
+            else:
+                st.error("Incorrect password")
+        st.stop()
 
-def parquet_available():
-    try:
-        import pyarrow  # noqa
-        return True
-    except Exception:
-        return False
+# ---- Paths (all relative to this file in Streamlit Cloud) ----
+BASE = Path(__file__).parent
+DATA_FILE = BASE / "Exclusive_Report_with_Aging.xlsx"
+SOURCE_XLSX = BASE / "Check3.xlsx"
+GENERATOR = BASE / "exclusive_report_with_aging_final.py"
 
-@st.cache_data(ttl=24*3600)
-def load_data():
-    if DATA_PARQ.exists() and parquet_available():
-        return pd.read_parquet(DATA_PARQ)
-    if DATA_CSV.exists():
-        return pd.read_csv(DATA_CSV)
-    df = pd.read_excel(DATA_XLSX, engine="openpyxl")
-    if parquet_available():
-        df.to_parquet(DATA_PARQ, index=False)
-    return df
+st.title("📊 Exclusive Report with Aging — Dashboard")
 
-try:
-    df = load_data()
-except Exception as e:
-    st.error(f"Failed to load data: {e}")
-    st.stop()
+# ---- Upload (manual daily update) ----
+st.subheader("📥 Upload your daily Excel")
+uploaded = st.file_uploader("Upload Check3.xlsx (source) OR Exclusive_Report_with_Aging.xlsx (final)", type=["xlsx"])
 
-st.success(f"Loaded {len(df):,} rows")
+colA, colB = st.columns([1,1])
+with colA:
+    if uploaded is not None:
+        name = uploaded.name.lower()
+        content = uploaded.read()
 
-# ---------- derive standard columns (rename if present) ----------
-# Try to map common column names:
-rename_map = {
-    "InsPlan": "Plan",
-    "InsuranceName": "Insurance",
-    "Net Amount": "NetAmount",
-    "Paid Amount": "Paid",
-    "VisitDate": "DOS",            # treat VisitDate as DOS if DOS missing
-    "ActivityStart": "DOS",        # else use ActivityStart
-}
-for k, v in rename_map.items():
-    if k in df.columns and v not in df.columns:
-        df = df.rename(columns={k: v})
+        if "check3" in name:
+            with open(SOURCE_XLSX, "wb") as f:
+                f.write(content)
+            st.info("Source file saved. Generating report...")
+            result = subprocess.run(
+                [sys.executable, str(GENERATOR), str(SOURCE_XLSX)],
+                capture_output=True, text=True, cwd=str(BASE)
+            )
+            if result.returncode == 0 and DATA_FILE.exists():
+                st.success("✅ Report generated from uploaded Check3.xlsx.")
+            else:
+                st.error("❌ Report generation failed.")
+                st.code(result.stderr or result.stdout)
+        else:
+            with open(DATA_FILE, "wb") as f:
+                f.write(content)
+            st.success("✅ Replaced Exclusive_Report_with_Aging.xlsx.")
 
-# Numeric safety
-for num in ["NetAmount", "Paid"]:
-    if num in df.columns:
-        df[num] = pd.to_numeric(df[num], errors="coerce")
+with colB:
+    if st.button("🔄 Refresh using current Check3.xlsx"):
+        if SOURCE_XLSX.exists():
+            result = subprocess.run(
+                [sys.executable, str(GENERATOR), str(SOURCE_XLSX)],
+                capture_output=True, text=True, cwd=str(BASE)
+            )
+            if result.returncode == 0 and DATA_FILE.exists():
+                st.success("✅ Report refreshed.")
+            else:
+                st.error("❌ Refresh failed.")
+                st.code(result.stderr or result.stdout)
+        else:
+            st.warning("No Check3.xlsx found yet. Please upload it first.")
 
-if "Paid" in df.columns and "NetAmount" in df.columns:
-    df["Balance"] = (df["NetAmount"] - df["Paid"]).fillna(0)
+st.divider()
 
-# Date safety
-if "DOS" in df.columns:
-    df["DOS"] = pd.to_datetime(df["DOS"], errors="coerce")
-
-# ---------- Sidebar filters ----------
-with st.sidebar:
-    st.header("Filters")
-    ins = st.multiselect("Insurance", sorted(df["Insurance"].dropna().unique()) if "Insurance" in df else [])
-    plan = st.multiselect("Plan", sorted(df["Plan"].dropna().unique()) if "Plan" in df else [])
-    if "DOS" in df.columns:
-        min_d, max_d = pd.to_datetime(df["DOS"].min()), pd.to_datetime(df["DOS"].max())
-        date_range = st.date_input("Date range", (min_d.date(), max_d.date()))
-    else:
-        date_range = None
-    search = st.text_input("Search (MemberID / Claim / Patient)", "")
-
-# apply filters
-filtered = df.copy()
-
-if ins and "Insurance" in filtered:
-    filtered = filtered[filtered["Insurance"].isin(ins)]
-if plan and "Plan" in filtered:
-    filtered = filtered[filtered["Plan"].isin(plan)]
-if date_range and "DOS" in filtered:
-    start, end = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
-    filtered = filtered[(filtered["DOS"] >= start) & (filtered["DOS"] <= end)]
-if search:
-    s = search.lower()
-    cols = [c for c in ["MemberID","UniqueID","EncPatID","PatName","ClaimID"] if c in filtered]
-    if cols:
-        filtered = filtered[filtered[cols].astype(str).apply(lambda r: r.str.lower().str.contains(s)).any(axis=1)]
-
-st.caption(f"Showing {len(filtered):,} rows after filters")
-
-# ---------- KPI cards ----------
-def safe_sum(col):
-    return float(filtered[col].sum()) if col in filtered else 0.0
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Net Amount", f"AED {safe_sum('NetAmount'):,.2f}")
-c2.metric("Paid", f"AED {safe_sum('Paid'):,.2f}")
-c3.metric("Balance", f"AED {safe_sum('Balance'):,.2f}")
-
-# ---------- Grouped summary (Insurance → Plan) ----------
-group_cols = [c for c in ["Insurance","Plan"] if c in filtered]
-value_cols = [c for c in ["NetAmount","Paid","Balance"] if c in filtered]
-if group_cols and value_cols:
-    summary = (filtered
-               .groupby(group_cols, dropna=False)[value_cols]
-               .sum()
-               .reset_index()
-               .sort_values(value_cols[-1], ascending=False))
-    st.subheader("Summary by Insurance / Plan")
-    st.dataframe(summary, use_container_width=True)
-
-# ---------- Detail table ----------
-st.subheader("Detail")
-st.dataframe(filtered.head(1000), use_container_width=True)
-
-# ---------- Downloads ----------
+# ---- Data viewer ----
 @st.cache_data
-def to_csv(df_): return df_.to_csv(index=False).encode("utf-8")
-st.download_button("Download filtered CSV", to_csv(filtered), file_name="exclusive_filtered.csv")
+def load_sheet(sheet):
+    return pd.read_excel(DATA_FILE, sheet_name=sheet, engine="openpyxl")
 
-if parquet_available():
-    @st.cache_data
-    def to_parquet_bytes(df_): return df_.to_parquet(index=False)
-    st.download_button("Download filtered Parquet", to_parquet_bytes(filtered), file_name="exclusive_filtered.parquet")
+tabs = st.tabs(["Insurance Totals", "Balance Aging Summary", "Balance Aging Detail", "Exclusive Report"])
 
+if not DATA_FILE.exists():
+    st.warning("No report file yet. Upload Check3.xlsx and click Refresh, or upload the final report.")
+else:
+    # Tab 1
+    with tabs[0]:
+        df = load_sheet("Insurance_Totals")
+        st.subheader("Insurance Totals (Net Amount, Paid, Balance, Rejected, Accepted)")
+        top = df[df["Insurance"].ne("Grand Total")]
+        gt = df[df["Insurance"].eq("Grand Total")].tail(1)
+        c1, c2, c3, c4, c5 = st.columns(5)
+        if not gt.empty:
+            c1.metric("Net Amount", f"{gt['Net Amount'].iloc[0]:,.2f}")
+            c2.metric("Paid", f"{gt['Paid'].iloc[0]:,.2f}")
+            c3.metric("Balance", f"{gt['Balance'].iloc[0]:,.2f}")
+            c4.metric("Rejected", f"{gt['Rejected'].iloc[0]:,.2f}")
+            c5.metric("Accepted", f"{gt['Accepted'].iloc[0]:,.2f}")
+        st.bar_chart(top.set_index("Insurance")[["Net Amount","Paid","Balance"]])
+        st.dataframe(df, use_container_width=True)
 
+    # Tab 2
+    with tabs[1]:
+        df = load_sheet("Balance_Aging_Summary")
+        st.subheader("Balance Aging Summary")
+        st.dataframe(df, use_container_width=True)
 
+    # Tab 3
+    with tabs[2]:
+        df = load_sheet("Balance_Aging_Detail")
+        st.subheader("Balance Aging Detail")
+        st.dataframe(df, use_container_width=True)
+
+    # Tab 4
+    with tabs[3]:
+        df = load_sheet("Exclusive_Report")
+        st.subheader("Exclusive Report (raw)")
+        st.dataframe(df, use_container_width=True)
