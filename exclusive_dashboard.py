@@ -95,12 +95,17 @@ def load_detail_sheet(path: str, detail_sheet: str, _token: float):
     return xls.parse(detail_sheet)
 
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove empty or blank rows (like after Grand Total)."""
+    """
+    Remove completely empty/blank rows (e.g., the blank grid after 'Grand Total').
+    IMPORTANT: do this row-wise (axis=1) to avoid the 'Unalignable boolean Series' error.
+    """
     if df.empty:
         return df
-    df = df.dropna(how="all")
-    df = df.loc[~(df.astype(str).apply(lambda x: "".join(x).strip()) == "")]
-    return df
+    df2 = df.dropna(how="all")
+    if df2.empty:
+        return df2
+    blank_rows = df2.fillna("").astype(str).apply(lambda row: "".join(row).strip() == "", axis=1)
+    return df2.loc[~blank_rows]
 
 def show_kpis_smart(totals: pd.DataFrame):
     ins_col = "Insurance" if "Insurance" in totals.columns else None
@@ -129,9 +134,45 @@ def show_kpis_smart(totals: pd.DataFrame):
     c5.metric("Accepted", f"{acc:,.2f}")
 
 def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150) -> int:
-    """Auto height for all rows visible without scroll."""
+    """Auto height for all rows visible without inner scroll."""
     rows = len(df)
     return header_px + (rows * row_px) + padding_px
+
+def style_grid(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    """
+    Apply full borders, bold first column, bold 'Grand Total' row,
+    and thousand separators for numeric columns.
+    """
+    df = df.copy()
+    first_col = df.columns[0]
+
+    # numeric formatting
+    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    fmt_map = {c: "{:,.2f}".format for c in num_cols}
+
+    border = "#CBD5E1"  # slate-300
+    styler = (
+        df.style
+        .set_table_styles([
+            {"selector": "table", "props": [("border-collapse", "collapse")]},
+            {"selector": "th",    "props": [("border", f"1px solid {border}"), ("background", "#F8FAFC"), ("font-weight", "700")]},
+            {"selector": "td",    "props": [("border", f"1px solid {border}")]},
+        ])
+        .set_properties(subset=[first_col], **{"font-weight": "600"})
+        .format(fmt_map)
+    )
+
+    # Bold + highlight 'Grand Total' row if present
+    if first_col in df.columns:
+        mask_gt = df[first_col].astype(str).str.contains("grand total", case=False, na=False)
+        if mask_gt.any():
+            def row_style(row):
+                if mask_gt.loc[row.name]:
+                    return ["font-weight:700; background-color:#FFF7E0"] * len(row)
+                return [""] * len(row)
+            styler = styler.apply(row_style, axis=1)
+
+    return styler
 
 # --------------------------- State ------------------------------
 if "is_admin" not in st.session_state: st.session_state.is_admin = False
@@ -218,19 +259,38 @@ else:
         show_kpis_smart(totals)
 
         t1, t2, t3 = st.tabs([f"{s_tot}", f"{s_sum}", f"{s_det}"])
+
         with t1:
             clean_totals = trim_empty_rows(totals)
-            st.dataframe(clean_totals, use_container_width=True, hide_index=True, height=full_height(clean_totals))
+            st.dataframe(
+                style_grid(clean_totals),
+                use_container_width=True,
+                hide_index=True,
+                height=full_height(clean_totals),
+            )
+
         with t2:
             clean_summary = trim_empty_rows(summary)
-            st.dataframe(clean_summary, use_container_width=True, hide_index=True, height=full_height(clean_summary))
+            st.dataframe(
+                style_grid(clean_summary),
+                use_container_width=True,
+                hide_index=True,
+                height=full_height(clean_summary),
+            )
+
         with t3:
             detail = load_detail_sheet(str(out_path), s_det, token)
-            st.dataframe(detail, use_container_width=True, hide_index=True)
+            st.dataframe(
+                style_grid(detail),
+                use_container_width=True,
+                hide_index=True,
+            )
+
     except Exception as e:
         try:
             names = pd.ExcelFile(str(out_path)).sheet_names
         except Exception:
             names = []
         st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(could not read)'}")
+
 
