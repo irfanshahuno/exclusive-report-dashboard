@@ -128,8 +128,8 @@ def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150
 # --------------------------- Styling ---------------------------
 def style_grid(df: pd.DataFrame):
     """
-    Styled DataFrame with:
-    - Light-green header row
+    Styled DataFrame:
+    - Blue header row
     - White index column (no green strip)
     - Index starts from 1
     - Borders + Grand Total highlight
@@ -147,8 +147,8 @@ def style_grid(df: pd.DataFrame):
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
 
     border = "#CBD5E1"
-    header_bg = "#E8F5E9"  # light green
-    header_font = "#2E7D32"  # dark green
+    header_bg = "#E3F2FD"  # soft light blue
+    header_font = "#0D47A1"  # dark blue text
 
     styler = (
         df.style
@@ -156,21 +156,21 @@ def style_grid(df: pd.DataFrame):
             {"selector": "table",
              "props": [("border-collapse", "collapse"), ("width", "100%")]},
 
-            # ✅ Top header green
+            # ✅ Blue header
             {"selector": "th.col_heading",
              "props": [("border", f"1px solid {border}"),
                        ("background-color", header_bg),
                        ("font-weight", "700"),
                        ("color", header_font)]},
 
-            # ✅ Index white background (no green strip)
+            # ✅ White index (no blue strip)
             {"selector": "th.row_heading",
              "props": [("border", f"1px solid {border}"),
                        ("background-color", "#FFFFFF"),
                        ("color", "#000000"),
                        ("font-weight", "500")]},
 
-            # ✅ Regular cell borders
+            # ✅ Normal table cells
             {"selector": "td",
              "props": [("border", f"1px solid {border}")]}
         ])
@@ -283,6 +283,5 @@ else:
             names = pd.ExcelFile(str(out_path)).sheet_names
         except Exception: names = []
         st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
 
 
