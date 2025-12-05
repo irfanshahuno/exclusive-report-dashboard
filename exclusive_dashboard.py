@@ -12,14 +12,10 @@ st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layou
 BASE = Path(__file__).parent
 
 # ------------------------------------------------------------
-# CONFIG — adjust names if yours differ
+# CONFIG — adjust names if needed
 # ------------------------------------------------------------
 GENERATOR = BASE / "exclusive_report_with_aging_final.py"
-
-# If your generator supports: python script.py <source.xlsx> --out <report.xlsx>
-GENERATOR_SUPPORTS_OUT_ARG = False  # set True if you add --out to your script
-
-# The default Excel filename your generator writes (used when no --out)
+GENERATOR_SUPPORTS_OUT_ARG = False  # set True if your generator accepts --out <report.xlsx>
 DEFAULT_GENERATED_REPORT = BASE / "Exclusive_Report_with_Aging.xlsx"
 
 CENTERS = {
@@ -27,21 +23,13 @@ CENTERS = {
         "name": "Easy Health Medical Clinic (MF8031)",
         "source": BASE / "EH_Check3.xlsx",
         "report": BASE / "Exclusive_Report_with_Aging_EASYHEALTH.xlsx",
-        "sheets": {
-            "totals": "Insurance Totals",
-            "summary": "Balance Aging Summary",
-            "detail": "Balance Aging Detail",
-        },
+        "sheets": {"totals": "Insurance Totals", "summary": "Balance Aging Summary", "detail": "Balance Aging Detail"},
     },
     "excellent": {
         "name": "Excellent Medical Center (MF4777)",
         "source": BASE / "Check3.xlsx",
         "report": BASE / "Exclusive_Report_with_Aging_EXCELLENT.xlsx",
-        "sheets": {
-            "totals": "Insurance Totals",
-            "summary": "Balance Aging Summary",
-            "detail": "Balance Aging Detail",
-        },
+        "sheets": {"totals": "Insurance Totals", "summary": "Balance Aging Summary", "detail": "Balance Aging Detail"},
     },
 }
 
@@ -57,98 +45,102 @@ def mtime_token(p: Path) -> float:
 @st.cache_data(show_spinner=True)
 def load_report(path: str, totals_sheet: str, summary_sheet: str, detail_sheet: str, _token: float):
     xls = pd.ExcelFile(path)
-    totals  = xls.parse(totals_sheet)
-    summary = xls.parse(summary_sheet)
-    detail  = xls.parse(detail_sheet)
-    return totals, summary, detail
+    return xls.parse(totals_sheet), xls.parse(summary_sheet), xls.parse(detail_sheet)
 
 def show_kpis(totals: pd.DataFrame):
-    val = lambda c: float(totals[c].sum()) if c in totals else 0.0
+    v = lambda c: float(totals[c].sum()) if c in totals else 0.0
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Net Amount", f"{val('Net Amount'):,.2f}")
-    c2.metric("Paid", f"{val('Paid'):,.2f}")
-    c3.metric("Balance", f"{val('Balance'):,.2f}")
-    c4.metric("Rejected", f"{val('Rejected'):,.2f}")
-    c5.metric("Accepted", f"{val('Accepted'):,.2f}")
+    c1.metric("Net Amount", f"{v('Net Amount'):,.2f}")
+    c2.metric("Paid", f"{v('Paid'):,.2f}")
+    c3.metric("Balance", f"{v('Balance'):,.2f}")
+    c4.metric("Rejected", f"{v('Rejected'):,.2f}")
+    c5.metric("Accepted", f"{v('Accepted'):,.2f}")
 
 def rebuild_report(cfg) -> str:
-    src = str(cfg["source"])
-    out = str(cfg["report"])
+    src, out = str(cfg["source"]), str(cfg["report"])
     if GENERATOR_SUPPORTS_OUT_ARG:
-        res = subprocess.run(["python", str(GENERATOR), src, "--out", out],
-                             capture_output=True, text=True)
-        if res.returncode != 0:
-            raise RuntimeError(res.stderr or "Generator failed")
-        return res.stdout or "OK"
+        r = subprocess.run(["python", str(GENERATOR), src, "--out", out], capture_output=True, text=True)
+        if r.returncode: raise RuntimeError(r.stderr or "Generator failed")
+        return r.stdout or "OK"
     else:
-        res = subprocess.run(["python", str(GENERATOR), src],
-                             capture_output=True, text=True)
-        if res.returncode != 0:
-            raise RuntimeError(res.stderr or "Generator failed")
+        r = subprocess.run(["python", str(GENERATOR), src], capture_output=True, text=True)
+        if r.returncode: raise RuntimeError(r.stderr or "Generator failed")
         if not DEFAULT_GENERATED_REPORT.exists():
             raise RuntimeError(f"Expected output not found: {DEFAULT_GENERATED_REPORT.name}")
         shutil.copyfile(DEFAULT_GENERATED_REPORT, out)
-        return res.stdout or "OK"
+        return r.stdout or "OK"
 
 # ------------------------------------------------------------
-# Routing (buttons → center, optional admin mode)
+# MODE + CENTER (robust: use session_state)
 # ------------------------------------------------------------
 qp = st.query_params
 
-# Normalize mode + center from URL
-mode = (qp.get("mode", ["view"])[0] or "view").strip().lower()
-if mode not in ("view", "admin"):
-    mode = "view"
+# Initialize session_state flags once
+if "is_admin" not in st.session_state:
+    # Accept either ?mode=admin or ?admin=1 to turn admin on from URL
+    url_mode = (qp.get("mode", ["view"])[0] or "view").strip().lower()
+    url_admin = (qp.get("admin", ["0"])[0] or "0").strip()
+    st.session_state.is_admin = (url_mode == "admin") or (url_admin in ("1", "true", "yes"))
 
-center_key = qp.get("center", [None])[0]
-center_key = (center_key or "").strip().lower()
-if center_key == "":
-    center_key = None
+if "center_key" not in st.session_state:
+    ck = qp.get("center", [None])[0]
+    st.session_state.center_key = (ck or "").strip().lower() or None
 
-# Debug/status line so you can SEE the state (remove later if you want)
-st.caption(f"Mode: **{mode}** · Center: **{center_key or 'none'}**")
+is_admin = bool(st.session_state.is_admin)
+center_key = st.session_state.center_key
 
-# If no center chosen yet → show two big buttons and stop
+# Status line (you can remove later)
+st.caption(f"Mode: **{'admin' if is_admin else 'view'}** · Center: **{center_key or 'none'}**")
+
+# ------------------------------------------------------------
+# Center chooser (two big buttons)
+# ------------------------------------------------------------
 if center_key not in CENTERS:
     st.title("📊 Exclusive Report with Aging — Dashboard")
     st.subheader("Choose a center")
 
-    # Preserve mode when clicking a button
-    current_mode = (st.query_params.get("mode", ["view"])[0] or "view").strip().lower()
-
     c1, c2 = st.columns(2)
     with c1:
         if st.button(CENTERS["easyhealth"]["name"], use_container_width=True):
-            st.query_params.update(center="easyhealth", mode=current_mode)
+            st.session_state.center_key = "easyhealth"
+            # keep URL clean; also keep admin flag in URL if you came with it
+            new = {"center": "easyhealth"}
+            if is_admin: new["mode"] = "admin"
+            st.query_params.update(**new)
             st.rerun()
     with c2:
         if st.button(CENTERS["excellent"]["name"], use_container_width=True):
-            st.query_params.update(center="excellent", mode=current_mode)
+            st.session_state.center_key = "excellent"
+            new = {"center": "excellent"}
+            if is_admin: new["mode"] = "admin"
+            st.query_params.update(**new)
             st.rerun()
 
     st.stop()
 
-# Selected center
+# ------------------------------------------------------------
+# Selected center view
+# ------------------------------------------------------------
 cfg = CENTERS[center_key]
 st.title("📊 Exclusive Report with Aging — Dashboard")
 
-# Admin badge so you KNOW you're in admin
-if mode == "admin":
+if is_admin:
     st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
 
 st.caption(f"Center: **{cfg['name']}**  ·  Input: {cfg['source'].name}  ·  Report: {cfg['report'].name}")
 
-# Back button (preserves mode)
+# Back button (preserves admin flag)
 if st.button("◀ Choose another center"):
-    current_mode = (st.query_params.get("mode", ["view"])[0] or "view").strip().lower()
+    st.session_state.center_key = None
     st.query_params.clear()
-    st.query_params.update(mode=current_mode)
+    if is_admin:
+        st.query_params.update(mode="admin")
     st.rerun()
 
 # ------------------------------------------------------------
-# ADMIN (only when URL has ?mode=admin)
+# ADMIN tools (visible only in admin)
 # ------------------------------------------------------------
-if mode == "admin":
+if is_admin:
     with st.expander("⬆️ Upload/replace source Excel", expanded=False):
         up = st.file_uploader("Upload .xlsx", type=["xlsx"])
         if up:
@@ -165,16 +157,18 @@ if mode == "admin":
             load_report.clear()
         except Exception as e:
             st.error(str(e))
-
     if colB.button("🗂 Show file locations", use_container_width=True):
         st.info(f"Source: {cfg['source']}\nReport: {cfg['report']}\nScript: {GENERATOR}")
 
 # ------------------------------------------------------------
-# Viewer (KPIs + tables)
+# VIEWER
 # ------------------------------------------------------------
 token = mtime_token(cfg["report"])
 if token == 0.0:
-    st.warning("Report not found. (Open with ?mode=admin to upload source and rebuild.)")
+    warn = "Report not found."
+    if is_admin:
+        warn += " (Upload source and click Rebuild.)"
+    st.warning(warn)
 else:
     totals, summary, detail = load_report(
         str(cfg["report"]),
@@ -191,5 +185,4 @@ else:
         st.dataframe(summary, use_container_width=True, hide_index=True)
     with t3:
         st.dataframe(detail, use_container_width=True, hide_index=True)
-
 
