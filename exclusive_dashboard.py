@@ -71,76 +71,60 @@ def rebuild_report(cfg) -> str:
         return r.stdout or "OK"
 
 # ------------------------------------------------------------
-# MODE + CENTER (robust: use session_state)
+# State: admin toggle + center selection
 # ------------------------------------------------------------
-qp = st.query_params
-
-# Initialize session_state flags once
 if "is_admin" not in st.session_state:
-    # Accept either ?mode=admin or ?admin=1 to turn admin on from URL
-    url_mode = (qp.get("mode", ["view"])[0] or "view").strip().lower()
-    url_admin = (qp.get("admin", ["0"])[0] or "0").strip()
-    st.session_state.is_admin = (url_mode == "admin") or (url_admin in ("1", "true", "yes"))
+    st.session_state.is_admin = False  # default view-only
 
 if "center_key" not in st.session_state:
-    ck = qp.get("center", [None])[0]
-    st.session_state.center_key = (ck or "").strip().lower() or None
+    st.session_state.center_key = None
 
-is_admin = bool(st.session_state.is_admin)
-center_key = st.session_state.center_key
+# Header row: title + admin toggle on the right
+left, right = st.columns([5, 1])
+with left:
+    st.title("📊 Exclusive Report with Aging — Dashboard")
+with right:
+    st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
 
-# Status line (you can remove later)
-st.caption(f"Mode: **{'admin' if is_admin else 'view'}** · Center: **{center_key or 'none'}**")
+# Status line (you can delete later)
+st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}**")
 
 # ------------------------------------------------------------
 # Center chooser (two big buttons)
 # ------------------------------------------------------------
+center_key = st.session_state.center_key
 if center_key not in CENTERS:
-    st.title("📊 Exclusive Report with Aging — Dashboard")
     st.subheader("Choose a center")
-
     c1, c2 = st.columns(2)
     with c1:
         if st.button(CENTERS["easyhealth"]["name"], use_container_width=True):
             st.session_state.center_key = "easyhealth"
-            # keep URL clean; also keep admin flag in URL if you came with it
-            new = {"center": "easyhealth"}
-            if is_admin: new["mode"] = "admin"
-            st.query_params.update(**new)
             st.rerun()
     with c2:
         if st.button(CENTERS["excellent"]["name"], use_container_width=True):
             st.session_state.center_key = "excellent"
-            new = {"center": "excellent"}
-            if is_admin: new["mode"] = "admin"
-            st.query_params.update(**new)
             st.rerun()
-
     st.stop()
 
 # ------------------------------------------------------------
 # Selected center view
 # ------------------------------------------------------------
-cfg = CENTERS[center_key]
-st.title("📊 Exclusive Report with Aging — Dashboard")
+cfg = CENTERS[st.session_state.center_key]
 
-if is_admin:
+if st.session_state.is_admin:
     st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
 
 st.caption(f"Center: **{cfg['name']}**  ·  Input: {cfg['source'].name}  ·  Report: {cfg['report'].name}")
 
-# Back button (preserves admin flag)
+# Back button
 if st.button("◀ Choose another center"):
     st.session_state.center_key = None
-    st.query_params.clear()
-    if is_admin:
-        st.query_params.update(mode="admin")
     st.rerun()
 
 # ------------------------------------------------------------
-# ADMIN tools (visible only in admin)
+# ADMIN tools (only when toggled)
 # ------------------------------------------------------------
-if is_admin:
+if st.session_state.is_admin:
     with st.expander("⬆️ Upload/replace source Excel", expanded=False):
         up = st.file_uploader("Upload .xlsx", type=["xlsx"])
         if up:
@@ -165,10 +149,10 @@ if is_admin:
 # ------------------------------------------------------------
 token = mtime_token(cfg["report"])
 if token == 0.0:
-    warn = "Report not found."
-    if is_admin:
-        warn += " (Upload source and click Rebuild.)"
-    st.warning(warn)
+    msg = "Report not found."
+    if st.session_state.is_admin:
+        msg += " (Upload source and click Rebuild.)"
+    st.warning(msg)
 else:
     totals, summary, detail = load_report(
         str(cfg["report"]),
@@ -185,4 +169,5 @@ else:
         st.dataframe(summary, use_container_width=True, hide_index=True)
     with t3:
         st.dataframe(detail, use_container_width=True, hide_index=True)
+
 
