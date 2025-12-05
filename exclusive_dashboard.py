@@ -1,4 +1,4 @@
-# dashboard.py
+# exclusive_dashboard.py
 import sys
 import subprocess
 from pathlib import Path
@@ -73,12 +73,6 @@ def autodetect_sheets(xls: pd.ExcelFile):
     totals  = _pick_sheet(names, ["total"]) or _pick_sheet(names, ["insurance"])
     summary = _pick_sheet(names, ["aging", "summary"]) or _pick_sheet(names, ["summary"])
     detail  = _pick_sheet(names, ["aging", "detail"])  or _pick_sheet(names, ["detail"])
-    missing = []
-    if not totals:  missing.append("Totals (e.g., 'Insurance Totals')")
-    if not summary: missing.append("Aging Summary (e.g., 'Balance Aging Summary')")
-    if not detail:  missing.append("Aging Detail (e.g., 'Balance Aging Detail')")
-    if missing:
-        raise ValueError("Worksheet(s) not found: " + ", ".join(missing) + f". Found sheets: {', '.join(names)}")
     return totals, summary, detail
 
 @st.cache_data(show_spinner=True)
@@ -95,10 +89,6 @@ def load_detail_sheet(path: str, detail_sheet: str, _token: float):
     return xls.parse(detail_sheet)
 
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Remove completely empty/blank rows (e.g., the blank grid after 'Grand Total').
-    IMPORTANT: do this row-wise (axis=1) to avoid the 'Unalignable boolean Series' error.
-    """
     if df.empty:
         return df
     df2 = df.dropna(how="all")
@@ -114,18 +104,13 @@ def show_kpis_smart(totals: pd.DataFrame):
         mask_gt = totals[ins_col].astype(str).str.contains("grand total", case=False, na=False)
         if mask_gt.any():
             gt = totals.loc[mask_gt].iloc[-1]
-
     if gt is not None:
         net = float(gt.get("Net Amount", 0)); paid = float(gt.get("Paid", 0))
-        bal = float(gt.get("Balance", 0));   rej  = float(gt.get("Rejected", 0))
+        bal = float(gt.get("Balance", 0)); rej = float(gt.get("Rejected", 0))
         acc = float(gt.get("Accepted", 0))
     else:
-        t = totals.copy()
-        if ins_col:
-            t = t[~t[ins_col].astype(str).str.contains("grand total", case=False, na=False)]
-        def v(c): return float(t[c].sum()) if c in t.columns else 0.0
+        def v(c): return float(totals[c].sum()) if c in totals.columns else 0.0
         net, paid, bal, rej, acc = v("Net Amount"), v("Paid"), v("Balance"), v("Rejected"), v("Accepted")
-
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Net Amount", f"{net:,.2f}")
     c2.metric("Paid", f"{paid:,.2f}")
@@ -134,35 +119,25 @@ def show_kpis_smart(totals: pd.DataFrame):
     c5.metric("Accepted", f"{acc:,.2f}")
 
 def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150) -> int:
-    """Auto height for all rows visible without inner scroll."""
-    rows = len(df)
-    return header_px + (rows * row_px) + padding_px
+    return header_px + (len(df) * row_px) + padding_px
 
-def style_grid(df: pd.DataFrame) -> pd.io.formats.style.Styler:
-    """
-    Apply full borders, bold first column, bold 'Grand Total' row,
-    and thousand separators for numeric columns.
-    """
+# ------------ Styling function (no annotation to avoid AttributeError) ------------
+def style_grid(df: pd.DataFrame):
     df = df.copy()
     first_col = df.columns[0]
-
-    # numeric formatting
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
-
-    border = "#CBD5E1"  # slate-300
+    border = "#CBD5E1"
     styler = (
         df.style
         .set_table_styles([
             {"selector": "table", "props": [("border-collapse", "collapse")]},
-            {"selector": "th",    "props": [("border", f"1px solid {border}"), ("background", "#F8FAFC"), ("font-weight", "700")]},
-            {"selector": "td",    "props": [("border", f"1px solid {border}")]},
+            {"selector": "th", "props": [("border", f"1px solid {border}"), ("background", "#F8FAFC"), ("font-weight", "700")]},
+            {"selector": "td", "props": [("border", f"1px solid {border}")]},
         ])
         .set_properties(subset=[first_col], **{"font-weight": "600"})
         .format(fmt_map)
     )
-
-    # Bold + highlight 'Grand Total' row if present
     if first_col in df.columns:
         mask_gt = df[first_col].astype(str).str.contains("grand total", case=False, na=False)
         if mask_gt.any():
@@ -171,15 +146,13 @@ def style_grid(df: pd.DataFrame) -> pd.io.formats.style.Styler:
                     return ["font-weight:700; background-color:#FFF7E0"] * len(row)
                 return [""] * len(row)
             styler = styler.apply(row_style, axis=1)
-
     return styler
 
-# --------------------------- State ------------------------------
+# --------------------------- Streamlit state ---------------------------
 if "is_admin" not in st.session_state: st.session_state.is_admin = False
 if "center_key" not in st.session_state: st.session_state.center_key = None
 if "last_center_key" not in st.session_state: st.session_state.last_center_key = None
 
-# Header + admin toggle
 left, right = st.columns([5, 1])
 with left: st.title("📊 Exclusive Report with Aging — Dashboard")
 with right: st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
@@ -190,7 +163,6 @@ if st.session_state.center_key != st.session_state.last_center_key:
 
 st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}**")
 
-# --------------------------- Center chooser ---------------------
 ck = st.session_state.center_key
 if ck not in CENTERS:
     st.subheader("Choose a center")
@@ -203,11 +175,8 @@ if ck not in CENTERS:
             st.session_state.center_key = "excellent"; st.rerun()
     st.stop()
 
-# --------------------------- Selected center --------------------
 cfg = CENTERS[st.session_state.center_key]
-folder   = cfg["folder"]
-src_path = folder / cfg["src_name"]
-out_path = folder / cfg["out_name"]
+folder, src_path, out_path = cfg["folder"], cfg["folder"]/cfg["src_name"], cfg["folder"]/cfg["out_name"]
 
 if st.session_state.is_admin:
     st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
@@ -217,7 +186,6 @@ if st.button("◀ Choose another center"):
     st.session_state.center_key = None
     st.rerun()
 
-# --------------------------- Admin tools ------------------------
 if st.session_state.is_admin:
     with st.expander("⬆️ Upload/replace source Excel", expanded=False):
         up = st.file_uploader("Upload .xlsx", type=["xlsx"])
@@ -225,7 +193,6 @@ if st.session_state.is_admin:
             folder.mkdir(parents=True, exist_ok=True)
             src_path.write_bytes(up.read())
             st.success(f"Saved to {src_path}")
-
     colA, colB, colC = st.columns(3)
     if colA.button("↻ Rebuild report", use_container_width=True):
         try:
@@ -233,64 +200,38 @@ if st.session_state.is_admin:
             st.success("Report rebuilt successfully.")
             if msg.strip(): st.code(msg, language="bash")
             load_report_fast.clear(); load_detail_sheet.clear()
-        except Exception as e:
-            st.error(str(e))
-
+        except Exception as e: st.error(str(e))
     if colB.button("🗂 Show file locations", use_container_width=True):
         st.info(f"Source: {src_path}\nReport: {out_path}\nScript: {GENERATOR}")
-
     if colC.button("🗑 Reset (delete) this center's report", use_container_width=True):
         try:
             if out_path.exists(): out_path.unlink()
-            st.success("Report deleted for this center.")
+            st.success("Report deleted.")
             load_report_fast.clear(); load_detail_sheet.clear()
-        except Exception as e:
-            st.error(str(e))
+        except Exception as e: st.error(str(e))
 
-# --------------------------- Viewer ------------------------------
 token = mtime_token(out_path)
 if token == 0.0:
     msg = "Report not found for this center."
-    if st.session_state.is_admin: msg += " (Upload a source file and click Rebuild.)"
+    if st.session_state.is_admin: msg += " (Upload source and click Rebuild.)"
     st.warning(msg)
 else:
     try:
         totals, summary, s_tot, s_sum, s_det = load_report_fast(str(out_path), token)
         show_kpis_smart(totals)
-
         t1, t2, t3 = st.tabs([f"{s_tot}", f"{s_sum}", f"{s_det}"])
-
         with t1:
-            clean_totals = trim_empty_rows(totals)
-            st.dataframe(
-                style_grid(clean_totals),
-                use_container_width=True,
-                hide_index=True,
-                height=full_height(clean_totals),
-            )
-
+            df1 = trim_empty_rows(totals)
+            st.dataframe(style_grid(df1), use_container_width=True, hide_index=True, height=full_height(df1))
         with t2:
-            clean_summary = trim_empty_rows(summary)
-            st.dataframe(
-                style_grid(clean_summary),
-                use_container_width=True,
-                hide_index=True,
-                height=full_height(clean_summary),
-            )
-
+            df2 = trim_empty_rows(summary)
+            st.dataframe(style_grid(df2), use_container_width=True, hide_index=True, height=full_height(df2))
         with t3:
-            detail = load_detail_sheet(str(out_path), s_det, token)
-            st.dataframe(
-                style_grid(detail),
-                use_container_width=True,
-                hide_index=True,
-            )
-
+            df3 = load_detail_sheet(str(out_path), s_det, token)
+            st.dataframe(style_grid(df3), use_container_width=True, hide_index=True)
     except Exception as e:
         try:
             names = pd.ExcelFile(str(out_path)).sheet_names
-        except Exception:
-            names = []
-        st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(could not read)'}")
-
+        except Exception: names = []
+        st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
 
