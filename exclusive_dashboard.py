@@ -6,10 +6,7 @@ import pandas as pd
 import streamlit as st
 
 # --------------------------- Page setup ---------------------------
-st.set_page_config(
-    page_title="Exclusive Report with Aging — Dashboard",
-    layout="wide",
-)
+st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layout="wide")
 BASE = Path(__file__).parent
 DATA_DIR = BASE / "data"
 (DATA_DIR / "easyhealth").mkdir(parents=True, exist_ok=True)
@@ -51,7 +48,6 @@ def _run(cmd):
     return res
 
 def rebuild_report(src_path: Path, out_path: Path) -> str:
-    """Run your generator script with --out and the source path."""
     py = sys.executable
     out_path.parent.mkdir(parents=True, exist_ok=True)
     src, out = str(src_path), str(out_path)
@@ -59,17 +55,14 @@ def rebuild_report(src_path: Path, out_path: Path) -> str:
         res = _run([py, str(GENERATOR), "--out", out, src])
         return res.stdout or "OK"
     except Exception:
-        # Fallback for alternate arg order
         res = _run([py, str(GENERATOR), src, "--out", out])
         return res.stdout or "OK"
 
 def _pick_sheet(sheet_names, wants):
     lower = [s.lower() for s in sheet_names]
-    # strict (all tokens)
     for i, s in enumerate(lower):
         if all(w in s for w in wants):
             return sheet_names[i]
-    # loose (any token)
     for i, s in enumerate(lower):
         if any(w in s for w in wants):
             return sheet_names[i]
@@ -80,15 +73,10 @@ def autodetect_sheets(xls: pd.ExcelFile):
     totals  = _pick_sheet(names, ["total"]) or _pick_sheet(names, ["insurance"])
     summary = _pick_sheet(names, ["aging", "summary"]) or _pick_sheet(names, ["summary"])
     detail  = _pick_sheet(names, ["aging", "detail"])  or _pick_sheet(names, ["detail"])
-    # provide safe fallbacks to the first three if anything is None
-    if totals is None and names: totals = names[0]
-    if summary is None and len(names) > 1: summary = names[1]
-    if detail is None and len(names) > 2: detail = names[2] if len(names) > 2 else names[-1]
     return totals, summary, detail
 
 @st.cache_data(show_spinner=True)
 def load_report_fast(path: str, _token: float):
-    """Load totals & summary only (fast) + return resolved sheet names."""
     xls = pd.ExcelFile(path)
     totals_name, summary_name, detail_name = autodetect_sheets(xls)
     totals  = xls.parse(totals_name)
@@ -97,12 +85,11 @@ def load_report_fast(path: str, _token: float):
 
 @st.cache_data(show_spinner=True)
 def load_detail_sheet(path: str, detail_sheet: str, _token: float):
-    """Load detail sheet on demand (lazy)."""
     xls = pd.ExcelFile(path)
     return xls.parse(detail_sheet)
 
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
+    if df.empty:
         return df
     df2 = df.dropna(how="all")
     if df2.empty:
@@ -132,25 +119,24 @@ def show_kpis_smart(totals: pd.DataFrame):
     c5.metric("Accepted", f"{acc:,.2f}")
 
 def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150) -> int:
-    n = 0 if df is None else len(df)
-    return header_px + (n * row_px) + padding_px
+    return header_px + (len(df) * row_px) + padding_px
 
-# --------------------------- Styling ---------------------------
+# --------------------------- Styling function ---------------------------
 def style_grid(df: pd.DataFrame):
     """
     Styled DataFrame with:
-    - Light-green column header
-    - White (and hidden) row-index header
+    - Light-green header
     - Full borders
     - Bold header & first column
-    - Highlighted 'Grand Total' row
+    - Highlighted 'Grand Total' row (yellow)
+    - Hidden index (no green bar)
     """
     if not isinstance(df, pd.DataFrame):
         return df
     if df.shape[1] == 0:
         return df.style
 
-    # Ensure no legacy index lingering
+    # ✅ Drop index completely before styling (prevents Streamlit re-color)
     df = df.reset_index(drop=True)
 
     first_col = df.columns[0]
@@ -158,40 +144,27 @@ def style_grid(df: pd.DataFrame):
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
 
     border = "#CBD5E1"          # soft gray border
-    header_bg = "#E8F5E9"       # light green for column headings
+    header_bg = "#E8F5E9"       # light green header
     header_font = "#2E7D32"     # dark green text
 
-    # IMPORTANT: style column headers and row headers separately
     styler = (
         df.style
         .set_table_styles([
             {"selector": "table",
              "props": [("border-collapse", "collapse"), ("width", "100%")]},
-
-            # Column headers only
-            {"selector": "th.col_heading",
+            {"selector": "th",
              "props": [("border", f"1px solid {border}"),
                        ("background-color", header_bg),
                        ("font-weight", "700"),
                        ("color", header_font)]},
-
-            # Row headers (index) — keep white and normal weight
-            {"selector": "th.row_heading",
-             "props": [("border", f"1px solid {border}"),
-                       ("background-color", "#FFFFFF"),
-                       ("font-weight", "400"),
-                       ("color", "#111111")]},
-
-            # Table cells
             {"selector": "td",
-             "props": [("border", f"1px solid {border}")]}
+             "props": [("border", f"1px solid {border}")]},
         ])
         .set_properties(subset=[first_col], **{"font-weight": "600"})
         .format(fmt_map)
-        .hide(axis="index")  # also hide the index entirely
     )
 
-    # Highlight "Grand Total" row if present
+    # --- Highlight the "Grand Total" row if found ---
     try:
         mask_gt = df[first_col].astype(str).str.contains("grand total", case=False, na=False)
         if mask_gt.any():
@@ -202,64 +175,49 @@ def style_grid(df: pd.DataFrame):
     except Exception:
         pass
 
+    # ✅ Hide index completely
+    styler = styler.hide(axis="index")
+
     return styler
 
 # --------------------------- Streamlit state ---------------------------
-if "is_admin" not in st.session_state:
-    st.session_state.is_admin = False
-if "center_key" not in st.session_state:
-    st.session_state.center_key = None
-if "last_center_key" not in st.session_state:
-    st.session_state.last_center_key = None
+if "is_admin" not in st.session_state: st.session_state.is_admin = False
+if "center_key" not in st.session_state: st.session_state.center_key = None
+if "last_center_key" not in st.session_state: st.session_state.last_center_key = None
 
-# Header
 left, right = st.columns([5, 1])
-with left:
-    st.title("📊 Exclusive Report with Aging — Dashboard")
-with right:
-    st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
+with left: st.title("📊 Exclusive Report with Aging — Dashboard")
+with right: st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
 
-# Clear caches when switching centers
 if st.session_state.center_key != st.session_state.last_center_key:
-    load_report_fast.clear()
-    load_detail_sheet.clear()
+    load_report_fast.clear(); load_detail_sheet.clear()
     st.session_state.last_center_key = st.session_state.center_key
 
-st.caption(
-    f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · "
-    f"Center: **{st.session_state.center_key or 'none'}**"
-)
+st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}**")
 
-# Center picker
 ck = st.session_state.center_key
 if ck not in CENTERS:
     st.subheader("Choose a center")
     c1, c2 = st.columns(2)
     with c1:
         if st.button(CENTERS["easyhealth"]["name"], use_container_width=True):
-            st.session_state.center_key = "easyhealth"
-            st.rerun()
+            st.session_state.center_key = "easyhealth"; st.rerun()
     with c2:
         if st.button(CENTERS["excellent"]["name"], use_container_width=True):
-            st.session_state.center_key = "excellent"
-            st.rerun()
+            st.session_state.center_key = "excellent"; st.rerun()
     st.stop()
 
 cfg = CENTERS[st.session_state.center_key]
-folder = cfg["folder"]
-src_path = folder / cfg["src_name"]
-out_path = folder / cfg["out_name"]
+folder, src_path, out_path = cfg["folder"], cfg["folder"]/cfg["src_name"], cfg["folder"]/cfg["out_name"]
 
 if st.session_state.is_admin:
     st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
 st.caption(f"Center: **{cfg['name']}**  ·  Input: {src_path.name}  ·  Report: {out_path.name}")
 
-# Back button
 if st.button("◀ Choose another center"):
     st.session_state.center_key = None
     st.rerun()
 
-# Admin controls
 if st.session_state.is_admin:
     with st.expander("⬆️ Upload/replace source Excel", expanded=False):
         up = st.file_uploader("Upload .xlsx", type=["xlsx"])
@@ -272,68 +230,41 @@ if st.session_state.is_admin:
         try:
             msg = rebuild_report(src_path, out_path)
             st.success("Report rebuilt successfully.")
-            if msg.strip():
-                st.code(msg, language="bash")
-            load_report_fast.clear()
-            load_detail_sheet.clear()
-        except Exception as e:
-            st.error(str(e))
+            if msg.strip(): st.code(msg, language="bash")
+            load_report_fast.clear(); load_detail_sheet.clear()
+        except Exception as e: st.error(str(e))
     if colB.button("🗂 Show file locations", use_container_width=True):
         st.info(f"Source: {src_path}\nReport: {out_path}\nScript: {GENERATOR}")
     if colC.button("🗑 Reset (delete) this center's report", use_container_width=True):
         try:
-            if out_path.exists():
-                out_path.unlink()
+            if out_path.exists(): out_path.unlink()
             st.success("Report deleted.")
-            load_report_fast.clear()
-            load_detail_sheet.clear()
-        except Exception as e:
-            st.error(str(e))
+            load_report_fast.clear(); load_detail_sheet.clear()
+        except Exception as e: st.error(str(e))
 
-# --------------------------- Load & show ---------------------------
 token = mtime_token(out_path)
 if token == 0.0:
     msg = "Report not found for this center."
-    if st.session_state.is_admin:
-        msg += " (Upload source and click Rebuild.)"
+    if st.session_state.is_admin: msg += " (Upload source and click Rebuild.)"
     st.warning(msg)
 else:
     try:
         totals, summary, s_tot, s_sum, s_det = load_report_fast(str(out_path), token)
-
-        # KPIs
         show_kpis_smart(totals)
-
-        # Tabs
         t1, t2, t3 = st.tabs([f"{s_tot}", f"{s_sum}", f"{s_det}"])
 
         with t1:
             df1 = trim_empty_rows(totals)
-            st.dataframe(
-                style_grid(df1),
-                use_container_width=True,
-                hide_index=True,
-                height=full_height(df1),
-            )
+            st.table(style_grid(df1))
 
         with t2:
             df2 = trim_empty_rows(summary)
-            st.dataframe(
-                style_grid(df2),
-                use_container_width=True,
-                hide_index=True,
-                height=full_height(df2),
-            )
+            st.table(style_grid(df2))
 
         with t3:
             df3 = load_detail_sheet(str(out_path), s_det, token)
-            df3 = trim_empty_rows(df3)
-            st.dataframe(
-                style_grid(df3),
-                use_container_width=True,
-                hide_index=True,
-                height=full_height(df3),
-            )
+            df3 = df3.reset_index(drop=True)
+            st.dataframe(style_grid(df3), use_container_width=True, hide_index=True)
 
     except Exception as e:
         try:
@@ -341,6 +272,4 @@ else:
         except Exception:
             names = []
         st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
-
 
