@@ -16,7 +16,11 @@ BASE = Path(__file__).parent
 # CONFIG — adjust names if needed
 # ------------------------------------------------------------
 GENERATOR = BASE / "exclusive_report_with_aging_final.py"
-GENERATOR_SUPPORTS_OUT_ARG = False  # set True if your generator accepts --out <report.xlsx>
+
+# Your generator REQUIRES --out now
+GENERATOR_SUPPORTS_OUT_ARG = True
+
+# Fallback name only used if your script writes a fixed file (not needed when --out works)
 DEFAULT_GENERATED_REPORT = BASE / "Exclusive_Report_with_Aging.xlsx"
 
 CENTERS = {
@@ -58,7 +62,6 @@ def show_kpis(totals: pd.DataFrame):
     c5.metric("Accepted", f"{v('Accepted'):,.2f}")
 
 def _run(cmd):
-    """Run a command and return CompletedProcess; show the exact command if it fails."""
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
         raise RuntimeError(
@@ -71,15 +74,28 @@ def _run(cmd):
 
 def rebuild_report(cfg) -> str:
     """
-    Run the generator to produce the report for the selected center,
-    using the SAME Python interpreter as Streamlit.
+    Run the generator to produce the report for the selected center.
+    Uses the SAME Python interpreter as Streamlit (so pandas/openpyxl are available),
+    and passes --out correctly. Tries both common orders just in case.
     """
     src, out = str(cfg["source"]), str(cfg["report"])
-    py = sys.executable  # <-- critical fix: use current env so pandas/openpyxl are available
+    py = sys.executable
+
     if GENERATOR_SUPPORTS_OUT_ARG:
-        res = _run([py, str(GENERATOR), src, "--out", out])
-        return res.stdout or "OK"
+        # Prefer usage shown by your error:  --out OUT  input.xlsx
+        try:
+            res = _run([py, str(GENERATOR), "--out", out, src])
+            return res.stdout or "OK"
+        except Exception as e_first:
+            # Try alternate order: input.xlsx --out OUT
+            try:
+                res = _run([py, str(GENERATOR), src, "--out", out])
+                return res.stdout or "OK"
+            except Exception as e_second:
+                # Show the first error (usually more informative)
+                raise e_first
     else:
+        # Legacy path (not used anymore)
         res = _run([py, str(GENERATOR), src])
         if not DEFAULT_GENERATED_REPORT.exists():
             raise RuntimeError(f"Expected output not found: {DEFAULT_GENERATED_REPORT.name}")
@@ -95,7 +111,7 @@ if "is_admin" not in st.session_state:
 if "center_key" not in st.session_state:
     st.session_state.center_key = None
 
-# Header row: title + admin toggle on the right
+# Header row: title + admin toggle
 left, right = st.columns([5, 1])
 with left:
     st.title("📊 Exclusive Report with Aging — Dashboard")
@@ -150,10 +166,10 @@ if st.session_state.is_admin:
     colA, colB = st.columns(2)
     if colA.button("↻ Rebuild report", use_container_width=True):
         try:
-            out = rebuild_report(cfg)
+            out_msg = rebuild_report(cfg)
             st.success("Report rebuilt successfully.")
-            if out.strip():
-                st.code(out, language="bash")
+            if out_msg.strip():
+                st.code(out_msg, language="bash")
             load_report.clear()
         except Exception as e:
             st.error(str(e))
@@ -185,5 +201,4 @@ else:
         st.dataframe(summary, use_container_width=True, hide_index=True)
     with t3:
         st.dataframe(detail, use_container_width=True, hide_index=True)
-
 
