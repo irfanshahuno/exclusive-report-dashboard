@@ -1,4 +1,5 @@
 # dashboard.py
+import sys
 import shutil
 import subprocess
 from pathlib import Path
@@ -56,19 +57,34 @@ def show_kpis(totals: pd.DataFrame):
     c4.metric("Rejected", f"{v('Rejected'):,.2f}")
     c5.metric("Accepted", f"{v('Accepted'):,.2f}")
 
+def _run(cmd):
+    """Run a command and return CompletedProcess; show the exact command if it fails."""
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(
+            "Command failed:\n"
+            + " ".join(cmd)
+            + "\n\nSTDOUT:\n" + (res.stdout or "(empty)")
+            + "\n\nSTDERR:\n" + (res.stderr or "(empty)")
+        )
+    return res
+
 def rebuild_report(cfg) -> str:
+    """
+    Run the generator to produce the report for the selected center,
+    using the SAME Python interpreter as Streamlit.
+    """
     src, out = str(cfg["source"]), str(cfg["report"])
+    py = sys.executable  # <-- critical fix: use current env so pandas/openpyxl are available
     if GENERATOR_SUPPORTS_OUT_ARG:
-        r = subprocess.run(["python", str(GENERATOR), src, "--out", out], capture_output=True, text=True)
-        if r.returncode: raise RuntimeError(r.stderr or "Generator failed")
-        return r.stdout or "OK"
+        res = _run([py, str(GENERATOR), src, "--out", out])
+        return res.stdout or "OK"
     else:
-        r = subprocess.run(["python", str(GENERATOR), src], capture_output=True, text=True)
-        if r.returncode: raise RuntimeError(r.stderr or "Generator failed")
+        res = _run([py, str(GENERATOR), src])
         if not DEFAULT_GENERATED_REPORT.exists():
             raise RuntimeError(f"Expected output not found: {DEFAULT_GENERATED_REPORT.name}")
         shutil.copyfile(DEFAULT_GENERATED_REPORT, out)
-        return r.stdout or "OK"
+        return res.stdout or "OK"
 
 # ------------------------------------------------------------
 # State: admin toggle + center selection
@@ -86,7 +102,7 @@ with left:
 with right:
     st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
 
-# Status line (you can delete later)
+# Status line (optional)
 st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}**")
 
 # ------------------------------------------------------------
