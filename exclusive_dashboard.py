@@ -121,14 +121,15 @@ def show_kpis_smart(totals: pd.DataFrame):
 def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150) -> int:
     return header_px + (len(df) * row_px) + padding_px
 
-# --------------------------- Styling function (light green header) ---------------------------
+# --------------------------- Styling function ---------------------------
 def style_grid(df: pd.DataFrame):
     """
     Styled DataFrame with:
     - Light-green header
     - Full borders
     - Bold header & first column
-    - Highlighted 'Grand Total' row
+    - Highlighted 'Grand Total' row (yellow)
+    - Hidden index (no green bar)
     """
     if not isinstance(df, pd.DataFrame):
         return df
@@ -166,11 +167,14 @@ def style_grid(df: pd.DataFrame):
         mask_gt = df[first_col].astype(str).str.contains("grand total", case=False, na=False)
         if mask_gt.any():
             def highlight(row):
-                return (["font-weight:700; background-color:#FFF7E0"] * len(row)
+                return (["font-weight:700; color:black; background-color:#FFF7E0"] * len(row)
                         if mask_gt.iloc[row.name] else [""] * len(row))
             styler = styler.apply(highlight, axis=1)
     except Exception:
         pass
+
+    # ✅ Hide index completely (no green strip or numbering)
+    styler = styler.hide(axis="index")
 
     return styler
 
@@ -247,16 +251,14 @@ else:
         show_kpis_smart(totals)
         t1, t2, t3 = st.tabs([f"{s_tot}", f"{s_sum}", f"{s_det}"])
 
-        # --- Use st.table for styling to apply the green header ---
         with t1:
             df1 = trim_empty_rows(totals)
-            st.table(style_grid(df1))  # header will be light green
+            st.table(style_grid(df1))
 
         with t2:
             df2 = trim_empty_rows(summary)
-            st.table(style_grid(df2))  # header will be light green
+            st.table(style_grid(df2))
 
-        # Keep detail in dataframe (large/scrollable)
         with t3:
             df3 = load_detail_sheet(str(out_path), s_det, token)
             st.dataframe(style_grid(df3), use_container_width=True, hide_index=True)
@@ -267,4 +269,3 @@ else:
         except Exception:
             names = []
         st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
