@@ -110,14 +110,17 @@ if center_key not in CENTERS:
     st.title("📊 Exclusive Report with Aging — Dashboard")
     st.subheader("Choose a center")
 
+    # Preserve mode when user clicks a button
+    current_mode = st.query_params.get("mode", ["view"])[0].lower()
+
     c1, c2 = st.columns(2)
     with c1:
         if st.button(CENTERS["easyhealth"]["name"], use_container_width=True):
-            st.query_params.update(center="easyhealth", mode=mode)
+            st.query_params.update(center="easyhealth", mode=current_mode)
             st.rerun()
     with c2:
         if st.button(CENTERS["excellent"]["name"], use_container_width=True):
-            st.query_params.update(center="excellent", mode=mode)
+            st.query_params.update(center="excellent", mode=current_mode)
             st.rerun()
 
     st.stop()
@@ -127,11 +130,11 @@ cfg = CENTERS[center_key]
 st.title("📊 Exclusive Report with Aging — Dashboard")
 st.caption(f"Center: **{cfg['name']}**  ·  Input: {cfg['source'].name}  ·  Report: {cfg['report'].name}")
 
-# Little back button to go to center chooser
+# Little back button to go to center chooser (preserves mode)
 if st.button("◀ Choose another center"):
-    # keep mode (view/admin) but clear center for clean home
-    st.query_params.update(mode=mode)
-    st.query_params.pop("center", None)
+    current_mode = st.query_params.get("mode", ["view"])[0].lower()
+    st.query_params.clear()
+    st.query_params.update(mode=current_mode)
     st.rerun()
 
 # -------------------------------------------------------------------
