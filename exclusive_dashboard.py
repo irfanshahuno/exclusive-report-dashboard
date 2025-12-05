@@ -48,15 +48,14 @@ def _run(cmd):
     return res
 
 def rebuild_report(src_path: Path, out_path: Path) -> str:
-    """Run your generator with --out using the SAME Python interpreter as Streamlit."""
     py = sys.executable
     out_path.parent.mkdir(parents=True, exist_ok=True)
     src, out = str(src_path), str(out_path)
     try:
-        res = _run([py, str(GENERATOR), "--out", out, src])  # preferred order
+        res = _run([py, str(GENERATOR), "--out", out, src])
         return res.stdout or "OK"
     except Exception:
-        res = _run([py, str(GENERATOR), src, "--out", out])  # alternate order
+        res = _run([py, str(GENERATOR), src, "--out", out])
         return res.stdout or "OK"
 
 def _pick_sheet(sheet_names, wants):
@@ -71,7 +70,7 @@ def _pick_sheet(sheet_names, wants):
 
 def autodetect_sheets(xls: pd.ExcelFile):
     names = xls.sheet_names
-    totals  = _pick_sheet(names, ["total"]) or _pick_sheet(names, ["insurance"]) or _pick_sheet(names, ["summary total"])
+    totals  = _pick_sheet(names, ["total"]) or _pick_sheet(names, ["insurance"])
     summary = _pick_sheet(names, ["aging", "summary"]) or _pick_sheet(names, ["summary"])
     detail  = _pick_sheet(names, ["aging", "detail"])  or _pick_sheet(names, ["detail"])
     missing = []
@@ -82,12 +81,8 @@ def autodetect_sheets(xls: pd.ExcelFile):
         raise ValueError("Worksheet(s) not found: " + ", ".join(missing) + f". Found sheets: {', '.join(names)}")
     return totals, summary, detail
 
-# --------- FAST load (Totals+Summary only) + LAZY Detail on demand ----------
 @st.cache_data(show_spinner=True)
 def load_report_fast(path: str, _token: float):
-    """
-    Parse only Totals and Summary now; return detail sheet NAME to load later.
-    """
     xls = pd.ExcelFile(path)
     totals_name, summary_name, detail_name = autodetect_sheets(xls)
     totals  = xls.parse(totals_name)
@@ -100,11 +95,6 @@ def load_detail_sheet(path: str, detail_sheet: str, _token: float):
     return xls.parse(detail_sheet)
 
 def show_kpis_smart(totals: pd.DataFrame):
-    """
-    KPIs:
-    - Use 'Grand Total' row if present.
-    - Else sum all rows EXCLUDING any that look like 'Grand Total'.
-    """
     ins_col = "Insurance" if "Insurance" in totals.columns else None
     gt = None
     if ins_col:
@@ -130,12 +120,10 @@ def show_kpis_smart(totals: pd.DataFrame):
     c4.metric("Rejected", f"{rej:,.2f}")
     c5.metric("Accepted", f"{acc:,.2f}")
 
-def auto_table_height(df, row_px: int = 28, header_px: int = 42, padding_px: int = 24, max_px: int = 1200):
-    """
-    Compute a good height for st.dataframe so all rows are visible without scrolling.
-    """
+def full_height(df):
+    """Return large enough height so all rows show fully (no scroll)."""
     rows = len(df)
-    return min(header_px + rows * row_px + padding_px, max_px)
+    return max(400, 50 + rows * 30)
 
 # --------------------------- State ------------------------------
 if "is_admin" not in st.session_state: st.session_state.is_admin = False
@@ -147,7 +135,6 @@ left, right = st.columns([5, 1])
 with left: st.title("📊 Exclusive Report with Aging — Dashboard")
 with right: st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
 
-# Clear cached data when switching centers
 if st.session_state.center_key != st.session_state.last_center_key:
     load_report_fast.clear(); load_detail_sheet.clear()
     st.session_state.last_center_key = st.session_state.center_key
@@ -211,7 +198,7 @@ if st.session_state.is_admin:
         except Exception as e:
             st.error(str(e))
 
-# --------------------------- Viewer (lazy detail + no scroll) ----------------
+# --------------------------- Viewer ------------------------------
 token = mtime_token(out_path)
 if token == 0.0:
     msg = "Report not found for this center."
@@ -220,38 +207,20 @@ if token == 0.0:
 else:
     try:
         totals, summary, s_tot, s_sum, s_det = load_report_fast(str(out_path), token)
-
-        # Smart KPIs (Grand Total aware)
         show_kpis_smart(totals)
 
         t1, t2, t3 = st.tabs([f"{s_tot}", f"{s_sum}", f"{s_det}"])
         with t1:
-            st.dataframe(
-                totals,
-                use_container_width=True,
-                hide_index=True,
-                height=auto_table_height(totals)  # <<< show all insurers without scrolling
-            )
+            st.dataframe(totals, use_container_width=True, hide_index=True, height=full_height(totals))
         with t2:
-            st.dataframe(
-                summary,
-                use_container_width=True,
-                hide_index=True,
-                height=auto_table_height(summary)  # optional no-scroll for summary
-            )
+            st.dataframe(summary, use_container_width=True, hide_index=True, height=full_height(summary))
         with t3:
-            # Lazy load happens only when this tab renders
             detail = load_detail_sheet(str(out_path), s_det, token)
-            st.dataframe(
-                detail,
-                use_container_width=True,
-                hide_index=True,
-                # keep default height for large detail; uncomment to force no-scroll:
-                # height=auto_table_height(detail)
-            )
+            st.dataframe(detail, use_container_width=True, hide_index=True)
     except Exception as e:
         try:
             names = pd.ExcelFile(str(out_path)).sheet_names
         except Exception:
             names = []
         st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(could not read)'}")
+
