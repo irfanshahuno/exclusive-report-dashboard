@@ -6,28 +6,23 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-# ------------------------------------------------------------
-# Page setup
-# ------------------------------------------------------------
+# --------------------------- Page setup ---------------------------
 st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layout="wide")
 BASE = Path(__file__).parent
 DATA_DIR = BASE / "data"
 (DATA_DIR / "easyhealth").mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "excellent").mkdir(parents=True, exist_ok=True)
 
-# ------------------------------------------------------------
-# CONFIG — generator
-# ------------------------------------------------------------
+# --------------------------- Generator config ---------------------
 GENERATOR = BASE / "exclusive_report_with_aging_final.py"
 GENERATOR_SUPPORTS_OUT_ARG = True  # your script requires --out
 
-# Per-center files are now in separate subfolders
 CENTERS = {
     "easyhealth": {
         "name": "Easy Health Medical Clinic (MF8031)",
         "folder": DATA_DIR / "easyhealth",
-        "src_name": "source.xlsx",   # saved as data/easyhealth/source.xlsx
-        "out_name": "report.xlsx",   # saved as data/easyhealth/report.xlsx
+        "src_name": "source.xlsx",
+        "out_name": "report.xlsx",
     },
     "excellent": {
         "name": "Excellent Medical Center (MF4777)",
@@ -37,9 +32,7 @@ CENTERS = {
     },
 }
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
+# --------------------------- Helpers ------------------------------
 def mtime_token(p: Path) -> float:
     try:
         return p.stat().st_mtime
@@ -63,9 +56,8 @@ def rebuild_report(src_path: Path, out_path: Path) -> str:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     src = str(src_path)
     out = str(out_path)
-    # your script usage (seen in error earlier):  --out OUT_XLSX input_xlsx
     try:
-        res = _run([py, str(GENERATOR), "--out", out, src])
+        res = _run([py, str(GENERATOR), "--out", out, src])  # preferred order
         return res.stdout or "OK"
     except Exception:
         res = _run([py, str(GENERATOR), src, "--out", out])  # alternate order
@@ -103,22 +95,40 @@ def load_report_auto(path: str, _token: float):
     detail  = xls.parse(detail_name)
     return totals, summary, detail, totals_name, summary_name, detail_name
 
-def show_kpis(totals: pd.DataFrame):
-    def v(col):
-        try:
-            return float(totals[col].sum())
-        except Exception:
-            return 0.0
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Net Amount", f"{v('Net Amount'):,.2f}")
-    c2.metric("Paid", f"{v('Paid'):,.2f}")
-    c3.metric("Balance", f"{v('Balance'):,.2f}")
-    c4.metric("Rejected", f"{v('Rejected'):,.2f}")
-    c5.metric("Accepted", f"{v('Accepted'):,.2f}")
+def show_kpis_smart(totals: pd.DataFrame):
+    """
+    KPIs logic:
+    - If a 'Grand Total' row exists, use that single row.
+    - Else sum all rows EXCLUDING any that look like 'Grand Total'.
+    """
+    ins_col = "Insurance" if "Insurance" in totals.columns else None
+    gt = None
+    if ins_col:
+        mask_gt = totals[ins_col].astype(str).str.contains("grand total", case=False, na=False)
+        if mask_gt.any():
+            gt = totals.loc[mask_gt].iloc[-1]
 
-# ------------------------------------------------------------
-# State: admin toggle + center selection
-# ------------------------------------------------------------
+    if gt is not None:
+        net = float(gt.get("Net Amount", 0))
+        paid = float(gt.get("Paid", 0))
+        bal = float(gt.get("Balance", 0))
+        rej = float(gt.get("Rejected", 0))
+        acc = float(gt.get("Accepted", 0))
+    else:
+        t = totals.copy()
+        if ins_col:
+            t = t[~t[ins_col].astype(str).str.contains("grand total", case=False, na=False)]
+        def v(c): return float(t[c].sum()) if c in t.columns else 0.0
+        net, paid, bal, rej, acc = v("Net Amount"), v("Paid"), v("Balance"), v("Rejected"), v("Accepted")
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Net Amount", f"{net:,.2f}")
+    c2.metric("Paid", f"{paid:,.2f}")
+    c3.metric("Balance", f"{bal:,.2f}")
+    c4.metric("Rejected", f"{rej:,.2f}")
+    c5.metric("Accepted", f"{acc:,.2f}")
+
+# --------------------------- State ------------------------------
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 if "center_key" not in st.session_state:
@@ -126,24 +136,21 @@ if "center_key" not in st.session_state:
 if "last_center_key" not in st.session_state:
     st.session_state.last_center_key = None
 
-# Header row: title + admin toggle
+# Header + admin toggle
 left, right = st.columns([5, 1])
 with left:
     st.title("📊 Exclusive Report with Aging — Dashboard")
 with right:
     st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
 
-# If the user changed centers, clear the cache to avoid any confusion
+# Clear cached data when switching centers
 if st.session_state.center_key != st.session_state.last_center_key:
     load_report_auto.clear()
     st.session_state.last_center_key = st.session_state.center_key
 
-# Status
 st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}**")
 
-# ------------------------------------------------------------
-# Center chooser
-# ------------------------------------------------------------
+# --------------------------- Center chooser ---------------------
 ck = st.session_state.center_key
 if ck not in CENTERS:
     st.subheader("Choose a center")
@@ -156,9 +163,7 @@ if ck not in CENTERS:
             st.session_state.center_key = "excellent"; st.rerun()
     st.stop()
 
-# ------------------------------------------------------------
-# Selected center view
-# ------------------------------------------------------------
+# --------------------------- Selected center --------------------
 cfg = CENTERS[st.session_state.center_key]
 folder   = cfg["folder"]
 src_path = folder / cfg["src_name"]
@@ -168,14 +173,11 @@ if st.session_state.is_admin:
     st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
 st.caption(f"Center: **{cfg['name']}**  ·  Input: {src_path.name}  ·  Report: {out_path.name}")
 
-# Back button
 if st.button("◀ Choose another center"):
     st.session_state.center_key = None
     st.rerun()
 
-# ------------------------------------------------------------
-# ADMIN tools (only when toggled)
-# ------------------------------------------------------------
+# --------------------------- Admin tools ------------------------
 if st.session_state.is_admin:
     with st.expander("⬆️ Upload/replace source Excel", expanded=False):
         up = st.file_uploader("Upload .xlsx", type=["xlsx"])
@@ -189,8 +191,7 @@ if st.session_state.is_admin:
         try:
             msg = rebuild_report(src_path, out_path)
             st.success("Report rebuilt successfully.")
-            if msg.strip():
-                st.code(msg, language="bash")
+            if msg.strip(): st.code(msg, language="bash")
             load_report_auto.clear()
         except Exception as e:
             st.error(str(e))
@@ -207,9 +208,7 @@ if st.session_state.is_admin:
         except Exception as e:
             st.error(str(e))
 
-# ------------------------------------------------------------
-# VIEWER
-# ------------------------------------------------------------
+# --------------------------- Viewer -----------------------------
 token = mtime_token(out_path)
 if token == 0.0:
     msg = "Report not found for this center."
@@ -219,15 +218,19 @@ if token == 0.0:
 else:
     try:
         totals, summary, detail, s_tot, s_sum, s_det = load_report_auto(str(out_path), token)
-        show_kpis(totals)
+        # >>>> SMART KPIs (Grand Total aware)
+        show_kpis_smart(totals)
+
         t1, t2, t3 = st.tabs([f"{s_tot}", f"{s_sum}", f"{s_det}"])
-        with t1: st.dataframe(totals,  use_container_width=True, hide_index=True)
-        with t2: st.dataframe(summary, use_container_width=True, hide_index=True)
-        with t3: st.dataframe(detail,  use_container_width=True, hide_index=True)
+        with t1:
+            st.dataframe(totals, use_container_width=True, hide_index=True)
+        with t2:
+            st.dataframe(summary, use_container_width=True, hide_index=True)
+        with t3:
+            st.dataframe(detail, use_container_width=True, hide_index=True)
     except Exception as e:
         try:
             names = pd.ExcelFile(str(out_path)).sheet_names
         except Exception:
             names = []
         st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(could not read)'}")
-
