@@ -94,6 +94,14 @@ def load_detail_sheet(path: str, detail_sheet: str, _token: float):
     xls = pd.ExcelFile(path)
     return xls.parse(detail_sheet)
 
+def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove empty or blank rows (like after Grand Total)."""
+    if df.empty:
+        return df
+    df = df.dropna(how="all")
+    df = df.loc[~(df.astype(str).apply(lambda x: "".join(x).strip()) == "")]
+    return df
+
 def show_kpis_smart(totals: pd.DataFrame):
     ins_col = "Insurance" if "Insurance" in totals.columns else None
     gt = None
@@ -120,10 +128,8 @@ def show_kpis_smart(totals: pd.DataFrame):
     c4.metric("Rejected", f"{rej:,.2f}")
     c5.metric("Accepted", f"{acc:,.2f}")
 
-def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 250) -> int:
-    """
-    Set dataframe height so ALL rows show fully, no internal scrollbar.
-    """
+def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150) -> int:
+    """Auto height for all rows visible without scroll."""
     rows = len(df)
     return header_px + (rows * row_px) + padding_px
 
@@ -213,9 +219,11 @@ else:
 
         t1, t2, t3 = st.tabs([f"{s_tot}", f"{s_sum}", f"{s_det}"])
         with t1:
-            st.dataframe(totals, use_container_width=True, hide_index=True, height=full_height(totals))
+            clean_totals = trim_empty_rows(totals)
+            st.dataframe(clean_totals, use_container_width=True, hide_index=True, height=full_height(clean_totals))
         with t2:
-            st.dataframe(summary, use_container_width=True, hide_index=True, height=full_height(summary))
+            clean_summary = trim_empty_rows(summary)
+            st.dataframe(clean_summary, use_container_width=True, hide_index=True, height=full_height(clean_summary))
         with t3:
             detail = load_detail_sheet(str(out_path), s_det, token)
             st.dataframe(detail, use_container_width=True, hide_index=True)
@@ -225,5 +233,4 @@ else:
         except Exception:
             names = []
         st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(could not read)'}")
-
 
