@@ -1,6 +1,5 @@
 # dashboard.py
 import sys
-import shutil
 import subprocess
 from pathlib import Path
 import pandas as pd
@@ -15,7 +14,6 @@ DATA_DIR = BASE / "data"
 
 # --------------------------- Generator config ---------------------
 GENERATOR = BASE / "exclusive_report_with_aging_final.py"
-GENERATOR_SUPPORTS_OUT_ARG = True  # your script requires --out
 
 CENTERS = {
     "easyhealth": {
@@ -43,8 +41,7 @@ def _run(cmd):
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
         raise RuntimeError(
-            "Command failed:\n"
-            + " ".join(cmd)
+            "Command failed:\n" + " ".join(cmd)
             + "\n\nSTDOUT:\n" + (res.stdout or "(empty)")
             + "\n\nSTDERR:\n" + (res.stderr or "(empty)")
         )
@@ -54,8 +51,7 @@ def rebuild_report(src_path: Path, out_path: Path) -> str:
     """Run your generator with --out using the SAME Python interpreter as Streamlit."""
     py = sys.executable
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    src = str(src_path)
-    out = str(out_path)
+    src, out = str(src_path), str(out_path)
     try:
         res = _run([py, str(GENERATOR), "--out", out, src])  # preferred order
         return res.stdout or "OK"
@@ -86,19 +82,27 @@ def autodetect_sheets(xls: pd.ExcelFile):
         raise ValueError("Worksheet(s) not found: " + ", ".join(missing) + f". Found sheets: {', '.join(names)}")
     return totals, summary, detail
 
+# --------- FAST load (Totals+Summary only) + LAZY Detail on demand ----------
 @st.cache_data(show_spinner=True)
-def load_report_auto(path: str, _token: float):
+def load_report_fast(path: str, _token: float):
+    """
+    Parse only Totals and Summary now; return detail sheet NAME to load later.
+    """
     xls = pd.ExcelFile(path)
     totals_name, summary_name, detail_name = autodetect_sheets(xls)
     totals  = xls.parse(totals_name)
     summary = xls.parse(summary_name)
-    detail  = xls.parse(detail_name)
-    return totals, summary, detail, totals_name, summary_name, detail_name
+    return totals, summary, totals_name, summary_name, detail_name
+
+@st.cache_data(show_spinner=True)
+def load_detail_sheet(path: str, detail_sheet: str, _token: float):
+    xls = pd.ExcelFile(path)
+    return xls.parse(detail_sheet)
 
 def show_kpis_smart(totals: pd.DataFrame):
     """
-    KPIs logic:
-    - If a 'Grand Total' row exists, use that single row.
+    KPIs:
+    - Use 'Grand Total' row if present.
     - Else sum all rows EXCLUDING any that look like 'Grand Total'.
     """
     ins_col = "Insurance" if "Insurance" in totals.columns else None
@@ -109,10 +113,8 @@ def show_kpis_smart(totals: pd.DataFrame):
             gt = totals.loc[mask_gt].iloc[-1]
 
     if gt is not None:
-        net = float(gt.get("Net Amount", 0))
-        paid = float(gt.get("Paid", 0))
-        bal = float(gt.get("Balance", 0))
-        rej = float(gt.get("Rejected", 0))
+        net = float(gt.get("Net Amount", 0)); paid = float(gt.get("Paid", 0))
+        bal = float(gt.get("Balance", 0));   rej  = float(gt.get("Rejected", 0))
         acc = float(gt.get("Accepted", 0))
     else:
         t = totals.copy()
@@ -128,24 +130,26 @@ def show_kpis_smart(totals: pd.DataFrame):
     c4.metric("Rejected", f"{rej:,.2f}")
     c5.metric("Accepted", f"{acc:,.2f}")
 
+def auto_table_height(df, row_px: int = 28, header_px: int = 42, padding_px: int = 24, max_px: int = 1200):
+    """
+    Compute a good height for st.dataframe so all rows are visible without scrolling.
+    """
+    rows = len(df)
+    return min(header_px + rows * row_px + padding_px, max_px)
+
 # --------------------------- State ------------------------------
-if "is_admin" not in st.session_state:
-    st.session_state.is_admin = False
-if "center_key" not in st.session_state:
-    st.session_state.center_key = None
-if "last_center_key" not in st.session_state:
-    st.session_state.last_center_key = None
+if "is_admin" not in st.session_state: st.session_state.is_admin = False
+if "center_key" not in st.session_state: st.session_state.center_key = None
+if "last_center_key" not in st.session_state: st.session_state.last_center_key = None
 
 # Header + admin toggle
 left, right = st.columns([5, 1])
-with left:
-    st.title("📊 Exclusive Report with Aging — Dashboard")
-with right:
-    st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
+with left: st.title("📊 Exclusive Report with Aging — Dashboard")
+with right: st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
 
 # Clear cached data when switching centers
 if st.session_state.center_key != st.session_state.last_center_key:
-    load_report_auto.clear()
+    load_report_fast.clear(); load_detail_sheet.clear()
     st.session_state.last_center_key = st.session_state.center_key
 
 st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}**")
@@ -192,7 +196,7 @@ if st.session_state.is_admin:
             msg = rebuild_report(src_path, out_path)
             st.success("Report rebuilt successfully.")
             if msg.strip(): st.code(msg, language="bash")
-            load_report_auto.clear()
+            load_report_fast.clear(); load_detail_sheet.clear()
         except Exception as e:
             st.error(str(e))
 
@@ -201,33 +205,50 @@ if st.session_state.is_admin:
 
     if colC.button("🗑 Reset (delete) this center's report", use_container_width=True):
         try:
-            if out_path.exists():
-                out_path.unlink()
+            if out_path.exists(): out_path.unlink()
             st.success("Report deleted for this center.")
-            load_report_auto.clear()
+            load_report_fast.clear(); load_detail_sheet.clear()
         except Exception as e:
             st.error(str(e))
 
-# --------------------------- Viewer -----------------------------
+# --------------------------- Viewer (lazy detail + no scroll) ----------------
 token = mtime_token(out_path)
 if token == 0.0:
     msg = "Report not found for this center."
-    if st.session_state.is_admin:
-        msg += " (Upload a source file and click Rebuild.)"
+    if st.session_state.is_admin: msg += " (Upload a source file and click Rebuild.)"
     st.warning(msg)
 else:
     try:
-        totals, summary, detail, s_tot, s_sum, s_det = load_report_auto(str(out_path), token)
-        # >>>> SMART KPIs (Grand Total aware)
+        totals, summary, s_tot, s_sum, s_det = load_report_fast(str(out_path), token)
+
+        # Smart KPIs (Grand Total aware)
         show_kpis_smart(totals)
 
         t1, t2, t3 = st.tabs([f"{s_tot}", f"{s_sum}", f"{s_det}"])
         with t1:
-            st.dataframe(totals, use_container_width=True, hide_index=True)
+            st.dataframe(
+                totals,
+                use_container_width=True,
+                hide_index=True,
+                height=auto_table_height(totals)  # <<< show all insurers without scrolling
+            )
         with t2:
-            st.dataframe(summary, use_container_width=True, hide_index=True)
+            st.dataframe(
+                summary,
+                use_container_width=True,
+                hide_index=True,
+                height=auto_table_height(summary)  # optional no-scroll for summary
+            )
         with t3:
-            st.dataframe(detail, use_container_width=True, hide_index=True)
+            # Lazy load happens only when this tab renders
+            detail = load_detail_sheet(str(out_path), s_det, token)
+            st.dataframe(
+                detail,
+                use_container_width=True,
+                hide_index=True,
+                # keep default height for large detail; uncomment to force no-scroll:
+                # height=auto_table_height(detail)
+            )
     except Exception as e:
         try:
             names = pd.ExcelFile(str(out_path)).sheet_names
