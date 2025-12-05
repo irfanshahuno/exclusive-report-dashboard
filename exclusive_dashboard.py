@@ -120,10 +120,12 @@ def show_kpis_smart(totals: pd.DataFrame):
     c4.metric("Rejected", f"{rej:,.2f}")
     c5.metric("Accepted", f"{acc:,.2f}")
 
-def full_height(df):
-    """Return large enough height so all rows show fully (no scroll)."""
+def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 250) -> int:
+    """
+    Set dataframe height so ALL rows show fully, no internal scrollbar.
+    """
     rows = len(df)
-    return max(400, 50 + rows * 30)
+    return header_px + (rows * row_px) + padding_px
 
 # --------------------------- State ------------------------------
 if "is_admin" not in st.session_state: st.session_state.is_admin = False
@@ -223,4 +225,5 @@ else:
         except Exception:
             names = []
         st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(could not read)'}")
+
 
