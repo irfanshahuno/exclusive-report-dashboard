@@ -129,24 +129,26 @@ def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150
 def style_grid(df: pd.DataFrame):
     """
     Styled DataFrame with:
-    - Light-green header row only
-    - White left index (no green strip)
-    - Borders + bold first column
-    - Highlighted 'Grand Total' row
+    - Light-green header row
+    - White index column (no green strip)
+    - Index starts from 1
+    - Borders + Grand Total highlight
     """
     if not isinstance(df, pd.DataFrame):
         return df
     if df.shape[1] == 0:
         return df.style
 
-    df = df.reset_index(drop=True)
+    # ✅ Reset index to start from 1
+    df.index = range(1, len(df) + 1)
+
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
 
     border = "#CBD5E1"
     header_bg = "#E8F5E9"  # light green
-    header_font = "#2E7D32"  # dark green text
+    header_font = "#2E7D32"  # dark green
 
     styler = (
         df.style
@@ -154,20 +156,21 @@ def style_grid(df: pd.DataFrame):
             {"selector": "table",
              "props": [("border-collapse", "collapse"), ("width", "100%")]},
 
-            # Top header
+            # ✅ Top header green
             {"selector": "th.col_heading",
              "props": [("border", f"1px solid {border}"),
                        ("background-color", header_bg),
                        ("font-weight", "700"),
                        ("color", header_font)]},
 
-            # Row index (make white to remove left strip)
+            # ✅ Index white background (no green strip)
             {"selector": "th.row_heading",
              "props": [("border", f"1px solid {border}"),
                        ("background-color", "#FFFFFF"),
-                       ("font-weight", "400"),
-                       ("color", "#111111")]},
+                       ("color", "#000000"),
+                       ("font-weight", "500")]},
 
+            # ✅ Regular cell borders
             {"selector": "td",
              "props": [("border", f"1px solid {border}")]}
         ])
@@ -175,13 +178,13 @@ def style_grid(df: pd.DataFrame):
         .format(fmt_map)
     )
 
-    # Highlight Grand Total
+    # ✅ Highlight "Grand Total"
     try:
         mask_gt = df[first_col].astype(str).str.contains("grand total", case=False, na=False)
         if mask_gt.any():
             def highlight(row):
                 return (["font-weight:700; color:black; background-color:#FFF7E0"] * len(row)
-                        if mask_gt.iloc[row.name] else [""] * len(row))
+                        if mask_gt.iloc[row.name - 1] else [""] * len(row))
             styler = styler.apply(highlight, axis=1)
     except Exception:
         pass
