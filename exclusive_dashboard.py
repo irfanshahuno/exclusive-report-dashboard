@@ -246,18 +246,25 @@ else:
         totals, summary, s_tot, s_sum, s_det = load_report_fast(str(out_path), token)
         show_kpis_smart(totals)
         t1, t2, t3 = st.tabs([f"{s_tot}", f"{s_sum}", f"{s_det}"])
+
+        # --- Use st.table for styling to apply the green header ---
         with t1:
             df1 = trim_empty_rows(totals)
-            st.dataframe(style_grid(df1), use_container_width=True, hide_index=True, height=full_height(df1))
+            st.table(style_grid(df1))  # header will be light green
+
         with t2:
             df2 = trim_empty_rows(summary)
-            st.dataframe(style_grid(df2), use_container_width=True, hide_index=True, height=full_height(df2))
+            st.table(style_grid(df2))  # header will be light green
+
+        # Keep detail in dataframe (large/scrollable)
         with t3:
             df3 = load_detail_sheet(str(out_path), s_det, token)
             st.dataframe(style_grid(df3), use_container_width=True, hide_index=True)
+
     except Exception as e:
         try:
             names = pd.ExcelFile(str(out_path)).sheet_names
-        except Exception: names = []
+        except Exception:
+            names = []
         st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
 
