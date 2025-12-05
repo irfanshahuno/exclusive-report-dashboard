@@ -121,31 +121,57 @@ def show_kpis_smart(totals: pd.DataFrame):
 def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150) -> int:
     return header_px + (len(df) * row_px) + padding_px
 
-# ------------ Styling function (no annotation to avoid AttributeError) ------------
+# --------------------------- Styling function (light green header) ---------------------------
 def style_grid(df: pd.DataFrame):
+    """
+    Styled DataFrame with:
+    - Light-green header
+    - Full borders
+    - Bold header & first column
+    - Highlighted 'Grand Total' row
+    """
+    if not isinstance(df, pd.DataFrame):
+        return df
+    if df.shape[1] == 0:
+        return df.style
+
     df = df.copy()
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
-    border = "#CBD5E1"
+
+    border = "#CBD5E1"          # soft gray border
+    header_bg = "#E8F5E9"       # light green header
+    header_font = "#2E7D32"     # dark green text
+
     styler = (
         df.style
         .set_table_styles([
-            {"selector": "table", "props": [("border-collapse", "collapse")]},
-            {"selector": "th", "props": [("border", f"1px solid {border}"), ("background", "#F8FAFC"), ("font-weight", "700")]},
-            {"selector": "td", "props": [("border", f"1px solid {border}")]},
+            {"selector": "table",
+             "props": [("border-collapse", "collapse"), ("width", "100%")]},
+            {"selector": "th",
+             "props": [("border", f"1px solid {border}"),
+                       ("background-color", header_bg),
+                       ("font-weight", "700"),
+                       ("color", header_font)]},
+            {"selector": "td",
+             "props": [("border", f"1px solid {border}")]},
         ])
         .set_properties(subset=[first_col], **{"font-weight": "600"})
         .format(fmt_map)
     )
-    if first_col in df.columns:
+
+    # --- Highlight the "Grand Total" row if found ---
+    try:
         mask_gt = df[first_col].astype(str).str.contains("grand total", case=False, na=False)
         if mask_gt.any():
-            def row_style(row):
-                if mask_gt.loc[row.name]:
-                    return ["font-weight:700; background-color:#FFF7E0"] * len(row)
-                return [""] * len(row)
-            styler = styler.apply(row_style, axis=1)
+            def highlight(row):
+                return (["font-weight:700; background-color:#FFF7E0"] * len(row)
+                        if mask_gt.iloc[row.name] else [""] * len(row))
+            styler = styler.apply(highlight, axis=1)
+    except Exception:
+        pass
+
     return styler
 
 # --------------------------- Streamlit state ---------------------------
