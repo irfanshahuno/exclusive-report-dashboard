@@ -73,6 +73,9 @@ def autodetect_sheets(xls: pd.ExcelFile):
     totals  = _pick_sheet(names, ["total"]) or _pick_sheet(names, ["insurance"])
     summary = _pick_sheet(names, ["aging", "summary"]) or _pick_sheet(names, ["summary"])
     detail  = _pick_sheet(names, ["aging", "detail"])  or _pick_sheet(names, ["detail"])
+    if totals is None and names: totals = names[0]
+    if summary is None and len(names) > 1: summary = names[1]
+    if detail is None and len(names) > 2: detail = names[2] if len(names) > 2 else names[-1]
     return totals, summary, detail
 
 @st.cache_data(show_spinner=True)
@@ -89,7 +92,7 @@ def load_detail_sheet(path: str, detail_sheet: str, _token: float):
     return xls.parse(detail_sheet)
 
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
+    if df is None or df.empty:
         return df
     df2 = df.dropna(how="all")
     if df2.empty:
@@ -119,52 +122,60 @@ def show_kpis_smart(totals: pd.DataFrame):
     c5.metric("Accepted", f"{acc:,.2f}")
 
 def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150) -> int:
-    return header_px + (len(df) * row_px) + padding_px
+    n = 0 if df is None else len(df)
+    return header_px + (n * row_px) + padding_px
 
-# --------------------------- Styling function ---------------------------
+# --------------------------- Styling ---------------------------
 def style_grid(df: pd.DataFrame):
     """
     Styled DataFrame with:
-    - Light-green header
-    - Full borders
-    - Bold header & first column
-    - Highlighted 'Grand Total' row (yellow)
-    - Hidden index (no green bar)
+    - Light-green header row only
+    - White left index (no green strip)
+    - Borders + bold first column
+    - Highlighted 'Grand Total' row
     """
     if not isinstance(df, pd.DataFrame):
         return df
     if df.shape[1] == 0:
         return df.style
 
-    # ✅ Drop index completely before styling (prevents Streamlit re-color)
     df = df.reset_index(drop=True)
-
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
 
-    border = "#CBD5E1"          # soft gray border
-    header_bg = "#E8F5E9"       # light green header
-    header_font = "#2E7D32"     # dark green text
+    border = "#CBD5E1"
+    header_bg = "#E8F5E9"  # light green
+    header_font = "#2E7D32"  # dark green text
 
     styler = (
         df.style
         .set_table_styles([
             {"selector": "table",
              "props": [("border-collapse", "collapse"), ("width", "100%")]},
-            {"selector": "th",
+
+            # Top header
+            {"selector": "th.col_heading",
              "props": [("border", f"1px solid {border}"),
                        ("background-color", header_bg),
                        ("font-weight", "700"),
                        ("color", header_font)]},
+
+            # Row index (make white to remove left strip)
+            {"selector": "th.row_heading",
+             "props": [("border", f"1px solid {border}"),
+                       ("background-color", "#FFFFFF"),
+                       ("font-weight", "400"),
+                       ("color", "#111111")]},
+
             {"selector": "td",
-             "props": [("border", f"1px solid {border}")]},
+             "props": [("border", f"1px solid {border}")]}
         ])
         .set_properties(subset=[first_col], **{"font-weight": "600"})
         .format(fmt_map)
     )
 
-    # --- Highlight the "Grand Total" row if found ---
+    # Highlight Grand Total
     try:
         mask_gt = df[first_col].astype(str).str.contains("grand total", case=False, na=False)
         if mask_gt.any():
@@ -175,22 +186,25 @@ def style_grid(df: pd.DataFrame):
     except Exception:
         pass
 
-    # ✅ Hide index completely
-    styler = styler.hide(axis="index")
-
     return styler
 
 # --------------------------- Streamlit state ---------------------------
-if "is_admin" not in st.session_state: st.session_state.is_admin = False
-if "center_key" not in st.session_state: st.session_state.center_key = None
-if "last_center_key" not in st.session_state: st.session_state.last_center_key = None
+if "is_admin" not in st.session_state:
+    st.session_state.is_admin = False
+if "center_key" not in st.session_state:
+    st.session_state.center_key = None
+if "last_center_key" not in st.session_state:
+    st.session_state.last_center_key = None
 
 left, right = st.columns([5, 1])
-with left: st.title("📊 Exclusive Report with Aging — Dashboard")
-with right: st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
+with left:
+    st.title("📊 Exclusive Report with Aging — Dashboard")
+with right:
+    st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
 
 if st.session_state.center_key != st.session_state.last_center_key:
-    load_report_fast.clear(); load_detail_sheet.clear()
+    load_report_fast.clear()
+    load_detail_sheet.clear()
     st.session_state.last_center_key = st.session_state.center_key
 
 st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}**")
@@ -252,24 +266,20 @@ else:
         totals, summary, s_tot, s_sum, s_det = load_report_fast(str(out_path), token)
         show_kpis_smart(totals)
         t1, t2, t3 = st.tabs([f"{s_tot}", f"{s_sum}", f"{s_det}"])
-
         with t1:
             df1 = trim_empty_rows(totals)
-            st.table(style_grid(df1))
-
+            st.dataframe(style_grid(df1), use_container_width=True, height=full_height(df1))
         with t2:
             df2 = trim_empty_rows(summary)
-            st.table(style_grid(df2))
-
+            st.dataframe(style_grid(df2), use_container_width=True, height=full_height(df2))
         with t3:
             df3 = load_detail_sheet(str(out_path), s_det, token)
-            df3 = df3.reset_index(drop=True)
-            st.dataframe(style_grid(df3), use_container_width=True, hide_index=True)
-
+            st.dataframe(style_grid(df3), use_container_width=True, height=full_height(df3))
     except Exception as e:
         try:
             names = pd.ExcelFile(str(out_path)).sheet_names
-        except Exception:
-            names = []
+        except Exception: names = []
         st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
+
 
