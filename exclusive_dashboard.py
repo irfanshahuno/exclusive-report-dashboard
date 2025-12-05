@@ -136,7 +136,9 @@ def style_grid(df: pd.DataFrame):
     if df.shape[1] == 0:
         return df.style
 
-    df = df.copy()
+    # ✅ Drop index completely before styling (prevents Streamlit re-color)
+    df = df.reset_index(drop=True)
+
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
@@ -173,7 +175,7 @@ def style_grid(df: pd.DataFrame):
     except Exception:
         pass
 
-    # ✅ Hide index completely (no green strip or numbering)
+    # ✅ Hide index completely
     styler = styler.hide(axis="index")
 
     return styler
@@ -261,6 +263,7 @@ else:
 
         with t3:
             df3 = load_detail_sheet(str(out_path), s_det, token)
+            df3 = df3.reset_index(drop=True)
             st.dataframe(style_grid(df3), use_container_width=True, hide_index=True)
 
     except Exception as e:
@@ -269,3 +272,5 @@ else:
         except Exception:
             names = []
         st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
+
