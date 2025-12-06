@@ -11,22 +11,40 @@ BASE = Path(__file__).parent
 DATA_DIR = BASE / "data"
 (DATA_DIR / "easyhealth").mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "excellent").mkdir(parents=True, exist_ok=True)
+# NEW: pharmacy data folder
+(DATA_DIR / "excellent_pharmacy").mkdir(parents=True, exist_ok=True)
 
 # --------------------------- Generator config ---------------------
+# default generator (used for medical centers if center doesn't override)
 GENERATOR = BASE / "exclusive_report_with_aging_final.py"
 
+# Each center can now have its own generator and flag whether it supports --out
 CENTERS = {
     "easyhealth": {
         "name": "Easy Health Medical Clinic (MF8031)",
         "folder": DATA_DIR / "easyhealth",
         "src_name": "source.xlsx",
         "out_name": "report.xlsx",
+        "generator": BASE / "exclusive_report_with_aging_final.py",
+        "supports_out": True,
     },
     "excellent": {
         "name": "Excellent Medical Center (MF4777)",
         "folder": DATA_DIR / "excellent",
         "src_name": "source.xlsx",
         "out_name": "report.xlsx",
+        "generator": BASE / "exclusive_report_with_aging_final.py",
+        "supports_out": True,
+    },
+    # NEW center: Excellent Pharmacy
+    "excellent_pharmacy": {
+        "name": "Excellent Pharmacy (PF3205)",
+        "folder": DATA_DIR / "excellent_pharmacy",
+        "src_name": "source.xlsx",
+        # pharmacy script writes this fixed filename
+        "out_name": "Pharmacy_Exclusive_Report_with_Aging.xlsx",
+        "generator": BASE / "pharmacy_exclusive_report_with_aging.py",
+        "supports_out": False,  # current pharmacy script doesn't take --out
     },
 }
 
@@ -47,15 +65,23 @@ def _run(cmd):
         )
     return res
 
-def rebuild_report(src_path: Path, out_path: Path) -> str:
+# UPDATED: accept per-center generator + whether it supports --out
+def rebuild_report(src_path: Path, out_path: Path, generator: Path, supports_out: bool = True) -> str:
     py = sys.executable
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    src, out = str(src_path), str(out_path)
-    try:
-        res = _run([py, str(GENERATOR), "--out", out, src])
-        return res.stdout or "OK"
-    except Exception:
-        res = _run([py, str(GENERATOR), src, "--out", out])
+    src, out, gen = str(src_path), str(out_path), str(generator)
+
+    if supports_out:
+        # try both arg orders (your medical generator accepts either)
+        try:
+            res = _run([py, gen, "--out", out, src])
+            return res.stdout or "OK"
+        except Exception:
+            res = _run([py, gen, src, "--out", out])
+            return res.stdout or "OK"
+    else:
+        # pharmacy script writes its own output name (no --out)
+        res = _run([py, gen, src])
         return res.stdout or "OK"
 
 def _pick_sheet(sheet_names, wants):
@@ -215,13 +241,17 @@ st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Cen
 ck = st.session_state.center_key
 if ck not in CENTERS:
     st.subheader("Choose a center")
-    c1, c2 = st.columns(2)
+    # UPDATED: third button for pharmacy
+    c1, c2, c3 = st.columns(3)
     with c1:
         if st.button(CENTERS["easyhealth"]["name"], use_container_width=True):
             st.session_state.center_key = "easyhealth"; st.rerun()
     with c2:
         if st.button(CENTERS["excellent"]["name"], use_container_width=True):
             st.session_state.center_key = "excellent"; st.rerun()
+    with c3:
+        if st.button(CENTERS["excellent_pharmacy"]["name"], use_container_width=True):
+            st.session_state.center_key = "excellent_pharmacy"; st.rerun()
     st.stop()
 
 cfg = CENTERS[st.session_state.center_key]
@@ -245,13 +275,19 @@ if st.session_state.is_admin:
     colA, colB, colC = st.columns(3)
     if colA.button("↻ Rebuild report", use_container_width=True):
         try:
-            msg = rebuild_report(src_path, out_path)
+            msg = rebuild_report(
+                src_path,
+                out_path,
+                cfg.get("generator", GENERATOR),
+                cfg.get("supports_out", True),
+            )
             st.success("Report rebuilt successfully.")
             if msg.strip(): st.code(msg, language="bash")
             load_report_fast.clear(); load_detail_sheet.clear()
         except Exception as e: st.error(str(e))
     if colB.button("🗂 Show file locations", use_container_width=True):
-        st.info(f"Source: {src_path}\nReport: {out_path}\nScript: {GENERATOR}")
+        gen_show = cfg.get("generator", GENERATOR)
+        st.info(f"Source: {src_path}\nReport: {out_path}\nScript: {gen_show}")
     if colC.button("🗑 Reset (delete) this center's report", use_container_width=True):
         try:
             if out_path.exists(): out_path.unlink()
@@ -281,6 +317,7 @@ else:
     except Exception as e:
         try:
             names = pd.ExcelFile(str(out_path)).sheet_names
-        except Exception: names = []
+        except Exception:
+            names = []
         st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
 
