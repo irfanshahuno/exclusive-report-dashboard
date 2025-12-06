@@ -11,40 +11,33 @@ BASE = Path(__file__).parent
 DATA_DIR = BASE / "data"
 (DATA_DIR / "easyhealth").mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "excellent").mkdir(parents=True, exist_ok=True)
-# NEW: pharmacy data folder
 (DATA_DIR / "excellent_pharmacy").mkdir(parents=True, exist_ok=True)
 
 # --------------------------- Generator config ---------------------
-# default generator (used for medical centers if center doesn't override)
-GENERATOR = BASE / "exclusive_report_with_aging_final.py"
+GENERATOR_MEDICAL = BASE / "exclusive_report_with_aging_final.py"
+GENERATOR_PHARM  = BASE / "pharmacy_exclusive_report_with_aging.py"
 
-# Each center can now have its own generator and flag whether it supports --out
 CENTERS = {
     "easyhealth": {
         "name": "Easy Health Medical Clinic (MF8031)",
         "folder": DATA_DIR / "easyhealth",
         "src_name": "source.xlsx",
         "out_name": "report.xlsx",
-        "generator": BASE / "exclusive_report_with_aging_final.py",
-        "supports_out": True,
+        "generator": GENERATOR_MEDICAL,
     },
     "excellent": {
         "name": "Excellent Medical Center (MF4777)",
         "folder": DATA_DIR / "excellent",
         "src_name": "source.xlsx",
         "out_name": "report.xlsx",
-        "generator": BASE / "exclusive_report_with_aging_final.py",
-        "supports_out": True,
+        "generator": GENERATOR_MEDICAL,
     },
-    # NEW center: Excellent Pharmacy
     "excellent_pharmacy": {
         "name": "Excellent Pharmacy (PF3205)",
         "folder": DATA_DIR / "excellent_pharmacy",
         "src_name": "source.xlsx",
-        # pharmacy script writes this fixed filename
         "out_name": "Pharmacy_Exclusive_Report_with_Aging.xlsx",
-        "generator": BASE / "pharmacy_exclusive_report_with_aging.py",
-        "supports_out": False,  # current pharmacy script doesn't take --out
+        "generator": GENERATOR_PHARM,
     },
 }
 
@@ -65,23 +58,16 @@ def _run(cmd):
         )
     return res
 
-# UPDATED: accept per-center generator + whether it supports --out
-def rebuild_report(src_path: Path, out_path: Path, generator: Path, supports_out: bool = True) -> str:
+def rebuild_report(generator: Path, src_path: Path, out_path: Path) -> str:
     py = sys.executable
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    src, out, gen = str(src_path), str(out_path), str(generator)
-
-    if supports_out:
-        # try both arg orders (your medical generator accepts either)
-        try:
-            res = _run([py, gen, "--out", out, src])
-            return res.stdout or "OK"
-        except Exception:
-            res = _run([py, gen, src, "--out", out])
-            return res.stdout or "OK"
-    else:
-        # pharmacy script writes its own output name (no --out)
-        res = _run([py, gen, src])
+    src, out = str(src_path), str(out_path)
+    # Try both arg orders (your generators accept either)
+    try:
+        res = _run([py, str(generator), src])
+        return res.stdout or "OK"
+    except Exception:
+        res = _run([py, str(generator), src])
         return res.stdout or "OK"
 
 def _pick_sheet(sheet_names, wants):
@@ -96,7 +82,8 @@ def _pick_sheet(sheet_names, wants):
 
 def autodetect_sheets(xls: pd.ExcelFile):
     names = xls.sheet_names
-    totals  = _pick_sheet(names, ["total"]) or _pick_sheet(names, ["insurance"])
+    # Prefer Insurance_Totals for KPIs if available
+    totals  = _pick_sheet(names, ["insurance", "total"]) or _pick_sheet(names, ["total"])
     summary = _pick_sheet(names, ["aging", "summary"]) or _pick_sheet(names, ["summary"])
     detail  = _pick_sheet(names, ["aging", "detail"])  or _pick_sheet(names, ["detail"])
     if totals is None and names: totals = names[0]
@@ -126,20 +113,37 @@ def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     blank_rows = df2.fillna("").astype(str).apply(lambda row: "".join(row).strip() == "", axis=1)
     return df2.loc[~blank_rows]
 
+# --------------------------- KPI (tolerant to NetAmount/Net Amount) ---------------------------
 def show_kpis_smart(totals: pd.DataFrame):
-    ins_col = "Insurance" if "Insurance" in totals.columns else None
+    def pick(*names):
+        for n in names:
+            if n in totals.columns:
+                return n
+        return None
+
+    ins_col = pick("Insurance")
+    net_col = pick("Net Amount", "NetAmount")
+    paid_col = pick("Paid")
+    bal_col  = pick("Balance")
+    rej_col  = pick("Rejected")
+    acc_col  = pick("Accepted")
+
     gt = None
     if ins_col:
         mask_gt = totals[ins_col].astype(str).str.contains("grand total", case=False, na=False)
         if mask_gt.any():
             gt = totals.loc[mask_gt].iloc[-1]
+
     if gt is not None:
-        net = float(gt.get("Net Amount", 0)); paid = float(gt.get("Paid", 0))
-        bal = float(gt.get("Balance", 0)); rej = float(gt.get("Rejected", 0))
-        acc = float(gt.get("Accepted", 0))
+        net  = float(gt.get(net_col, 0))
+        paid = float(gt.get(paid_col, 0))
+        bal  = float(gt.get(bal_col, 0))
+        rej  = float(gt.get(rej_col, 0))
+        acc  = float(gt.get(acc_col, 0))
     else:
-        def v(c): return float(totals[c].sum()) if c in totals.columns else 0.0
-        net, paid, bal, rej, acc = v("Net Amount"), v("Paid"), v("Balance"), v("Rejected"), v("Accepted")
+        def v(c): return float(totals[c].sum()) if c and c in totals.columns else 0.0
+        net, paid, bal, rej, acc = v(net_col), v(paid_col), v(bal_col), v(rej_col), v(acc_col)
+
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Net Amount", f"{net:,.2f}")
     c2.metric("Paid", f"{paid:,.2f}")
@@ -154,9 +158,8 @@ def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150
 # --------------------------- Styling ---------------------------
 def style_grid(df: pd.DataFrame):
     """
-    Styled DataFrame with:
-    - Blue header row
-    - White index column (no color)
+    - Blue header
+    - White index (no color)
     - Index starts from 1
     - Borders + Grand Total highlight
     """
@@ -165,7 +168,6 @@ def style_grid(df: pd.DataFrame):
     if df.shape[1] == 0:
         return df.style
 
-    # ✅ Reset index to start from 1
     df.index = range(1, len(df) + 1)
 
     first_col = df.columns[0]
@@ -173,30 +175,24 @@ def style_grid(df: pd.DataFrame):
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
 
     border = "#CBD5E1"
-    header_bg = "#2196F3"  # 🔵 Blue header background
-    header_font = "#FFFFFF"  # White text
+    header_bg = "#2196F3"
+    header_font = "#FFFFFF"
 
     styler = (
         df.style
         .set_table_styles([
             {"selector": "table",
              "props": [("border-collapse", "collapse"), ("width", "100%")]},
-
-            # ✅ Blue header
             {"selector": "th.col_heading",
              "props": [("border", f"1px solid {border}"),
                        ("background-color", header_bg),
                        ("font-weight", "700"),
                        ("color", header_font)]},
-
-            # ✅ White index (no blue strip)
             {"selector": "th.row_heading",
              "props": [("border", f"1px solid {border}"),
                        ("background-color", "#FFFFFF"),
                        ("color", "#000000"),
                        ("font-weight", "500")]},
-
-            # ✅ Normal table cells
             {"selector": "td",
              "props": [("border", f"1px solid {border}")]}
         ])
@@ -204,7 +200,6 @@ def style_grid(df: pd.DataFrame):
         .format(fmt_map)
     )
 
-    # ✅ Highlight "Grand Total"
     try:
         mask_gt = df[first_col].astype(str).str.contains("grand total", case=False, na=False)
         if mask_gt.any():
@@ -241,7 +236,6 @@ st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Cen
 ck = st.session_state.center_key
 if ck not in CENTERS:
     st.subheader("Choose a center")
-    # UPDATED: third button for pharmacy
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button(CENTERS["easyhealth"]["name"], use_container_width=True):
@@ -255,7 +249,10 @@ if ck not in CENTERS:
     st.stop()
 
 cfg = CENTERS[st.session_state.center_key]
-folder, src_path, out_path = cfg["folder"], cfg["folder"]/cfg["src_name"], cfg["folder"]/cfg["out_name"]
+folder = cfg["folder"]
+src_path = folder / cfg["src_name"]
+out_path = folder / cfg["out_name"]
+generator = cfg["generator"]
 
 if st.session_state.is_admin:
     st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
@@ -275,25 +272,22 @@ if st.session_state.is_admin:
     colA, colB, colC = st.columns(3)
     if colA.button("↻ Rebuild report", use_container_width=True):
         try:
-            msg = rebuild_report(
-                src_path,
-                out_path,
-                cfg.get("generator", GENERATOR),
-                cfg.get("supports_out", True),
-            )
+            msg = rebuild_report(generator, src_path, out_path)
             st.success("Report rebuilt successfully.")
-            if msg.strip(): st.code(msg, language="bash")
+            if msg.strip():
+                st.code(msg, language="bash")
             load_report_fast.clear(); load_detail_sheet.clear()
-        except Exception as e: st.error(str(e))
+        except Exception as e:
+            st.error(str(e))
     if colB.button("🗂 Show file locations", use_container_width=True):
-        gen_show = cfg.get("generator", GENERATOR)
-        st.info(f"Source: {src_path}\nReport: {out_path}\nScript: {gen_show}")
+        st.info(f"Source: {src_path}\nReport: {out_path}\nGenerator: {generator}")
     if colC.button("🗑 Reset (delete) this center's report", use_container_width=True):
         try:
             if out_path.exists(): out_path.unlink()
             st.success("Report deleted.")
             load_report_fast.clear(); load_detail_sheet.clear()
-        except Exception as e: st.error(str(e))
+        except Exception as e:
+            st.error(str(e))
 
 token = mtime_token(out_path)
 if token == 0.0:
@@ -320,4 +314,3 @@ else:
         except Exception:
             names = []
         st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
