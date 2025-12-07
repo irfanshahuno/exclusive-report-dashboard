@@ -374,16 +374,25 @@ try:
         summary = ensure_grand_total(summary, summary.columns[0])
 
     # ---------- Values (no Net) ----------
+    def drop_grand_total(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        first_col = df.columns[0]
+        mask = ~df[first_col].astype(str).str.contains("grand total", case=False, na=False)
+        return df.loc[mask]
+
     def ksum(df, *cands):
         for col in cands:
             if col in df.columns:
                 return float(pd.to_numeric(df[col], errors="coerce").sum())
         return 0.0
 
-    paid = ksum(totals, "Paid")
-    bal  = ksum(totals, "Balance")
-    rej  = ksum(totals, "Rejected", "Rejection")
-    acc  = ksum(totals, "Accepted")
+    totals_no_gt = drop_grand_total(totals)
+
+    paid = ksum(totals_no_gt, "Paid")
+    bal  = ksum(totals_no_gt, "Balance")
+    rej  = ksum(totals_no_gt, "Rejected", "Rejection")
+    acc  = ksum(totals_no_gt, "Accepted")
 
     # KPI strip (no Net)
     k1, k2, k3, k4 = st.columns(4)
@@ -392,20 +401,20 @@ try:
     k3.metric("Rejected", f"{rej:,.2f}")
     k4.metric("Accepted", f"{acc:,.2f}")
 
-    # ---------- Bar chart only (distinct colors for all 4) ----------
+    # ---------- Bar chart (smaller, colored) ----------
     import matplotlib.pyplot as plt
-
     st.subheader("Chart")
-    fig, ax = plt.subplots(figsize=(10.5, 4.0), dpi=150)
+    fig, ax = plt.subplots(figsize=(7.5, 3.0), dpi=150)  # compact
     labels = ["Paid", "Balance", "Rejected", "Accepted"]
     vals   = [paid,   bal,       rej,        acc]
     colors = ["#2E7D32", "#FB8C00", "#C62828", "#1976D2"]  # green, orange, red, blue
-    ax.bar(labels, vals, color=colors)
+    bars = ax.bar(labels, vals, color=colors)
     ax.set_title("Amounts", fontsize=11)
     ax.set_ylabel("AED")
     ax.grid(axis="y", linestyle="--", alpha=0.35)
-    for i, v in enumerate(vals):
-        ax.text(i, v, f"{v:,.0f}", ha="center", va="bottom", fontsize=9)
+    for rect, v in zip(bars, vals):
+        ax.text(rect.get_x() + rect.get_width()/2, rect.get_height(),
+                f"{v:,.0f}", ha="center", va="bottom", fontsize=9)
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
 
