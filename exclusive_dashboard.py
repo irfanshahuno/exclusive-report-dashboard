@@ -116,9 +116,9 @@ def autodetect(xls: pd.ExcelFile):
         detail  = _pick_sheet(names, wants_all=["aging","detail"]) or _pick_sheet(names, wants_any=["detail"])
     return ins_tot, summary, detail, names
 
-@st.cache_data(show_spinner=True)
+# NOTE: changed to cache_resource to avoid pickling ExcelFile
+@st.cache_resource(show_spinner=True)
 def load_book(path: str, _token: float):
-    # cache the parsed workbook for speed
     return pd.ExcelFile(path, engine="openpyxl")
 
 @st.cache_data(show_spinner=True)
@@ -545,3 +545,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
