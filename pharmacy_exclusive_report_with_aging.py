@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-import time
+import sys, time, glob
 import pandas as pd
-import glob
+from pathlib import Path
 from datetime import datetime
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 
 # =================== CONFIG ===================
-OUTPUT_XLSX     = "Pharmacy_Exclusive_Report_with_Aging.xlsx"
+OUTPUT_NAME     = "Pharmacy_Exclusive_Report_with_Aging.xlsx"
 TINY_THRESHOLD  = 4        # ≤ 4 goes to Accepted (not Balance)
 DECIMALS        = 2
 BINS            = [-1, 30, 45, 60, 90, float("inf")]
@@ -15,6 +15,12 @@ LABELS          = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days"
 
 # =================== HELPERS ===================
 def find_input_file():
+    # If dashboard provided a path, use it
+    if len(sys.argv) >= 2:
+        p = Path(sys.argv[1])
+        if p.exists() and p.suffix.lower() == ".xlsx":
+            return str(p)
+    # Fallback to your original behavior
     files = [f for f in glob.glob("*.xlsx") if "Rejection_Report" not in f]
     if not files:
         raise FileNotFoundError("❌ No Excel file (.xlsx) found in this folder.")
@@ -31,16 +37,14 @@ def style_headers(wb):
     header_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")  # blue
     total_fill  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")  # light orange
     for ws in wb.worksheets:
-        # header
         for c in range(1, ws.max_column + 1):
             cell = ws.cell(row=1, column=c)
             cell.fill = header_fill
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal="center", vertical="center")
-        # highlight Grand Total row/col in summary
-        if ws.title.lower().startswith("balance_aging_summary"):
+        if ws.title == "Balance_Aging_Summary":
             for r in range(2, ws.max_row + 1):
-                if str(ws.cell(row=r, column=1).value).strip().lower() == "grand total":
+                if ws.cell(row=r, column=1).value == "Grand Total":
                     for c in range(1, ws.max_column + 1):
                         gt = ws.cell(row=r, column=c)
                         gt.fill = total_fill
@@ -65,8 +69,8 @@ t1 = time.time()
 print(f"⏳ Load time: {t1 - t0:.2f}s")
 
 # ===== Detect columns (prefer your pharmacy names) =====
-col_net   = ci_get(df, ["Claim Amount","NetAmount","Net Amount","TotalAmount","Total Amount","Net"])
-col_paid  = ci_get(df, ["Remitted Amount","Paid","Remit Amount","RemitAmount"])
+col_net   = ci_get(df, ["Claim Amount","Claim Amount (Net)","NetAmount","Net Amount","TotalAmount","Total Amount","Net"])
+col_paid  = ci_get(df, ["Remitted Amount","Remitted Amount (Paid)","Paid","Remit Amount","RemitAmount"])
 col_stat  = ci_get(df, ["ClaimStatus","Status","ResponseType"])
 col_payer = ci_get(df, ["Insurance","PayerName","Insurer","Plan","InsurancePlan"])
 col_date  = ci_get(df, ["ClaimDate","RxDate","DispenseDate","SubmissionDate","VisitDate","DOS","DateOfService"])
@@ -134,7 +138,9 @@ grand = df[money_cols].sum().round(DECIMALS)
 text_like = [c for c in ["RxId","Bill No","ClaimXmlId","ClaimStatus","Insurance","Plan","PayerName","Insurer"] if c in df.columns]
 empty_text_mask = pd.Series(True, index=df.index)
 if text_like:
-    empty_text_mask = df[text_like].apply(lambda s: s.astype(str).str.strip().replace({"nan":"","None":""}), axis=0).eq("").all(axis=1)
+    empty_text_mask = df[text_like].apply(
+        lambda s: s.astype(str).str.strip().replace({"nan":"","None":""}), axis=0
+    ).eq("").all(axis=1)
 
 eq_grand_mask = False
 for c in money_cols:
@@ -173,28 +179,12 @@ for col in pivot_summary.columns:
     if col != "Insurance":
         pivot_summary[col] = pd.to_numeric(pivot_summary[col], errors="coerce").round(DECIMALS)
 
-# -------- Insurance totals + Grand Total --------
-num_cols = ["NetAmount","Paid","Balance","Rejected","Accepted"]
-
+# Insurance totals
 insurance_totals = (
-    df.groupby("Insurance", dropna=False)[num_cols]
-      .sum()
-      .reset_index()
+    df.groupby("Insurance", dropna=False)[["NetAmount","Paid","Balance","Rejected","Accepted"]]
+      .sum().reset_index()
 )
-
-# Remove pre-existing 'Grand Total' to avoid duplicates
-if "Insurance" in insurance_totals.columns:
-    insurance_totals = insurance_totals[
-        ~insurance_totals["Insurance"].astype(str).str.contains("grand total", case=False, na=False)
-    ].copy()
-
-# Append computed Grand Total
-gt_vals = insurance_totals[num_cols].sum().to_dict()
-gt_row = {"Insurance": "Grand Total", **{c: float(gt_vals.get(c, 0.0)) for c in num_cols}}
-insurance_totals = pd.concat([insurance_totals, pd.DataFrame([gt_row])], ignore_index=True)
-
-# Rounding
-for c in num_cols:
+for c in ["NetAmount","Paid","Balance","Rejected","Accepted"]:
     insurance_totals[c] = insurance_totals[c].round(DECIMALS)
 
 t2 = time.time()
@@ -204,24 +194,20 @@ print(f"⚙️ Processing time: {t2 - t1:.2f}s")
 print("🧪 Running self-checks…")
 checks = {}
 
-# A) Row identity exactness
 row_sum = (df["Paid"] + df["Balance"] + df["Rejected"] + df["Accepted"]).round(DECIMALS)
 row_diff = (df["NetAmount"].round(DECIMALS) - row_sum).round(DECIMALS)
 checks["A_rows_balanced"] = bool((row_diff == 0).all())
 checks["A_rows_unbalanced_count"] = int((row_diff != 0).sum())
 checks["A_max_abs_row_drift"] = float(row_diff.abs().max()) if len(row_diff) else 0.0
 
-# B) Grand totals consistency
 tot_left  = df["NetAmount"].sum().round(DECIMALS)
 tot_right = (df["Paid"] + df["Balance"] + df["Rejected"] + df["Accepted"]).sum().round(DECIMALS)
 checks["B_totals_match"] = bool(tot_left == tot_right)
 checks["B_totals_left_net"] = float(tot_left)
 checks["B_totals_right_sum"] = float(tot_right)
 
-# C) No totals rows left
 checks["C_removed_totals_rows"] = removed_rows
 
-# D) Aging consistency (detail vs summary)
 balance_total_detail = float(balance_df["Balance"].sum().round(DECIMALS))
 summary_no_gt = pivot_summary[pivot_summary["Insurance"] != "Grand Total"]
 balance_total_summary = float(summary_no_gt.drop(columns=["Insurance"]).sum(axis=1).sum().round(DECIMALS))
@@ -230,17 +216,21 @@ checks["D_balance_detail_sum"] = balance_total_detail
 checks["D_balance_summary_sum"] = balance_total_summary
 
 # =================== SAVE ===================
+# Write the output to the same folder as the input file (works with the dashboard)
+out_dir = Path(input_file).resolve().parent
+out_path = out_dir / OUTPUT_NAME
+
 print("💾 Saving Excel…")
-with pd.ExcelWriter(OUTPUT_XLSX, engine="openpyxl") as writer:
+with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
     df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
     insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
     pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
     balance_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
-    pd.DataFrame([checks]).to_excel(writer, sheet_name="Meta", index=False)
+    pd.DataFrame([checks]).to_excel(writer, sheet_name="Validation", index=False)
 
-wb = load_workbook(OUTPUT_XLSX)
+wb = load_workbook(out_path)
 style_headers(wb)
-wb.save(OUTPUT_XLSX)
+wb.save(out_path)
 t3 = time.time()
 print(f"💾 Save time: {t3 - t2:.2f}s")
 
@@ -249,4 +239,4 @@ print(f"✅ Total time: {t3 - t0:.2f}s")
 print("✅ Self-checks summary:")
 for k, v in checks.items():
     print(f"   - {k}: {v}")
-
+print(f"✅ Saved: {out_path.name}")
