@@ -164,7 +164,7 @@ def style_grid(df: pd.DataFrame):
     if df.shape[1] == 0:
         return df.style
     df = df.copy()
-    # index 1,2,3... (no color)
+    # index 1..N (no color)
     df.index = range(1, len(df) + 1)
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
@@ -385,20 +385,6 @@ try:
     rej  = ksum(totals, "Rejected", "Rejection")
     acc  = ksum(totals, "Accepted")
 
-    # Aging buckets (best-effort)
-    def pick_bucket(name):
-        for c in summary.columns:
-            s = str(c).strip().lower()
-            if name in s:
-                return c
-        return None
-    b0 = ksum(summary, pick_bucket("0–30") or pick_bucket("0-30") or pick_bucket("0 to 30") or pick_bucket("0_30"))
-    b1 = ksum(summary, pick_bucket("31–45") or pick_bucket("31-45"))
-    b2 = ksum(summary, pick_bucket("46–60") or pick_bucket("46-60"))
-    b3 = ksum(summary, pick_bucket("61–90") or pick_bucket("61-90"))
-    b4 = ksum(summary, pick_bucket(">90")   or pick_bucket("90+") or pick_bucket("> 90"))
-    aging_total = max(b0 + b1 + b2 + b3 + b4, 0.0)
-
     # KPI strip (no Net)
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Paid",     f"{paid:,.2f}")
@@ -406,43 +392,22 @@ try:
     k3.metric("Rejected", f"{rej:,.2f}")
     k4.metric("Accepted", f"{acc:,.2f}")
 
-    # ---------- Excel-style charts with distinct colors ----------
+    # ---------- Bar chart only (distinct colors for all 4) ----------
     import matplotlib.pyplot as plt
-    import numpy as np
 
-    st.subheader("Charts")
-
-    c1, c2 = st.columns(2)
-
-    # Bar: amounts (distinct colors)
-    with c1:
-        fig1, ax1 = plt.subplots(figsize=(5.4, 3.4), dpi=150)
-        labels = ["Paid", "Balance", "Rejected", "Accepted"]
-        vals   = [paid,   bal,       rej,        acc]
-        colors = ["#2E7D32", "#FB8C00", "#C62828", "#1976D2"]  # green, orange, red, blue
-        ax1.bar(labels, vals, color=colors)
-        ax1.set_title("Amounts (Bar)", fontsize=11)
-        ax1.set_ylabel("AED")
-        ax1.grid(axis="y", linestyle="--", alpha=0.4)
-        for i, v in enumerate(vals):
-            ax1.text(i, v, f"{v:,.0f}", ha="center", va="bottom", fontsize=8)
-        fig1.tight_layout()
-        st.pyplot(fig1, use_container_width=True)
-
-    # Pie: aging share (distinct colors)
-    with c2:
-        fig2, ax2 = plt.subplots(figsize=(5.4, 3.4), dpi=150)
-        pie_pairs = [("0–30", b0), ("31–45", b1), ("46–60", b2), ("61–90", b3), (">90", b4)]
-        pie_labels = [lab for lab, v in pie_pairs if v and v > 0]
-        pie_vals   = [v   for lab, v in pie_pairs if v and v > 0]
-        pie_colors = ["#64B5F6", "#4DB6AC", "#AED581", "#FFB74D", "#E57373"]  # blue, teal, light green, orange, light red
-        if not pie_vals:
-            pie_labels, pie_vals, pie_colors = ["No Aging Data"], [1], ["#B0BEC5"]
-        ax2.pie(pie_vals, labels=pie_labels, autopct="%1.0f%%", startangle=90, colors=pie_colors[:len(pie_vals)])
-        ax2.set_title("Aging Share (Pie)", fontsize=11)
-        ax2.axis("equal")
-        fig2.tight_layout()
-        st.pyplot(fig2, use_container_width=True)
+    st.subheader("Chart")
+    fig, ax = plt.subplots(figsize=(10.5, 4.0), dpi=150)
+    labels = ["Paid", "Balance", "Rejected", "Accepted"]
+    vals   = [paid,   bal,       rej,        acc]
+    colors = ["#2E7D32", "#FB8C00", "#C62828", "#1976D2"]  # green, orange, red, blue
+    ax.bar(labels, vals, color=colors)
+    ax.set_title("Amounts", fontsize=11)
+    ax.set_ylabel("AED")
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
+    for i, v in enumerate(vals):
+        ax.text(i, v, f"{v:,.0f}", ha="center", va="bottom", fontsize=9)
+    fig.tight_layout()
+    st.pyplot(fig, use_container_width=True)
 
     # ---------- Tabs ----------
     t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, SHEET_DETAIL])
@@ -502,4 +467,3 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
