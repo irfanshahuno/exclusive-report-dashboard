@@ -1,260 +1,110 @@
-# exclusive_dashboard.py
-import sys
-import subprocess
-from pathlib import Path
-from typing import Dict, Optional, Tuple
-
 import pandas as pd
 import streamlit as st
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill, Font, Alignment
+from datetime import datetime
+import io
 
-# --------------------------- Page setup ---------------------------
-st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layout="wide")
-BASE = Path(__file__).parent.resolve()
+st.set_page_config(page_title="Exclusive Rejection Report", page_icon="📊", layout="wide")
+st.title("📊 Exclusive Rejection Report Generator")
 
-GENERATOR = BASE / "exclusive_report_with_aging_final.py"
+st.markdown("""
+Upload your Excel file below.  
+The app will automatically calculate **Paid, Rejection, Accepted, Balance, Check, CheckDiff**,  
+add totals, and let you **download the final styled report**.
+""")
 
-DATA_DIR = BASE / "data"
-CENTERS = {
-    "easyhealth": {
-        "title": "Easy Health Medical Clinic (MF8031)",
-        "folder": DATA_DIR / "easyhealth",
-        "report_name": "Exclusive_Report_with_Aging.xlsx",
-        "short": "EasyHealth",
-    },
-    "excellent": {
-        "title": "Excellent Medical Center (MF4777)",
-        "folder": DATA_DIR / "excellent",
-        "report_name": "Exclusive_Report_with_Aging.xlsx",
-        "short": "Excellent",
-    },
-    "excellent_pharmacy": {
-        "title": "Excellent Pharmacy (PF3205)",
-        "folder": DATA_DIR / "excellent_pharmacy",
-        "report_name": "Pharmacy_Exclusive_Report_with_Aging.xlsx",
-        "short": "Pharmacy",
-    },
-}
-for c in CENTERS.values():
-    c["folder"].mkdir(parents=True, exist_ok=True)
+uploaded_file = st.file_uploader("📂 Upload your Excel file", type=["xlsx"])
 
-# --------------------------- Helpers ---------------------------
-def run_generator(source_xlsx: Path, out_xlsx: Path) -> Tuple[bool, str]:
-    cmd = [sys.executable, str(GENERATOR), "--out", str(out_xlsx), str(source_xlsx)]
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    ok = p.returncode == 0
-    log = ("Command: " + " ".join(p.args)
-           + "\n\nSTDOUT:\n" + (p.stdout or "(empty)")
-           + "\n\nSTDERR:\n" + (p.stderr or "(empty)"))
-    return ok, log
+if uploaded_file:
+    # --- Load Data ---
+    df = pd.read_excel(uploaded_file, engine="openpyxl")
+    df.columns = df.columns.str.strip()
 
-def read_sheet_safe(xlsx_path: Path, sheet_name: str) -> Optional[pd.DataFrame]:
-    if not xlsx_path.exists():
-        return None
-    try:
-        return pd.read_excel(xlsx_path, sheet_name=sheet_name, engine="openpyxl")
-    except Exception:
-        return None
+    # --- Convert numeric columns ---
+    num_cols = ["ActivityIns", "actRemitInsShare", "actResub1RemitInsShare",
+                "actResub2RemitInsShare", "actResub3RemitInsShare", "TKBKAmountAct"]
+    for col in num_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        else:
+            df[col] = 0.0
 
-def to_num(s):
-    return pd.to_numeric(s, errors="coerce")
+    # --- Paid ---
+    df["Paid"] = df[["actRemitInsShare", "actResub1RemitInsShare",
+                     "actResub2RemitInsShare", "actResub3RemitInsShare",
+                     "TKBKAmountAct"]].sum(axis=1)
 
-def detect_cols(df: pd.DataFrame) -> Dict[str, Optional[str]]:
-    # Expanded to include explicit Accepted Amount variants
-    candidates = {
-        "net":  ["Net Amount", "NetAmount", "ActivityIns", "Net_Amount", "Net"],
-        "paid": ["Paid", "Paid Amount", "PaidAmount", "Paid_Amount"],
-        "bal":  ["Balance", "Pending", "Pending Balance", "Outstanding"],
-        "rej":  ["Rejected", "Rejection", "Rejections"],
-        "acc_amt": ["Accepted Amount", "AcceptedAmount", "Accepted_Amt"],  # NEW
-        "acc":  ["Accepted", "Approval", "Approvals", "Approved"],         # may be counts
-    }
-    found = {}
-    lc = {c.lower(): c for c in df.columns}
-    for key, names in candidates.items():
-        hit = None
-        for n in names:
-            if n in df.columns:
-                hit = n; break
-            if n.lower() in lc:
-                hit = lc[n.lower()]; break
-        found[key] = hit
-    return found
+    # --- Initialize buckets ---
+    df["Rejection"] = 0.0
+    df["Accepted"] = 0.0
+    df["Balance"] = 0.0
 
-def _pick_label_col(df: pd.DataFrame) -> Optional[str]:
-    for c in df.columns:
-        if df[c].dtype == object:
-            return c
-    return None
+    # --- Exclusive Logic ---
+    if "ActivityStatus" in df.columns and "DenialCode" in df.columns:
+        mask_paid = df["Paid"] > 0
+        df.loc[mask_paid, "Accepted"] = df["ActivityIns"] - df["Paid"]
+        df.loc[mask_paid, ["Balance", "Rejection"]] = 0
 
-def _grand_total_row(df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    lbl = _pick_label_col(df)
-    if lbl is None:
-        return None
-    mask = df[lbl].astype(str).str.strip().str.lower().isin(
-        ["grand total", "total", "totals", "grand_total"]
+        mask_reject = (df["Paid"] == 0) & \
+                      (df["ActivityStatus"].astype(str).str.lower() == "rejected") & \
+                      (df["DenialCode"].notna())
+        df.loc[mask_reject, "Rejection"] = df["ActivityIns"]
+        df.loc[mask_reject, ["Balance", "Accepted"]] = 0
+
+        mask_balance = (df["Paid"] == 0) & ~mask_reject
+        df.loc[mask_balance, "Balance"] = df["ActivityIns"]
+        df.loc[mask_balance, ["Rejection", "Accepted"]] = 0
+
+    # --- Check Columns ---
+    df["Check"] = df["Paid"] + df["Accepted"] + df["Rejection"] + df["Balance"]
+    df["CheckDiff"] = df["ActivityIns"] - df["Check"]
+
+    # --- Totals ---
+    totals = df[num_cols + ["Paid", "Rejection", "Accepted", "Balance", "Check", "CheckDiff"]].sum(numeric_only=True)
+    totals["RowType"] = "Total"
+    df["RowType"] = "Detail"
+    final_report = pd.concat([df, pd.DataFrame([totals])], ignore_index=True)
+
+    # --- Style and Save to BytesIO ---
+    temp_output = io.BytesIO()
+    final_report.to_excel(temp_output, index=False, engine="openpyxl")
+    temp_output.seek(0)
+
+    wb = load_workbook(temp_output)
+    ws = wb.active
+
+    header_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")  # blue header
+    highlight_fill = PatternFill(start_color="FFD966", end_color="FFD966", fill_type="solid")  # orange/yellow
+
+    for col in range(1, ws.max_column + 1):
+        cell = ws.cell(row=1, column=col)
+        if cell.value in ["Paid", "Balance", "Rejection", "Accepted", "Check", "CheckDiff"]:
+            cell.fill = highlight_fill
+        else:
+            cell.fill = header_fill
+        cell.font = Font(bold=True, color="000000")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Re-save styled workbook into memory
+    styled_output = io.BytesIO()
+    wb.save(styled_output)
+    styled_output.seek(0)
+
+    st.subheader("📊 Processed Report Preview")
+    st.dataframe(final_report.head())
+
+    # --- Download Button ---
+    today = datetime.now().strftime("%Y-%m-%d")
+    file_name = f"Rejection_Report_{today}.xlsx"
+
+    st.download_button(
+        label="⬇️ Download Final Styled Report",
+        data=styled_output,
+        file_name=file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-    if mask.any():
-        return df.loc[mask].tail(1)
-    return None
 
-def ensure_grand_total_row(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    if _grand_total_row(df) is not None:
-        return df
-    # Compute totals row for display
-    total_row = {}
-    for c in df.columns:
-        if pd.api.types.is_numeric_dtype(df[c]) or to_num(df[c]).notna().any():
-            total_row[c] = to_num(df[c]).fillna(0).sum()
-        else:
-            total_row[c] = "Grand Total"
-    return pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
+    st.success("✅ Report generated and styled successfully!")
 
-def kpis_from_totals(df: pd.DataFrame) -> Dict[str, float]:
-    cols = detect_cols(df)
-    grand = _grand_total_row(df)
 
-    def v_from(frame, key):
-        col = cols.get(key)
-        if not col or col not in frame.columns:
-            return 0.0
-        return float(to_num(frame[col]).fillna(0).iloc[0])
-
-    def s_from(key):
-        col = cols.get(key)
-        if not col or col not in df.columns:
-            return 0.0
-        return float(to_num(df[col]).fillna(0).sum())
-
-    # Prefer the grand-total row when present
-    if grand is not None and not grand.empty:
-        net = v_from(grand, "net")
-        paid = v_from(grand, "paid")
-        bal  = v_from(grand, "bal")
-        rej  = v_from(grand, "rej")
-
-        # Accepted Amount: prefer explicit amount column; else derive
-        if cols.get("acc_amt") and cols["acc_amt"] in grand.columns:
-            acc = v_from(grand, "acc_amt")
-        else:
-            acc = max(0.0, round(net - paid - bal - rej, 2))
-        return {"net": net, "paid": paid, "bal": bal, "rej": rej, "acc": acc}
-
-    # Otherwise, sum columns and derive
-    net = s_from("net"); paid = s_from("paid"); bal = s_from("bal"); rej = s_from("rej")
-    if cols.get("acc_amt") and cols["acc_amt"] in df.columns:
-        acc = s_from("acc_amt")
-    else:
-        acc = max(0.0, round(net - paid - bal - rej, 2))
-    return {"net": net, "paid": paid, "bal": bal, "rej": rej, "acc": acc}
-
-def money(v: float) -> str:
-    return f"{v:,.2f}"
-
-# --------------------------- UI ---------------------------
-st.title("📊 Exclusive Report with Aging — Dashboard")
-
-mode_col, _ = st.columns([1, 5])
-with mode_col:
-    admin = st.toggle("Admin mode", value=False)
-
-# Quick center buttons
-b1, b2, b3, _sp = st.columns([1, 1, 1, 4])
-if "center_key" not in st.session_state:
-    st.session_state.center_key = "excellent"
-
-def choose_center(k): st.session_state.center_key = k
-if b1.button("EasyHealth", use_container_width=True): choose_center("easyhealth")
-if b2.button("Excellent",  use_container_width=True): choose_center("excellent")
-if b3.button("Pharmacy",   use_container_width=True): choose_center("excellent_pharmacy")
-
-center_key = st.session_state.center_key
-center = CENTERS[center_key]
-center_dir = center["folder"]
-source_path = center_dir / "source.xlsx"
-report_path = center_dir / center["report_name"]
-
-st.caption(f"Center: **{center['title']}** · Input: `source.xlsx` · Report: `{center['report_name']}`")
-
-# Admin actions
-if admin:
-    st.subheader("Upload .xlsx")
-    up = st.file_uploader("Drag and drop file here", type=["xlsx"], label_visibility="collapsed")
-    if up is not None:
-        source_path.write_bytes(up.getvalue())
-        st.success(f"Saved to {source_path.as_posix()}")
-
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
-        if st.button("🔄 Rebuild report", use_container_width=True):
-            if not GENERATOR.exists():
-                st.error(f"Generator not found: {GENERATOR}")
-            elif not source_path.exists():
-                st.error("No input found. Upload a source .xlsx first.")
-            else:
-                ok, log = run_generator(source_path, report_path)
-                st.success(f"Report built: {report_path.name}") if ok else st.error("Build failed."); 
-                if not ok: st.code(log)
-    with c2:
-        st.button("📁 Show file locations", use_container_width=True, help=str(center_dir.resolve()))
-    with c3:
-        if st.button("🗑️ Reset (delete) this center's report", use_container_width=True):
-            try:
-                if report_path.exists(): report_path.unlink()
-                st.success("Report removed.")
-            except Exception as e:
-                st.error(f"Could not delete report: {e}")
-else:
-    st.info("View mode: read-only (toggle Admin mode to upload or rebuild).")
-
-# Load report
-if not report_path.exists():
-    st.info("Report not found for this center. (Upload source and click Rebuild in Admin mode.)")
-    st.stop()
-
-# KPIs from Insurance_Totals (with accepted derived correctly)
-df_totals = read_sheet_safe(report_path, "Insurance_Totals")
-if df_totals is None or df_totals.empty:
-    df_totals = read_sheet_safe(report_path, "Balance_Aging_Summary")
-
-if df_totals is None or df_totals.empty:
-    st.error("Could not load totals from the report.")
-    st.stop()
-
-kpis = kpis_from_totals(df_totals)
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Net Amount",  money(kpis["net"]))
-m2.metric("Paid",        money(kpis["paid"]))
-m3.metric("Balance",     money(kpis["bal"]))
-m4.metric("Rejected",    money(kpis["rej"]))
-m5.metric("Accepted",    money(kpis["acc"]))
-
-# Tabs
-tab1, tab2, tab3 = st.tabs(["Insurance_Totals", "Balance_Aging_Summary", "Balance_Aging_Detail"])
-
-with tab1:
-    df = read_sheet_safe(report_path, "Insurance_Totals")
-    if df is None:
-        st.warning("Sheet `Insurance_Totals` not found.")
-    else:
-        st.caption("Includes a computed **Grand Total** row if the file does not have one.")
-        st.dataframe(ensure_grand_total_row(df), use_container_width=True)
-
-with tab2:
-    df = read_sheet_safe(report_path, "Balance_Aging_Summary")
-    if df is None:
-        st.warning("Sheet `Balance_Aging_Summary` not found.")
-    else:
-        st.dataframe(df, use_container_width=True)
-
-with tab3:
-    st.caption("⚡ To keep the app fast, this sheet loads only when requested.")
-    if st.checkbox("Load Balance_Aging_Detail"):
-        df = read_sheet_safe(report_path, "Balance_Aging_Detail")
-        if df is None:
-            st.warning("Sheet `Balance_Aging_Detail` not found.")
-        else:
-            st.dataframe(df, use_container_width=True)
-    else:
-        st.info("Not loaded.")
