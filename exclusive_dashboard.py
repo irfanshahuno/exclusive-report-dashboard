@@ -13,34 +13,33 @@ DATA_DIR = BASE / "data"
 (DATA_DIR / "excellent").mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "excellent_pharmacy").mkdir(parents=True, exist_ok=True)
 
-# --------------------------- Centers & Generators -----------------
+# --------------------------- Generator config ---------------------
+GENERATOR_MEDICAL = BASE / "exclusive_report_with_aging_final.py"
+GENERATOR_PHARM  = BASE / "pharmacy_exclusive_report_with_aging.py"
+
 CENTERS = {
     "easyhealth": {
         "name": "Easy Health Medical Clinic (MF8031)",
         "folder": DATA_DIR / "easyhealth",
         "src_name": "source.xlsx",
         "out_name": "report.xlsx",
-        "generator": BASE / "exclusive_report_with_aging_final.py",
+        "generator": GENERATOR_MEDICAL,
     },
     "excellent": {
         "name": "Excellent Medical Center (MF4777)",
         "folder": DATA_DIR / "excellent",
         "src_name": "source.xlsx",
         "out_name": "report.xlsx",
-        "generator": BASE / "exclusive_report_with_aging_final.py",
+        "generator": GENERATOR_MEDICAL,
     },
-    "pharmacy": {
-        "name": "Excellent Pharmacy (PF code)",
+    "excellent_pharmacy": {
+        "name": "Excellent Pharmacy (PF3205)",
         "folder": DATA_DIR / "excellent_pharmacy",
         "src_name": "source.xlsx",
-        # IMPORTANT: this is the file your pharmacy script produces
         "out_name": "Pharmacy_Exclusive_Report_with_Aging.xlsx",
-        # IMPORTANT: must exist at repo root with this exact name
-        "generator": BASE / "pharmacy_exclusive_report_with_aging.py",
+        "generator": GENERATOR_PHARM,
     },
 }
-
-DETAIL_SHEET_NAME = "Balance_Aging_Detail"
 
 # --------------------------- Helpers ------------------------------
 def mtime_token(p: Path) -> float:
@@ -59,20 +58,16 @@ def _run(cmd):
         )
     return res
 
-def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
-    """
-    Always run the generator from the repo root (BASE), passing absolute paths.
-    """
+def rebuild_report(generator: Path, src_path: Path, out_path: Path) -> str:
     py = sys.executable
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [py, str(gen_path), str(src_path)]
-    # Prefer the "--out" style if your generator accepts it; otherwise let the script’s default write the chosen file.
-    # We try both orders to be tolerant.
+    src, out = str(src_path), str(out_path)
+    # Try both arg orders (your generators accept either)
     try:
-        res = _run(cmd + ["--out", str(out_path)])
+        res = _run([py, str(generator), src])
         return res.stdout or "OK"
     except Exception:
-        res = _run([py, str(gen_path), "--out", str(out_path), str(src_path)])
+        res = _run([py, str(generator), src])
         return res.stdout or "OK"
 
 def _pick_sheet(sheet_names, wants):
@@ -87,9 +82,10 @@ def _pick_sheet(sheet_names, wants):
 
 def autodetect_sheets(xls: pd.ExcelFile):
     names = xls.sheet_names
-    totals  = _pick_sheet(names, ["insurance", "total"]) or _pick_sheet(names, ["totals"]) or _pick_sheet(names, ["insurance"])
+    # Prefer Insurance_Totals for KPIs if available
+    totals  = _pick_sheet(names, ["insurance", "total"]) or _pick_sheet(names, ["total"])
     summary = _pick_sheet(names, ["aging", "summary"]) or _pick_sheet(names, ["summary"])
-    detail  = _pick_sheet(names, ["aging", "detail"])  or DETAIL_SHEET_NAME
+    detail  = _pick_sheet(names, ["aging", "detail"])  or _pick_sheet(names, ["detail"])
     if totals is None and names: totals = names[0]
     if summary is None and len(names) > 1: summary = names[1]
     if detail is None and len(names) > 2: detail = names[2] if len(names) > 2 else names[-1]
@@ -117,20 +113,43 @@ def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     blank_rows = df2.fillna("").astype(str).apply(lambda row: "".join(row).strip() == "", axis=1)
     return df2.loc[~blank_rows]
 
-def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
-    """
-    If a 'Grand Total' row is missing, append one using numeric column sums.
-    """
-    if df is None or df.empty or name_col not in df.columns:
-        return df
-    if df[name_col].astype(str).str.lower().str.contains("grand total").any():
-        return df
-    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    gt = {c: df[c].sum() for c in num_cols}
-    row = {c: "" for c in df.columns}
-    row.update(gt)
-    row[name_col] = "Grand Total"
-    return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+# --------------------------- KPI (tolerant to NetAmount/Net Amount) ---------------------------
+def show_kpis_smart(totals: pd.DataFrame):
+    def pick(*names):
+        for n in names:
+            if n in totals.columns:
+                return n
+        return None
+
+    ins_col = pick("Insurance")
+    net_col = pick("Net Amount", "NetAmount")
+    paid_col = pick("Paid")
+    bal_col  = pick("Balance")
+    rej_col  = pick("Rejected")
+    acc_col  = pick("Accepted")
+
+    gt = None
+    if ins_col:
+        mask_gt = totals[ins_col].astype(str).str.contains("grand total", case=False, na=False)
+        if mask_gt.any():
+            gt = totals.loc[mask_gt].iloc[-1]
+
+    if gt is not None:
+        net  = float(gt.get(net_col, 0))
+        paid = float(gt.get(paid_col, 0))
+        bal  = float(gt.get(bal_col, 0))
+        rej  = float(gt.get(rej_col, 0))
+        acc  = float(gt.get(acc_col, 0))
+    else:
+        def v(c): return float(totals[c].sum()) if c and c in totals.columns else 0.0
+        net, paid, bal, rej, acc = v(net_col), v(paid_col), v(bal_col), v(rej_col), v(acc_col)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Net Amount", f"{net:,.2f}")
+    c2.metric("Paid", f"{paid:,.2f}")
+    c3.metric("Balance", f"{bal:,.2f}")
+    c4.metric("Rejected", f"{rej:,.2f}")
+    c5.metric("Accepted", f"{acc:,.2f}")
 
 def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150) -> int:
     n = 0 if df is None else len(df)
@@ -139,15 +158,16 @@ def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150
 # --------------------------- Styling ---------------------------
 def style_grid(df: pd.DataFrame):
     """
-    Blue header, white index, index starts from 1, with Grand Total highlight.
+    - Blue header
+    - White index (no color)
+    - Index starts from 1
+    - Borders + Grand Total highlight
     """
     if not isinstance(df, pd.DataFrame):
         return df
     if df.shape[1] == 0:
         return df.style
 
-    # index start from 1
-    df = df.copy()
     df.index = range(1, len(df) + 1)
 
     first_col = df.columns[0]
@@ -161,16 +181,20 @@ def style_grid(df: pd.DataFrame):
     styler = (
         df.style
         .set_table_styles([
-            {"selector": "table", "props": [("border-collapse", "collapse"), ("width", "100%")]},
-            {"selector": "th.col_heading", "props": [("border", f"1px solid {border}"),
-                                                    ("background-color", header_bg),
-                                                    ("font-weight", "700"),
-                                                    ("color", header_font)]},
-            {"selector": "th.row_heading", "props": [("border", f"1px solid {border}"),
-                                                     ("background-color", "#FFFFFF"),
-                                                     ("color", "#000000"),
-                                                     ("font-weight", "500")]},
-            {"selector": "td", "props": [("border", f"1px solid {border}")]}
+            {"selector": "table",
+             "props": [("border-collapse", "collapse"), ("width", "100%")]},
+            {"selector": "th.col_heading",
+             "props": [("border", f"1px solid {border}"),
+                       ("background-color", header_bg),
+                       ("font-weight", "700"),
+                       ("color", header_font)]},
+            {"selector": "th.row_heading",
+             "props": [("border", f"1px solid {border}"),
+                       ("background-color", "#FFFFFF"),
+                       ("color", "#000000"),
+                       ("font-weight", "500")]},
+            {"selector": "td",
+             "props": [("border", f"1px solid {border}")]}
         ])
         .set_properties(subset=[first_col], **{"font-weight": "600"})
         .format(fmt_map)
@@ -185,6 +209,7 @@ def style_grid(df: pd.DataFrame):
             styler = styler.apply(highlight, axis=1)
     except Exception:
         pass
+
     return styler
 
 # --------------------------- Streamlit state ---------------------------
@@ -201,7 +226,6 @@ with left:
 with right:
     st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
 
-# When center changes, clear caches
 if st.session_state.center_key != st.session_state.last_center_key:
     load_report_fast.clear()
     load_detail_sheet.clear()
@@ -220,15 +244,15 @@ if ck not in CENTERS:
         if st.button(CENTERS["excellent"]["name"], use_container_width=True):
             st.session_state.center_key = "excellent"; st.rerun()
     with c3:
-        if st.button(CENTERS["pharmacy"]["name"], use_container_width=True):
-            st.session_state.center_key = "pharmacy"; st.rerun()
+        if st.button(CENTERS["excellent_pharmacy"]["name"], use_container_width=True):
+            st.session_state.center_key = "excellent_pharmacy"; st.rerun()
     st.stop()
 
 cfg = CENTERS[st.session_state.center_key]
 folder = cfg["folder"]
 src_path = folder / cfg["src_name"]
 out_path = folder / cfg["out_name"]
-gen_path = cfg["generator"]
+generator = cfg["generator"]
 
 if st.session_state.is_admin:
     st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
@@ -238,7 +262,6 @@ if st.button("◀ Choose another center"):
     st.session_state.center_key = None
     st.rerun()
 
-# -------- Admin controls
 if st.session_state.is_admin:
     with st.expander("⬆️ Upload/replace source Excel", expanded=False):
         up = st.file_uploader("Upload .xlsx", type=["xlsx"])
@@ -249,17 +272,15 @@ if st.session_state.is_admin:
     colA, colB, colC = st.columns(3)
     if colA.button("↻ Rebuild report", use_container_width=True):
         try:
-            if not gen_path.exists():
-                st.error(f"Generator not found: {gen_path}")
-            else:
-                msg = rebuild_report(gen_path, src_path, out_path)
-                st.success("Report rebuilt successfully.")
-                if msg.strip(): st.code(msg, language="bash")
+            msg = rebuild_report(generator, src_path, out_path)
+            st.success("Report rebuilt successfully.")
+            if msg.strip():
+                st.code(msg, language="bash")
             load_report_fast.clear(); load_detail_sheet.clear()
         except Exception as e:
             st.error(str(e))
     if colB.button("🗂 Show file locations", use_container_width=True):
-        st.info(f"Source: {src_path}\nReport: {out_path}\nGenerator: {gen_path}")
+        st.info(f"Source: {src_path}\nReport: {out_path}\nGenerator: {generator}")
     if colC.button("🗑 Reset (delete) this center's report", use_container_width=True):
         try:
             if out_path.exists(): out_path.unlink()
@@ -268,67 +289,28 @@ if st.session_state.is_admin:
         except Exception as e:
             st.error(str(e))
 
-# -------- Render
 token = mtime_token(out_path)
 if token == 0.0:
     msg = "Report not found for this center."
     if st.session_state.is_admin: msg += " (Upload source and click Rebuild.)"
     st.warning(msg)
-    st.stop()
-
-try:
-    totals, summary, s_tot, s_sum, s_det = load_report_fast(str(out_path), token)
-
-    # Guarantee Grand Total on insurance totals
-    totals = ensure_grand_total(trim_empty_rows(totals), name_col="Insurance")
-    summary = trim_empty_rows(summary)
-
-    # KPIs
-    def ksum(df, col):
-        return float(df[col].sum()) if col in df.columns else 0.0
-
-    net = ksum(totals, "NetAmount") or ksum(totals, "Net Amount") or ksum(totals, "Net")
-    paid = ksum(totals, "Paid")
-    bal  = ksum(totals, "Balance")
-    rej  = ksum(totals, "Rejected")
-    acc  = ksum(totals, "Accepted")
-
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Net Amount", f"{net:,.2f}")
-    k2.metric("Paid", f"{paid:,.2f}")
-    k3.metric("Balance", f"{bal:,.2f}")
-    k4.metric("Rejected", f"{rej:,.2f}")
-    k5.metric("Accepted", f"{acc:,.2f}")
-
-    t1, t2, t3 = st.tabs([f"Insurance_Totals", f"Balance_Aging_Summary", f"{DETAIL_SHEET_NAME}"])
-
-    with t1:
-        st.dataframe(style_grid(totals), use_container_width=True, height=full_height(totals))
-
-    with t2:
-        st.dataframe(style_grid(summary), use_container_width=True, height=full_height(summary))
-
-    with t3:
-        st.caption("Loads only when you click to keep the app fast.")
-        if st.button("Load Balance_Aging_Detail (no styling)"):
-            try:
-                # use the detected sheet name s_det; fall back to our constant
-                detail_sheet = s_det or DETAIL_SHEET_NAME
-                df3 = load_detail_sheet(str(out_path), detail_sheet, token)
-                df3 = trim_empty_rows(df3)
-                st.dataframe(df3, use_container_width=True, height=full_height(df3))
-            except Exception as e:
-                # show what sheets exist to help diagnose
-                try:
-                    names = pd.ExcelFile(str(out_path)).sheet_names
-                except Exception:
-                    names = []
-                st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
-except Exception as e:
+else:
     try:
-        names = pd.ExcelFile(str(out_path)).sheet_names
-    except Exception:
-        names = []
-    st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
+        totals, summary, s_tot, s_sum, s_det = load_report_fast(str(out_path), token)
+        show_kpis_smart(totals)
+        t1, t2, t3 = st.tabs([f"{s_tot}", f"{s_sum}", f"{s_det}"])
+        with t1:
+            df1 = trim_empty_rows(totals)
+            st.dataframe(style_grid(df1), use_container_width=True, height=full_height(df1))
+        with t2:
+            df2 = trim_empty_rows(summary)
+            st.dataframe(style_grid(df2), use_container_width=True, height=full_height(df2))
+        with t3:
+            df3 = load_detail_sheet(str(out_path), s_det, token)
+            st.dataframe(style_grid(df3), use_container_width=True, height=full_height(df3))
+    except Exception as e:
+        try:
+            names = pd.ExcelFile(str(out_path)).sheet_names
+        except Exception:
+            names = []
+        st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
