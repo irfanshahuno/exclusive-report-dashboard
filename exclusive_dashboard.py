@@ -1,7 +1,10 @@
 # exclusive_dashboard.py
 import sys
 import subprocess
+import hashlib
 from pathlib import Path
+from datetime import datetime
+
 import pandas as pd
 import streamlit as st
 
@@ -16,6 +19,7 @@ DATA_DIR = BASE / "data"
 # =========================== Centers & Generators =====================
 CENTERS = {
     "easyhealth": {
+        "key": "easyhealth",
         "name": "Easy Health Medical Clinic (MF8031)",
         "folder_root": DATA_DIR / "easyhealth",
         "src_name": "source.xlsx",
@@ -23,6 +27,7 @@ CENTERS = {
         "generator": BASE / "exclusive_report_with_aging_final.py",
     },
     "excellent": {
+        "key": "excellent",
         "name": "Excellent Medical Center (MF4777)",
         "folder_root": DATA_DIR / "excellent",
         "src_name": "source.xlsx",
@@ -30,6 +35,7 @@ CENTERS = {
         "generator": BASE / "exclusive_report_with_aging_final.py",
     },
     "pharmacy": {
+        "key": "pharmacy",
         "name": "Excellent Pharmacy (PF code)",
         "folder_root": DATA_DIR / "excellent_pharmacy",
         "src_name": "source.xlsx",
@@ -46,6 +52,16 @@ SHEET_SUMMARY = "Balance_Aging_Summary"
 SHEET_DETAIL  = "Balance_Aging_Detail"
 
 # =============================== Helpers ==============================
+def sha1_short(path: Path) -> str:
+    try:
+        h = hashlib.sha1()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()[:10]
+    except Exception:
+        return "—"
+
 def mtime_token(p: Path) -> float:
     try:
         return p.stat().st_mtime
@@ -70,6 +86,7 @@ def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
         res = _run(cmd + ["--out", str(out_path)])
         return res.stdout or "OK"
     except Exception:
+        # try alternate arg order (some older scripts expect --out first)
         res = _run([py, str(gen_path), "--out", str(out_path), str(src_path)])
         return res.stdout or "OK"
 
@@ -100,8 +117,13 @@ def autodetect(xls: pd.ExcelFile):
     return ins_tot, summary, detail, names
 
 @st.cache_data(show_spinner=True)
+def load_book(path: str, _token: float):
+    # cache the parsed workbook for speed
+    return pd.ExcelFile(path, engine="openpyxl")
+
+@st.cache_data(show_spinner=True)
 def load_core_sheets(path: str, _token: float):
-    xls = pd.ExcelFile(path)
+    xls = load_book(path, _token)
     ins_tot, summary, detail, names = autodetect(xls)
     if not ins_tot or not summary:
         raise RuntimeError(f"Required sheets not found. Available: {', '.join(names)}")
@@ -111,7 +133,7 @@ def load_core_sheets(path: str, _token: float):
 
 @st.cache_data(show_spinner=True)
 def load_detail(path: str, sheet_name: str, _token: float):
-    xls = pd.ExcelFile(path)
+    xls = load_book(path, _token)
     return xls.parse(sheet_name)
 
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -147,7 +169,7 @@ def style_grid(df: pd.DataFrame):
         return df.style
 
     df = df.copy()
-    df.index = range(1, len(df) + 1)
+    df.index = range(1, len(df) + 1)  # index starts at 1
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
@@ -182,9 +204,38 @@ def style_grid(df: pd.DataFrame):
         pass
     return styler
 
+def format_aed(x):
+    try:
+        return f"AED {float(x):,.2f}"
+    except Exception:
+        return x
+
+def apply_currency(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    styler = style_grid(df)
+    return styler.format({c: format_aed for c in num_cols})
+
+# ------------------------------ Admin Auth ---------------------------
+def is_admin_mode() -> bool:
+    # If a password is set in secrets, use login. Otherwise fall back to a toggle.
+    secret_pwd = st.secrets.get("ADMIN_PASSWORD", "")
+    if secret_pwd:
+        if st.session_state.get("is_admin", False):
+            return True
+        with st.popover("🔒 Admin login"):
+            pwd = st.text_input("Password", type="password", key="admin_pwd")
+            if st.button("Login"):
+                if pwd == secret_pwd:
+                    st.session_state.is_admin = True
+                    st.rerun()
+                else:
+                    st.error("Wrong password")
+        return False
+    else:
+        # Fallback (no secret configured)
+        return st.toggle("Admin mode (no password set)", value=st.session_state.get("is_admin", False), key="admin_toggle")
+
 # ============================= App State =============================
-if "is_admin" not in st.session_state:
-    st.session_state.is_admin = False
 if "center_key" not in st.session_state:
     st.session_state.center_key = None
 if "last_center_key" not in st.session_state:
@@ -194,20 +245,39 @@ if "year" not in st.session_state:
 if "last_year" not in st.session_state:
     st.session_state.last_year = None
 
-top_left, top_right = st.columns([5, 1])
+# ============================== Header ===============================
+top_left, top_right = st.columns([5, 2])
 with top_left:
     st.title("📊 Exclusive Report with Aging — Dashboard")
 with top_right:
-    st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
+    st.session_state.is_admin = is_admin_mode()
+
+# ====================== URL deep-links (center/year) ==================
+qs = st.query_params
+# Preselect from URL if present
+if st.session_state.center_key is None and qs.get("center"):
+    ck_qs = qs.get("center")
+    if ck_qs in CENTERS:
+        st.session_state.center_key = ck_qs
+if st.session_state.year is None and qs.get("year"):
+    try:
+        st.session_state.year = int(qs.get("year"))
+    except Exception:
+        pass
 
 # Clear caches if center/year changed
 if (st.session_state.center_key != st.session_state.last_center_key) or (st.session_state.year != st.session_state.last_year):
     load_core_sheets.clear()
     load_detail.clear()
+    load_book.clear()
     st.session_state.last_center_key = st.session_state.center_key
     st.session_state.last_year = st.session_state.year
 
-st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}** · Year: **{st.session_state.year or 'none'}**")
+st.caption(
+    f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · "
+    f"Center: **{st.session_state.center_key or 'none'}** · "
+    f"Year: **{st.session_state.year or 'none'}**"
+)
 
 # =========================== Center selection =========================
 ck = st.session_state.center_key
@@ -237,6 +307,7 @@ if chosen_year is not None:
     st.session_state.year = chosen_year
     st.rerun()
 
+# Auto-pick latest year that has a report; else default to last in YEARS
 if st.session_state.year is None:
     cfg_tmp = CENTERS[ck]
     found = None
@@ -256,10 +327,17 @@ src_path = folder / cfg["src_name"]
 out_path = folder / cfg["out_name"]
 gen_path = cfg["generator"]
 
-if st.session_state.is_admin:
-    st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
-st.caption(f"Center: **{cfg['name']}**  ·  Year: **{st.session_state.year}**  ·  Input: {src_path.name}  ·  Report: {out_path.name}")
+# Keep URL in sync (shareable deep-link)
+if (st.query_params.get("center") != st.session_state.center_key) or (st.query_params.get("year") != str(st.session_state.year)):
+    st.query_params["center"] = st.session_state.center_key
+    st.query_params["year"]   = str(st.session_state.year)
 
+# Audit ribbon
+mt = mtime_token(out_path)
+built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
+st.caption(f"Built: **{built}** · Source: `{src_path}` · Report: `{out_path.name}` · Hash: `{sha1_short(out_path) if mt else '—'}`")
+
+# Back button
 if st.button("◀ Choose another center"):
     st.session_state.center_key = None
     st.session_state.year = None
@@ -267,6 +345,7 @@ if st.button("◀ Choose another center"):
 
 # ============================== Admin panel ===========================
 if st.session_state.is_admin:
+    st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
     with st.expander("⬆️ Upload/replace source Excel for this year", expanded=False):
         up = st.file_uploader(
             f"Upload .xlsx for {st.session_state.year}",
@@ -286,11 +365,13 @@ if st.session_state.is_admin:
             elif not src_path.exists():
                 st.error(f"No source file found for {st.session_state.year}. Please upload {src_path.name} first.")
             else:
+                t0 = datetime.now()
                 msg = rebuild_report(gen_path, src_path, out_path)
-                st.success("Report rebuilt successfully.")
+                t1 = datetime.now()
+                st.success(f"Report rebuilt successfully in {(t1 - t0).total_seconds():.1f}s.")
                 if msg.strip():
                     st.code(msg, language="bash")
-            load_core_sheets.clear(); load_detail.clear()
+            load_core_sheets.clear(); load_detail.clear(); load_book.clear()
         except Exception as e:
             st.error(str(e))
 
@@ -302,7 +383,7 @@ if st.session_state.is_admin:
             if out_path.exists():
                 out_path.unlink()
             st.success("Report deleted.")
-            load_core_sheets.clear(); load_detail.clear()
+            load_core_sheets.clear(); load_detail.clear(); load_book.clear()
         except Exception as e:
             st.error(str(e))
 
@@ -320,7 +401,7 @@ try:
     totals, summary, s_tot, s_sum, s_det, available = load_core_sheets(str(out_path), token)
 
     # Normalize Insurance_Totals columns
-    if "Insurance" not in totals.columns:
+    if "Insurance" not in totals.columns and len(totals.columns) > 0:
         first = totals.columns[0]
         totals = totals.rename(columns={first: "Insurance"})
     for a, b in [("NetAmount","Net Amount"), ("Net amount","Net Amount"), ("Net","Net Amount")]:
@@ -329,7 +410,12 @@ try:
 
     totals = trim_empty_rows(totals)
     totals = ensure_grand_total(totals, name_col="Insurance")
+
+    # Summary: trim + ensure GT as well
     summary = trim_empty_rows(summary)
+    if not summary.empty:
+        first_sum_col = summary.columns[0]
+        summary = ensure_grand_total(summary, name_col=first_sum_col)
 
     # KPIs from Insurance_Totals
     def ksum(df, *cands):
@@ -345,14 +431,13 @@ try:
     acc  = ksum(totals, "Accepted")
 
     k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Net Amount", f"{net:,.2f}")
-    k2.metric("Paid", f"{paid:,.2f}")
-    k3.metric("Balance", f"{bal:,.2f}")
-    k4.metric("Rejected", f"{rej:,.2f}")
-    k5.metric("Accepted", f"{acc:,.2f}")
+    k1.metric("Net Amount", format_aed(net))
+    k2.metric("Paid",       format_aed(paid))
+    k3.metric("Balance",    format_aed(bal))
+    k4.metric("Rejected",   format_aed(rej))
+    k5.metric("Accepted",   format_aed(acc))
 
-    # ---------- Compact KPI Donut (NO Net Amount) ----------
-    # Only show: Paid, Balance, Rejected, Accepted
+    # ---------- Compact KPI Donut (Paid/Balance/Rejected/Accepted) ----------
     labels = ["Paid", "Balance", "Rejected", "Accepted"]
     values = [paid, bal, rej, acc]
     zipped = [(l, v) for l, v in zip(labels, values) if v and v > 0]
@@ -371,8 +456,8 @@ try:
             }
             colors = [color_map.get(lbl, "#9E9E9E") for lbl in labels]
 
-            fig, ax = plt.subplots(figsize=(5, 5))  # smaller donut
-            wedges, _, _ = ax.pie(
+            fig, ax = plt.subplots(figsize=(5, 5))  # smaller, clean donut
+            wedges, _texts, _autotexts = ax.pie(
                 values,
                 labels=None,
                 autopct=lambda pct: f"{pct:.1f}%" if pct >= 3 else "",
@@ -381,11 +466,10 @@ try:
                 colors=colors,
                 wedgeprops=dict(width=0.35, edgecolor="white")
             )
-
             total = float(np.sum(values))
             ax.text(0, 0, f"TOTAL\n{total:,.0f}", ha="center", va="center",
                     fontsize=13, fontweight="bold")
-            legend_labels = [f"{lbl}: {val:,.2f}" for lbl, val in zip(labels, values)]
+            legend_labels = [f"{lbl}: {format_aed(val)}" for lbl, val in zip(labels, values)]
             ax.legend(
                 wedges, legend_labels, title="KPIs",
                 loc="lower right", bbox_to_anchor=(1.05, 0.05),
@@ -405,10 +489,22 @@ try:
     t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, SHEET_DETAIL])
 
     with t1:
-        st.dataframe(style_grid(totals), use_container_width=True, height=full_height(totals))
+        st.dataframe(apply_currency(totals), use_container_width=True, height=full_height(totals))
+        dl1, dl2 = st.columns(2)
+        with dl1:
+            st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(), file_name=out_path.name, use_container_width=True)
+        with dl2:
+            st.download_button("⬇️ Export this table (CSV)", totals.to_csv(index=False).encode("utf-8"),
+                               file_name=f"{cfg['key']}_{st.session_state.year}_totals.csv", use_container_width=True)
 
     with t2:
-        st.dataframe(style_grid(summary), use_container_width=True, height=full_height(summary))
+        st.dataframe(apply_currency(summary), use_container_width=True, height=full_height(summary))
+        dl1, dl2 = st.columns(2)
+        with dl1:
+            st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(), file_name=out_path.name, use_container_width=True)
+        with dl2:
+            st.download_button("⬇️ Export this table (CSV)", summary.to_csv(index=False).encode("utf-8"),
+                               file_name=f"{cfg['key']}_{st.session_state.year}_summary.csv", use_container_width=True)
 
     with t3:
         st.caption("Loads only when you click, to keep things fast.")
@@ -421,14 +517,31 @@ try:
                     )
                 df3 = load_detail(str(out_path), detail_sheet, token)
                 df3 = trim_empty_rows(df3)
-                st.dataframe(df3, use_container_width=True, height=full_height(df3))
+
+                # Simple paging for very large sheets
+                total_rows = len(df3)
+                st.info(f"Rows: {total_rows:,}")
+                page_size = st.number_input("Rows per page", min_value=500, max_value=50000, step=500, value=5000)
+                max_page = max(1, (total_rows + page_size - 1) // page_size)
+                page = st.number_input("Page", min_value=1, max_value=max_page, step=1, value=1)
+                start = (page - 1) * page_size
+                end = min(start + page_size, total_rows)
+                view = df3.iloc[start:end].copy()
+                view.index = range(start + 1, end + 1)
+
+                st.dataframe(view, use_container_width=True, height=full_height(view))
+                dl1, dl2 = st.columns(2)
+                with dl1:
+                    st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(), file_name=out_path.name, use_container_width=True)
+                with dl2:
+                    st.download_button("⬇️ Export this page (CSV)", view.to_csv(index=False).encode("utf-8"),
+                                       file_name=f"{cfg['key']}_{st.session_state.year}_detail_p{page}.csv", use_container_width=True)
             except Exception as e:
                 st.error(str(e))
 
 except Exception as e:
     try:
-        names = pd.ExcelFile(str(out_path)).sheet_names
+        names = pd.ExcelFile(str(out_path), engine="openpyxl").sheet_names
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
