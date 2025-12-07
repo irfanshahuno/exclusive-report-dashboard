@@ -11,10 +11,8 @@ import streamlit as st
 st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layout="wide")
 BASE = Path(__file__).parent.resolve()
 
-# The generator script (same one you already have)
 GENERATOR = BASE / "exclusive_report_with_aging_final.py"
 
-# Data roots and per-center config
 DATA_DIR = BASE / "data"
 CENTERS = {
     "easyhealth": {
@@ -41,21 +39,13 @@ for c in CENTERS.values():
 
 # --------------------------- Helpers ---------------------------
 def run_generator(source_xlsx: Path, out_xlsx: Path) -> Tuple[bool, str]:
-    """Call the generator with the required --out argument."""
-    cmd = [
-        sys.executable,
-        str(GENERATOR),
-        "--out", str(out_xlsx),
-        str(source_xlsx),
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    ok = proc.returncode == 0
-    msg = (
-        "Command: " + " ".join(proc.args)
-        + "\n\nSTDOUT:\n" + (proc.stdout or "(empty)")
-        + "\n\nSTDERR:\n" + (proc.stderr or "(empty)")
-    )
-    return ok, msg
+    cmd = [sys.executable, str(GENERATOR), "--out", str(out_xlsx), str(source_xlsx)]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    ok = p.returncode == 0
+    log = ("Command: " + " ".join(p.args)
+           + "\n\nSTDOUT:\n" + (p.stdout or "(empty)")
+           + "\n\nSTDERR:\n" + (p.stderr or "(empty)"))
+    return ok, log
 
 def read_sheet_safe(xlsx_path: Path, sheet_name: str) -> Optional[pd.DataFrame]:
     if not xlsx_path.exists():
@@ -69,13 +59,14 @@ def to_num(s):
     return pd.to_numeric(s, errors="coerce")
 
 def detect_cols(df: pd.DataFrame) -> Dict[str, Optional[str]]:
-    """Map common column name variants → canonical keys."""
+    # Expanded to include explicit Accepted Amount variants
     candidates = {
-        "net": ["Net Amount", "NetAmount", "ActivityIns", "Net_Amount", "Net"],
+        "net":  ["Net Amount", "NetAmount", "ActivityIns", "Net_Amount", "Net"],
         "paid": ["Paid", "Paid Amount", "PaidAmount", "Paid_Amount"],
-        "bal": ["Balance", "Pending", "Pending Balance", "Outstanding"],
-        "rej": ["Rejected", "Rejection", "Rejections"],
-        "acc": ["Accepted", "Approval", "Approvals", "Approved"],
+        "bal":  ["Balance", "Pending", "Pending Balance", "Outstanding"],
+        "rej":  ["Rejected", "Rejection", "Rejections"],
+        "acc_amt": ["Accepted Amount", "AcceptedAmount", "Accepted_Amt"],  # NEW
+        "acc":  ["Accepted", "Approval", "Approvals", "Approved"],         # may be counts
     }
     found = {}
     lc = {c.lower(): c for c in df.columns}
@@ -89,62 +80,29 @@ def detect_cols(df: pd.DataFrame) -> Dict[str, Optional[str]]:
         found[key] = hit
     return found
 
-def kpis_from_insurance_totals(df: pd.DataFrame) -> Dict[str, float]:
-    """
-    Prefer the 'Grand Total' row if it exists; otherwise sum columns.
-    Works across any column-name variant set by detect_cols().
-    """
-    cols = detect_cols(df)
-    # Try to find a "Grand Total" row by looking at the first string column
-    label_col = None
+def _pick_label_col(df: pd.DataFrame) -> Optional[str]:
     for c in df.columns:
         if df[c].dtype == object:
-            label_col = c; break
+            return c
+    return None
 
-    grand = None
-    if label_col is not None:
-        # accept many variants of grand total text
-        mask = df[label_col].astype(str).str.strip().str.lower().isin(
-            ["grand total", "total", "totals", "grand_total"]
-        )
-        if mask.any():
-            grand = df.loc[mask].tail(1)  # take the last if multiple
-
-    if grand is not None and not grand.empty:
-        getv = lambda k: float(to_num(grand[cols[k]]).fillna(0).iloc[0]) if cols[k] in grand.columns else 0.0
-        return {
-            "net": getv("net"),
-            "paid": getv("paid"),
-            "bal": getv("bal"),
-            "rej": getv("rej"),
-            "acc": getv("acc"),
-        }
-    else:
-        # Sum the whole sheet
-        getsum = lambda k: float(to_num(df.get(cols[k], 0)).fillna(0).sum()) if cols[k] else 0.0
-        return {"net": getsum("net"), "paid": getsum("paid"), "bal": getsum("bal"),
-                "rej": getsum("rej"), "acc": getsum("acc")}
+def _grand_total_row(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    lbl = _pick_label_col(df)
+    if lbl is None:
+        return None
+    mask = df[lbl].astype(str).str.strip().str.lower().isin(
+        ["grand total", "total", "totals", "grand_total"]
+    )
+    if mask.any():
+        return df.loc[mask].tail(1)
+    return None
 
 def ensure_grand_total_row(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    If Insurance_Totals lacks a Grand Total row, append one (display only).
-    Detects numeric columns automatically.
-    """
     if df is None or df.empty:
         return df
-    label_col = None
-    for c in df.columns:
-        if df[c].dtype == object:
-            label_col = c; break
-    has_gt = False
-    if label_col is not None:
-        has_gt = df[label_col].astype(str).str.strip().str.lower().isin(
-            ["grand total", "total", "totals", "grand_total"]
-        ).any()
-    if has_gt:
+    if _grand_total_row(df) is not None:
         return df
-
-    # build a totals row
+    # Compute totals row for display
     total_row = {}
     for c in df.columns:
         if pd.api.types.is_numeric_dtype(df[c]) or to_num(df[c]).notna().any():
@@ -153,46 +111,78 @@ def ensure_grand_total_row(df: pd.DataFrame) -> pd.DataFrame:
             total_row[c] = "Grand Total"
     return pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
 
+def kpis_from_totals(df: pd.DataFrame) -> Dict[str, float]:
+    cols = detect_cols(df)
+    grand = _grand_total_row(df)
+
+    def v_from(frame, key):
+        col = cols.get(key)
+        if not col or col not in frame.columns:
+            return 0.0
+        return float(to_num(frame[col]).fillna(0).iloc[0])
+
+    def s_from(key):
+        col = cols.get(key)
+        if not col or col not in df.columns:
+            return 0.0
+        return float(to_num(df[col]).fillna(0).sum())
+
+    # Prefer the grand-total row when present
+    if grand is not None and not grand.empty:
+        net = v_from(grand, "net")
+        paid = v_from(grand, "paid")
+        bal  = v_from(grand, "bal")
+        rej  = v_from(grand, "rej")
+
+        # Accepted Amount: prefer explicit amount column; else derive
+        if cols.get("acc_amt") and cols["acc_amt"] in grand.columns:
+            acc = v_from(grand, "acc_amt")
+        else:
+            acc = max(0.0, round(net - paid - bal - rej, 2))
+        return {"net": net, "paid": paid, "bal": bal, "rej": rej, "acc": acc}
+
+    # Otherwise, sum columns and derive
+    net = s_from("net"); paid = s_from("paid"); bal = s_from("bal"); rej = s_from("rej")
+    if cols.get("acc_amt") and cols["acc_amt"] in df.columns:
+        acc = s_from("acc_amt")
+    else:
+        acc = max(0.0, round(net - paid - bal - rej, 2))
+    return {"net": net, "paid": paid, "bal": bal, "rej": rej, "acc": acc}
+
 def money(v: float) -> str:
     return f"{v:,.2f}"
 
 # --------------------------- UI ---------------------------
 st.title("📊 Exclusive Report with Aging — Dashboard")
 
-# Admin toggle
 mode_col, _ = st.columns([1, 5])
 with mode_col:
     admin = st.toggle("Admin mode", value=False)
 
-# Quick center buttons (left to right)
+# Quick center buttons
 b1, b2, b3, _sp = st.columns([1, 1, 1, 4])
 if "center_key" not in st.session_state:
-    st.session_state.center_key = "excellent_pharmacy"  # default to your last screenshot
+    st.session_state.center_key = "excellent"
 
-def choose_center(key: str):
-    st.session_state.center_key = key
-
-if b1.button("EasyHealth", use_container_width=True):
-    choose_center("easyhealth")
-if b2.button("Excellent", use_container_width=True):
-    choose_center("excellent")
-if b3.button("Pharmacy", use_container_width=True):
-    choose_center("excellent_pharmacy")
+def choose_center(k): st.session_state.center_key = k
+if b1.button("EasyHealth", use_container_width=True): choose_center("easyhealth")
+if b2.button("Excellent",  use_container_width=True): choose_center("excellent")
+if b3.button("Pharmacy",   use_container_width=True): choose_center("excellent_pharmacy")
 
 center_key = st.session_state.center_key
 center = CENTERS[center_key]
-center_dir: Path = center["folder"]
-source_path: Path = center_dir / "source.xlsx"
-report_path: Path = center_dir / center["report_name"]
+center_dir = center["folder"]
+source_path = center_dir / "source.xlsx"
+report_path = center_dir / center["report_name"]
 
 st.caption(f"Center: **{center['title']}** · Input: `source.xlsx` · Report: `{center['report_name']}`")
 
-# --------------------------- Admin / View actions ---------------------------
+# Admin actions
 if admin:
     st.subheader("Upload .xlsx")
-    uploaded = st.file_uploader("Drag and drop file here", type=["xlsx"], label_visibility="collapsed")
-    if uploaded is not None:
-        source_path.write_bytes(uploaded.getvalue())
+    up = st.file_uploader("Drag and drop file here", type=["xlsx"], label_visibility="collapsed")
+    if up is not None:
+        source_path.write_bytes(up.getvalue())
         st.success(f"Saved to {source_path.as_posix()}")
 
     c1, c2, c3 = st.columns([1, 1, 1])
@@ -204,41 +194,35 @@ if admin:
                 st.error("No input found. Upload a source .xlsx first.")
             else:
                 ok, log = run_generator(source_path, report_path)
-                if ok:
-                    st.success(f"Report built: {report_path.name}")
-                else:
-                    st.error("Build failed. See details below.")
-                    st.code(log)
+                st.success(f"Report built: {report_path.name}") if ok else st.error("Build failed."); 
+                if not ok: st.code(log)
     with c2:
-        st.button("📁 Show file locations", use_container_width=True,
-                  help=str(center_dir.resolve()))
+        st.button("📁 Show file locations", use_container_width=True, help=str(center_dir.resolve()))
     with c3:
         if st.button("🗑️ Reset (delete) this center's report", use_container_width=True):
             try:
                 if report_path.exists(): report_path.unlink()
-                st.success("Report removed for this center.")
+                st.success("Report removed.")
             except Exception as e:
                 st.error(f"Could not delete report: {e}")
 else:
     st.info("View mode: read-only (toggle Admin mode to upload or rebuild).")
 
-# --------------------------- Load report ---------------------------
+# Load report
 if not report_path.exists():
     st.info("Report not found for this center. (Upload source and click Rebuild in Admin mode.)")
     st.stop()
 
-# KPI source preference: Insurance_Totals
+# KPIs from Insurance_Totals (with accepted derived correctly)
 df_totals = read_sheet_safe(report_path, "Insurance_Totals")
-if df_totals is None:
+if df_totals is None or df_totals.empty:
     df_totals = read_sheet_safe(report_path, "Balance_Aging_Summary")
 
-# KPIs — rely on Grand Total row when available
 if df_totals is None or df_totals.empty:
     st.error("Could not load totals from the report.")
     st.stop()
 
-kpis = kpis_from_insurance_totals(df_totals)
-
+kpis = kpis_from_totals(df_totals)
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Net Amount",  money(kpis["net"]))
 m2.metric("Paid",        money(kpis["paid"]))
@@ -246,7 +230,7 @@ m3.metric("Balance",     money(kpis["bal"]))
 m4.metric("Rejected",    money(kpis["rej"]))
 m5.metric("Accepted",    money(kpis["acc"]))
 
-# --------------------------- Tabs ---------------------------
+# Tabs
 tab1, tab2, tab3 = st.tabs(["Insurance_Totals", "Balance_Aging_Summary", "Balance_Aging_Detail"])
 
 with tab1:
@@ -274,4 +258,3 @@ with tab3:
             st.dataframe(df, use_container_width=True)
     else:
         st.info("Not loaded.")
-
