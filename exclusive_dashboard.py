@@ -17,21 +17,21 @@ DATA_DIR = BASE / "data"
 CENTERS = {
     "easyhealth": {
         "name": "Easy Health Medical Clinic (MF8031)",
-        "folder": DATA_DIR / "easyhealth",
+        "folder_root": DATA_DIR / "easyhealth",
         "src_name": "source.xlsx",
         "out_name": "report.xlsx",
         "generator": BASE / "exclusive_report_with_aging_final.py",
     },
     "excellent": {
         "name": "Excellent Medical Center (MF4777)",
-        "folder": DATA_DIR / "excellent",
+        "folder_root": DATA_DIR / "excellent",
         "src_name": "source.xlsx",
         "out_name": "report.xlsx",
         "generator": BASE / "exclusive_report_with_aging_final.py",
     },
     "pharmacy": {
         "name": "Excellent Pharmacy (PF code)",
-        "folder": DATA_DIR / "excellent_pharmacy",
+        "folder_root": DATA_DIR / "excellent_pharmacy",
         "src_name": "source.xlsx",
         # IMPORTANT: this is the file your pharmacy script produces
         "out_name": "Pharmacy_Exclusive_Report_with_Aging.xlsx",
@@ -40,6 +40,7 @@ CENTERS = {
     },
 }
 
+YEARS = [2024, 2025]
 DETAIL_SHEET_NAME = "Balance_Aging_Detail"
 
 # --------------------------- Helpers ------------------------------
@@ -66,8 +67,7 @@ def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
     py = sys.executable
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [py, str(gen_path), str(src_path)]
-    # Prefer the "--out" style if your generator accepts it; otherwise let the script’s default write the chosen file.
-    # We try both orders to be tolerant.
+    # Try both "--out" syntaxes to be tolerant with your generator.
     try:
         res = _run(cmd + ["--out", str(out_path)])
         return res.stdout or "OK"
@@ -194,20 +194,26 @@ if "center_key" not in st.session_state:
     st.session_state.center_key = None
 if "last_center_key" not in st.session_state:
     st.session_state.last_center_key = None
+if "year" not in st.session_state:
+    st.session_state.year = None
+if "last_year" not in st.session_state:
+    st.session_state.last_year = None
 
-left, right = st.columns([5, 1])
-with left:
+top_left, top_right = st.columns([5, 1])
+with top_left:
     st.title("📊 Exclusive Report with Aging — Dashboard")
-with right:
+with top_right:
     st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
 
-# When center changes, clear caches
-if st.session_state.center_key != st.session_state.last_center_key:
+# Clear caches if center or year changed
+if (st.session_state.center_key != st.session_state.last_center_key) or (st.session_state.year != st.session_state.last_year):
     load_report_fast.clear()
     load_detail_sheet.clear()
     st.session_state.last_center_key = st.session_state.center_key
+    st.session_state.last_year = st.session_state.year
 
-st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}**")
+# --------------------------- Center selection ---------------------------
+st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}** · Year: **{st.session_state.year or 'none'}**")
 
 ck = st.session_state.center_key
 if ck not in CENTERS:
@@ -215,42 +221,79 @@ if ck not in CENTERS:
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button(CENTERS["easyhealth"]["name"], use_container_width=True):
-            st.session_state.center_key = "easyhealth"; st.rerun()
+            st.session_state.center_key = "easyhealth"
+            st.session_state.year = None
+            st.rerun()
     with c2:
         if st.button(CENTERS["excellent"]["name"], use_container_width=True):
-            st.session_state.center_key = "excellent"; st.rerun()
+            st.session_state.center_key = "excellent"
+            st.session_state.year = None
+            st.rerun()
     with c3:
         if st.button(CENTERS["pharmacy"]["name"], use_container_width=True):
-            st.session_state.center_key = "pharmacy"; st.rerun()
+            st.session_state.center_key = "pharmacy"
+            st.session_state.year = None
+            st.rerun()
     st.stop()
 
+# --------------------------- Year selection ---------------------------
+st.subheader("Select Year")
+ycols = st.columns(len(YEARS))
+chosen_year = None
+for i, y in enumerate(YEARS):
+    with ycols[i]:
+        if st.button(str(y), use_container_width=True):
+            chosen_year = y
+
+if chosen_year is not None:
+    st.session_state.year = chosen_year
+    st.rerun()
+
+if st.session_state.year is None:
+    # Pick latest available year that has a report, else default to latest year
+    cfg_tmp = CENTERS[ck]
+    found = None
+    for y in reversed(YEARS):
+        folder_try = (cfg_tmp["folder_root"] / str(y))
+        out_try = folder_try / cfg_tmp["out_name"]
+        if out_try.exists():
+            found = y
+            break
+    st.session_state.year = found or YEARS[-1]  # default to 2025
+    st.rerun()
+
+# Resolve active paths now that we have center+year
 cfg = CENTERS[st.session_state.center_key]
-folder = cfg["folder"]
+folder = cfg["folder_root"] / str(st.session_state.year)
+folder.mkdir(parents=True, exist_ok=True)
 src_path = folder / cfg["src_name"]
 out_path = folder / cfg["out_name"]
 gen_path = cfg["generator"]
 
 if st.session_state.is_admin:
     st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
-st.caption(f"Center: **{cfg['name']}**  ·  Input: {src_path.name}  ·  Report: {out_path.name}")
+st.caption(f"Center: **{cfg['name']}**  ·  Year: **{st.session_state.year}**  ·  Input: {src_path.name}  ·  Report: {out_path.name}")
 
 if st.button("◀ Choose another center"):
     st.session_state.center_key = None
+    st.session_state.year = None
     st.rerun()
 
-# -------- Admin controls
+# -------- Admin controls (per year)
 if st.session_state.is_admin:
-    with st.expander("⬆️ Upload/replace source Excel", expanded=False):
-        up = st.file_uploader("Upload .xlsx", type=["xlsx"])
+    with st.expander("⬆️ Upload/replace source Excel for this year", expanded=False):
+        up = st.file_uploader(f"Upload .xlsx for {st.session_state.year}", type=["xlsx"], key=f"uploader_{st.session_state.center_key}_{st.session_state.year}")
         if up:
             folder.mkdir(parents=True, exist_ok=True)
             src_path.write_bytes(up.read())
             st.success(f"Saved to {src_path}")
     colA, colB, colC = st.columns(3)
-    if colA.button("↻ Rebuild report", use_container_width=True):
+    if colA.button("↻ Rebuild report", use_container_width=True, key=f"rebuild_{ck}_{st.session_state.year}"):
         try:
             if not gen_path.exists():
                 st.error(f"Generator not found: {gen_path}")
+            elif not src_path.exists():
+                st.error(f"No source file found for {st.session_state.year}. Please upload {src_path.name} first.")
             else:
                 msg = rebuild_report(gen_path, src_path, out_path)
                 st.success("Report rebuilt successfully.")
@@ -258,9 +301,9 @@ if st.session_state.is_admin:
             load_report_fast.clear(); load_detail_sheet.clear()
         except Exception as e:
             st.error(str(e))
-    if colB.button("🗂 Show file locations", use_container_width=True):
+    if colB.button("🗂 Show file locations", use_container_width=True, key=f"loc_{ck}_{st.session_state.year}"):
         st.info(f"Source: {src_path}\nReport: {out_path}\nGenerator: {gen_path}")
-    if colC.button("🗑 Reset (delete) this center's report", use_container_width=True):
+    if colC.button("🗑 Reset (delete) this year's report", use_container_width=True, key=f"del_{ck}_{st.session_state.year}"):
         try:
             if out_path.exists(): out_path.unlink()
             st.success("Report deleted.")
@@ -271,7 +314,7 @@ if st.session_state.is_admin:
 # -------- Render
 token = mtime_token(out_path)
 if token == 0.0:
-    msg = "Report not found for this center."
+    msg = f"Report not found for {cfg['name']} ({st.session_state.year})."
     if st.session_state.is_admin: msg += " (Upload source and click Rebuild.)"
     st.warning(msg)
     st.stop()
@@ -300,6 +343,17 @@ try:
     k4.metric("Rejected", f"{rej:,.2f}")
     k5.metric("Accepted", f"{acc:,.2f}")
 
+    # ---------- KPI Bar Chart (visual image) ----------
+    # Simple bar chart that management can read at a glance
+    chart_df = pd.DataFrame(
+        {
+            "Metric": ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"],
+            "Amount": [net,          paid,   bal,       rej,        acc],
+        }
+    ).set_index("Metric")
+    st.bar_chart(chart_df, use_container_width=True)
+
+    # ---------- Tabs ----------
     t1, t2, t3 = st.tabs([f"Insurance_Totals", f"Balance_Aging_Summary", f"{DETAIL_SHEET_NAME}"])
 
     with t1:
@@ -331,5 +385,3 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
-
