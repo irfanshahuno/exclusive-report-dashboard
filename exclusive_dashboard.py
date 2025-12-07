@@ -4,7 +4,6 @@ import subprocess
 import hashlib
 from pathlib import Path
 from datetime import datetime
-
 import pandas as pd
 import streamlit as st
 
@@ -86,7 +85,6 @@ def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
         res = _run(cmd + ["--out", str(out_path)])
         return res.stdout or "OK"
     except Exception:
-        # try alternate arg order (some older scripts expect --out first)
         res = _run([py, str(gen_path), "--out", str(out_path), str(src_path)])
         return res.stdout or "OK"
 
@@ -107,7 +105,6 @@ def autodetect(xls: pd.ExcelFile):
     ins_tot = SHEET_INS_TOT if SHEET_INS_TOT in names else None
     summary = SHEET_SUMMARY if SHEET_SUMMARY in names else None
     detail  = SHEET_DETAIL  if SHEET_DETAIL  in names else None
-    # Fallbacks for older files
     if ins_tot is None:
         ins_tot = _pick_sheet(names, wants_any=["insurance", "total"]) or _pick_sheet(names, wants_any=["totals"])
     if summary is None:
@@ -116,7 +113,7 @@ def autodetect(xls: pd.ExcelFile):
         detail  = _pick_sheet(names, wants_all=["aging","detail"]) or _pick_sheet(names, wants_any=["detail"])
     return ins_tot, summary, detail, names
 
-# NOTE: changed to cache_resource to avoid pickling ExcelFile
+# ---------- caching ----------
 @st.cache_resource(show_spinner=True)
 def load_book(path: str, _token: float):
     return pd.ExcelFile(path, engine="openpyxl")
@@ -136,6 +133,7 @@ def load_detail(path: str, sheet_name: str, _token: float):
     xls = load_book(path, _token)
     return xls.parse(sheet_name)
 
+# ---------- helpers ----------
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -161,19 +159,17 @@ def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150
     n = 0 if df is None else len(df)
     return header_px + (n * row_px) + padding_px
 
-# ------------------------------ Styling ------------------------------
+# ---------- table style ----------
 def style_grid(df: pd.DataFrame):
     if not isinstance(df, pd.DataFrame):
         return df
     if df.shape[1] == 0:
         return df.style
-
     df = df.copy()
-    df.index = range(1, len(df) + 1)  # index starts at 1
+    df.index = range(1, len(df) + 1)
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
-
     border = "#CBD5E1"; header_bg = "#2196F3"; header_font = "#FFFFFF"
     styler = (
         df.style
@@ -192,7 +188,6 @@ def style_grid(df: pd.DataFrame):
         .set_properties(subset=[first_col], **{"font-weight": "600"})
         .format(fmt_map)
     )
-
     try:
         mask_gt = df[first_col].astype(str).str.contains("grand total", case=False, na=False)
         if mask_gt.any():
@@ -204,20 +199,8 @@ def style_grid(df: pd.DataFrame):
         pass
     return styler
 
-def format_aed(x):
-    try:
-        return f"AED {float(x):,.2f}"
-    except Exception:
-        return x
-
-def apply_currency(df: pd.DataFrame) -> pd.io.formats.style.Styler:
-    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    styler = style_grid(df)
-    return styler.format({c: format_aed for c in num_cols})
-
-# ------------------------------ Admin Auth ---------------------------
+# ---------- admin ----------
 def is_admin_mode() -> bool:
-    # If a password is set in secrets, use login. Otherwise fall back to a toggle.
     secret_pwd = st.secrets.get("ADMIN_PASSWORD", "")
     if secret_pwd:
         if st.session_state.get("is_admin", False):
@@ -232,10 +215,9 @@ def is_admin_mode() -> bool:
                     st.error("Wrong password")
         return False
     else:
-        # Fallback (no secret configured)
-        return st.toggle("Admin mode (no password set)", value=st.session_state.get("is_admin", False), key="admin_toggle")
+        return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
 
-# ============================= App State =============================
+# ---------- state ----------
 if "center_key" not in st.session_state:
     st.session_state.center_key = None
 if "last_center_key" not in st.session_state:
@@ -245,16 +227,15 @@ if "year" not in st.session_state:
 if "last_year" not in st.session_state:
     st.session_state.last_year = None
 
-# ============================== Header ===============================
+# ---------- header ----------
 top_left, top_right = st.columns([5, 2])
 with top_left:
     st.title("📊 Exclusive Report with Aging — Dashboard")
 with top_right:
     st.session_state.is_admin = is_admin_mode()
 
-# ====================== URL deep-links (center/year) ==================
+# URL preselect
 qs = st.query_params
-# Preselect from URL if present
 if st.session_state.center_key is None and qs.get("center"):
     ck_qs = qs.get("center")
     if ck_qs in CENTERS:
@@ -265,21 +246,15 @@ if st.session_state.year is None and qs.get("year"):
     except Exception:
         pass
 
-# Clear caches if center/year changed
+# Clear caches when selection changes
 if (st.session_state.center_key != st.session_state.last_center_key) or (st.session_state.year != st.session_state.last_year):
-    load_core_sheets.clear()
-    load_detail.clear()
-    load_book.clear()
+    load_core_sheets.clear(); load_detail.clear(); load_book.clear()
     st.session_state.last_center_key = st.session_state.center_key
     st.session_state.last_year = st.session_state.year
 
-st.caption(
-    f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · "
-    f"Center: **{st.session_state.center_key or 'none'}** · "
-    f"Year: **{st.session_state.year or 'none'}**"
-)
+st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}** · Year: **{st.session_state.year or 'none'}**")
 
-# =========================== Center selection =========================
+# ---------- center select ----------
 ck = st.session_state.center_key
 if ck not in CENTERS:
     st.subheader("Choose a center")
@@ -295,7 +270,7 @@ if ck not in CENTERS:
             st.session_state.center_key = "pharmacy"; st.session_state.year = None; st.rerun()
     st.stop()
 
-# ============================= Year selection =========================
+# ---------- year select ----------
 st.subheader("Select Year")
 ycols = st.columns(len(YEARS))
 chosen_year = None
@@ -307,7 +282,7 @@ if chosen_year is not None:
     st.session_state.year = chosen_year
     st.rerun()
 
-# Auto-pick latest year that has a report; else default to last in YEARS
+# Auto-pick latest year with a report else fallback
 if st.session_state.year is None:
     cfg_tmp = CENTERS[ck]
     found = None
@@ -319,7 +294,7 @@ if st.session_state.year is None:
     st.session_state.year = found or YEARS[-1]
     st.rerun()
 
-# =========================== Resolve active paths =====================
+# ---------- resolve paths ----------
 cfg = CENTERS[st.session_state.center_key]
 folder = cfg["folder_root"] / str(st.session_state.year)
 folder.mkdir(parents=True, exist_ok=True)
@@ -327,7 +302,7 @@ src_path = folder / cfg["src_name"]
 out_path = folder / cfg["out_name"]
 gen_path = cfg["generator"]
 
-# Keep URL in sync (shareable deep-link)
+# Keep URL in sync
 if (st.query_params.get("center") != st.session_state.center_key) or (st.query_params.get("year") != str(st.session_state.year)):
     st.query_params["center"] = st.session_state.center_key
     st.query_params["year"]   = str(st.session_state.year)
@@ -343,15 +318,11 @@ if st.button("◀ Choose another center"):
     st.session_state.year = None
     st.rerun()
 
-# ============================== Admin panel ===========================
+# ---------- admin panel ----------
 if st.session_state.is_admin:
     st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
     with st.expander("⬆️ Upload/replace source Excel for this year", expanded=False):
-        up = st.file_uploader(
-            f"Upload .xlsx for {st.session_state.year}",
-            type=["xlsx"],
-            key=f"uploader_{st.session_state.center_key}_{st.session_state.year}",
-        )
+        up = st.file_uploader(f"Upload .xlsx for {st.session_state.year}", type=["xlsx"], key=f"uploader_{st.session_state.center_key}_{st.session_state.year}")
         if up:
             folder.mkdir(parents=True, exist_ok=True)
             src_path.write_bytes(up.read())
@@ -375,19 +346,7 @@ if st.session_state.is_admin:
         except Exception as e:
             st.error(str(e))
 
-    if colB.button("🗂 Show file locations", use_container_width=True, key=f"loc_{ck}_{st.session_state.year}"):
-        st.info(f"Source: {src_path}\nReport: {out_path}\nGenerator: {gen_path}")
-
-    if colC.button("🗑 Reset (delete) this year's report", use_container_width=True, key=f"del_{ck}_{st.session_state.year}"):
-        try:
-            if out_path.exists():
-                out_path.unlink()
-            st.success("Report deleted.")
-            load_core_sheets.clear(); load_detail.clear(); load_book.clear()
-        except Exception as e:
-            st.error(str(e))
-
-# ================================ Render ==============================
+# ---------- render ----------
 token = mtime_token(out_path)
 if token == 0.0:
     msg = f"Report not found for {cfg['name']} ({st.session_state.year})."
@@ -397,27 +356,25 @@ if token == 0.0:
     st.stop()
 
 try:
-    # --- Load core sheets only (fast) ---
+    # Load core sheets
     totals, summary, s_tot, s_sum, s_det, available = load_core_sheets(str(out_path), token)
 
-    # Normalize Insurance_Totals columns
+    # Normalize totals
     if "Insurance" not in totals.columns and len(totals.columns) > 0:
-        first = totals.columns[0]
-        totals = totals.rename(columns={first: "Insurance"})
+        totals = totals.rename(columns={totals.columns[0]: "Insurance"})
     for a, b in [("NetAmount","Net Amount"), ("Net amount","Net Amount"), ("Net","Net Amount")]:
         if a in totals.columns and "Net Amount" not in totals.columns:
             totals = totals.rename(columns={a: "Net Amount"})
 
     totals = trim_empty_rows(totals)
-    totals = ensure_grand_total(totals, name_col="Insurance")
+    totals = ensure_grand_total(totals, "Insurance")
 
-    # Summary: trim + ensure GT as well
+    # Summary
     summary = trim_empty_rows(summary)
     if not summary.empty:
-        first_sum_col = summary.columns[0]
-        summary = ensure_grand_total(summary, name_col=first_sum_col)
+        summary = ensure_grand_total(summary, summary.columns[0])
 
-    # KPIs from Insurance_Totals
+    # ---------- KPIs (no AED) ----------
     def ksum(df, *cands):
         for col in cands:
             if col in df.columns:
@@ -431,13 +388,13 @@ try:
     acc  = ksum(totals, "Accepted")
 
     k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Net Amount", format_aed(net))
-    k2.metric("Paid",       format_aed(paid))
-    k3.metric("Balance",    format_aed(bal))
-    k4.metric("Rejected",   format_aed(rej))
-    k5.metric("Accepted",   format_aed(acc))
+    k1.metric("Net Amount", f"{net:,.2f}")
+    k2.metric("Paid",       f"{paid:,.2f}")
+    k3.metric("Balance",    f"{bal:,.2f}")
+    k4.metric("Rejected",   f"{rej:,.2f}")
+    k5.metric("Accepted",   f"{acc:,.2f}")
 
-    # ---------- Compact KPI Donut (Paid/Balance/Rejected/Accepted) ----------
+    # ---------- Compact Donut (3x3) ----------
     labels = ["Paid", "Balance", "Rejected", "Accepted"]
     values = [paid, bal, rej, acc]
     zipped = [(l, v) for l, v in zip(labels, values) if v and v > 0]
@@ -445,43 +402,28 @@ try:
     try:
         import matplotlib.pyplot as plt
         import numpy as np
-
         if zipped:
             labels, values = zip(*zipped)
-            color_map = {
-                "Paid":     "#2E7D32",   # green
-                "Balance":  "#FB8C00",   # orange
-                "Rejected": "#C62828",   # red
-                "Accepted": "#6D6D6D",   # gray
-            }
+            color_map = {"Paid": "#2E7D32", "Balance": "#FB8C00", "Rejected": "#C62828", "Accepted": "#6D6D6D"}
             colors = [color_map.get(lbl, "#9E9E9E") for lbl in labels]
-
-            fig, ax = plt.subplots(figsize=(5, 5))  # smaller, clean donut
-            wedges, _texts, _autotexts = ax.pie(
+            fig, ax = plt.subplots(figsize=(3, 3))
+            ax.pie(
                 values,
                 labels=None,
-                autopct=lambda pct: f"{pct:.1f}%" if pct >= 3 else "",
+                autopct=lambda pct: f"{pct:.1f}%" if pct >= 4 else "",
                 startangle=90,
                 counterclock=False,
                 colors=colors,
                 wedgeprops=dict(width=0.35, edgecolor="white")
             )
             total = float(np.sum(values))
-            ax.text(0, 0, f"TOTAL\n{total:,.0f}", ha="center", va="center",
-                    fontsize=13, fontweight="bold")
-            legend_labels = [f"{lbl}: {format_aed(val)}" for lbl, val in zip(labels, values)]
-            ax.legend(
-                wedges, legend_labels, title="KPIs",
-                loc="lower right", bbox_to_anchor=(1.05, 0.05),
-                frameon=True, fontsize=9, title_fontsize=10
-            )
+            ax.text(0, 0, f"{total:,.0f}", ha="center", va="center", fontsize=10, fontweight="bold", color="#333333")
             ax.set_aspect("equal")
             fig.tight_layout()
             st.pyplot(fig, use_container_width=False)
         else:
             st.info("No positive KPI values to chart.")
     except ModuleNotFoundError:
-        st.warning("Matplotlib not installed — showing a simple bar chart instead.")
         _df = pd.DataFrame({"Value": [paid, bal, rej, acc]}, index=labels)
         st.bar_chart(_df, use_container_width=False)
 
@@ -489,7 +431,7 @@ try:
     t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, SHEET_DETAIL])
 
     with t1:
-        st.dataframe(apply_currency(totals), use_container_width=True, height=full_height(totals))
+        st.dataframe(style_grid(totals), use_container_width=True, height=full_height(totals))
         dl1, dl2 = st.columns(2)
         with dl1:
             st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(), file_name=out_path.name, use_container_width=True)
@@ -498,7 +440,7 @@ try:
                                file_name=f"{cfg['key']}_{st.session_state.year}_totals.csv", use_container_width=True)
 
     with t2:
-        st.dataframe(apply_currency(summary), use_container_width=True, height=full_height(summary))
+        st.dataframe(style_grid(summary), use_container_width=True, height=full_height(summary))
         dl1, dl2 = st.columns(2)
         with dl1:
             st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(), file_name=out_path.name, use_container_width=True)
@@ -512,13 +454,11 @@ try:
             try:
                 detail_sheet = s_det or SHEET_DETAIL
                 if not detail_sheet or detail_sheet not in available:
-                    raise RuntimeError(
-                        f"Detail sheet not found. Available: {', '.join(available)}"
-                    )
+                    raise RuntimeError(f"Detail sheet not found. Available: {', '.join(available)}")
                 df3 = load_detail(str(out_path), detail_sheet, token)
                 df3 = trim_empty_rows(df3)
 
-                # Simple paging for very large sheets
+                # paging
                 total_rows = len(df3)
                 st.info(f"Rows: {total_rows:,}")
                 page_size = st.number_input("Rows per page", min_value=500, max_value=50000, step=500, value=5000)
@@ -545,4 +485,3 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
