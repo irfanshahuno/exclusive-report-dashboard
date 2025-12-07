@@ -39,13 +39,15 @@ for c in CENTERS.values():
 
 # --------------------------- Helpers ---------------------------
 def run_generator(source_xlsx: Path, out_xlsx: Path) -> Tuple[bool, str]:
-    """Invoke your generator with required --out arg."""
+    """Invoke your generator with required --out arg and capture full logs."""
     cmd = [sys.executable, str(GENERATOR), "--out", str(out_xlsx), str(source_xlsx)]
     p = subprocess.run(cmd, capture_output=True, text=True)
     ok = p.returncode == 0
-    log = ("Command: " + " ".join(p.args)
-           + "\n\nSTDOUT:\n" + (p.stdout or "(empty)")
-           + "\n\nSTDERR:\n" + (p.stderr or "(empty)"))
+    log = (
+        "Command: " + " ".join(p.args)
+        + "\n\nSTDOUT:\n" + (p.stdout or "(empty)")
+        + "\n\nSTDERR:\n" + (p.stderr or "(empty)")
+    )
     return ok, log
 
 def read_sheet_safe(xlsx_path: Path, sheet_name: str) -> Optional[pd.DataFrame]:
@@ -66,7 +68,7 @@ def detect_cols(df: pd.DataFrame) -> Dict[str, Optional[str]]:
         "paid": ["Paid", "Paid Amount", "PaidAmount", "Paid_Amount"],
         "bal":  ["Balance", "Pending", "Pending Balance", "Outstanding"],
         "rej":  ["Rejected", "Rejection", "Rejections"],
-        "acc_amt": ["Accepted Amount", "AcceptedAmount", "Accepted_Amt"],  # explicit amount if present
+        "acc_amt": ["Accepted Amount", "AcceptedAmount", "Accepted_Amt"],  # explicit amount
         "acc":  ["Accepted", "Approval", "Approvals", "Approved"],         # may be counts
     }
     found = {}
@@ -224,8 +226,11 @@ if admin:
                 st.error("No input found. Upload a source .xlsx first.")
             else:
                 ok, log = run_generator(source_path, report_path)
-                st.success(f"Report built: {report_path.name}") if ok else st.error("Build failed.")
-                if not ok: st.code(log)
+                if ok:
+                    st.success(f"✅ Report built: {report_path.name}")
+                else:
+                    st.error("❌ Build failed. See details below:")
+                st.code(log, language="bash")  # <-- SHOW FULL LOG
     with c2:
         st.button("📁 Show file locations", use_container_width=True, help=str(center_dir.resolve()))
     with c3:
@@ -290,5 +295,4 @@ with tab3:
             st.dataframe(with_srno(df), use_container_width=True, hide_index=True)
     else:
         st.info("Not loaded.")
-
 
