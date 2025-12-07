@@ -39,7 +39,11 @@ CENTERS = {
 }
 
 YEARS = [2024, 2025]
-DETAIL_SHEET_NAME = "Balance_Aging_Detail"
+
+# Canonical sheet names we expect from both generators
+SHEET_INS_TOT = "Insurance_Totals"
+SHEET_SUMMARY = "Balance_Aging_Summary"
+SHEET_DETAIL  = "Balance_Aging_Detail"
 
 # --------------------------- Helpers ------------------------------
 def mtime_token(p: Path) -> float:
@@ -59,7 +63,6 @@ def _run(cmd):
     return res
 
 def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
-    """Run generator with tolerant --out ordering."""
     py = sys.executable
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [py, str(gen_path), str(src_path)]
@@ -70,38 +73,53 @@ def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
         res = _run([py, str(gen_path), "--out", str(out_path), str(src_path)])
         return res.stdout or "OK"
 
-def _pick_sheet(sheet_names, wants):
+def _pick_sheet(sheet_names, wants_all=None, wants_any=None):
     lower = [s.lower() for s in sheet_names]
-    for i, s in enumerate(lower):
-        if all(w in s for w in wants):
-            return sheet_names[i]
-    for i, s in enumerate(lower):
-        if any(w in s for w in wants):
-            return sheet_names[i]
+    if wants_all:
+        for i, s in enumerate(lower):
+            if all(w in s for w in wants_all):
+                return sheet_names[i]
+    if wants_any:
+        for i, s in enumerate(lower):
+            if any(w in s for w in wants_any):
+                return sheet_names[i]
     return None
 
-def autodetect_sheets(xls: pd.ExcelFile):
+def autodetect(xls: pd.ExcelFile):
     names = xls.sheet_names
-    totals  = _pick_sheet(names, ["insurance", "total"]) or _pick_sheet(names, ["totals"]) or _pick_sheet(names, ["insurance"])
-    summary = _pick_sheet(names, ["aging", "summary"]) or _pick_sheet(names, ["summary"])
-    detail  = _pick_sheet(names, ["aging", "detail"])  or DETAIL_SHEET_NAME
-    if totals is None and names: totals = names[0]
-    if summary is None and len(names) > 1: summary = names[1]
-    if detail is None and len(names) > 2: detail = names[2] if len(names) > 2 else names[-1]
-    return totals, summary, detail
+
+    # Prefer exact canonical names first
+    ins_tot = SHEET_INS_TOT if SHEET_INS_TOT in names else None
+    summary = SHEET_SUMMARY if SHEET_SUMMARY in names else None
+    detail  = SHEET_DETAIL  if SHEET_DETAIL  in names else None
+
+    # Fallbacks (defensive for older files)
+    if ins_tot is None:
+        ins_tot = _pick_sheet(names, wants_any=["insurance", "total"]) or _pick_sheet(names, wants_any=["totals"])
+    if summary is None:
+        summary = _pick_sheet(names, wants_all=["aging","summary"]) or _pick_sheet(names, wants_any=["summary"])
+    if detail is None:
+        detail  = _pick_sheet(names, wants_all=["aging","detail"]) or _pick_sheet(names, wants_any=["detail"])
+
+    return ins_tot, summary, detail, names
 
 @st.cache_data(show_spinner=True)
-def load_report_fast(path: str, _token: float):
+def load_core_sheets(path: str, _token: float):
     xls = pd.ExcelFile(path)
-    totals_name, summary_name, detail_name = autodetect_sheets(xls)
-    totals  = xls.parse(totals_name)
-    summary = xls.parse(summary_name)
-    return totals, summary, totals_name, summary_name, detail_name
+    ins_tot, summary, detail, names = autodetect(xls)
+    if not ins_tot or not summary:
+        raise RuntimeError(
+            f"Required sheets not found. Available: {', '.join(names)}"
+        )
+    df_ins  = xls.parse(ins_tot)
+    df_sum  = xls.parse(summary)
+    # we don't parse detail here; it's heavy and stays lazy
+    return df_ins, df_sum, ins_tot, summary, detail, names
 
 @st.cache_data(show_spinner=True)
-def load_detail_sheet(path: str, detail_sheet: str, _token: float):
+def load_detail(path: str, sheet_name: str, _token: float):
     xls = pd.ExcelFile(path)
-    return xls.parse(detail_sheet)
+    return xls.parse(sheet_name)
 
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -113,7 +131,6 @@ def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df2.loc[~blank_rows]
 
 def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
-    """Append a Grand Total row if missing."""
     if df is None or df.empty or name_col not in df.columns:
         return df
     if df[name_col].astype(str).str.lower().str.contains("grand total").any():
@@ -131,7 +148,6 @@ def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150
 
 # --------------------------- Styling ---------------------------
 def style_grid(df: pd.DataFrame):
-    """Blue header, white index, index from 1, Grand Total highlight."""
     if not isinstance(df, pd.DataFrame):
         return df
     if df.shape[1] == 0:
@@ -193,8 +209,8 @@ with top_right:
 
 # Clear caches if center/year changed
 if (st.session_state.center_key != st.session_state.last_center_key) or (st.session_state.year != st.session_state.last_year):
-    load_report_fast.clear()
-    load_detail_sheet.clear()
+    load_core_sheets.clear()
+    load_detail.clear()
     st.session_state.last_center_key = st.session_state.center_key
     st.session_state.last_year = st.session_state.year
 
@@ -236,7 +252,7 @@ if st.session_state.year is None:
         out_try = folder_try / cfg_tmp["out_name"]
         if out_try.exists():
             found = y; break
-    st.session_state.year = found or YEARS[-1]  # default to latest (2025)
+    st.session_state.year = found or YEARS[-1]
     st.rerun()
 
 # Resolve active paths
@@ -281,7 +297,7 @@ if st.session_state.is_admin:
                 st.success("Report rebuilt successfully.")
                 if msg.strip():
                     st.code(msg, language="bash")
-            load_report_fast.clear(); load_detail_sheet.clear()
+            load_core_sheets.clear(); load_detail.clear()
         except Exception as e:
             st.error(str(e))
 
@@ -293,7 +309,7 @@ if st.session_state.is_admin:
             if out_path.exists():
                 out_path.unlink()
             st.success("Report deleted.")
-            load_report_fast.clear(); load_detail_sheet.clear()
+            load_core_sheets.clear(); load_detail.clear()
         except Exception as e:
             st.error(str(e))
 
@@ -307,20 +323,38 @@ if token == 0.0:
     st.stop()
 
 try:
-    totals, summary, s_tot, s_sum, s_det = load_report_fast(str(out_path), token)
+    # --- Load ONLY the required sheets up front ---
+    totals, summary, s_tot, s_sum, s_det, available = load_core_sheets(str(out_path), token)
 
-    # Guarantee Grand Total on insurance totals
-    totals = ensure_grand_total(trim_empty_rows(totals), name_col="Insurance")
+    # Clean up dataframes
+    def ksum(df, *cands):
+        for col in cands:
+            if col in df.columns:
+                return float(pd.to_numeric(df[col], errors="coerce").sum())
+        return 0.0
+
+    # Ensure correct column names in Insurance_Totals
+    # Try to normalize to: Insurance | Net Amount | Paid | Balance | Rejected | Accepted
+    if "Insurance" not in totals.columns:
+        # try to rename first column to Insurance defensively
+        first = totals.columns[0]
+        totals = totals.rename(columns={first: "Insurance"})
+    for a,b in [("NetAmount","Net Amount"), ("Net amount","Net Amount"), ("Net","Net Amount")]:
+        if a in totals.columns and "Net Amount" not in totals.columns:
+            totals = totals.rename(columns={a:"Net Amount"})
+
+    # Guarantee a Grand Total row on Insurance_Totals
+    totals = trim_empty_rows(totals)
+    totals = ensure_grand_total(totals, name_col="Insurance")
+
+    # Summary trim only (GT row/col already inside the file)
     summary = trim_empty_rows(summary)
 
-    # KPIs
-    def ksum(df, col):
-        return float(df[col].sum()) if col in df.columns else 0.0
-
-    net = ksum(totals, "NetAmount") or ksum(totals, "Net Amount") or ksum(totals, "Net")
+    # KPIs from Insurance_Totals
+    net = ksum(totals, "Net Amount", "NetAmount", "Net")
     paid = ksum(totals, "Paid")
     bal  = ksum(totals, "Balance")
-    rej  = ksum(totals, "Rejected")
+    rej  = ksum(totals, "Rejected", "Rejection")
     acc  = ksum(totals, "Accepted")
 
     k1, k2, k3, k4, k5 = st.columns(5)
@@ -330,54 +364,52 @@ try:
     k4.metric("Rejected", f"{rej:,.2f}")
     k5.metric("Accepted", f"{acc:,.2f}")
 
-    # ---------- KPI Donut ("football" circle) ----------
-    import matplotlib.pyplot as plt
-    import numpy as np
-
+    # ---------- KPI Donut with graceful fallback ----------
     labels = ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]
     values = [net, paid, bal, rej, acc]
-
-    # Filter out zero/negative to avoid tiny wedges
     zipped = [(l, v) for l, v in zip(labels, values) if v and v > 0]
-    if not zipped:
-        st.info("No positive KPI values to chart.")
-    else:
-        labels, values = zip(*zipped)
-        color_map = {
-            "Net Amount": "#1976D2",  # blue
-            "Paid":       "#2E7D32",  # green
-            "Balance":    "#FB8C00",  # orange
-            "Rejected":   "#C62828",  # red
-            "Accepted":   "#6D6D6D",  # gray
-        }
-        colors = [color_map.get(lbl, "#9E9E9E") for lbl in labels]
 
-        fig, ax = plt.subplots(figsize=(6.5, 6.5))
-        wedges, _, _ = ax.pie(
-            values,
-            labels=None,
-            autopct=lambda pct: (f"{pct:.1f}%") if pct >= 3 else "",
-            startangle=90,
-            counterclock=False,
-            colors=colors,
-            wedgeprops=dict(width=0.35, edgecolor="white")  # thickness of ring
-        )
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
 
-        total = float(np.sum(values))
-        ax.text(
-            0, 0,
-            f"TOTAL\n{total:,.0f}",
-            ha="center", va="center",
-            fontsize=14, fontweight="bold"
-        )
-
-        legend_labels = [f"{lbl}: {val:,.2f}" for lbl, val in zip(labels, values)]
-        ax.legend(wedges, legend_labels, title="KPIs", loc="center left", bbox_to_anchor=(1, 0.5))
-        ax.set_aspect("equal")
-        st.pyplot(fig, use_container_width=True)
+        if zipped:
+            labels, values = zip(*zipped)
+            color_map = {
+                "Net Amount": "#1976D2",
+                "Paid":       "#2E7D32",
+                "Balance":    "#FB8C00",
+                "Rejected":   "#C62828",
+                "Accepted":   "#6D6D6D",
+            }
+            colors = [color_map.get(lbl, "#9E9E9E") for lbl in labels]
+            fig, ax = plt.subplots(figsize=(6.5, 6.5))
+            wedges, _, _ = ax.pie(
+                values,
+                labels=None,
+                autopct=lambda pct: (f"{pct:.1f}%") if pct >= 3 else "",
+                startangle=90,
+                counterclock=False,
+                colors=colors,
+                wedgeprops=dict(width=0.35, edgecolor="white")
+            )
+            total = float(np.sum(values))
+            ax.text(0, 0, f"TOTAL\n{total:,.0f}", ha="center", va="center",
+                    fontsize=14, fontweight="bold")
+            legend_labels = [f"{lbl}: {val:,.2f}" for lbl, val in zip(labels, values)]
+            ax.legend(wedges, legend_labels, title="KPIs", loc="center left",
+                      bbox_to_anchor=(1, 0.5))
+            ax.set_aspect("equal")
+            st.pyplot(fig, use_container_width=True)
+        else:
+            st.info("No positive KPI values to chart.")
+    except ModuleNotFoundError:
+        st.warning("Matplotlib not installed — showing a simple bar chart instead.")
+        _df = pd.DataFrame({"Value": [net, paid, bal, rej, acc]}, index=labels)
+        st.bar_chart(_df, use_container_width=True)
 
     # ---------- Tabs ----------
-    t1, t2, t3 = st.tabs([f"Insurance_Totals", f"Balance_Aging_Summary", f"{DETAIL_SHEET_NAME}"])
+    t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, SHEET_DETAIL])
 
     with t1:
         st.dataframe(style_grid(totals), use_container_width=True, height=full_height(totals))
@@ -386,19 +418,19 @@ try:
         st.dataframe(style_grid(summary), use_container_width=True, height=full_height(summary))
 
     with t3:
-        st.caption("Loads only when you click to keep the app fast.")
+        st.caption("Loads only when you click, to keep things fast.")
         if st.button("Load Balance_Aging_Detail (no styling)"):
             try:
-                detail_sheet = s_det or DETAIL_SHEET_NAME
-                df3 = load_detail_sheet(str(out_path), detail_sheet, token)
+                detail_sheet = s_det or SHEET_DETAIL
+                if not detail_sheet or detail_sheet not in available:
+                    raise RuntimeError(
+                        f"Detail sheet not found. Available: {', '.join(available)}"
+                    )
+                df3 = load_detail(str(out_path), detail_sheet, token)
                 df3 = trim_empty_rows(df3)
                 st.dataframe(df3, use_container_width=True, height=full_height(df3))
             except Exception as e:
-                try:
-                    names = pd.ExcelFile(str(out_path)).sheet_names
-                except Exception:
-                    names = []
-                st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+                st.error(str(e))
 
 except Exception as e:
     try:
