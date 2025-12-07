@@ -17,14 +17,27 @@ LABELS          = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days"
 def find_input_file():
     # If dashboard provided a path, use it
     if len(sys.argv) >= 2:
-        p = Path(sys.argv[1])
-        if p.exists() and p.suffix.lower() == ".xlsx":
-            return str(p)
-    # Fallback to your original behavior
+        # support --out too
+        args = sys.argv[1:]
+        positional = [a for a in args if not a.startswith("-")]
+        if positional:
+            p = Path(positional[0])
+            if p.exists() and p.suffix.lower() == ".xlsx":
+                return str(p), parse_out(args, default=(p.parent / OUTPUT_NAME))
+    # Fallback to first *.xlsx
     files = [f for f in glob.glob("*.xlsx") if "Rejection_Report" not in f]
     if not files:
         raise FileNotFoundError("❌ No Excel file (.xlsx) found in this folder.")
-    return files[0]
+    p = Path(files[0])
+    return str(p), p.parent / OUTPUT_NAME
+
+def parse_out(args, default: Path):
+    if "--out" in args:
+        i = args.index("--out")
+        if i + 1 >= len(args):
+            raise SystemExit("error: --out requires a filename")
+        return Path(args[i + 1])
+    return default
 
 def ci_get(df, names):
     lower_map = {c.lower(): c for c in df.columns}
@@ -37,23 +50,27 @@ def style_headers(wb):
     header_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")  # blue
     total_fill  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")  # light orange
     for ws in wb.worksheets:
+        # headers
         for c in range(1, ws.max_column + 1):
             cell = ws.cell(row=1, column=c)
             cell.fill = header_fill
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal="center", vertical="center")
-        if ws.title == "Balance_Aging_Summary":
+        # grand total highlights
+        if ws.title in ("Balance_Aging_Summary", "Insurance_Totals"):
             for r in range(2, ws.max_row + 1):
-                if ws.cell(row=r, column=1).value == "Grand Total":
+                first = ws.cell(row=r, column=1).value
+                if str(first).strip().lower() in ("grand total", "grand_total", "totals", "total"):
                     for c in range(1, ws.max_column + 1):
                         gt = ws.cell(row=r, column=c)
                         gt.fill = total_fill
                         gt.font = Font(bold=True)
-            last_col = ws.max_column
-            for r in range(1, ws.max_row + 1):
-                gt = ws.cell(row=r, column=last_col)
-                gt.fill = total_fill
-                gt.font = Font(bold=True)
+            if ws.title == "Balance_Aging_Summary":
+                last_col = ws.max_column
+                for r in range(1, ws.max_row + 1):
+                    gt = ws.cell(row=r, column=last_col)
+                    gt.fill = total_fill
+                    gt.font = Font(bold=True)
 
 # =================== TIMER START ===================
 t0 = time.time()
@@ -61,14 +78,15 @@ print("▶️ Starting Pharmacy report…")
 
 # =================== LOAD ===================
 print("📂 Locating & loading Excel…")
-input_file = find_input_file()
+input_file, out_path = find_input_file()
 print(f"   Using: {input_file}")
+print(f"   Output: {out_path}")
 df = pd.read_excel(input_file, engine="openpyxl")
 df.columns = df.columns.str.strip()
 t1 = time.time()
 print(f"⏳ Load time: {t1 - t0:.2f}s")
 
-# ===== Detect columns (prefer your pharmacy names) =====
+# ===== Detect columns (case-insensitive, pharmacy-friendly) =====
 col_net   = ci_get(df, ["Claim Amount","Claim Amount (Net)","NetAmount","Net Amount","TotalAmount","Total Amount","Net"])
 col_paid  = ci_get(df, ["Remitted Amount","Remitted Amount (Paid)","Paid","Remit Amount","RemitAmount"])
 col_stat  = ci_get(df, ["ClaimStatus","Status","ResponseType"])
@@ -78,7 +96,7 @@ col_date  = ci_get(df, ["ClaimDate","RxDate","DispenseDate","SubmissionDate","Vi
 missing = []
 if not col_net:  missing.append("Claim Amount (net)")
 if not col_paid: missing.append("Remitted Amount (paid)")
-if not col_stat: missing.append("ClaimStatus")
+if not col_stat: missing.append("ClaimStatus/Status")
 if missing:
     raise ValueError("❌ Required columns missing: " + ", ".join(missing))
 if not col_payer:
@@ -102,11 +120,11 @@ df["Rejected"] = 0.0
 df["Accepted"] = 0.0
 df["Balance"]  = 0.0
 
-# Rejected = full net when denied
-mask_denied = (lower_status == "denied")
+# Rejected = full net when denied/rejected
+mask_denied = lower_status.isin(["denied", "rejected"])
 df.loc[mask_denied, "Rejected"] = net
 
-# Accepted = tiny leftover (≤4) only when paid > 0 and not denied
+# Accepted = tiny leftover (≤4) when paid > 0 and not denied
 mask_paid  = paid > 0
 mask_tiny  = diff <= TINY_THRESHOLD
 mask_acc   = (~mask_denied) & mask_paid & mask_tiny
@@ -117,10 +135,10 @@ df.loc[mask_acc, "Balance"]  = 0.0
 mask_bal = (~mask_denied) & (diff > TINY_THRESHOLD)
 df.loc[mask_bal, "Balance"] = diff
 
-# Force zero for denied
+# zero out accepted/balance for denied
 df.loc[mask_denied, ["Accepted","Balance"]] = 0.0
 
-# Standardized names
+# Standardized names for output
 df.rename(columns={
     col_net: "NetAmount",
     col_paid: "Paid",
@@ -131,26 +149,9 @@ df.rename(columns={
 # Round money cols
 money_cols = ["NetAmount","Paid","Balance","Rejected","Accepted"]
 for c in money_cols:
-    df[c] = df[c].round(DECIMALS)
+    df[c] = pd.to_numeric(df[c], errors="coerce").round(DECIMALS)
 
-# Strong “total row” remover (no-text + equals a grand sum or empty date)
-grand = df[money_cols].sum().round(DECIMALS)
-text_like = [c for c in ["RxId","Bill No","ClaimXmlId","ClaimStatus","Insurance","Plan","PayerName","Insurer"] if c in df.columns]
-empty_text_mask = pd.Series(True, index=df.index)
-if text_like:
-    empty_text_mask = df[text_like].apply(
-        lambda s: s.astype(str).str.strip().replace({"nan":"","None":""}), axis=0
-    ).eq("").all(axis=1)
-
-eq_grand_mask = False
-for c in money_cols:
-    eq_grand_mask = eq_grand_mask | (df[c].round(DECIMALS) == grand[c])
-date_empty = df["RefDate"].isna()
-totals_like = (empty_text_mask & (eq_grand_mask | date_empty))
-removed_rows = int(totals_like.sum())
-df = df.loc[~totals_like].copy()
-
-# Enforce identity (Net = Paid+Balance+Rejected+Accepted)
+# Per-row identity: Net = Paid + Balance + Rejected + Accepted
 sum_cols = (df["Paid"] + df["Balance"] + df["Rejected"] + df["Accepted"]).round(DECIMALS)
 drift = (df["NetAmount"].round(DECIMALS) - sum_cols).round(DECIMALS)
 df["Accepted"] = (df["Accepted"] + drift).round(DECIMALS)
@@ -162,30 +163,46 @@ df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=BINS, labels=LABELS)
 
 # Balance-only views
 balance_df = df.loc[df["Balance"] > 0].copy()
-pivot_summary = pd.pivot_table(
-    balance_df,
-    index="Insurance",
-    columns="AgingBucket",
-    values="Balance",
-    aggfunc="sum",
-    fill_value=0,
-    observed=False
-)
-pivot_summary = pivot_summary.reindex(columns=LABELS)
-pivot_summary["Grand Total"] = pivot_summary.sum(axis=1)
-pivot_summary.loc["Grand Total"] = pivot_summary.sum(axis=0)
-pivot_summary.reset_index(inplace=True)
-for col in pivot_summary.columns:
-    if col != "Insurance":
-        pivot_summary[col] = pd.to_numeric(pivot_summary[col], errors="coerce").round(DECIMALS)
+
+# Aging summary (robust if empty)
+if balance_df.empty:
+    pivot_summary = pd.DataFrame({"Insurance": []})
+    for lab in LABELS:
+        pivot_summary[lab] = []
+    pivot_summary["Grand Total"] = []
+else:
+    pivot_summary = pd.pivot_table(
+        balance_df,
+        index="Insurance",
+        columns="AgingBucket",
+        values="Balance",
+        aggfunc="sum",
+        fill_value=0,
+        observed=False
+    )
+    pivot_summary = pivot_summary.reindex(columns=LABELS).fillna(0)
+    pivot_summary["Grand Total"] = pivot_summary.sum(axis=1)
+    pivot_summary.loc["Grand Total"] = pivot_summary.sum(axis=0)
+    pivot_summary.reset_index(inplace=True)
 
 # Insurance totals
 insurance_totals = (
     df.groupby("Insurance", dropna=False)[["NetAmount","Paid","Balance","Rejected","Accepted"]]
       .sum().reset_index()
 )
-for c in ["NetAmount","Paid","Balance","Rejected","Accepted"]:
-    insurance_totals[c] = insurance_totals[c].round(DECIMALS)
+# Grand Total row
+gt = {
+    "Insurance": "Grand Total",
+    "NetAmount": insurance_totals["NetAmount"].sum(),
+    "Paid":      insurance_totals["Paid"].sum(),
+    "Balance":   insurance_totals["Balance"].sum(),
+    "Rejected":  insurance_totals["Rejected"].sum(),
+    "Accepted":  insurance_totals["Accepted"].sum(),
+}
+insurance_totals = pd.concat([insurance_totals, pd.DataFrame([gt])], ignore_index=True)
+
+# Pretty column names for dashboard
+insurance_totals = insurance_totals.rename(columns={"NetAmount": "Net Amount"})
 
 t2 = time.time()
 print(f"⚙️ Processing time: {t2 - t1:.2f}s")
@@ -200,25 +217,27 @@ checks["A_rows_balanced"] = bool((row_diff == 0).all())
 checks["A_rows_unbalanced_count"] = int((row_diff != 0).sum())
 checks["A_max_abs_row_drift"] = float(row_diff.abs().max()) if len(row_diff) else 0.0
 
-tot_left  = df["NetAmount"].sum().round(DECIMALS)
-tot_right = (df["Paid"] + df["Balance"] + df["Rejected"] + df["Accepted"]).sum().round(DECIMALS)
+tot_left  = float(df["NetAmount"].sum().round(DECIMALS))
+tot_right = float((df["Paid"] + df["Balance"] + df["Rejected"] + df["Accepted"]).sum().round(DECIMALS))
 checks["B_totals_match"] = bool(tot_left == tot_right)
-checks["B_totals_left_net"] = float(tot_left)
-checks["B_totals_right_sum"] = float(tot_right)
+checks["B_totals_left_net"] = tot_left
+checks["B_totals_right_sum"] = tot_right
 
-checks["C_removed_totals_rows"] = removed_rows
-
-balance_total_detail = float(balance_df["Balance"].sum().round(DECIMALS))
-summary_no_gt = pivot_summary[pivot_summary["Insurance"] != "Grand Total"]
-balance_total_summary = float(summary_no_gt.drop(columns=["Insurance"]).sum(axis=1).sum().round(DECIMALS))
-checks["D_aging_detail_equals_summary"] = bool(abs(balance_total_detail - balance_total_summary) < 0.01)
-checks["D_balance_detail_sum"] = balance_total_detail
-checks["D_balance_summary_sum"] = balance_total_summary
+if balance_df.empty:
+    checks["C_aging_detail_equals_summary"] = True
+    checks["C_balance_detail_sum"] = 0.0
+    checks["C_balance_summary_sum"] = 0.0
+else:
+    balance_total_detail = float(balance_df["Balance"].sum().round(DECIMALS))
+    summary_no_gt = pivot_summary[pivot_summary["Insurance"] != "Grand Total"]
+    balance_total_summary = float(summary_no_gt.drop(columns=["Insurance"]).sum(axis=1).sum().round(DECIMALS))
+    checks["C_aging_detail_equals_summary"] = bool(abs(balance_total_detail - balance_total_summary) < 0.01)
+    checks["C_balance_detail_sum"] = balance_total_detail
+    checks["C_balance_summary_sum"] = balance_total_summary
 
 # =================== SAVE ===================
-# Write the output to the same folder as the input file (works with the dashboard)
-out_dir = Path(input_file).resolve().parent
-out_path = out_dir / OUTPUT_NAME
+out_path = Path(out_path)
+out_path.parent.mkdir(parents=True, exist_ok=True)
 
 print("💾 Saving Excel…")
 with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
@@ -240,3 +259,4 @@ print("✅ Self-checks summary:")
 for k, v in checks.items():
     print(f"   - {k}: {v}")
 print(f"✅ Saved: {out_path.name}")
+
