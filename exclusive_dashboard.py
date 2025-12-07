@@ -164,8 +164,7 @@ def style_grid(df: pd.DataFrame):
     if df.shape[1] == 0:
         return df.style
     df = df.copy()
-    # index 1..N (no color)
-    df.index = range(1, len(df) + 1)
+    df.index = range(1, len(df) + 1)  # index 1..N (no color)
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
@@ -373,7 +372,10 @@ try:
     if not summary.empty:
         summary = ensure_grand_total(summary, summary.columns[0])
 
-    # ---------- Values (no Net) ----------
+    # ---------- Values / KPIs & Chart (pretty, with optional Net) ----------
+    from matplotlib.ticker import FuncFormatter
+    import matplotlib.pyplot as plt
+
     def drop_grand_total(df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return df
@@ -393,28 +395,57 @@ try:
     bal  = ksum(totals_no_gt, "Balance")
     rej  = ksum(totals_no_gt, "Rejected", "Rejection")
     acc  = ksum(totals_no_gt, "Accepted")
+    net  = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
 
-    # KPI strip (no Net)
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Paid",     f"{paid:,.2f}")
-    k2.metric("Balance",  f"{bal:,.2f}")
-    k3.metric("Rejected", f"{rej:,.2f}")
-    k4.metric("Accepted", f"{acc:,.2f}")
+    show_net = st.toggle("Show Net Amount", value=False, help="Include Net Amount in KPIs and the chart")
 
-    # ---------- Bar chart (smaller, colored) ----------
-    import matplotlib.pyplot as plt
+    if show_net:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Net Amount", f"{net:,.2f}")
+        c2.metric("Paid",       f"{paid:,.2f}")
+        c3.metric("Balance",    f"{bal:,.2f}")
+        c4.metric("Rejected",   f"{rej:,.2f}")
+        c5.metric("Accepted",   f"{acc:,.2f}")
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Paid",       f"{paid:,.2f}")
+        c2.metric("Balance",    f"{bal:,.2f}")
+        c3.metric("Rejected",   f"{rej:,.2f}")
+        c4.metric("Accepted",   f"{acc:,.2f}")
+
     st.subheader("Chart")
-    fig, ax = plt.subplots(figsize=(7.5, 3.0), dpi=150)  # compact
+
     labels = ["Paid", "Balance", "Rejected", "Accepted"]
-    vals   = [paid,   bal,       rej,        acc]
+    values = [paid, bal, rej, acc]
     colors = ["#2E7D32", "#FB8C00", "#C62828", "#1976D2"]  # green, orange, red, blue
-    bars = ax.bar(labels, vals, color=colors)
-    ax.set_title("Amounts", fontsize=11)
+
+    if show_net:
+        labels = ["Net Amount"] + labels
+        values = [net] + values
+        colors = ["#455A64"] + colors  # slate gray for Net
+
+    def human_aed(x, _pos=None):
+        absx = abs(x)
+        if absx >= 1_000_000_000:
+            return f"{x/1_000_000_000:.2f}B"
+        if absx >= 1_000_000:
+            return f"{x/1_000_000:.2f}M"
+        if absx >= 1_000:
+            return f"{x/1_000:.1f}k"
+        return f"{x:,.0f}"
+
+    fig, ax = plt.subplots(figsize=(7.8, 3.0), dpi=150)  # compact, neat
+    bars = ax.bar(labels, values, color=colors, edgecolor="#333", linewidth=0.5)
+    ax.set_title("Amounts", fontsize=12, loc="left", pad=6)
     ax.set_ylabel("AED")
+    ax.yaxis.set_major_formatter(FuncFormatter(human_aed))
     ax.grid(axis="y", linestyle="--", alpha=0.35)
-    for rect, v in zip(bars, vals):
+    ax.set_axisbelow(True)
+    for rect, v in zip(bars, values):
         ax.text(rect.get_x() + rect.get_width()/2, rect.get_height(),
                 f"{v:,.0f}", ha="center", va="bottom", fontsize=9)
+    for tick in ax.get_xticklabels():
+        tick.set_fontsize(10)
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
 
@@ -449,7 +480,6 @@ try:
                 df3 = load_detail(str(out_path), detail_sheet, token)
                 df3 = trim_empty_rows(df3)
 
-                # paging
                 total_rows = len(df3)
                 st.info(f"Rows: {total_rows:,}")
                 page_size = st.number_input("Rows per page", min_value=500, max_value=50000, step=500, value=5000)
