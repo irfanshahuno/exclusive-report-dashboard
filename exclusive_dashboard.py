@@ -33,9 +33,7 @@ CENTERS = {
         "name": "Excellent Pharmacy (PF code)",
         "folder_root": DATA_DIR / "excellent_pharmacy",
         "src_name": "source.xlsx",
-        # IMPORTANT: this is the file your pharmacy script produces
         "out_name": "Pharmacy_Exclusive_Report_with_Aging.xlsx",
-        # IMPORTANT: must exist at repo root with this exact name
         "generator": BASE / "pharmacy_exclusive_report_with_aging.py",
     },
 }
@@ -61,13 +59,10 @@ def _run(cmd):
     return res
 
 def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
-    """
-    Always run the generator from the repo root (BASE), passing absolute paths.
-    """
+    """Run generator with tolerant --out ordering."""
     py = sys.executable
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [py, str(gen_path), str(src_path)]
-    # Try both "--out" syntaxes to be tolerant with your generator.
     try:
         res = _run(cmd + ["--out", str(out_path)])
         return res.stdout or "OK"
@@ -118,9 +113,7 @@ def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df2.loc[~blank_rows]
 
 def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
-    """
-    If a 'Grand Total' row is missing, append one using numeric column sums.
-    """
+    """Append a Grand Total row if missing."""
     if df is None or df.empty or name_col not in df.columns:
         return df
     if df[name_col].astype(str).str.lower().str.contains("grand total").any():
@@ -138,26 +131,19 @@ def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150
 
 # --------------------------- Styling ---------------------------
 def style_grid(df: pd.DataFrame):
-    """
-    Blue header, white index, index starts from 1, with Grand Total highlight.
-    """
+    """Blue header, white index, index from 1, Grand Total highlight."""
     if not isinstance(df, pd.DataFrame):
         return df
     if df.shape[1] == 0:
         return df.style
 
-    # index start from 1
     df = df.copy()
     df.index = range(1, len(df) + 1)
-
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
 
-    border = "#CBD5E1"
-    header_bg = "#2196F3"
-    header_font = "#FFFFFF"
-
+    border = "#CBD5E1"; header_bg = "#2196F3"; header_font = "#FFFFFF"
     styler = (
         df.style
         .set_table_styles([
@@ -205,35 +191,29 @@ with top_left:
 with top_right:
     st.session_state.is_admin = st.toggle("Admin mode", value=st.session_state.is_admin)
 
-# Clear caches if center or year changed
+# Clear caches if center/year changed
 if (st.session_state.center_key != st.session_state.last_center_key) or (st.session_state.year != st.session_state.last_year):
     load_report_fast.clear()
     load_detail_sheet.clear()
     st.session_state.last_center_key = st.session_state.center_key
     st.session_state.last_year = st.session_state.year
 
-# --------------------------- Center selection ---------------------------
 st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}** · Year: **{st.session_state.year or 'none'}**")
 
+# --------------------------- Center selection ---------------------------
 ck = st.session_state.center_key
 if ck not in CENTERS:
     st.subheader("Choose a center")
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button(CENTERS["easyhealth"]["name"], use_container_width=True):
-            st.session_state.center_key = "easyhealth"
-            st.session_state.year = None
-            st.rerun()
+            st.session_state.center_key = "easyhealth"; st.session_state.year = None; st.rerun()
     with c2:
         if st.button(CENTERS["excellent"]["name"], use_container_width=True):
-            st.session_state.center_key = "excellent"
-            st.session_state.year = None
-            st.rerun()
+            st.session_state.center_key = "excellent"; st.session_state.year = None; st.rerun()
     with c3:
         if st.button(CENTERS["pharmacy"]["name"], use_container_width=True):
-            st.session_state.center_key = "pharmacy"
-            st.session_state.year = None
-            st.rerun()
+            st.session_state.center_key = "pharmacy"; st.session_state.year = None; st.rerun()
     st.stop()
 
 # --------------------------- Year selection ---------------------------
@@ -244,25 +224,22 @@ for i, y in enumerate(YEARS):
     with ycols[i]:
         if st.button(str(y), use_container_width=True):
             chosen_year = y
-
 if chosen_year is not None:
     st.session_state.year = chosen_year
     st.rerun()
 
 if st.session_state.year is None:
-    # Pick latest available year that has a report, else default to latest year
     cfg_tmp = CENTERS[ck]
     found = None
     for y in reversed(YEARS):
         folder_try = (cfg_tmp["folder_root"] / str(y))
         out_try = folder_try / cfg_tmp["out_name"]
         if out_try.exists():
-            found = y
-            break
-    st.session_state.year = found or YEARS[-1]  # default to 2025
+            found = y; break
+    st.session_state.year = found or YEARS[-1]  # default to latest (2025)
     st.rerun()
 
-# Resolve active paths now that we have center+year
+# Resolve active paths
 cfg = CENTERS[st.session_state.center_key]
 folder = cfg["folder_root"] / str(st.session_state.year)
 folder.mkdir(parents=True, exist_ok=True)
@@ -282,11 +259,16 @@ if st.button("◀ Choose another center"):
 # -------- Admin controls (per year)
 if st.session_state.is_admin:
     with st.expander("⬆️ Upload/replace source Excel for this year", expanded=False):
-        up = st.file_uploader(f"Upload .xlsx for {st.session_state.year}", type=["xlsx"], key=f"uploader_{st.session_state.center_key}_{st.session_state.year}")
+        up = st.file_uploader(
+            f"Upload .xlsx for {st.session_state.year}",
+            type=["xlsx"],
+            key=f"uploader_{st.session_state.center_key}_{st.session_state.year}",
+        )
         if up:
             folder.mkdir(parents=True, exist_ok=True)
             src_path.write_bytes(up.read())
             st.success(f"Saved to {src_path}")
+
     colA, colB, colC = st.columns(3)
     if colA.button("↻ Rebuild report", use_container_width=True, key=f"rebuild_{ck}_{st.session_state.year}"):
         try:
@@ -297,15 +279,19 @@ if st.session_state.is_admin:
             else:
                 msg = rebuild_report(gen_path, src_path, out_path)
                 st.success("Report rebuilt successfully.")
-                if msg.strip(): st.code(msg, language="bash")
+                if msg.strip():
+                    st.code(msg, language="bash")
             load_report_fast.clear(); load_detail_sheet.clear()
         except Exception as e:
             st.error(str(e))
+
     if colB.button("🗂 Show file locations", use_container_width=True, key=f"loc_{ck}_{st.session_state.year}"):
         st.info(f"Source: {src_path}\nReport: {out_path}\nGenerator: {gen_path}")
+
     if colC.button("🗑 Reset (delete) this year's report", use_container_width=True, key=f"del_{ck}_{st.session_state.year}"):
         try:
-            if out_path.exists(): out_path.unlink()
+            if out_path.exists():
+                out_path.unlink()
             st.success("Report deleted.")
             load_report_fast.clear(); load_detail_sheet.clear()
         except Exception as e:
@@ -315,7 +301,8 @@ if st.session_state.is_admin:
 token = mtime_token(out_path)
 if token == 0.0:
     msg = f"Report not found for {cfg['name']} ({st.session_state.year})."
-    if st.session_state.is_admin: msg += " (Upload source and click Rebuild.)"
+    if st.session_state.is_admin:
+        msg += " (Upload source and click Rebuild.)"
     st.warning(msg)
     st.stop()
 
@@ -343,15 +330,51 @@ try:
     k4.metric("Rejected", f"{rej:,.2f}")
     k5.metric("Accepted", f"{acc:,.2f}")
 
-    # ---------- KPI Bar Chart (visual image) ----------
-    # Simple bar chart that management can read at a glance
-    chart_df = pd.DataFrame(
-        {
-            "Metric": ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"],
-            "Amount": [net,          paid,   bal,       rej,        acc],
+    # ---------- KPI Donut ("football" circle) ----------
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    labels = ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]
+    values = [net, paid, bal, rej, acc]
+
+    # Filter out zero/negative to avoid tiny wedges
+    zipped = [(l, v) for l, v in zip(labels, values) if v and v > 0]
+    if not zipped:
+        st.info("No positive KPI values to chart.")
+    else:
+        labels, values = zip(*zipped)
+        color_map = {
+            "Net Amount": "#1976D2",  # blue
+            "Paid":       "#2E7D32",  # green
+            "Balance":    "#FB8C00",  # orange
+            "Rejected":   "#C62828",  # red
+            "Accepted":   "#6D6D6D",  # gray
         }
-    ).set_index("Metric")
-    st.bar_chart(chart_df, use_container_width=True)
+        colors = [color_map.get(lbl, "#9E9E9E") for lbl in labels]
+
+        fig, ax = plt.subplots(figsize=(6.5, 6.5))
+        wedges, _, _ = ax.pie(
+            values,
+            labels=None,
+            autopct=lambda pct: (f"{pct:.1f}%") if pct >= 3 else "",
+            startangle=90,
+            counterclock=False,
+            colors=colors,
+            wedgeprops=dict(width=0.35, edgecolor="white")  # thickness of ring
+        )
+
+        total = float(np.sum(values))
+        ax.text(
+            0, 0,
+            f"TOTAL\n{total:,.0f}",
+            ha="center", va="center",
+            fontsize=14, fontweight="bold"
+        )
+
+        legend_labels = [f"{lbl}: {val:,.2f}" for lbl, val in zip(labels, values)]
+        ax.legend(wedges, legend_labels, title="KPIs", loc="center left", bbox_to_anchor=(1, 0.5))
+        ax.set_aspect("equal")
+        st.pyplot(fig, use_container_width=True)
 
     # ---------- Tabs ----------
     t1, t2, t3 = st.tabs([f"Insurance_Totals", f"Balance_Aging_Summary", f"{DETAIL_SHEET_NAME}"])
@@ -366,13 +389,11 @@ try:
         st.caption("Loads only when you click to keep the app fast.")
         if st.button("Load Balance_Aging_Detail (no styling)"):
             try:
-                # use the detected sheet name s_det; fall back to our constant
                 detail_sheet = s_det or DETAIL_SHEET_NAME
                 df3 = load_detail_sheet(str(out_path), detail_sheet, token)
                 df3 = trim_empty_rows(df3)
                 st.dataframe(df3, use_container_width=True, height=full_height(df3))
             except Exception as e:
-                # show what sheets exist to help diagnose
                 try:
                     names = pd.ExcelFile(str(out_path)).sheet_names
                 except Exception:
