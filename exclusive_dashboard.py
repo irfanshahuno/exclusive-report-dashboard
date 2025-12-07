@@ -1,5 +1,6 @@
-# exclusive_dashboard.py
+# exclusive_dashboard.py (robust v2)
 import sys
+import traceback
 import subprocess
 from pathlib import Path
 import pandas as pd
@@ -37,6 +38,11 @@ CENTERS = {
     },
 }
 
+# Canonical sheet names
+SHEET_INS_TOT = "Insurance_Totals"
+SHEET_SUMMARY = "Balance_Aging_Summary"
+SHEET_DETAIL  = "Balance_Aging_Detail"
+
 # ====================== Helpers ======================
 def mtime_token(p: Path) -> float:
     try:
@@ -48,7 +54,7 @@ def _run(cmd):
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
         raise RuntimeError(
-            f"Command failed: {' '.join(cmd)}\n\n{res.stderr or res.stdout}"
+            f"Command failed: {' '.join(cmd)}\n\nSTDOUT:\n{res.stdout}\n\nSTDERR:\n{res.stderr}"
         )
     return res
 
@@ -60,20 +66,48 @@ def rebuild(gen, src, out):
     except Exception:
         return _run([py, str(gen), "--out", str(out), str(src)])
 
-@st.cache_data(show_spinner=True)
-def load_fast(path: str, token: float):
-    xls = pd.ExcelFile(path)
-    names = xls.sheet_names
-    ins_tot = next((n for n in names if "insurance" in n.lower() and "total" in n.lower()), None)
-    summary = next((n for n in names if "summary" in n.lower()), None)
-    detail = next((n for n in names if "detail" in n.lower()), None)
-    df1 = xls.parse(ins_tot) if ins_tot else pd.DataFrame()
-    df2 = xls.parse(summary) if summary else pd.DataFrame()
-    return df1, df2, ins_tot, summary, detail, names
+def _pick_sheet(names, wants_all=None, wants_any=None):
+    lower = [n.lower() for n in names]
+    if wants_all:
+        for i, s in enumerate(lower):
+            if all(w in s for w in wants_all):
+                return names[i]
+    if wants_any:
+        for i, s in enumerate(lower):
+            if any(w in s for w in wants_any):
+                return names[i]
+    return None
 
 @st.cache_data(show_spinner=True)
-def load_detail(path: str, name: str, token: float):
-    return pd.read_excel(path, sheet_name=name)
+def load_core(path: str, _token: float):
+    # returns: totals_df, summary_df, s_tot, s_sum, s_det, all_names
+    xls = pd.ExcelFile(path)
+
+    names = xls.sheet_names
+    # Prefer exact canonical names first
+    s_tot = SHEET_INS_TOT if SHEET_INS_TOT in names else None
+    s_sum = SHEET_SUMMARY if SHEET_SUMMARY in names else None
+    s_det = SHEET_DETAIL  if SHEET_DETAIL  in names else None
+
+    # Fallbacks for old files
+    if not s_tot:
+        s_tot = _pick_sheet(names, wants_any=["insurance", "totals"]) or _pick_sheet(names, wants_any=["totals"])
+    if not s_sum:
+        s_sum = _pick_sheet(names, wants_all=["aging", "summary"]) or _pick_sheet(names, wants_any=["summary"])
+    if not s_det:
+        s_det = _pick_sheet(names, wants_all=["aging", "detail"]) or _pick_sheet(names, wants_any=["detail"])
+
+    if not s_tot or not s_sum:
+        # Return empty dfs but with names for diagnostics
+        return pd.DataFrame(), pd.DataFrame(), s_tot, s_sum, s_det, names
+
+    totals = xls.parse(s_tot)
+    summary = xls.parse(s_sum)
+    return totals, summary, s_tot, s_sum, s_det, names
+
+@st.cache_data(show_spinner=True)
+def load_detail(path: str, sheet_name: str, _token: float):
+    return pd.read_excel(path, sheet_name=sheet_name)
 
 def trim(df: pd.DataFrame):
     if df is None or df.empty:
@@ -87,11 +121,10 @@ def full_height(df, row_px=45, header_px=70, pad=150):
     return header_px + (n * row_px) + pad
 
 def style_grid(df: pd.DataFrame):
-    if df.empty:
+    if df is None or df.empty:
         return df
     df = df.copy()
     df.index = range(1, len(df) + 1)
-    from pandas.io.formats.style import Styler
     border = "#D0D0D0"
     return (
         df.style
@@ -101,6 +134,18 @@ def style_grid(df: pd.DataFrame):
         ])
         .format({c: "{:,.2f}".format for c in df.select_dtypes("number").columns})
     )
+
+def ensure_grand_total(df: pd.DataFrame, name_col="Insurance"):
+    if df is None or df.empty or name_col not in df.columns:
+        return df
+    if df[name_col].astype(str).str.lower().str.contains("grand total").any():
+        return df
+    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    sums = {c: pd.to_numeric(df[c], errors="coerce").sum() for c in num_cols}
+    row = {c: "" for c in df.columns}
+    row.update(sums)
+    row[name_col] = "Grand Total"
+    return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
 
 # ====================== UI State ======================
 if "is_admin" not in st.session_state:
@@ -125,45 +170,86 @@ if ck not in CENTERS:
     st.stop()
 
 cfg = CENTERS[ck]
-folder, src_path, out_path, gen_path = cfg["folder"], cfg["folder"]/cfg["src"], cfg["folder"]/cfg["out"], cfg["generator"]
+folder = cfg["folder"]; folder.mkdir(parents=True, exist_ok=True)
+src_path = folder / cfg["src"]
+out_path = folder / cfg["out"]
+gen_path = cfg["generator"]
 st.caption(f"Center: **{cfg['name']}** · Mode: **{'Admin' if st.session_state.is_admin else 'View'}**")
 
+# ====================== Admin Controls ======================
 if st.session_state.is_admin:
     with st.expander("⬆️ Upload Source Excel", expanded=False):
-        up = st.file_uploader("Upload Excel", type=["xlsx"])
+        up = st.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
         if up:
             src_path.write_bytes(up.read())
-            st.success(f"Uploaded: {src_path.name}")
+            st.success(f"Uploaded: {src_path}")
 
-    colA, colB = st.columns(2)
+    colA, colB, colC = st.columns(3)
     if colA.button("↻ Rebuild Report", use_container_width=True):
         try:
-            if not src_path.exists():
+            if not gen_path.exists():
+                st.error(f"Generator missing: {gen_path.name}")
+            elif not src_path.exists():
                 st.error("No source file uploaded.")
             else:
-                msg = rebuild(gen_path, src_path, out_path)
-                st.success("Report rebuilt successfully.")
-                st.code(msg.stdout or "Done", language="bash")
-                load_fast.clear(); load_detail.clear()
+                res = rebuild(gen_path, src_path, out_path)
+                st.success("Report rebuilt.")
+                if res.stdout.strip():
+                    st.code(res.stdout, language="bash")
+                load_core.clear(); load_detail.clear()
         except Exception as e:
             st.error(str(e))
-    if colB.button("🗂 Show Locations", use_container_width=True):
+    if colB.button("🗂 Show Paths", use_container_width=True):
         st.info(f"Source: {src_path}\nReport: {out_path}\nGenerator: {gen_path}")
+    if colC.button("🗑 Delete Report", use_container_width=True):
+        try:
+            if out_path.exists():
+                out_path.unlink()
+            st.success("Report deleted.")
+            load_core.clear(); load_detail.clear()
+        except Exception as e:
+            st.error(str(e))
 
+# ====================== Render ======================
 token = mtime_token(out_path)
 if token == 0.0:
-    st.warning("⚠️ Report not found. Please upload & rebuild in Admin Mode.")
+    st.warning("⚠️ Report not found. Upload & Rebuild in Admin Mode.")
     st.stop()
 
-# ====================== Data + KPIs ======================
 try:
-    totals, summary, s_tot, s_sum, s_det, available = load_fast(str(out_path), token)
-    totals, summary = trim(totals), trim(summary)
+    totals, summary, s_tot, s_sum, s_det, names = load_core(str(out_path), token)
 
-    def ksum(df, *cols):
-        for c in cols:
+    # Diagnostics if sheets missing
+    if totals.empty or summary.empty:
+        st.error("Required sheets not found in the report.")
+        st.code(
+            f"Available sheets: {', '.join(names) if names else '(none)'}\n"
+            f"Detected -> Insurance_Totals: {s_tot or '(not found)'} | "
+            f"Balance_Aging_Summary: {s_sum or '(not found)'} | "
+            f"Balance_Aging_Detail: {s_det or '(not found)'}",
+            language="bash"
+        )
+        st.stop()
+
+    # Normalize & clean
+    if "Insurance" not in totals.columns:
+        # rename first col defensively to Insurance
+        totals = totals.rename(columns={totals.columns[0]: "Insurance"})
+    if "Net Amount" not in totals.columns:
+        for cand in ["NetAmount", "Net amount", "Net"]:
+            if cand in totals.columns:
+                totals = totals.rename(columns={cand: "Net Amount"})
+                break
+
+    totals = trim(totals)
+    totals = ensure_grand_total(totals, name_col="Insurance")
+    summary = trim(summary)
+
+    # KPIs
+    def ksum(df, *cands):
+        for c in cands:
             if c in df.columns:
-                return float(df[c].sum())
+                return float(pd.to_numeric(df[c], errors="coerce").sum())
         return 0.0
 
     net = ksum(totals, "Net Amount", "NetAmount", "Net")
@@ -190,8 +276,7 @@ try:
 
         if zipped:
             labels, values = zip(*zipped)
-            colors = ["#27ae60", "#f39c12", "#c0392b", "#7f8c8d"]
-
+            colors = ["#27ae60", "#f39c12", "#c0392b", "#7f8c8d"]  # green, orange, red, gray
             fig, ax = plt.subplots(figsize=(3, 3), subplot_kw=dict(aspect="equal"))
             wedges, _ = ax.pie(
                 values,
@@ -201,15 +286,12 @@ try:
                 wedgeprops=dict(width=0.35, edgecolor="white",
                                 linewidth=1.2, shadow=True, alpha=0.92)
             )
-
             total = float(np.sum(values))
             ax.text(0, 0, f"{total:,.0f}\nTOTAL",
                     ha="center", va="center",
                     fontsize=10, fontweight="bold", color="#333")
-            circle = plt.Circle((0, 0), 0.7, color="black",
-                                fill=False, linewidth=0.5, alpha=0.25)
-            ax.add_artist(circle)
-
+            rim = plt.Circle((0, 0), 0.7, color="black", fill=False, linewidth=0.5, alpha=0.25)
+            ax.add_artist(rim)
             legend_labels = [f"{lbl}: {val:,.2f}" for lbl, val in zip(labels, values)]
             ax.legend(
                 wedges, legend_labels, title="KPIs",
@@ -222,8 +304,7 @@ try:
             st.info("No positive KPI values to chart.")
     except ModuleNotFoundError:
         st.warning("Matplotlib not installed — showing bars instead.")
-        import pandas as _pd
-        _df = _pd.DataFrame({"Value": [paid, bal, rej, acc]}, index=labels)
+        _df = pd.DataFrame({"Value": [paid, bal, rej, acc]}, index=labels)
         st.bar_chart(_df, use_container_width=False)
 
     # ---------- Tabs ----------
@@ -231,18 +312,32 @@ try:
 
     with t1:
         st.dataframe(style_grid(totals), use_container_width=True, height=full_height(totals))
+        # quick diagnostics
+        st.caption("Columns (Insurance_Totals):")
+        st.code(", ".join(map(str, totals.columns)))
+
     with t2:
         st.dataframe(style_grid(summary), use_container_width=True, height=full_height(summary))
+        st.caption("Columns (Balance_Aging_Summary):")
+        st.code(", ".join(map(str, summary.columns)))
+
     with t3:
         st.caption("Loads only when you click (to keep fast).")
         if st.button("Load Balance_Aging_Detail (no styling)"):
             try:
-                df3 = load_detail(str(out_path), s_det or "Balance_Aging_Detail", token)
+                detail_sheet = s_det or SHEET_DETAIL
+                if not detail_sheet or detail_sheet not in names:
+                    raise RuntimeError(
+                        f"Detail sheet not found. Available: {', '.join(names) if names else '(none)'}"
+                    )
+                df3 = load_detail(str(out_path), detail_sheet, token)
                 df3 = trim(df3)
                 st.dataframe(df3, use_container_width=True, height=full_height(df3))
+                st.caption("Columns (Balance_Aging_Detail):")
+                st.code(", ".join(map(str, df3.columns)))
             except Exception as e:
                 st.error(str(e))
 
-except Exception as e:
-    st.error(f"❌ {e}")
-
+except Exception:
+    st.error("An unexpected error occurred:")
+    st.code(traceback.format_exc(), language="python")
