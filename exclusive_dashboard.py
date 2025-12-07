@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-# --------------------------- Page setup ---------------------------
+# =========================== Page & Folders ===========================
 st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layout="wide")
 BASE = Path(__file__).parent
 DATA_DIR = BASE / "data"
@@ -13,7 +13,7 @@ DATA_DIR = BASE / "data"
 (DATA_DIR / "excellent").mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "excellent_pharmacy").mkdir(parents=True, exist_ok=True)
 
-# --------------------------- Centers & Generators -----------------
+# =========================== Centers & Generators =====================
 CENTERS = {
     "easyhealth": {
         "name": "Easy Health Medical Clinic (MF8031)",
@@ -40,12 +40,12 @@ CENTERS = {
 
 YEARS = [2024, 2025]
 
-# Canonical sheet names we expect from both generators
+# Canonical sheet names expected from generators
 SHEET_INS_TOT = "Insurance_Totals"
 SHEET_SUMMARY = "Balance_Aging_Summary"
 SHEET_DETAIL  = "Balance_Aging_Detail"
 
-# --------------------------- Helpers ------------------------------
+# =============================== Helpers ==============================
 def mtime_token(p: Path) -> float:
     try:
         return p.stat().st_mtime
@@ -87,20 +87,16 @@ def _pick_sheet(sheet_names, wants_all=None, wants_any=None):
 
 def autodetect(xls: pd.ExcelFile):
     names = xls.sheet_names
-
-    # Prefer exact canonical names first
     ins_tot = SHEET_INS_TOT if SHEET_INS_TOT in names else None
     summary = SHEET_SUMMARY if SHEET_SUMMARY in names else None
     detail  = SHEET_DETAIL  if SHEET_DETAIL  in names else None
-
-    # Fallbacks (defensive for older files)
+    # Fallbacks for older files
     if ins_tot is None:
         ins_tot = _pick_sheet(names, wants_any=["insurance", "total"]) or _pick_sheet(names, wants_any=["totals"])
     if summary is None:
         summary = _pick_sheet(names, wants_all=["aging","summary"]) or _pick_sheet(names, wants_any=["summary"])
     if detail is None:
         detail  = _pick_sheet(names, wants_all=["aging","detail"]) or _pick_sheet(names, wants_any=["detail"])
-
     return ins_tot, summary, detail, names
 
 @st.cache_data(show_spinner=True)
@@ -108,12 +104,9 @@ def load_core_sheets(path: str, _token: float):
     xls = pd.ExcelFile(path)
     ins_tot, summary, detail, names = autodetect(xls)
     if not ins_tot or not summary:
-        raise RuntimeError(
-            f"Required sheets not found. Available: {', '.join(names)}"
-        )
+        raise RuntimeError(f"Required sheets not found. Available: {', '.join(names)}")
     df_ins  = xls.parse(ins_tot)
     df_sum  = xls.parse(summary)
-    # we don't parse detail here; it's heavy and stays lazy
     return df_ins, df_sum, ins_tot, summary, detail, names
 
 @st.cache_data(show_spinner=True)
@@ -136,7 +129,7 @@ def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.Data
     if df[name_col].astype(str).str.lower().str.contains("grand total").any():
         return df
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    gt = {c: df[c].sum() for c in num_cols}
+    gt = {c: pd.to_numeric(df[c], errors="coerce").sum() for c in num_cols}
     row = {c: "" for c in df.columns}
     row.update(gt)
     row[name_col] = "Grand Total"
@@ -146,7 +139,7 @@ def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150
     n = 0 if df is None else len(df)
     return header_px + (n * row_px) + padding_px
 
-# --------------------------- Styling ---------------------------
+# ------------------------------ Styling ------------------------------
 def style_grid(df: pd.DataFrame):
     if not isinstance(df, pd.DataFrame):
         return df
@@ -189,7 +182,7 @@ def style_grid(df: pd.DataFrame):
         pass
     return styler
 
-# --------------------------- Streamlit state ---------------------------
+# ============================= App State =============================
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 if "center_key" not in st.session_state:
@@ -216,7 +209,7 @@ if (st.session_state.center_key != st.session_state.last_center_key) or (st.sess
 
 st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}** · Year: **{st.session_state.year or 'none'}**")
 
-# --------------------------- Center selection ---------------------------
+# =========================== Center selection =========================
 ck = st.session_state.center_key
 if ck not in CENTERS:
     st.subheader("Choose a center")
@@ -232,7 +225,7 @@ if ck not in CENTERS:
             st.session_state.center_key = "pharmacy"; st.session_state.year = None; st.rerun()
     st.stop()
 
-# --------------------------- Year selection ---------------------------
+# ============================= Year selection =========================
 st.subheader("Select Year")
 ycols = st.columns(len(YEARS))
 chosen_year = None
@@ -255,7 +248,7 @@ if st.session_state.year is None:
     st.session_state.year = found or YEARS[-1]
     st.rerun()
 
-# Resolve active paths
+# =========================== Resolve active paths =====================
 cfg = CENTERS[st.session_state.center_key]
 folder = cfg["folder_root"] / str(st.session_state.year)
 folder.mkdir(parents=True, exist_ok=True)
@@ -272,7 +265,7 @@ if st.button("◀ Choose another center"):
     st.session_state.year = None
     st.rerun()
 
-# -------- Admin controls (per year)
+# ============================== Admin panel ===========================
 if st.session_state.is_admin:
     with st.expander("⬆️ Upload/replace source Excel for this year", expanded=False):
         up = st.file_uploader(
@@ -313,7 +306,7 @@ if st.session_state.is_admin:
         except Exception as e:
             st.error(str(e))
 
-# -------- Render
+# ================================ Render ==============================
 token = mtime_token(out_path)
 if token == 0.0:
     msg = f"Report not found for {cfg['name']} ({st.session_state.year})."
@@ -323,34 +316,28 @@ if token == 0.0:
     st.stop()
 
 try:
-    # --- Load ONLY the required sheets up front ---
+    # --- Load core sheets only (fast) ---
     totals, summary, s_tot, s_sum, s_det, available = load_core_sheets(str(out_path), token)
 
-    # Clean up dataframes
+    # Normalize Insurance_Totals columns
+    if "Insurance" not in totals.columns:
+        first = totals.columns[0]
+        totals = totals.rename(columns={first: "Insurance"})
+    for a, b in [("NetAmount","Net Amount"), ("Net amount","Net Amount"), ("Net","Net Amount")]:
+        if a in totals.columns and "Net Amount" not in totals.columns:
+            totals = totals.rename(columns={a: "Net Amount"})
+
+    totals = trim_empty_rows(totals)
+    totals = ensure_grand_total(totals, name_col="Insurance")
+    summary = trim_empty_rows(summary)
+
+    # KPIs from Insurance_Totals
     def ksum(df, *cands):
         for col in cands:
             if col in df.columns:
                 return float(pd.to_numeric(df[col], errors="coerce").sum())
         return 0.0
 
-    # Ensure correct column names in Insurance_Totals
-    # Try to normalize to: Insurance | Net Amount | Paid | Balance | Rejected | Accepted
-    if "Insurance" not in totals.columns:
-        # try to rename first column to Insurance defensively
-        first = totals.columns[0]
-        totals = totals.rename(columns={first: "Insurance"})
-    for a,b in [("NetAmount","Net Amount"), ("Net amount","Net Amount"), ("Net","Net Amount")]:
-        if a in totals.columns and "Net Amount" not in totals.columns:
-            totals = totals.rename(columns={a:"Net Amount"})
-
-    # Guarantee a Grand Total row on Insurance_Totals
-    totals = trim_empty_rows(totals)
-    totals = ensure_grand_total(totals, name_col="Insurance")
-
-    # Summary trim only (GT row/col already inside the file)
-    summary = trim_empty_rows(summary)
-
-    # KPIs from Insurance_Totals
     net = ksum(totals, "Net Amount", "NetAmount", "Net")
     paid = ksum(totals, "Paid")
     bal  = ksum(totals, "Balance")
@@ -364,9 +351,10 @@ try:
     k4.metric("Rejected", f"{rej:,.2f}")
     k5.metric("Accepted", f"{acc:,.2f}")
 
-    # ---------- KPI Donut with graceful fallback ----------
-    labels = ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]
-    values = [net, paid, bal, rej, acc]
+    # ---------- Compact KPI Donut (NO Net Amount) ----------
+    # Only show: Paid, Balance, Rejected, Accepted
+    labels = ["Paid", "Balance", "Rejected", "Accepted"]
+    values = [paid, bal, rej, acc]
     zipped = [(l, v) for l, v in zip(labels, values) if v and v > 0]
 
     try:
@@ -376,37 +364,42 @@ try:
         if zipped:
             labels, values = zip(*zipped)
             color_map = {
-                "Net Amount": "#1976D2",
-                "Paid":       "#2E7D32",
-                "Balance":    "#FB8C00",
-                "Rejected":   "#C62828",
-                "Accepted":   "#6D6D6D",
+                "Paid":     "#2E7D32",   # green
+                "Balance":  "#FB8C00",   # orange
+                "Rejected": "#C62828",   # red
+                "Accepted": "#6D6D6D",   # gray
             }
             colors = [color_map.get(lbl, "#9E9E9E") for lbl in labels]
-            fig, ax = plt.subplots(figsize=(6.5, 6.5))
+
+            fig, ax = plt.subplots(figsize=(5, 5))  # smaller donut
             wedges, _, _ = ax.pie(
                 values,
                 labels=None,
-                autopct=lambda pct: (f"{pct:.1f}%") if pct >= 3 else "",
+                autopct=lambda pct: f"{pct:.1f}%" if pct >= 3 else "",
                 startangle=90,
                 counterclock=False,
                 colors=colors,
                 wedgeprops=dict(width=0.35, edgecolor="white")
             )
+
             total = float(np.sum(values))
             ax.text(0, 0, f"TOTAL\n{total:,.0f}", ha="center", va="center",
-                    fontsize=14, fontweight="bold")
+                    fontsize=13, fontweight="bold")
             legend_labels = [f"{lbl}: {val:,.2f}" for lbl, val in zip(labels, values)]
-            ax.legend(wedges, legend_labels, title="KPIs", loc="center left",
-                      bbox_to_anchor=(1, 0.5))
+            ax.legend(
+                wedges, legend_labels, title="KPIs",
+                loc="lower right", bbox_to_anchor=(1.05, 0.05),
+                frameon=True, fontsize=9, title_fontsize=10
+            )
             ax.set_aspect("equal")
-            st.pyplot(fig, use_container_width=True)
+            fig.tight_layout()
+            st.pyplot(fig, use_container_width=False)
         else:
             st.info("No positive KPI values to chart.")
     except ModuleNotFoundError:
         st.warning("Matplotlib not installed — showing a simple bar chart instead.")
-        _df = pd.DataFrame({"Value": [net, paid, bal, rej, acc]}, index=labels)
-        st.bar_chart(_df, use_container_width=True)
+        _df = pd.DataFrame({"Value": [paid, bal, rej, acc]}, index=labels)
+        st.bar_chart(_df, use_container_width=False)
 
     # ---------- Tabs ----------
     t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, SHEET_DETAIL])
@@ -438,3 +431,5 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
+   
