@@ -42,7 +42,6 @@ CENTERS = {
         "generator": BASE / "pharmacy_exclusive_report_with_aging.py",
     },
 }
-
 YEARS = [2024, 2025]
 
 # Canonical sheet names expected from generators
@@ -165,11 +164,12 @@ def style_grid(df: pd.DataFrame):
     if df.shape[1] == 0:
         return df.style
     df = df.copy()
+    # index 1,2,3... (no color)
     df.index = range(1, len(df) + 1)
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
-    border = "#334155"; header_bg = "#0EA5E9"; header_font = "#E6F6FF"
+    border = "#CBD5E1"; header_bg = "#2196F3"; header_font = "#FFFFFF"
     styler = (
         df.style
         .set_table_styles([
@@ -179,36 +179,24 @@ def style_grid(df: pd.DataFrame):
                                                     ("font-weight", "700"),
                                                     ("color", header_font)]},
             {"selector": "th.row_heading", "props": [("border", f"1px solid {border}"),
-                                                     ("background-color", "#0B1220"),
-                                                     ("color", "#CBD5E1"),
+                                                     ("background-color", "#FFFFFF"),
+                                                     ("color", "#000000"),
                                                      ("font-weight", "500")]},
-            {"selector": "td", "props": [("border", f"1px solid {border}"), ("color", "#E2E8F0")]}
+            {"selector": "td", "props": [("border", f"1px solid {border}")]},
         ])
-        .set_properties(subset=[first_col], **{"font-weight": "600", "color": "#F8FAFC"})
+        .set_properties(subset=[first_col], **{"font-weight": "600"})
         .format(fmt_map)
     )
     try:
         mask_gt = df[first_col].astype(str).str.contains("grand total", case=False, na=False)
         if mask_gt.any():
             def highlight(row):
-                return (["font-weight:700; color:#111827; background-color:#FDE68A"] * len(row)
+                return (["font-weight:700; color:black; background-color:#FFF7E0"] * len(row)
                         if mask_gt.iloc[row.name - 1] else [""] * len(row))
             styler = styler.apply(highlight, axis=1)
     except Exception:
         pass
     return styler
-
-# ---------- dark skin (for 2nd-image vibe) ----------
-st.markdown("""
-<style>
-:root { --bg:#0B1220; --panel:#0F172A; --ink:#E2E8F0; --muted:#94A3B8; }
-body, .stApp { background: var(--bg); color: var(--ink); }
-.block-container { padding-top: 1.2rem; }
-.stMetric { background: var(--panel); padding: 0.8rem; border-radius: 16px; }
-[data-testid="stMetricValue"] { color: #F8FAFC; }
-[data-testid="stMetricDelta"] { color: #38BDF8; }
-</style>
-""", unsafe_allow_html=True)
 
 # ---------- admin ----------
 def is_admin_mode() -> bool:
@@ -398,90 +386,57 @@ try:
     rej  = ksum(totals, "Rejected", "Rejection")
     acc  = ksum(totals, "Accepted")
 
-    # Aging buckets (best-effort; uses common column names)
+    # Aging buckets (best-effort)
     def pick_bucket(name):
         for c in summary.columns:
             s = str(c).strip().lower()
             if name in s:
                 return c
         return None
-    b0 = ksum(summary, pick_bucket("0–30") or pick_bucket("0-30") or pick_bucket("0 to 30") or pick_bucket("0 to30") or pick_bucket("0_30"))
+    b0 = ksum(summary, pick_bucket("0–30") or pick_bucket("0-30") or pick_bucket("0 to 30") or pick_bucket("0_30"))
     b1 = ksum(summary, pick_bucket("31–45") or pick_bucket("31-45"))
     b2 = ksum(summary, pick_bucket("46–60") or pick_bucket("46-60"))
     b3 = ksum(summary, pick_bucket("61–90") or pick_bucket("61-90"))
     b4 = ksum(summary, pick_bucket(">90")   or pick_bucket("90+") or pick_bucket("> 90"))
     aging_total = max(b0 + b1 + b2 + b3 + b4, 0.0)
 
-    # ---------- Neon 3×3 ring gauges ----------
+    # ---------- Excel-style charts ----------
     import matplotlib.pyplot as plt
     import numpy as np
 
-    PALETTE = {
-        "teal":   "#10B981",
-        "mag":    "#EC4899",
-        "lime":   "#A3E635",
-        "amber":  "#F59E0B",
-        "red":    "#F43F5E",
-        "cyan":   "#22D3EE",
-        "muted":  "#1F2937"
-    }
+    st.subheader("Charts")
 
-    def ring_gauge(value, total, label, color, fmt="amount", size=1.65):
-        """Draw a small donut with subtle inner shadow (3D-ish)."""
-        total = total if total > 0 else (value if value > 0 else 1.0)
-        pct = 0 if total == 0 else (value / total)
-        shown = max(min(pct, 1.0), 0.0)
-        # Base figure
-        fig, ax = plt.subplots(figsize=(size, size), dpi=150)
-        ax.set_facecolor("#0B1220")
-        # Back ring
-        ax.pie([1], radius=1.0, colors=["#1E293B"], startangle=90,
-               wedgeprops=dict(width=0.26, edgecolor="#0B1220"))
-        # Value ring
-        ax.pie([shown, 1 - shown], radius=1.0, colors=[color, "#111827"],
-               startangle=90, counterclock=False,
-               wedgeprops=dict(width=0.26, edgecolor="#0B1220"))
-        # Inner glow (fake depth)
-        ax.pie([1], radius=0.74, colors=["#0B1220"],
-               wedgeprops=dict(width=0.02, edgecolor="#0B1220"))
-        ax.set(aspect="equal")
-        ax.axis("off")
-        # Center text
-        if fmt == "amount":
-            center = f"{value:,.0f}"
-        elif fmt == "pct":
-            center = f"{shown*100:.0f}%"
-        else:
-            center = str(value)
-        ax.text(0, 0.10, center, ha="center", va="center", fontsize=10, color="#F8FAFC", fontweight="bold")
-        ax.text(0, -0.78, label, ha="center", va="center", fontsize=7.5, color="#9CA3AF")
-        st.pyplot(fig, use_container_width=False, clear_figure=True)
+    c1, c2 = st.columns(2)
+    # Bar: amounts
+    with c1:
+        fig1, ax1 = plt.subplots(figsize=(5.4, 3.4), dpi=150)
+        labels = ["Paid", "Balance", "Rejected", "Accepted"]
+        vals   = [paid,   bal,       rej,        acc]
+        ax1.bar(labels, vals)
+        ax1.set_title("Amounts (Bar)", fontsize=11)
+        ax1.set_ylabel("AED")
+        ax1.grid(axis="y", linestyle="--", alpha=0.4)
+        for i, v in enumerate(vals):
+            ax1.text(i, v, f"{v:,.0f}", ha="center", va="bottom", fontsize=8)
+        fig1.tight_layout()
+        st.pyplot(fig1, use_container_width=True)
 
-    st.subheader("Overview")
-    # Top KPI row (amounts)
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Net Amount", f"{net:,.2f}")
-    k2.metric("Paid",       f"{paid:,.2f}")
-    k3.metric("Balance",    f"{bal:,.2f}")
-    k4.metric("Rejected",   f"{rej:,.2f}")
-    k5.metric("Accepted",   f"{acc:,.2f}")
-
-    # 3×3 grid
-    st.markdown("### ")
-    r1 = st.columns(3)
-    with r1[0]: ring_gauge(paid, net or paid, "Paid",     PALETTE["teal"],  fmt="amount")
-    with r1[1]: ring_gauge(bal,  net or bal,  "Balance",  PALETTE["amber"], fmt="amount")
-    with r1[2]: ring_gauge(rej,  net or rej,  "Rejected", PALETTE["red"],   fmt="amount")
-
-    r2 = st.columns(3)
-    with r2[0]: ring_gauge(b0, aging_total, "0–30 Days",  PALETTE["cyan"],  fmt="pct")
-    with r2[1]: ring_gauge(b1, aging_total, "31–45 Days", PALETTE["lime"],  fmt="pct")
-    with r2[2]: ring_gauge(b2, aging_total, "46–60 Days", PALETTE["mag"],   fmt="pct")
-
-    r3 = st.columns(3)
-    with r3[0]: ring_gauge(b3, aging_total, "61–90 Days", PALETTE["amber"], fmt="pct")
-    with r3[1]: ring_gauge(b4, aging_total, ">90 Days",   PALETTE["red"],   fmt="pct")
-    with r3[2]: ring_gauge(net, net, "Net Amount",        PALETTE["teal"],  fmt="amount")
+    # Pie: aging share
+    with c2:
+        fig2, ax2 = plt.subplots(figsize=(5.4, 3.4), dpi=150)
+        pie_labels = []
+        pie_vals = []
+        for lab, v in [("0–30", b0), ("31–45", b1), ("46–60", b2), ("61–90", b3), (">90", b4)]:
+            if v and v > 0:
+                pie_labels.append(lab)
+                pie_vals.append(v)
+        if sum(pie_vals) == 0:
+            pie_labels, pie_vals = ["No Aging Data"], [1]
+        ax2.pie(pie_vals, labels=pie_labels, autopct="%1.0f%%", startangle=90)
+        ax2.set_title("Aging Share (Pie)", fontsize=11)
+        ax2.axis("equal")
+        fig2.tight_layout()
+        st.pyplot(fig2, use_container_width=True)
 
     # ---------- Tabs ----------
     t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, SHEET_DETAIL])
