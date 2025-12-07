@@ -133,7 +133,7 @@ def load_detail(path: str, sheet_name: str, _token: float):
     xls = load_book(path, _token)
     return xls.parse(sheet_name)
 
-# ---------- helpers ----------
+# ---------- table helpers ----------
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -159,7 +159,6 @@ def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150
     n = 0 if df is None else len(df)
     return header_px + (n * row_px) + padding_px
 
-# ---------- table style ----------
 def style_grid(df: pd.DataFrame):
     if not isinstance(df, pd.DataFrame):
         return df
@@ -170,7 +169,7 @@ def style_grid(df: pd.DataFrame):
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
-    border = "#CBD5E1"; header_bg = "#2196F3"; header_font = "#FFFFFF"
+    border = "#334155"; header_bg = "#0EA5E9"; header_font = "#E6F6FF"
     styler = (
         df.style
         .set_table_styles([
@@ -180,24 +179,36 @@ def style_grid(df: pd.DataFrame):
                                                     ("font-weight", "700"),
                                                     ("color", header_font)]},
             {"selector": "th.row_heading", "props": [("border", f"1px solid {border}"),
-                                                     ("background-color", "#FFFFFF"),
-                                                     ("color", "#000000"),
+                                                     ("background-color", "#0B1220"),
+                                                     ("color", "#CBD5E1"),
                                                      ("font-weight", "500")]},
-            {"selector": "td", "props": [("border", f"1px solid {border}")]}
+            {"selector": "td", "props": [("border", f"1px solid {border}"), ("color", "#E2E8F0")]}
         ])
-        .set_properties(subset=[first_col], **{"font-weight": "600"})
+        .set_properties(subset=[first_col], **{"font-weight": "600", "color": "#F8FAFC"})
         .format(fmt_map)
     )
     try:
         mask_gt = df[first_col].astype(str).str.contains("grand total", case=False, na=False)
         if mask_gt.any():
             def highlight(row):
-                return (["font-weight:700; color:black; background-color:#FFF7E0"] * len(row)
+                return (["font-weight:700; color:#111827; background-color:#FDE68A"] * len(row)
                         if mask_gt.iloc[row.name - 1] else [""] * len(row))
             styler = styler.apply(highlight, axis=1)
     except Exception:
         pass
     return styler
+
+# ---------- dark skin (for 2nd-image vibe) ----------
+st.markdown("""
+<style>
+:root { --bg:#0B1220; --panel:#0F172A; --ink:#E2E8F0; --muted:#94A3B8; }
+body, .stApp { background: var(--bg); color: var(--ink); }
+.block-container { padding-top: 1.2rem; }
+.stMetric { background: var(--panel); padding: 0.8rem; border-radius: 16px; }
+[data-testid="stMetricValue"] { color: #F8FAFC; }
+[data-testid="stMetricDelta"] { color: #38BDF8; }
+</style>
+""", unsafe_allow_html=True)
 
 # ---------- admin ----------
 def is_admin_mode() -> bool:
@@ -374,7 +385,7 @@ try:
     if not summary.empty:
         summary = ensure_grand_total(summary, summary.columns[0])
 
-    # ---------- KPIs (no AED) ----------
+    # ---------- KPIs ----------
     def ksum(df, *cands):
         for col in cands:
             if col in df.columns:
@@ -387,6 +398,67 @@ try:
     rej  = ksum(totals, "Rejected", "Rejection")
     acc  = ksum(totals, "Accepted")
 
+    # Aging buckets (best-effort; uses common column names)
+    def pick_bucket(name):
+        for c in summary.columns:
+            s = str(c).strip().lower()
+            if name in s:
+                return c
+        return None
+    b0 = ksum(summary, pick_bucket("0–30") or pick_bucket("0-30") or pick_bucket("0 to 30") or pick_bucket("0 to30") or pick_bucket("0_30"))
+    b1 = ksum(summary, pick_bucket("31–45") or pick_bucket("31-45"))
+    b2 = ksum(summary, pick_bucket("46–60") or pick_bucket("46-60"))
+    b3 = ksum(summary, pick_bucket("61–90") or pick_bucket("61-90"))
+    b4 = ksum(summary, pick_bucket(">90")   or pick_bucket("90+") or pick_bucket("> 90"))
+    aging_total = max(b0 + b1 + b2 + b3 + b4, 0.0)
+
+    # ---------- Neon 3×3 ring gauges ----------
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    PALETTE = {
+        "teal":   "#10B981",
+        "mag":    "#EC4899",
+        "lime":   "#A3E635",
+        "amber":  "#F59E0B",
+        "red":    "#F43F5E",
+        "cyan":   "#22D3EE",
+        "muted":  "#1F2937"
+    }
+
+    def ring_gauge(value, total, label, color, fmt="amount", size=1.65):
+        """Draw a small donut with subtle inner shadow (3D-ish)."""
+        total = total if total > 0 else (value if value > 0 else 1.0)
+        pct = 0 if total == 0 else (value / total)
+        shown = max(min(pct, 1.0), 0.0)
+        # Base figure
+        fig, ax = plt.subplots(figsize=(size, size), dpi=150)
+        ax.set_facecolor("#0B1220")
+        # Back ring
+        ax.pie([1], radius=1.0, colors=["#1E293B"], startangle=90,
+               wedgeprops=dict(width=0.26, edgecolor="#0B1220"))
+        # Value ring
+        ax.pie([shown, 1 - shown], radius=1.0, colors=[color, "#111827"],
+               startangle=90, counterclock=False,
+               wedgeprops=dict(width=0.26, edgecolor="#0B1220"))
+        # Inner glow (fake depth)
+        ax.pie([1], radius=0.74, colors=["#0B1220"],
+               wedgeprops=dict(width=0.02, edgecolor="#0B1220"))
+        ax.set(aspect="equal")
+        ax.axis("off")
+        # Center text
+        if fmt == "amount":
+            center = f"{value:,.0f}"
+        elif fmt == "pct":
+            center = f"{shown*100:.0f}%"
+        else:
+            center = str(value)
+        ax.text(0, 0.10, center, ha="center", va="center", fontsize=10, color="#F8FAFC", fontweight="bold")
+        ax.text(0, -0.78, label, ha="center", va="center", fontsize=7.5, color="#9CA3AF")
+        st.pyplot(fig, use_container_width=False, clear_figure=True)
+
+    st.subheader("Overview")
+    # Top KPI row (amounts)
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Net Amount", f"{net:,.2f}")
     k2.metric("Paid",       f"{paid:,.2f}")
@@ -394,38 +466,22 @@ try:
     k4.metric("Rejected",   f"{rej:,.2f}")
     k5.metric("Accepted",   f"{acc:,.2f}")
 
-    # ---------- Compact Donut (3x3) ----------
-    labels = ["Paid", "Balance", "Rejected", "Accepted"]
-    values = [paid, bal, rej, acc]
-    zipped = [(l, v) for l, v in zip(labels, values) if v and v > 0]
+    # 3×3 grid
+    st.markdown("### ")
+    r1 = st.columns(3)
+    with r1[0]: ring_gauge(paid, net or paid, "Paid",     PALETTE["teal"],  fmt="amount")
+    with r1[1]: ring_gauge(bal,  net or bal,  "Balance",  PALETTE["amber"], fmt="amount")
+    with r1[2]: ring_gauge(rej,  net or rej,  "Rejected", PALETTE["red"],   fmt="amount")
 
-    try:
-        import matplotlib.pyplot as plt
-        import numpy as np
-        if zipped:
-            labels, values = zip(*zipped)
-            color_map = {"Paid": "#2E7D32", "Balance": "#FB8C00", "Rejected": "#C62828", "Accepted": "#6D6D6D"}
-            colors = [color_map.get(lbl, "#9E9E9E") for lbl in labels]
-            fig, ax = plt.subplots(figsize=(3, 3))
-            ax.pie(
-                values,
-                labels=None,
-                autopct=lambda pct: f"{pct:.1f}%" if pct >= 4 else "",
-                startangle=90,
-                counterclock=False,
-                colors=colors,
-                wedgeprops=dict(width=0.35, edgecolor="white")
-            )
-            total = float(np.sum(values))
-            ax.text(0, 0, f"{total:,.0f}", ha="center", va="center", fontsize=10, fontweight="bold", color="#333333")
-            ax.set_aspect("equal")
-            fig.tight_layout()
-            st.pyplot(fig, use_container_width=False)
-        else:
-            st.info("No positive KPI values to chart.")
-    except ModuleNotFoundError:
-        _df = pd.DataFrame({"Value": [paid, bal, rej, acc]}, index=labels)
-        st.bar_chart(_df, use_container_width=False)
+    r2 = st.columns(3)
+    with r2[0]: ring_gauge(b0, aging_total, "0–30 Days",  PALETTE["cyan"],  fmt="pct")
+    with r2[1]: ring_gauge(b1, aging_total, "31–45 Days", PALETTE["lime"],  fmt="pct")
+    with r2[2]: ring_gauge(b2, aging_total, "46–60 Days", PALETTE["mag"],   fmt="pct")
+
+    r3 = st.columns(3)
+    with r3[0]: ring_gauge(b3, aging_total, "61–90 Days", PALETTE["amber"], fmt="pct")
+    with r3[1]: ring_gauge(b4, aging_total, ">90 Days",   PALETTE["red"],   fmt="pct")
+    with r3[2]: ring_gauge(net, net, "Net Amount",        PALETTE["teal"],  fmt="amount")
 
     # ---------- Tabs ----------
     t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, SHEET_DETAIL])
@@ -485,3 +541,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
