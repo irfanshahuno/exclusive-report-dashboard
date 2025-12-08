@@ -300,7 +300,7 @@ src_path = folder / cfg["src_name"]
 out_path = folder / cfg["out_name"]
 gen_path = cfg["generator"]
 
-# Keep URL in sync
+# Keep URL in sync (so direct links work)
 if (st.query_params.get("center") != st.session_state.center_key) or (st.query_params.get("year") != str(st.session_state.year)):
     st.query_params["center"] = st.session_state.center_key
     st.query_params["year"]   = str(st.session_state.year)
@@ -310,24 +310,35 @@ mt = mtime_token(out_path)
 built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
 st.caption(f"Built: **{built}** · Source: `{src_path}` · Report: `{out_path.name}` · Hash: `{sha1_short(out_path) if mt else '—'}`")
 
-# Back button
-if st.button("◀ Choose another center"):
+# ---------- back to center picker (clear URL params too) ----------
+if st.button("◀ Choose another center", key="btn_back_center"):
     st.session_state.center_key = None
     st.session_state.year = None
+    try:
+        if "center" in st.query_params:
+            del st.query_params["center"]
+        if "year" in st.query_params:
+            del st.query_params["year"]
+    except Exception:
+        # Fallback for older Streamlit:
+        st.experimental_set_query_params()
     st.rerun()
 
 # ---------- admin panel ----------
 if st.session_state.is_admin:
     st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
     with st.expander("⬆️ Upload/replace source Excel for this year", expanded=False):
-        up = st.file_uploader(f"Upload .xlsx for {st.session_state.year}", type=["xlsx"], key=f"uploader_{st.session_state.center_key}_{st.session_state.year}")
+        up = st.file_uploader(
+            f"Upload .xlsx for {st.session_state.year}",
+            type=["xlsx"],
+            key=f"uploader_{st.session_state.center_key}_{st.session_state.year}",
+        )
         if up:
             folder.mkdir(parents=True, exist_ok=True)
             src_path.write_bytes(up.read())
             st.success(f"Saved to {src_path}")
 
-    colA, colB, colC = st.columns(3)
-    if colA.button("↻ Rebuild report", use_container_width=True, key=f"rebuild_{ck}_{st.session_state.year}"):
+    if st.button("↻ Rebuild report", use_container_width=True, key=f"rebuild_{ck}_{st.session_state.year}"):
         try:
             if not gen_path.exists():
                 st.error(f"Generator not found: {gen_path}")
@@ -491,5 +502,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
 
