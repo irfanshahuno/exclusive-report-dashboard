@@ -35,7 +35,7 @@ CENTERS = {
     },
     "pharmacy": {
         "key": "pharmacy",
-        "name": "Excellent Pharmacy (PF3205)",
+        "name": "Excellent Pharmacy (PF3205)",   # <- updated display name
         "folder_root": DATA_DIR / "excellent_pharmacy",
         "src_name": "source.xlsx",
         "out_name": "Pharmacy_Exclusive_Report_with_Aging.xlsx",
@@ -268,17 +268,32 @@ if ck not in CENTERS:
             st.session_state.center_key = "pharmacy"; st.session_state.year = None; st.rerun()
     st.stop()
 
-# ---------- year select ----------
+# ---------- year select (HIGHLIGHT active year) ----------
 st.subheader("Select Year")
 ycols = st.columns(len(YEARS))
-chosen_year = None
 for i, y in enumerate(YEARS):
     with ycols[i]:
-        if st.button(str(y), use_container_width=True):
-            chosen_year = y
-if chosen_year is not None:
-    st.session_state.year = chosen_year
-    st.rerun()
+        if st.session_state.year == y:
+            st.markdown(
+                f"""
+                <div style="
+                    background-color:#2196F3;
+                    color:white;
+                    text-align:center;
+                    padding:0.8em;
+                    border-radius:6px;
+                    font-weight:700;
+                    font-size:1.1em;
+                    border:2px solid #1976D2;">
+                    {y}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            if st.button(str(y), use_container_width=True, key=f"year_btn_{y}"):
+                st.session_state.year = y
+                st.rerun()
 
 # Auto-pick latest year with a report else fallback
 if st.session_state.year is None:
@@ -405,12 +420,12 @@ try:
     rej  = ksum(totals_no_gt, "Rejected", "Rejection")
     acc  = ksum(totals_no_gt, "Accepted")
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Net Amount", f"{net:,.2f}")
-    c2.metric("Paid",       f"{paid:,.2f}")
-    c3.metric("Balance",    f"{bal:,.2f}")
-    c4.metric("Rejected",   f"{rej:,.2f}")
-    c5.metric("Accepted",   f"{acc:,.2f}")
+    c0, c1, c2, c3, c4 = st.columns(5)
+    c0.metric("Net Amount", f"{net:,.2f}")
+    c1.metric("Paid",       f"{paid:,.2f}")
+    c2.metric("Balance",    f"{bal:,.2f}")
+    c3.metric("Rejected",   f"{rej:,.2f}")
+    c4.metric("Accepted",   f"{acc:,.2f}")
 
     def human_aed(x, _pos=None):
         ax = abs(x)
@@ -530,5 +545,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
 
