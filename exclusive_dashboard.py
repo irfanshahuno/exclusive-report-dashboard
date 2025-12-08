@@ -146,7 +146,6 @@ def _pretty_span(d1: pd.Timestamp, d2: pd.Timestamp) -> str:
     same_year = d1.year == d2.year
     full_start = d1.day == 1
     full_end = d2.day == _last_day_of_month(d2.year, d2.month)
-
     if same_year and full_start and full_end:
         if d1.month == d2.month:
             return f"{_month_abbr(d1.month)} {d1.year}"
@@ -161,7 +160,7 @@ def _pretty_span(d1: pd.Timestamp, d2: pd.Timestamp) -> str:
 @st.cache_data(show_spinner=False)
 def find_date_span(path: str, preferred_detail_sheet: str | None, _token: float):
     """
-    Detect min/max service dates and likely date column.
+    Detect min/max service dates and the most valid date column.
     Returns (min_date, max_date, sheet_used, date_col) or None.
     """
     try:
@@ -187,7 +186,6 @@ def find_date_span(path: str, preferred_detail_sheet: str | None, _token: float)
             if not poss:
                 continue
 
-            # choose the best date column (first with many valid dates)
             best_col, best_count, best_min, best_max = None, -1, None, None
             for c in poss:
                 s = pd.to_datetime(df[c], errors="coerce")
@@ -269,7 +267,6 @@ def style_grid(df: pd.DataFrame):
         pass
     return styler
 
-# ---------- aggregates from Detail (for filtering) ----------
 def ksum(df: pd.DataFrame, *cands):
     for col in cands:
         if col in df.columns:
@@ -280,13 +277,11 @@ def recompute_totals_from_detail(df_detail: pd.DataFrame) -> pd.DataFrame:
     """Build an Insurance_Totals-like table from the detail rows."""
     if df_detail is None or df_detail.empty:
         return pd.DataFrame()
-    # normalize insurance column
     name_col = None
     for c in df_detail.columns:
         if str(c).strip().lower() in {"insurance", "payer", "company"}:
             name_col = c; break
     if not name_col:
-        # fallback single-row totals if no insurance column exists
         row = {
             "Insurance": "All",
             "Net Amount": ksum(df_detail, "Net Amount", "NetAmount", "Net"),
@@ -306,16 +301,13 @@ def recompute_totals_from_detail(df_detail: pd.DataFrame) -> pd.DataFrame:
     }
     agg = {}
     for friendly, cands in out_cols.items():
-        # pick the first existing candidate
         chosen = next((c for c in cands if c in df_detail.columns), None)
         if chosen:
             agg[chosen] = "sum"
-
     if not agg:
         return pd.DataFrame()
 
     g = df_detail.groupby(name_col, dropna=False).agg(agg).reset_index()
-    # rename aggregated columns back to friendly names
     rename_map = {}
     for friendly, cands in out_cols.items():
         for c in cands:
@@ -324,7 +316,6 @@ def recompute_totals_from_detail(df_detail: pd.DataFrame) -> pd.DataFrame:
                 break
     g = g.rename(columns=rename_map)
     g = g.rename(columns={name_col: "Insurance"})
-    # ensure all friendly columns exist
     for friendly in ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]:
         if friendly not in g.columns:
             g[friendly] = 0.0
@@ -385,7 +376,6 @@ if (st.session_state.center_key != st.session_state.last_center_key) or (st.sess
     load_core_sheets.clear(); load_detail.clear(); load_book.clear(); find_date_span.clear()
     st.session_state.last_center_key = st.session_state.center_key
     st.session_state.last_year = st.session_state.year
-    # also reset date filter on center/year change
     st.session_state.date_filter_active = False
     st.session_state.date_filter_start = None
     st.session_state.date_filter_end = None
@@ -408,7 +398,7 @@ if ck not in CENTERS:
             st.session_state.center_key = "pharmacy"; st.session_state.year = None; st.rerun()
     st.stop()
 
-# ---------- year select (HIGHLIGHT active year) ----------
+# ---------- year select ----------
 st.subheader("Select Year")
 ycols = st.columns(len(YEARS))
 for i, y in enumerate(YEARS):
@@ -530,6 +520,20 @@ try:
     if span:
         dmin, dmax, detail_sheet, date_col = span
 
+    # Helper: pretty print the currently selected filter range
+    def _pretty_selected_range() -> str:
+        s = st.session_state.get("date_filter_start")
+        e = st.session_state.get("date_filter_end")
+        if not s or not e:
+            return ""
+        s = pd.to_datetime(s).date()
+        e = pd.to_datetime(e).date()
+        if s.year == e.year:
+            if s.month == e.month:
+                return f"{s.strftime('%b %d')}–{e.strftime('%d, %Y')}"
+            return f"{s.strftime('%b %d')}–{e.strftime('%b %d, %Y')}"
+        return f"{s.strftime('%b %d, %Y')}–{e.strftime('%b %d, %Y')}"
+
     # clickable badge UI
     if span:
         label = _pretty_span(dmin, dmax)
@@ -539,7 +543,6 @@ try:
                 st.markdown("**Quick months**")
                 # month chips covering the span year(s)
                 min_y, max_y = dmin.year, dmax.year
-                # allow only months that intersect the workbook span
                 chips = []
                 for y in range(min_y, max_y + 1):
                     for m in range(1, 13):
@@ -579,9 +582,38 @@ try:
                     st.rerun()
         with col_actions:
             if st.session_state.date_filter_active:
-                st.success("Filter: ON")
+                st.markdown(
+                    f"""
+                    <div style="
+                        padding:10px 14px;
+                        border-radius:10px;
+                        background:#E8F5E9;
+                        border:1px solid #C8E6C9;
+                        font-weight:700;
+                        color:#1B5E20;">
+                        ✅ Filter: ON
+                        <div style="margin-top:6px; font-weight:600; color:#0B3D0B;">
+                            Range: {_pretty_selected_range()}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
             else:
-                st.info("Filter: OFF")
+                st.markdown(
+                    """
+                    <div style="
+                        padding:10px 14px;
+                        border-radius:10px;
+                        background:#F1F5F9;
+                        border:1px solid #CBD5E1;
+                        font-weight:700;
+                        color:#0F172A;">
+                        ⛔ Filter: OFF
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
     # Normalize totals from workbook
     if "Insurance" not in totals.columns and len(totals.columns) > 0:
@@ -589,7 +621,6 @@ try:
     for a, b in [("NetAmount","Net Amount"), ("Net amount","Net Amount"), ("Net","Net Amount")]:
         if a in totals.columns and "Net Amount" not in totals.columns:
             totals = totals.rename(columns={a: "Net Amount"})
-
     totals = trim_empty_rows(totals)
     totals = ensure_grand_total(totals, "Insurance")
 
@@ -602,23 +633,20 @@ try:
     filtered_totals = None
     net = paid = bal = rej = acc = 0.0
     use_filtered = False
-    df_detail = None
 
     if st.session_state.date_filter_active and detail_sheet and date_col:
         try:
             df_detail = load_detail(str(out_path), detail_sheet, token)
-            if not df_detail.empty:
+            if not df_detail.empty and date_col in df_detail.columns:
                 s_dates = pd.to_datetime(df_detail[date_col], errors="coerce")
                 mask = (s_dates.dt.date >= st.session_state.date_filter_start) & (s_dates.dt.date <= st.session_state.date_filter_end)
                 df_filt = df_detail.loc[mask].copy()
                 if not df_filt.empty:
-                    # KPIs from filtered detail
                     net = ksum(df_filt, "Net Amount", "NetAmount", "Net")
                     paid = ksum(df_filt, "Paid")
                     bal  = ksum(df_filt, "Balance")
                     rej  = ksum(df_filt, "Rejected", "Rejection")
                     acc  = ksum(df_filt, "Accepted")
-                    # Build an Insurance_Totals-like table
                     filtered_totals = recompute_totals_from_detail(df_filt)
                     filtered_totals = trim_empty_rows(filtered_totals)
                     filtered_totals = ensure_grand_total(filtered_totals, "Insurance")
@@ -644,6 +672,13 @@ try:
         rej  = ksum(totals_no_gt, "Rejected", "Rejection")
         acc  = ksum(totals_no_gt, "Accepted")
 
+    # >>> Clear caption above the KPIs when filtered
+    if st.session_state.date_filter_active:
+        st.caption(
+            f"Showing data for **{_pretty_selected_range()}** "
+            + (f"(from `{detail_sheet}` → `{date_col}`)" if detail_sheet and date_col else "")
+        )
+
     c0, c1, c2, c3, c4 = st.columns(5)
     c0.metric("Net Amount", f"{net:,.2f}")
     c1.metric("Paid",       f"{paid:,.2f}")
@@ -660,7 +695,7 @@ try:
 
     labels = ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]
     values = [net,          paid,   bal,       rej,        acc]
-    colors = ["#455A64",    "#2E7D32", "#FB8C00", "#C62828", "#1976D2"]  # gray, green, orange, red, blue
+    colors = ["#455A64",    "#2E7D32", "#FB8C00", "#C62828", "#1976D2"]
 
     st.subheader("Chart")
     fig, ax = plt.subplots(figsize=(6.4, 2.6), dpi=160)
@@ -683,9 +718,8 @@ try:
     t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, SHEET_DETAIL])
 
     with t1:
-        # If filtered totals exist, show them first as a separate table
         if use_filtered and filtered_totals is not None and not filtered_totals.empty:
-            st.markdown("**Filtered Insurance Totals (from Detail)**")
+            st.markdown(f"**Filtered Insurance Totals — {_pretty_selected_range()}**")
             st.dataframe(style_grid(filtered_totals), use_container_width=True,
                          height=full_height(filtered_totals))
             st.divider()
@@ -737,7 +771,6 @@ try:
                     raise RuntimeError(f"Detail sheet not found. Available: {', '.join(available)}")
                 df3 = load_detail(str(out_path), detail_sheet2, token)
                 df3 = trim_empty_rows(df3)
-                # If filter ON, show only filtered rows here too
                 if st.session_state.date_filter_active and date_col and date_col in df3.columns:
                     s_dates3 = pd.to_datetime(df3[date_col], errors="coerce")
                     mask3 = (s_dates3.dt.date >= (st.session_state.date_filter_start or date.min)) & \
@@ -781,4 +814,3 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
