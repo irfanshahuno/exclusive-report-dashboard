@@ -35,7 +35,7 @@ CENTERS = {
     },
     "pharmacy": {
         "key": "pharmacy",
-        "name": "Excellent Pharmacy (PF code)",
+        "name": "Excellent Pharmacy (PF3205)",
         "folder_root": DATA_DIR / "excellent_pharmacy",
         "src_name": "source.xlsx",
         "out_name": "Pharmacy_Exclusive_Report_with_Aging.xlsx",
@@ -530,4 +530,5 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
 
