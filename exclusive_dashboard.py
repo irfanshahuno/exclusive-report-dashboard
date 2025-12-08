@@ -164,7 +164,7 @@ def style_grid(df: pd.DataFrame):
     if df.shape[1] == 0:
         return df.style
     df = df.copy()
-    df.index = range(1, len(df) + 1)  # index 1..N (no color)
+    df.index = range(1, len(df) + 1)  # index 1..N
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
@@ -372,16 +372,15 @@ try:
     if not summary.empty:
         summary = ensure_grand_total(summary, summary.columns[0])
 
-    # ---------- Values / KPIs & Chart (pretty, with optional Net) ----------
-    from matplotlib.ticker import FuncFormatter
+    # ---------- KPIs & Compact Colored Chart (includes Net, no double-count) ----------
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
 
     def drop_grand_total(df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return df
         first_col = df.columns[0]
-        mask = ~df[first_col].astype(str).str.contains("grand total", case=False, na=False)
-        return df.loc[mask]
+        return df.loc[~df[first_col].astype(str).str.contains("grand total", case=False, na=False)]
 
     def ksum(df, *cands):
         for col in cands:
@@ -390,62 +389,48 @@ try:
         return 0.0
 
     totals_no_gt = drop_grand_total(totals)
-
+    net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
     paid = ksum(totals_no_gt, "Paid")
     bal  = ksum(totals_no_gt, "Balance")
     rej  = ksum(totals_no_gt, "Rejected", "Rejection")
     acc  = ksum(totals_no_gt, "Accepted")
-    net  = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
 
-    show_net = st.toggle("Show Net Amount", value=False, help="Include Net Amount in KPIs and the chart")
-
-    if show_net:
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Net Amount", f"{net:,.2f}")
-        c2.metric("Paid",       f"{paid:,.2f}")
-        c3.metric("Balance",    f"{bal:,.2f}")
-        c4.metric("Rejected",   f"{rej:,.2f}")
-        c5.metric("Accepted",   f"{acc:,.2f}")
-    else:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Paid",       f"{paid:,.2f}")
-        c2.metric("Balance",    f"{bal:,.2f}")
-        c3.metric("Rejected",   f"{rej:,.2f}")
-        c4.metric("Accepted",   f"{acc:,.2f}")
-
-    st.subheader("Chart")
-
-    labels = ["Paid", "Balance", "Rejected", "Accepted"]
-    values = [paid, bal, rej, acc]
-    colors = ["#2E7D32", "#FB8C00", "#C62828", "#1976D2"]  # green, orange, red, blue
-
-    if show_net:
-        labels = ["Net Amount"] + labels
-        values = [net] + values
-        colors = ["#455A64"] + colors  # slate gray for Net
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Net Amount", f"{net:,.2f}")
+    c2.metric("Paid",       f"{paid:,.2f}")
+    c3.metric("Balance",    f"{bal:,.2f}")
+    c4.metric("Rejected",   f"{rej:,.2f}")
+    c5.metric("Accepted",   f"{acc:,.2f}")
 
     def human_aed(x, _pos=None):
-        absx = abs(x)
-        if absx >= 1_000_000_000:
-            return f"{x/1_000_000_000:.2f}B"
-        if absx >= 1_000_000:
-            return f"{x/1_000_000:.2f}M"
-        if absx >= 1_000:
-            return f"{x/1_000:.1f}k"
+        ax = abs(x)
+        if ax >= 1_000_000_000: return f"{x/1_000_000_000:.2f}B"
+        if ax >= 1_000_000:     return f"{x/1_000_000:.2f}M"
+        if ax >= 1_000:         return f"{x/1_000:.1f}k"
         return f"{x:,.0f}"
 
-    fig, ax = plt.subplots(figsize=(7.8, 3.0), dpi=150)  # compact, neat
-    bars = ax.bar(labels, values, color=colors, edgecolor="#333", linewidth=0.5)
-    ax.set_title("Amounts", fontsize=12, loc="left", pad=6)
+    labels = ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]
+    values = [net,          paid,   bal,       rej,        acc]
+    colors = ["#455A64",    "#2E7D32", "#FB8C00", "#C62828", "#1976D2"]  # gray, green, orange, red, blue
+
+    st.subheader("Chart")
+    fig, ax = plt.subplots(figsize=(6.4, 2.6), dpi=160)  # compact & crisp
+    bars = ax.bar(labels, values, color=colors, edgecolor="#222", linewidth=0.6)
+
+    ax.set_title("Amounts", fontsize=13, loc="left", pad=4)
     ax.set_ylabel("AED")
     ax.yaxis.set_major_formatter(FuncFormatter(human_aed))
     ax.grid(axis="y", linestyle="--", alpha=0.35)
     ax.set_axisbelow(True)
+
+    ymax = max(values) if values else 1.0
     for rect, v in zip(bars, values):
-        ax.text(rect.get_x() + rect.get_width()/2, rect.get_height(),
+        y = max(v, 0.01 * ymax)
+        ax.text(rect.get_x() + rect.get_width()/2, y,
                 f"{v:,.0f}", ha="center", va="bottom", fontsize=9)
     for tick in ax.get_xticklabels():
         tick.set_fontsize(10)
+
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
 
@@ -506,3 +491,5 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
+
