@@ -212,6 +212,15 @@ def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     blank_rows = df2.fillna("").astype(str).apply(lambda row: "".join(row).strip() == "", axis=1)
     return df2.loc[~blank_rows]
 
+def drop_empty_insurance(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
+    """Remove rows where Insurance is blank/None-like, but keep 'Grand Total' rows."""
+    if df is None or df.empty or name_col not in df.columns:
+        return df
+    series = df[name_col].astype(str).fillna("").str.strip()
+    bad = series.str.lower().isin(["", "none", "nan", "null", "na", "-", "--"])
+    keep_grand = series.str.contains("grand total", case=False, na=False)
+    return df.loc[~bad | keep_grand].copy()
+
 def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
     if df is None or df.empty or name_col not in df.columns:
         return df
@@ -622,6 +631,7 @@ try:
         if a in totals.columns and "Net Amount" not in totals.columns:
             totals = totals.rename(columns={a: "Net Amount"})
     totals = trim_empty_rows(totals)
+    totals = drop_empty_insurance(totals, "Insurance")
     totals = ensure_grand_total(totals, "Insurance")
 
     # Summary
@@ -649,12 +659,13 @@ try:
                     acc  = ksum(df_filt, "Accepted")
                     filtered_totals = recompute_totals_from_detail(df_filt)
                     filtered_totals = trim_empty_rows(filtered_totals)
+                    filtered_totals = drop_empty_insurance(filtered_totals, "Insurance")
                     filtered_totals = ensure_grand_total(filtered_totals, "Insurance")
                     use_filtered = True
         except Exception:
             use_filtered = False
 
-    # >>> Clear caption above the KPIs when filtered
+    # >>> Caption above KPIs when filtered
     if st.session_state.date_filter_active:
         st.caption(
             f"Showing data for **{_pretty_selected_range()}** "
@@ -664,7 +675,6 @@ try:
     # ---------- KPIs ----------
     c0, c1, c2, c3, c4 = st.columns(5)
     if not use_filtered:
-        # fallback to workbook totals (excluding any “Grand Total” row)
         def drop_grand_total(df: pd.DataFrame) -> pd.DataFrame:
             if df is None or df.empty:
                 return df
@@ -683,7 +693,7 @@ try:
     c3.metric("Rejected",   f"{rej:,.2f}")
     c4.metric("Accepted",   f"{acc:,.2f}")
 
-    # ---------- Chart (styled like your screenshot) ----------
+    # ---------- Chart (styled) ----------
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter
 
@@ -826,3 +836,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
