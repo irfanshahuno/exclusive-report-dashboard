@@ -1,10 +1,10 @@
 # exclusive_dashboard.py
-from __future__ import annotations
-import sys, subprocess, hashlib, calendar
+import sys
+import subprocess
+import hashlib
+import calendar
 from pathlib import Path
 from datetime import datetime, date
-from typing import Optional, Iterable
-
 import pandas as pd
 import streamlit as st
 
@@ -118,43 +118,48 @@ def autodetect(xls: pd.ExcelFile):
 def load_book(path: str, _token: float):
     return pd.ExcelFile(path, engine="openpyxl")
 
-def _read_excel_safe(path: str, sheet: str, usecols=None, nrows: Optional[int]=None) -> pd.DataFrame:
-    """
-    Low-RAM read: prefer arrow dtypes, then fallback to plain/str on error.
-    """
-    try:
-        return pd.read_excel(
-            path, sheet_name=sheet, engine="openpyxl",
-            usecols=usecols, nrows=nrows, dtype_backend="pyarrow"
-        )
-    except Exception:
-        try:
-            return pd.read_excel(
-                path, sheet_name=sheet, engine="openpyxl",
-                usecols=usecols, nrows=nrows
-            )
-        except Exception:
-            return pd.read_excel(
-                path, sheet_name=sheet, engine="openpyxl",
-                usecols=usecols, nrows=nrows, dtype=str
-            )
-
 @st.cache_data(show_spinner=True)
 def load_core_sheets(path: str, _token: float):
-    """
-    Load totals & summary with arrow dtypes (smaller memory).
-    """
     xls = load_book(path, _token)
     ins_tot, summary, detail, names = autodetect(xls)
     if not ins_tot or not summary:
         raise RuntimeError(f"Required sheets not found. Available: {', '.join(names)}")
-    df_ins  = _read_excel_safe(path, ins_tot)
-    df_sum  = _read_excel_safe(path, summary)
+    df_ins  = xls.parse(ins_tot)
+    df_sum  = xls.parse(summary)
     return df_ins, df_sum, ins_tot, summary, detail, names
 
 # --------- memory-safe readers ----------
 def _safe_read_cols(path: str, sheet: str, usecols, _token: float) -> pd.DataFrame:
-    return _read_excel_safe(path, sheet, usecols=usecols)
+    """Read only selected columns (as strings) for low memory."""
+    return pd.read_excel(
+        path, sheet_name=sheet, engine="openpyxl",
+        usecols=usecols, dtype=str
+    )
+
+# ---------- date parsing (UAE style) ----------
+def _parse_dates_dayfirst(series: pd.Series) -> pd.Series:
+    """
+    Robust date parser that prefers UAE style (dd-mm-YYYY / dd/mm/YYYY),
+    but gracefully handles common alternatives.
+    """
+    s = series.astype(str).str.strip()
+
+    # If values look like dd-mm-YYYY or dd/mm/YYYY, force exact + dayfirst
+    if s.str.match(r"^\d{1,2}[-/]\d{1,2}[-/]\d{4}$").mean() > 0.8:
+        for fmt in ("%d-%m-%Y", "%d/%m/%Y"):
+            out = pd.to_datetime(s, format=fmt, errors="coerce")
+            if out.notna().sum() >= int(0.8 * len(s)):
+                return out
+        return pd.to_datetime(s, errors="coerce", dayfirst=True)
+
+    # Try common alternates
+    for fmt in ("%Y-%m-%d", "%d-%m-%y", "%d/%m/%y"):
+        out = pd.to_datetime(s, format=fmt, errors="coerce")
+        if out.notna().sum() >= int(0.8 * len(s)):
+            return out
+
+    # Last resort: prefer dayfirst
+    return pd.to_datetime(s, errors="coerce", dayfirst=True)
 
 @st.cache_data(show_spinner=False)
 def find_date_span(path: str, preferred_detail_sheet: str | None, _token: float):
@@ -176,7 +181,7 @@ def find_date_span(path: str, preferred_detail_sheet: str | None, _token: float)
             candidates = names
 
         for sheet in candidates:
-            head = _read_excel_safe(path, sheet, nrows=0)
+            head = pd.read_excel(path, sheet_name=sheet, engine="openpyxl", nrows=0)
             cols = list(head.columns)
             if not cols:
                 continue
@@ -184,12 +189,15 @@ def find_date_span(path: str, preferred_detail_sheet: str | None, _token: float)
                         for k in ["date","dos","service","encounter","txn","transaction"])]
             if not date_like:
                 continue
-            df_small = _read_excel_safe(path, sheet, usecols=date_like)
+            df_small = pd.read_excel(
+                path, sheet_name=sheet, engine="openpyxl",
+                usecols=date_like, dtype=str
+            )
             if df_small.empty:
                 continue
             best_col, best_cnt, best_min, best_max = None, -1, None, None
             for c in df_small.columns:
-                s = pd.to_datetime(df_small[c], errors="coerce")
+                s = _parse_dates_dayfirst(df_small[c])   # <—— UAE-style parser
                 cnt = s.notna().sum()
                 if cnt > best_cnt and cnt > 0:
                     best_col = c
@@ -236,6 +244,7 @@ def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df2.loc[~blank_rows]
 
 def drop_empty_insurance(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
+    """Remove rows where Insurance is blank/None-like, but keep 'Grand Total'."""
     if df is None or df.empty or name_col not in df.columns:
         return df
     series = df[name_col].astype(str).fillna("").str.strip()
@@ -265,7 +274,7 @@ def style_grid(df: pd.DataFrame):
     if df.shape[1] == 0:
         return df.style
     df = df.copy()
-    df.index = range(1, len(df) + 1)  # start index at 1
+    df.index = range(1, len(df) + 1)
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
@@ -282,7 +291,7 @@ def style_grid(df: pd.DataFrame):
                                                      ("background-color", "#FFFFFF"),
                                                      ("color", "#000000"),
                                                      ("font-weight", "500")]},
-            {"selector": "td", "props": [("border", f"1px solid {border}")]},
+            {"selector": "td", "props": [("border", f"1px solid {border}")]} ,
         ])
         .set_properties(subset=[first_col], **{"font-weight": "600"})
         .format(fmt_map)
@@ -305,6 +314,7 @@ def ksum(df: pd.DataFrame, *cands):
     return 0.0
 
 def recompute_totals_from_detail(df_detail: pd.DataFrame) -> pd.DataFrame:
+    """Build an Insurance_Totals-like table from the detail rows."""
     if df_detail is None or df_detail.empty:
         return pd.DataFrame()
     name_col = None
@@ -539,7 +549,7 @@ if token == 0.0:
     st.stop()
 
 try:
-    # Load core sheets (low-RAM)
+    # Load core sheets
     totals, summary, s_tot, s_sum, s_det, available = load_core_sheets(str(out_path), token)
 
     # ----- DATE RANGE BADGE + INTERACTIVE FILTER -----
@@ -550,6 +560,7 @@ try:
     if span:
         dmin, dmax, detail_sheet, date_col = span
 
+    # Helper: pretty print current filter range
     def _pretty_selected_range() -> str:
         s = st.session_state.get("date_filter_start")
         e = st.session_state.get("date_filter_end")
@@ -563,12 +574,14 @@ try:
             return f"{s.strftime('%b %d')}–{e.strftime('%b %d, %Y')}"
         return f"{s.strftime('%b %d, %Y')}–{e.strftime('%b %d, %Y')}"
 
+    # clickable badge UI
     if span:
         label = _pretty_span(dmin, dmax)
         col_badge, col_actions = st.columns([6, 2])
         with col_badge:
             with st.popover(f"📅 Data range: {label}", use_container_width=True):
                 st.markdown("**Quick months**")
+                # month chips covering the span year(s)
                 min_y, max_y = dmin.year, dmax.year
                 chips = []
                 for y in range(min_y, max_y + 1):
@@ -642,7 +655,8 @@ try:
                     unsafe_allow_html=True,
                 )
 
-    # Normalize totals
+    # Normalize totals from workbook
+    totals = totals.copy()
     if "Insurance" not in totals.columns and len(totals.columns) > 0:
         totals = totals.rename(columns={totals.columns[0]: "Insurance"})
     for a, b in [("NetAmount","Net Amount"), ("Net amount","Net Amount"), ("Net","Net Amount")]:
@@ -652,6 +666,7 @@ try:
     totals = drop_empty_insurance(totals, "Insurance")
     totals = ensure_grand_total(totals, "Insurance")
 
+    # Summary
     summary = trim_empty_rows(summary)
     if not summary.empty:
         summary = ensure_grand_total(summary, summary.columns[0])
@@ -664,7 +679,7 @@ try:
     if st.session_state.date_filter_active and detail_sheet and date_col:
         try:
             # probe headers
-            head = _read_excel_safe(str(out_path), detail_sheet, nrows=0)
+            head = pd.read_excel(str(out_path), sheet_name=detail_sheet, engine="openpyxl", nrows=0)
             hdr = list(head.columns.astype(str))
             ins_col = next((c for c in hdr if str(c).strip().lower() in {"insurance","payer","company"}), None)
             needed_amount_cols = ["Net Amount","NetAmount","Net","Paid","Balance","Rejected","Rejection","Accepted"]
@@ -674,14 +689,14 @@ try:
 
             df_small = _safe_read_cols(str(out_path), detail_sheet, usecols, token)
             if not df_small.empty:
-                s_dates = pd.to_datetime(df_small[date_col], errors="coerce")
+                s_dates = _parse_dates_dayfirst(df_small[date_col])  # <—— UAE-style parser
                 mask = (s_dates.dt.date >= st.session_state.date_filter_start) & \
                        (s_dates.dt.date <= st.session_state.date_filter_end)
                 df_filt = df_small.loc[mask].copy()
 
+                # Coerce numerics after filtering
                 for c in present:
-                    if c in df_filt.columns:
-                        df_filt[c] = pd.to_numeric(df_filt[c], errors="coerce").fillna(0.0)
+                    df_filt[c] = pd.to_numeric(df_filt[c], errors="coerce").fillna(0.0)
 
                 def pick(*cands):
                     for c in cands:
@@ -700,8 +715,9 @@ try:
                 acc  = float(df_filt[acc_col].sum()) if acc_col else 0.0
 
                 if ins_col:
-                    agg_cols = [x for x in [net_col, paid_col, bal_col, rej_col, acc_col] if x]
-                    grp = df_filt.groupby(ins_col, dropna=False).agg({c: "sum" for c in agg_cols}).reset_index()
+                    grp = df_filt.groupby(ins_col, dropna=False).agg({
+                        c: "sum" for c in [x for x in [net_col, paid_col, bal_col, rej_col, acc_col] if x]
+                    }).reset_index()
                     ren = {}
                     if net_col: ren[net_col] = "Net Amount"
                     if paid_col: ren[paid_col] = "Paid"
@@ -764,7 +780,7 @@ try:
 
     labels = ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]
     values = [net,          paid,   bal,       rej,        acc]
-    colors = ["#1E3A5F", "#2E7D32", "#F2B444", "#C62828", "#1976D2"]
+    colors = ["#1E3A5F", "#2E7D32", "#F2B444", "#C62828", "#1976D2"]  # navy, green, amber, red, blue
 
     st.subheader("")
     fig, ax = plt.subplots(figsize=(8.5, 4.8), dpi=160)
@@ -851,14 +867,17 @@ try:
                     raise RuntimeError(f"Detail sheet not found. Available: {', '.join(available)}")
 
                 # Read just header to get columns
-                head = _read_excel_safe(str(out_path), detail_sheet2, nrows=0)
+                head = pd.read_excel(str(out_path), sheet_name=detail_sheet2, engine="openpyxl", nrows=0)
                 all_cols = list(head.columns.astype(str))
                 if not all_cols:
                     st.warning("No columns found in detail sheet."); st.stop()
 
                 # Count rows cheaply by reading one column
                 first_col = all_cols[0]
-                col_only = _read_excel_safe(str(out_path), detail_sheet2, usecols=[first_col])
+                col_only = pd.read_excel(
+                    str(out_path), sheet_name=detail_sheet2, engine="openpyxl",
+                    usecols=[first_col], dtype=str
+                )
                 total_rows = len(col_only)
                 st.info(f"Rows in sheet: {total_rows:,}")
 
@@ -871,15 +890,14 @@ try:
                 skip = list(range(1, 1 + start))  # skip data rows before our page; keep header (row 0)
                 nrows = min(page_size, max(0, total_rows - start))
 
-                df_page = _read_excel_safe(str(out_path), detail_sheet2, nrows=nrows)
-                if start:
-                    # When using skiprows with fallback readers becomes tricky; we emulate by slicing after read
-                    df_page = _read_excel_safe(str(out_path), detail_sheet2, usecols=all_cols)
-                    df_page = df_page.iloc[start:start+nrows, :]
+                df_page = pd.read_excel(
+                    str(out_path), sheet_name=detail_sheet2, engine="openpyxl",
+                    skiprows=skip, nrows=nrows
+                )
 
                 # Apply date filter to page if active
                 if st.session_state.date_filter_active and date_col and date_col in df_page.columns:
-                    s_dates3 = pd.to_datetime(df_page[date_col], errors="coerce")
+                    s_dates3 = _parse_dates_dayfirst(df_page[date_col])  # <—— UAE-style parser
                     mask3 = (s_dates3.dt.date >= (st.session_state.date_filter_start or date.min)) & \
                             (s_dates3.dt.date <= (st.session_state.date_filter_end or date.max))
                     df_page = df_page.loc[mask3].copy()
@@ -914,3 +932,5 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
+
