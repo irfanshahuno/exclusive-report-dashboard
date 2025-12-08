@@ -300,7 +300,7 @@ src_path = folder / cfg["src_name"]
 out_path = folder / cfg["out_name"]
 gen_path = cfg["generator"]
 
-# Keep URL in sync (so direct links work)
+# Keep URL in sync
 if (st.query_params.get("center") != st.session_state.center_key) or (st.query_params.get("year") != str(st.session_state.year)):
     st.query_params["center"] = st.session_state.center_key
     st.query_params["year"]   = str(st.session_state.year)
@@ -320,7 +320,6 @@ if st.button("◀ Choose another center", key="btn_back_center"):
         if "year" in st.query_params:
             del st.query_params["year"]
     except Exception:
-        # Fallback for older Streamlit:
         st.experimental_set_query_params()
     st.rerun()
 
@@ -383,7 +382,7 @@ try:
     if not summary.empty:
         summary = ensure_grand_total(summary, summary.columns[0])
 
-    # ---------- KPIs & Compact Colored Chart (includes Net, no double-count) ----------
+    # ---------- KPIs & Compact Colored Chart ----------
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter
 
@@ -425,23 +424,19 @@ try:
     colors = ["#455A64",    "#2E7D32", "#FB8C00", "#C62828", "#1976D2"]  # gray, green, orange, red, blue
 
     st.subheader("Chart")
-    fig, ax = plt.subplots(figsize=(6.4, 2.6), dpi=160)  # compact & crisp
+    fig, ax = plt.subplots(figsize=(6.4, 2.6), dpi=160)
     bars = ax.bar(labels, values, color=colors, edgecolor="#222", linewidth=0.6)
-
     ax.set_title("Amounts", fontsize=13, loc="left", pad=4)
     ax.set_ylabel("AED")
     ax.yaxis.set_major_formatter(FuncFormatter(human_aed))
     ax.grid(axis="y", linestyle="--", alpha=0.35)
     ax.set_axisbelow(True)
-
     ymax = max(values) if values else 1.0
     for rect, v in zip(bars, values):
         y = max(v, 0.01 * ymax)
-        ax.text(rect.get_x() + rect.get_width()/2, y,
-                f"{v:,.0f}", ha="center", va="bottom", fontsize=9)
+        ax.text(rect.get_x() + rect.get_width()/2, y, f"{v:,.0f}", ha="center", va="bottom", fontsize=9)
     for tick in ax.get_xticklabels():
         tick.set_fontsize(10)
-
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
 
@@ -452,19 +447,41 @@ try:
         st.dataframe(style_grid(totals), use_container_width=True, height=full_height(totals))
         dl1, dl2 = st.columns(2)
         with dl1:
-            st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(), file_name=out_path.name, use_container_width=True)
+            st.download_button(
+                "⬇️ Download full report (.xlsx)",
+                out_path.read_bytes(),
+                file_name=out_path.name,
+                use_container_width=True,
+                key=f"dl_xlsx_totals_{ck}_{st.session_state.year}"
+            )
         with dl2:
-            st.download_button("⬇️ Export this table (CSV)", totals.to_csv(index=False).encode("utf-8"),
-                               file_name=f"{cfg['key']}_{st.session_state.year}_totals.csv", use_container_width=True)
+            st.download_button(
+                "⬇️ Export this table (CSV)",
+                totals.to_csv(index=False).encode("utf-8"),
+                file_name=f"{cfg['key']}_{st.session_state.year}_totals.csv",
+                use_container_width=True,
+                key=f"dl_csv_totals_{ck}_{st.session_state.year}"
+            )
 
     with t2:
         st.dataframe(style_grid(summary), use_container_width=True, height=full_height(summary))
         dl1, dl2 = st.columns(2)
         with dl1:
-            st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(), file_name=out_path.name, use_container_width=True)
+            st.download_button(
+                "⬇️ Download full report (.xlsx)",
+                out_path.read_bytes(),
+                file_name=out_path.name,
+                use_container_width=True,
+                key=f"dl_xlsx_summary_{ck}_{st.session_state.year}"
+            )
         with dl2:
-            st.download_button("⬇️ Export this table (CSV)", summary.to_csv(index=False).encode("utf-8"),
-                               file_name=f"{cfg['key']}_{st.session_state.year}_summary.csv", use_container_width=True)
+            st.download_button(
+                "⬇️ Export this table (CSV)",
+                summary.to_csv(index=False).encode("utf-8"),
+                file_name=f"{cfg['key']}_{st.session_state.year}_summary.csv",
+                use_container_width=True,
+                key=f"dl_csv_summary_{ck}_{st.session_state.year}"
+            )
 
     with t3:
         st.caption("Loads only when you click, to keep things fast.")
@@ -489,10 +506,21 @@ try:
                 st.dataframe(view, use_container_width=True, height=full_height(view))
                 dl1, dl2 = st.columns(2)
                 with dl1:
-                    st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(), file_name=out_path.name, use_container_width=True)
+                    st.download_button(
+                        "⬇️ Download full report (.xlsx)",
+                        out_path.read_bytes(),
+                        file_name=out_path.name,
+                        use_container_width=True,
+                        key=f"dl_xlsx_detail_{ck}_{st.session_state.year}"
+                    )
                 with dl2:
-                    st.download_button("⬇️ Export this page (CSV)", view.to_csv(index=False).encode("utf-8"),
-                                       file_name=f"{cfg['key']}_{st.session_state.year}_detail_p{page}.csv", use_container_width=True)
+                    st.download_button(
+                        "⬇️ Export this page (CSV)",
+                        view.to_csv(index=False).encode("utf-8"),
+                        file_name=f"{cfg['key']}_{st.session_state.year}_detail_p{page}.csv",
+                        use_container_width=True,
+                        key=f"dl_csv_detail_{ck}_{st.session_state.year}_p{page}"
+                    )
             except Exception as e:
                 st.error(str(e))
 
