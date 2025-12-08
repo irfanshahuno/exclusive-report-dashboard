@@ -330,7 +330,6 @@ def clean_insurance_totals(df: pd.DataFrame, payer_col: str = "Insurance") -> pd
         return df
     if payer_col not in df.columns:
         payer_col = df.columns[0]
-
     d = df.copy()
     txt = d[payer_col].astype(str).str.strip().str.lower()
     bad = (
@@ -366,7 +365,7 @@ def compute_cards_from_df(df: pd.DataFrame) -> dict:
     """
     Compute KPI cards from any dataframe that has the canonical columns.
     Balance = Net - Paid - Accepted + Rejected (after signs normalized).
-    We DO NOT trust/aggregate the 'Balance' column because it may be precomputed with different signs.
+    We DO NOT trust the precomputed 'Balance' column for cards.
     """
     if df is None or df.empty:
         return dict(net=0.0, paid=0.0, balance=0.0, rejected=0.0, accepted=0.0)
@@ -380,7 +379,7 @@ def compute_cards_from_df(df: pd.DataFrame) -> dict:
     acc  = d["Accepted"].sum() if "Accepted" in d.columns else 0.0
 
     pending = net - paid - acc + rej
-    if pending < 0:  # guard against tiny rounding artifacts
+    if pending < 0:  # protect against tiny negative due to rounding
         pending = 0.0
 
     return dict(net=net, paid=paid, balance=pending, rejected=rej, accepted=acc)
@@ -689,7 +688,6 @@ try:
 
     # Drop None/Total/Grand total rows so sums aren’t inflated
     totals = clean_insurance_totals(totals, "Insurance")
-
     totals = ensure_grand_total(totals, "Insurance")  # keep for display only
 
     # Summary
@@ -718,22 +716,15 @@ try:
         except Exception:
             use_filtered = False
 
-    # ---------- KPIs & Compact Colored Chart ----------
-    import matplotlib.pyplot as plt
-    from matplotlib.ticker import FuncFormatter
-
-    def drop_grand_total_rows(df: pd.DataFrame) -> pd.DataFrame:
-        if df is None or df.empty:
-            return df
-        first_col = df.columns[0]
-        mask = df[first_col].astype(str).str.contains("grand total", case=False, na=False)
-        return df.loc[~mask].copy()
-
-    # Compute KPI cards:
+    # ---------- KPIs ----------
     if use_filtered:
         cards = compute_cards_from_df(df_filt)
     else:
-        totals_for_cards = drop_grand_total_rows(totals)
+        # use payer totals without the visible Grand Total row
+        first_col = totals.columns[0]
+        totals_for_cards = totals.loc[
+            ~totals[first_col].astype(str).str.contains("grand total", case=False, na=False)
+        ].copy()
         cards = compute_cards_from_df(totals_for_cards)
 
     # Optional caption when filtered
@@ -750,31 +741,50 @@ try:
     c3.metric("Rejected",   f"{cards['rejected']:,.2f}")
     c4.metric("Accepted",   f"{cards['accepted']:,.2f}")
 
-    def human_aed(x, _pos=None):
-        ax = abs(x)
-        if ax >= 1_000_000_000: return f"{x/1_000_000_000:.2f}B"
-        if ax >= 1_000_000:     return f"{x/1_000_000:.2f}M"
-        if ax >= 1_000:         return f"{x/1_000:.1f}k"
-        return f"{x:,.0f}"
+    # ---------- Improved Chart ----------
+    st.subheader("Chart")
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
 
     labels = ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]
     values = [cards['net'], cards['paid'], cards['balance'], cards['rejected'], cards['accepted']]
     colors = ["#455A64", "#2E7D32", "#FB8C00", "#C62828", "#1976D2"]
 
-    st.subheader("Chart")
-    fig, ax = plt.subplots(figsize=(6.4, 2.6), dpi=160)
+    fig, ax = plt.subplots(figsize=(6.4, 2.8), dpi=160)
     bars = ax.bar(labels, values, color=colors, edgecolor="#222", linewidth=0.6)
-    ax.set_title("Amounts", fontsize=13, loc="left", pad=4)
-    ax.set_ylabel("AED")
+
+    def human_aed(x, _pos=None):
+        axv = abs(x)
+        if axv >= 1_000_000_000: return f"{x/1_000_000_000:.2f}B"
+        if axv >= 1_000_000:     return f"{x/1_000_000:.2f}M"
+        if axv >= 1_000:         return f"{x/1_000:.1f}k"
+        return f"{x:,.0f}"
+
+    ax.set_ylabel("AED", fontsize=11, fontweight="bold")
     ax.yaxis.set_major_formatter(FuncFormatter(human_aed))
-    ax.grid(axis="y", linestyle="--", alpha=0.35)
     ax.set_axisbelow(True)
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
+    ax.set_title("Amounts", fontsize=14, fontweight="bold", loc="left", pad=8)
+
+    # labels INSIDE bars; extra headroom so it never clips
     ymax = max(values) if values else 1.0
+    ax.set_ylim(0, ymax * 1.15)
+
     for rect, v in zip(bars, values):
-        y = max(v, 0.01 * ymax)
-        ax.text(rect.get_x() + rect.get_width()/2, y, f"{v:,.0f}", ha="center", va="bottom", fontsize=9)
+        x = rect.get_x() + rect.get_width() / 2
+        y = v * 0.98  # slightly below top
+        ax.text(
+            x, y, f"{v:,.0f}",
+            ha="center", va="top",
+            color="white" if v > 0 else "black",
+            fontsize=11, fontweight="bold"
+        )
+
+    # bold x-axis tick labels
     for tick in ax.get_xticklabels():
-        tick.set_fontsize(10)
+        tick.set_fontsize(11)
+        tick.set_fontweight("bold")
+
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
 
