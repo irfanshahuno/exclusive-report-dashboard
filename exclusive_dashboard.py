@@ -251,7 +251,7 @@ def style_grid(df: pd.DataFrame):
                                                      ("background-color", "#FFFFFF"),
                                                      ("color", "#000000"),
                                                      ("font-weight", "500")]},
-            {"selector": "td", "props": [("border", f"1px solid {border}")]},
+            {"selector": "td", "props": [("border", f"1px solid {border}")]}
         ])
         .set_properties(subset=[first_col], **{"font-weight": "600"})
         .format(fmt_map)
@@ -320,6 +320,70 @@ def recompute_totals_from_detail(df_detail: pd.DataFrame) -> pd.DataFrame:
         if friendly not in g.columns:
             g[friendly] = 0.0
     return g
+
+# ---------- fixes: clean rows, normalize signs, compute KPIs ----------
+AMOUNT_COLS_CANON = ["Net Amount", "Paid", "Rejected", "Accepted"]
+
+def clean_insurance_totals(df: pd.DataFrame, payer_col: str = "Insurance") -> pd.DataFrame:
+    """Drop junk rows like None/blank/Total/Grand total so they don't inflate sums."""
+    if df is None or df.empty:
+        return df
+    if payer_col not in df.columns:
+        payer_col = df.columns[0]
+
+    d = df.copy()
+    txt = d[payer_col].astype(str).str.strip().str.lower()
+    bad = (
+        d[payer_col].isna() |
+        txt.isin({"", "none", "nan"}) |
+        txt.str.fullmatch(r"grand\s*total") |
+        txt.str.fullmatch(r"total(s)?") |
+        txt.str.match(r"^total\b")
+    )
+    d = d.loc[~bad].reset_index(drop=True)
+    return d
+
+def coerce_amounts(df: pd.DataFrame, cols=AMOUNT_COLS_CANON) -> pd.DataFrame:
+    d = df.copy()
+    for c in cols:
+        if c in d.columns:
+            d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
+    return d
+
+def normalize_signs(df: pd.DataFrame, candidates=("Paid","Rejected","Accepted")) -> pd.DataFrame:
+    """
+    If a column is stored as negative credits (median < 0), flip it to positive magnitudes.
+    """
+    d = df.copy()
+    for c in candidates:
+        if c in d.columns and not d[c].empty:
+            med = d[c].median(skipna=True)
+            if pd.notna(med) and med < 0:
+                d[c] = -d[c]
+    return d
+
+def compute_cards_from_df(df: pd.DataFrame) -> dict:
+    """
+    Compute KPI cards from any dataframe that has the canonical columns.
+    Balance = Net - Paid - Accepted + Rejected (after signs normalized).
+    We DO NOT trust/aggregate the 'Balance' column because it may be precomputed with different signs.
+    """
+    if df is None or df.empty:
+        return dict(net=0.0, paid=0.0, balance=0.0, rejected=0.0, accepted=0.0)
+
+    d = coerce_amounts(df)
+    d = normalize_signs(d)
+
+    net = d["Net Amount"].sum() if "Net Amount" in d.columns else 0.0
+    paid = d["Paid"].sum() if "Paid" in d.columns else 0.0
+    rej  = d["Rejected"].sum() if "Rejected" in d.columns else 0.0
+    acc  = d["Accepted"].sum() if "Accepted" in d.columns else 0.0
+
+    pending = net - paid - acc + rej
+    if pending < 0:  # guard against tiny rounding artifacts
+        pending = 0.0
+
+    return dict(net=net, paid=paid, balance=pending, rejected=rej, accepted=acc)
 
 # ---------- admin ----------
 def is_admin_mode() -> bool:
@@ -622,7 +686,11 @@ try:
         if a in totals.columns and "Net Amount" not in totals.columns:
             totals = totals.rename(columns={a: "Net Amount"})
     totals = trim_empty_rows(totals)
-    totals = ensure_grand_total(totals, "Insurance")
+
+    # Drop None/Total/Grand total rows so sums aren’t inflated
+    totals = clean_insurance_totals(totals, "Insurance")
+
+    totals = ensure_grand_total(totals, "Insurance")  # keep for display only
 
     # Summary
     summary = trim_empty_rows(summary)
@@ -631,8 +699,8 @@ try:
 
     # ---------- Load Detail & apply date filter (for recompute) ----------
     filtered_totals = None
-    net = paid = bal = rej = acc = 0.0
     use_filtered = False
+    df_filt = pd.DataFrame()
 
     if st.session_state.date_filter_active and detail_sheet and date_col:
         try:
@@ -642,13 +710,9 @@ try:
                 mask = (s_dates.dt.date >= st.session_state.date_filter_start) & (s_dates.dt.date <= st.session_state.date_filter_end)
                 df_filt = df_detail.loc[mask].copy()
                 if not df_filt.empty:
-                    net = ksum(df_filt, "Net Amount", "NetAmount", "Net")
-                    paid = ksum(df_filt, "Paid")
-                    bal  = ksum(df_filt, "Balance")
-                    rej  = ksum(df_filt, "Rejected", "Rejection")
-                    acc  = ksum(df_filt, "Accepted")
                     filtered_totals = recompute_totals_from_detail(df_filt)
                     filtered_totals = trim_empty_rows(filtered_totals)
+                    filtered_totals = clean_insurance_totals(filtered_totals, "Insurance")
                     filtered_totals = ensure_grand_total(filtered_totals, "Insurance")
                     use_filtered = True
         except Exception:
@@ -658,21 +722,21 @@ try:
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter
 
-    def drop_grand_total(df: pd.DataFrame) -> pd.DataFrame:
+    def drop_grand_total_rows(df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return df
         first_col = df.columns[0]
-        return df.loc[~df[first_col].astype(str).str.contains("grand total", case=False, na=False)]
+        mask = df[first_col].astype(str).str.contains("grand total", case=False, na=False)
+        return df.loc[~mask].copy()
 
-    if not use_filtered:
-        totals_no_gt = drop_grand_total(totals)
-        net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
-        paid = ksum(totals_no_gt, "Paid")
-        bal  = ksum(totals_no_gt, "Balance")
-        rej  = ksum(totals_no_gt, "Rejected", "Rejection")
-        acc  = ksum(totals_no_gt, "Accepted")
+    # Compute KPI cards:
+    if use_filtered:
+        cards = compute_cards_from_df(df_filt)
+    else:
+        totals_for_cards = drop_grand_total_rows(totals)
+        cards = compute_cards_from_df(totals_for_cards)
 
-    # >>> Clear caption above the KPIs when filtered
+    # Optional caption when filtered
     if st.session_state.date_filter_active:
         st.caption(
             f"Showing data for **{_pretty_selected_range()}** "
@@ -680,11 +744,11 @@ try:
         )
 
     c0, c1, c2, c3, c4 = st.columns(5)
-    c0.metric("Net Amount", f"{net:,.2f}")
-    c1.metric("Paid",       f"{paid:,.2f}")
-    c2.metric("Balance",    f"{bal:,.2f}")
-    c3.metric("Rejected",   f"{rej:,.2f}")
-    c4.metric("Accepted",   f"{acc:,.2f}")
+    c0.metric("Net Amount", f"{cards['net']:,.2f}")
+    c1.metric("Paid",       f"{cards['paid']:,.2f}")
+    c2.metric("Balance",    f"{cards['balance']:,.2f}")
+    c3.metric("Rejected",   f"{cards['rejected']:,.2f}")
+    c4.metric("Accepted",   f"{cards['accepted']:,.2f}")
 
     def human_aed(x, _pos=None):
         ax = abs(x)
@@ -694,8 +758,8 @@ try:
         return f"{x:,.0f}"
 
     labels = ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]
-    values = [net,          paid,   bal,       rej,        acc]
-    colors = ["#455A64",    "#2E7D32", "#FB8C00", "#C62828", "#1976D2"]
+    values = [cards['net'], cards['paid'], cards['balance'], cards['rejected'], cards['accepted']]
+    colors = ["#455A64", "#2E7D32", "#FB8C00", "#C62828", "#1976D2"]
 
     st.subheader("Chart")
     fig, ax = plt.subplots(figsize=(6.4, 2.6), dpi=160)
@@ -814,3 +878,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
