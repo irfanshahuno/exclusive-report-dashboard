@@ -2,6 +2,7 @@
 import sys
 import subprocess
 import hashlib
+import calendar
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
@@ -35,7 +36,7 @@ CENTERS = {
     },
     "pharmacy": {
         "key": "pharmacy",
-        "name": "Excellent Pharmacy (PF3205)",   # <- updated display name
+        "name": "Excellent Pharmacy (PF3205)",
         "folder_root": DATA_DIR / "excellent_pharmacy",
         "src_name": "source.xlsx",
         "out_name": "Pharmacy_Exclusive_Report_with_Aging.xlsx",
@@ -131,6 +132,80 @@ def load_core_sheets(path: str, _token: float):
 def load_detail(path: str, sheet_name: str, _token: float):
     xls = load_book(path, _token)
     return xls.parse(sheet_name)
+
+# ---------- date-span helpers ----------
+def _month_abbr(m: int) -> str:
+    return calendar.month_abbr[m]
+
+def _last_day_of_month(y: int, m: int) -> int:
+    return calendar.monthrange(y, m)[1]
+
+def _pretty_span(d1: pd.Timestamp, d2: pd.Timestamp) -> str:
+    """Compact label for date ranges."""
+    d1 = pd.to_datetime(d1).to_pydatetime().date()
+    d2 = pd.to_datetime(d2).to_pydatetime().date()
+    same_year = d1.year == d2.year
+    full_start = d1.day == 1
+    full_end = d2.day == _last_day_of_month(d2.year, d2.month)
+
+    if same_year and full_start and full_end:
+        if d1.month == d2.month:
+            return f"{_month_abbr(d1.month)} {d1.year}"
+        return f"{_month_abbr(d1.month)}–{_month_abbr(d2.month)} {d1.year}"
+    else:
+        if same_year:
+            if d1.month == d2.month:
+                return f"{_month_abbr(d1.month)} {d1.day}–{d2.day}, {d1.year}"
+            return f"{_month_abbr(d1.month)} {d1.day}–{_month_abbr(d2.month)} {d2.day}, {d1.year}"
+        return f"{_month_abbr(d1.month)} {d1.day}, {d1.year}–{_month_abbr(d2.month)} {d2.day}, {d2.year}"
+
+@st.cache_data(show_spinner=False)
+def find_date_span(path: str, preferred_detail_sheet: str | None, _token: float):
+    """
+    Detect min/max service dates by scanning the detail sheet (preferred),
+    else any sheet that likely contains date-like columns.
+    Returns (min_date, max_date, sheet_used, cols_used) or None.
+    """
+    try:
+        xls = load_book(path, _token)
+        names = xls.sheet_names
+
+        candidates = []
+        if preferred_detail_sheet and preferred_detail_sheet in names:
+            candidates.append(preferred_detail_sheet)
+        for guess in ["Balance_Aging_Detail", "Detail", "Claims", "Data"]:
+            if guess in names and guess not in candidates:
+                candidates.append(guess)
+        if not candidates:
+            candidates = names
+
+        for sheet in candidates:
+            df = xls.parse(sheet)
+            if df is None or df.empty:
+                continue
+            poss = [c for c in df.columns
+                    if any(k in str(c).lower() for k in
+                           ["date", "dos", "service", "encounter", "txn", "transaction"])]
+            if not poss:
+                continue
+
+            combined = None
+            for c in poss:
+                s = pd.to_datetime(df[c], errors="coerce")
+                combined = s if combined is None else combined.combine_first(s)
+
+            if combined is None:
+                continue
+            combined = combined.dropna()
+            if combined.empty:
+                continue
+
+            dmin, dmax = combined.min(), combined.max()
+            return (dmin, dmax, sheet, poss)
+
+        return None
+    except Exception:
+        return None
 
 # ---------- table helpers ----------
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -381,6 +456,27 @@ if token == 0.0:
 try:
     # Load core sheets
     totals, summary, s_tot, s_sum, s_det, available = load_core_sheets(str(out_path), token)
+
+    # ----- DATE RANGE BADGE (auto-detected) -----
+    span = find_date_span(str(out_path), s_det, token)
+    if span:
+        dmin, dmax, sheet_used, cols_used = span
+        label = _pretty_span(dmin, dmax)
+        st.markdown(
+            f"""
+            <div style="
+                display:inline-block;
+                margin-top:8px;
+                padding:6px 12px;
+                border-radius:999px;
+                background:#F1F5F9;
+                border:1px solid #CBD5E1;
+                font-weight:600;">
+                📅 Data range: {label}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     # Normalize totals
     if "Insurance" not in totals.columns and len(totals.columns) > 0:
