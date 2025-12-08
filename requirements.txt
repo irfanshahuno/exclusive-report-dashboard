@@ -1,6 +1,4 @@
-streamlit>=1.31,<2.0
-pandas>=2.1,<2.3
-numpy>=1.26,<2.0
-openpyxl>=3.1,<4.0
-matplotlib>=3.8,<3.9
-pyarrow>=14,<17  # optional
+pandas>=2.1
+openpyxl>=3.1
+numpy>=1.26
+pyarrow>=15.0
