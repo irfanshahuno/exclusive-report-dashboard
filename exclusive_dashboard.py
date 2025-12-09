@@ -2,17 +2,13 @@
 import sys
 import subprocess
 import hashlib
-import calendar
 from pathlib import Path
-from datetime import datetime, date
-
+from datetime import datetime
 import pandas as pd
 import streamlit as st
 
 # =========================== Page & Folders ===========================
 st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layout="wide")
-st.set_option("client.showErrorDetails", False)
-
 BASE = Path(__file__).parent
 DATA_DIR = BASE / "data"
 (DATA_DIR / "easyhealth").mkdir(parents=True, exist_ok=True)
@@ -25,7 +21,7 @@ CENTERS = {
         "key": "easyhealth",
         "name": "Easy Health Medical Clinic (MF8031)",
         "folder_root": DATA_DIR / "easyhealth",
-        "src_name": "source.xlsx",  # fallback; auto-picks .xlsb/.xlsx/.xlsm anyway
+        "src_name": "source.xlsx",   # we will auto-pick .xlsb/.xlsx/.xlsm anyway
         "out_name": "report.xlsx",
         "generator": BASE / "exclusive_report_with_aging_final.py",
     },
@@ -48,10 +44,12 @@ CENTERS = {
 }
 YEARS = [2024, 2025]
 
-# Canonical sheet names expected from generators
+# Canonical sheet names
 SHEET_INS_TOT = "Insurance_Totals"
 SHEET_SUMMARY = "Balance_Aging_Summary"
-SHEET_DETAIL  = "Balance_Aging_Detail"  # not rendered in the app (download only)
+
+# Large-file info badge only (no heavy logic tied to this)
+SAFE_MB_LIMIT = 25
 
 # =============================== Helpers ==============================
 def sha1_short(path: Path) -> str:
@@ -107,19 +105,15 @@ def autodetect(xls: pd.ExcelFile):
     names = xls.sheet_names
     ins_tot = SHEET_INS_TOT if SHEET_INS_TOT in names else None
     summary = SHEET_SUMMARY if SHEET_SUMMARY in names else None
-    detail  = SHEET_DETAIL  if SHEET_DETAIL  in names else None
     if ins_tot is None:
-        ins_tot = _pick_sheet(names, wants_any=["insurance", "total"]) or _pick_sheet(names, wants_any=["totals"])
+        ins_tot = _pick_sheet(names, wants_any=["insurance", "totals"]) or _pick_sheet(names, wants_any=["totals"])
     if summary is None:
         summary = _pick_sheet(names, wants_all=["aging","summary"]) or _pick_sheet(names, wants_any=["summary"])
-    if detail is None:
-        detail  = _pick_sheet(names, wants_all=["aging","detail"]) or _pick_sheet(names, wants_any=["detail"])
-    return ins_tot, summary, detail, names
+    return ins_tot, summary, names
 
-# ===== XLSB/XLSX source helpers =====
 def resolve_source_path(folder: Path, preferred: str = "source.xlsx") -> Path:
-    candidates = [folder / "source.xlsb", folder / "source.xlsx", folder / "source.xlsm"]
-    for p in candidates:
+    for name in ("source.xlsb", "source.xlsx", "source.xlsm"):
+        p = folder / name
         if p.exists():
             return p
     return folder / preferred
@@ -133,135 +127,48 @@ def save_uploaded_source(folder: Path, upload) -> Path:
     dst.write_bytes(upload.read())
     return dst
 
-# ---------- caching ----------
 @st.cache_resource(show_spinner=True)
 def load_book(path: str, _token: float):
+    # .xlsx/.xlsm via openpyxl; .xlsb handled per-sheet (see load_core_sheets)
     return pd.ExcelFile(path, engine="openpyxl")
 
 @st.cache_data(show_spinner=True)
 def load_core_sheets(path: str, _token: float):
+    """Load ONLY the two light sheets. NO detail access at all."""
     ext = Path(path).suffix.lower()
     if ext == ".xlsb":
         xlsb = pd.ExcelFile(path, engine="pyxlsb")
-        ins_tot, summary, detail, names = autodetect(xlsb)
+        ins_tot, summary, names = autodetect(xlsb)
         if not ins_tot or not summary:
             raise RuntimeError(f"Required sheets not found. Available: {', '.join(names)}")
         df_ins  = pd.read_excel(path, sheet_name=ins_tot, engine="pyxlsb")
         df_sum  = pd.read_excel(path, sheet_name=summary, engine="pyxlsb")
-        return df_ins, df_sum, ins_tot, summary, detail, names
+        return df_ins, df_sum, ins_tot, summary, names
 
     xls = load_book(path, _token)
-    ins_tot, summary, detail, names = autodetect(xls)
+    ins_tot, summary, names = autodetect(xls)
     if not ins_tot or not summary:
         raise RuntimeError(f"Required sheets not found. Available: {', '.join(names)}")
     df_ins  = xls.parse(ins_tot)
     df_sum  = xls.parse(summary)
-    return df_ins, df_sum, ins_tot, summary, detail, names
+    return df_ins, df_sum, ins_tot, summary, names
 
-# ---------- memory-safe readers ----------
-def _safe_read_cols(path: str, sheet: str, usecols, _token: float) -> pd.DataFrame:
-    ext = Path(path).suffix.lower()
-    eng = "pyxlsb" if ext == ".xlsb" else "openpyxl"
-    return pd.read_excel(path, sheet_name=sheet, engine=eng, usecols=usecols, dtype=str)
-
-# ---------- date parsing (UAE style) ----------
-def _parse_dates_dayfirst(series: pd.Series) -> pd.Series:
-    s = series.astype(str).str.strip()
-    if s.str.match(r"^\d{1,2}[-/]\d{1,2}[-/]\d{4}$").mean() > 0.8:
-        for fmt in ("%d-%m-%Y", "%d/%m/%Y"):
-            out = pd.to_datetime(s, format=fmt, errors="coerce")
-            if out.notna().sum() >= int(0.8 * len(s)):
-                return out
-        return pd.to_datetime(s, errors="coerce", dayfirst=True)
-    for fmt in ("%Y-%m-%d", "%d-%m-%y", "%d/%m/%y"):
-        out = pd.to_datetime(s, format=fmt, errors="coerce")
-        if out.notna().sum() >= int(0.8 * len(s)):
-            return out
-    return pd.to_datetime(s, errors="coerce", dayfirst=True)
-
-@st.cache_data(show_spinner=False)
-def find_date_span(path: str, preferred_detail_sheet: str | None, _token: float):
-    try:
-        ext = Path(path).suffix.lower()
-        eng = "pyxlsb" if ext == ".xlsb" else "openpyxl"
-        names = pd.ExcelFile(path, engine=eng).sheet_names
-
-        candidates = []
-        if preferred_detail_sheet and preferred_detail_sheet in names:
-            candidates.append(preferred_detail_sheet)
-        for guess in ["Balance_Aging_Detail", "Detail", "Claims", "Data"]:
-            if guess in names and guess not in candidates:
-                candidates.append(guess)
-        if not candidates:
-            candidates = names
-
-        for sheet in candidates:
-            head = pd.read_excel(path, sheet_name=sheet, engine=eng, nrows=0)
-            cols = list(head.columns)
-            if not cols:
-                continue
-            date_like = [c for c in cols if any(k in str(c).lower()
-                        for k in ["date","dos","service","encounter","txn","transaction"])]
-            if not date_like:
-                continue
-            df_small = pd.read_excel(path, sheet_name=sheet, engine=eng, usecols=date_like, dtype=str)
-            if df_small.empty:
-                continue
-            best_col, best_cnt, best_min, best_max = None, -1, None, None
-            for c in df_small.columns:
-                s = _parse_dates_dayfirst(df_small[c])
-                cnt = s.notna().sum()
-                if cnt > best_cnt and cnt > 0:
-                    best_col = c
-                    best_cnt = cnt
-                    best_min, best_max = s.min(), s.max()
-            if best_col:
-                return (best_min, best_max, sheet, best_col)
-        return None
-    except Exception:
-        return None
-
-# ---------- date-span helpers ----------
-def _month_abbr(m: int) -> str:
-    return calendar.month_abbr[m]
-
-def _last_day_of_month(y: int, m: int) -> int:
-    return calendar.monthrange(y, m)[1]
-
-def _pretty_span(d1: pd.Timestamp, d2: pd.Timestamp) -> str:
-    d1 = pd.to_datetime(d1).to_pydatetime().date()
-    d2 = pd.to_datetime(d2).to_pydatetime().date()
-    same_year = d1.year == d2.year
-    full_start = d1.day == 1
-    full_end = d2.day == _last_day_of_month(d2.year, d2.month)
-    if same_year and full_start and full_end:
-        if d1.month == d2.month:
-            return f"{_month_abbr(d1.month)} {d1.year}"
-        return f"{_month_abbr(d1.month)}–{_month_abbr(d2.month)} {d1.year}"
-    else:
-        if same_year:
-            if d1.month == d2.month:
-                return f"{_month_abbr(d1.month)} {d1.day}–{d2.day}, {d1.year}"
-            return f"{_month_abbr(d1.month)} {d1.day}–{_month_abbr(d2.month)} {d2.day}, {d1.year}"
-        return f"{_month_abbr(d1.month)} {d1.day}, {d1.year}–{_month_abbr(d2.month)} {d2.day}, {d2.year}"
-
-# ---------- table & UI helpers ----------
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
     df2 = df.dropna(how="all")
     if df2.empty:
         return df2
-    blank_rows = df2.fillna("").astype(str).apply(lambda row: "".join(row).strip() == "", axis=1)
+    blank_rows = df2.fillna("").astype(str).apply(lambda r: "".join(r).strip() == "", axis=1)
     return df2.loc[~blank_rows]
 
 def drop_empty_insurance(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
     if df is None or df.empty or name_col not in df.columns:
         return df
-    series = df[name_col].astype(str).fillna("").str.strip()
-    bad = series.str.lower().isin(["", "none", "nan", "null", "na", "-", "--"])
-    keep_grand = series.str.contains("grand total", case=False, na=False)
-    return df.loc[~bad | keep_grand].copy()
+    s = df[name_col].astype(str).fillna("").str.strip()
+    bad = s.str.lower().isin(["", "none", "nan", "null", "na", "-", "--"])
+    keep_gt = s.str.contains("grand total", case=False, na=False)
+    return df.loc[~bad | keep_gt].copy()
 
 def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
     if df is None or df.empty or name_col not in df.columns:
@@ -271,8 +178,7 @@ def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.Data
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     gt = {c: pd.to_numeric(df[c], errors="coerce").sum() for c in num_cols}
     row = {c: "" for c in df.columns}
-    row.update(gt)
-    row[name_col] = "Grand Total"
+    row.update(gt); row[name_col] = "Grand Total"
     return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
 
 def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150) -> int:
@@ -324,7 +230,6 @@ def ksum(df: pd.DataFrame, *cands):
             return float(pd.to_numeric(df[col], errors="coerce").sum())
     return 0.0
 
-# ---------- admin ----------
 def is_admin_mode() -> bool:
     secret_pwd = st.secrets.get("ADMIN_PASSWORD", "")
     if secret_pwd:
@@ -348,18 +253,15 @@ for key, default in [
     ("last_center_key", None),
     ("year", None),
     ("last_year", None),
-    ("date_filter_active", False),
-    ("date_filter_start", None),
-    ("date_filter_end", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
 # ---------- header ----------
-top_left, top_right = st.columns([5, 2])
-with top_left:
+left, right = st.columns([5, 2])
+with left:
     st.title("📊 Exclusive Report with Aging — Dashboard")
-with top_right:
+with right:
     st.session_state.is_admin = is_admin_mode()
 
 # URL preselect
@@ -376,12 +278,9 @@ if st.session_state.year is None and qs.get("year"):
 
 # Clear caches when selection changes
 if (st.session_state.center_key != st.session_state.last_center_key) or (st.session_state.year != st.session_state.last_year):
-    load_core_sheets.clear(); find_date_span.clear()
+    load_core_sheets.clear()
     st.session_state.last_center_key = st.session_state.center_key
     st.session_state.last_year = st.session_state.year
-    st.session_state.date_filter_active = False
-    st.session_state.date_filter_start = None
-    st.session_state.date_filter_end = None
 
 st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}** · Year: **{st.session_state.year or 'none'}**")
 
@@ -454,20 +353,21 @@ if (st.query_params.get("center") != st.session_state.center_key) or (st.query_p
     st.query_params["center"] = st.session_state.center_key
     st.query_params["year"]   = str(st.session_state.year)
 
-# Audit ribbon
+# Audit ribbon + SAFE mode info
 mt = mtime_token(out_path)
 built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
+size_mb = (out_path.stat().st_size/1024/1024) if out_path.exists() else 0.0
+safe_note = "SAFE mode (large file)" if size_mb > SAFE_MB_LIMIT else "Normal mode"
 st.caption(f"Built: **{built}** · Source: `{src_path}` · Report: `{out_path.name}` · Hash: `{sha1_short(out_path) if mt else '—'}`")
+st.caption(f"Runtime: **{safe_note}** · Report size: {size_mb:.1f} MB")
 
 # ---------- back to center picker ----------
 if st.button("◀ Choose another center", key="btn_back_center"):
     st.session_state.center_key = None
     st.session_state.year = None
     try:
-        if "center" in st.query_params:
-            del st.query_params["center"]
-        if "year" in st.query_params:
-            del st.query_params["year"]
+        if "center" in st.query_params: del st.query_params["center"]
+        if "year" in st.query_params: del st.query_params["year"]
     except Exception:
         st.experimental_set_query_params()
     st.rerun()
@@ -478,7 +378,7 @@ if st.session_state.is_admin:
     with st.expander("⬆️ Upload/replace source Excel for this year", expanded=False):
         up = st.file_uploader(
             f"Upload source Excel for {st.session_state.year} (.xlsb/.xlsx/.xlsm)",
-            type=["xlsb", "xlsx", "xlsm"],
+            type=["xlsb","xlsx","xlsm"],
             key=f"uploader_{st.session_state.center_key}_{st.session_state.year}",
         )
         if up:
@@ -501,7 +401,7 @@ if st.session_state.is_admin:
                 st.success(f"Report rebuilt successfully in {(t1 - t0).total_seconds():.1f}s.")
                 if msg.strip():
                     st.code(msg, language="bash")
-            load_core_sheets.clear(); find_date_span.clear()
+            load_core_sheets.clear()
         except Exception as e:
             st.error(str(e))
 
@@ -515,108 +415,7 @@ if token == 0.0:
     st.stop()
 
 try:
-    # Load core sheets
-    totals, summary, s_tot, s_sum, s_det, available = load_core_sheets(str(out_path), token)
-
-    # ----- DATE RANGE BADGE + INTERACTIVE FILTER -----
-    span = find_date_span(str(out_path), s_det, token)
-    dmin = dmax = None
-    detail_sheet = s_det if s_det in available else None
-    date_col = None
-    if span:
-        dmin, dmax, detail_sheet, date_col = span
-
-    def _pretty_selected_range() -> str:
-        s = st.session_state.get("date_filter_start")
-        e = st.session_state.get("date_filter_end")
-        if not s or not e:
-            return ""
-        s = pd.to_datetime(s).date()
-        e = pd.to_datetime(e).date()
-        if s.year == e.year:
-            if s.month == e.month:
-                return f"{s.strftime('%b %d')}–{e.strftime('%d, %Y')}"
-            return f"{s.strftime('%b %d')}–{e.strftime('%b %d, %Y')}"
-        return f"{s.strftime('%b %d, %Y')}–{e.strftime('%b %d, %Y')}"
-
-    if span:
-        label = _pretty_span(dmin, dmax)
-        col_badge, col_actions = st.columns([6, 2])
-        with col_badge:
-            with st.popover(f"📅 Data range: {label}", use_container_width=True):
-                st.markdown("**Quick months**")
-                min_y, max_y = dmin.year, dmax.year
-                chips = []
-                for y in range(min_y, max_y + 1):
-                    for m in range(1, 13):
-                        m_start = date(y, m, 1)
-                        m_end = date(y, m, _last_day_of_month(y, m))
-                        if m_end < dmin.date() or m_start > dmax.date():
-                            continue
-                        chips.append((y, m))
-                chcols = st.columns(6)
-                for i, (y, m) in enumerate(chips):
-                    lab = f"{_month_abbr(m)} {y}"
-                    if chcols[i % 6].button(lab, key=f"chip_{y}_{m}"):
-                        st.session_state.date_filter_active = True
-                        st.session_state.date_filter_start = date(y, m, 1)
-                        st.session_state.date_filter_end = date(y, m, _last_day_of_month(y, m))
-                        st.rerun()
-
-                st.divider()
-                st.markdown("**Custom range**")
-                d0 = st.session_state.date_filter_start or dmin.date()
-                d1 = st.session_state.date_filter_end or dmax.date()
-                d0 = st.date_input("Start", value=d0, min_value=dmin.date(), max_value=dmax.date(), key="custom_start")
-                d1 = st.date_input("End", value=d1, min_value=dmin.date(), max_value=dmax.date(), key="custom_end")
-                a1, a2 = st.columns(2)
-                if a1.button("Apply"):
-                    if d0 <= d1:
-                        st.session_state.date_filter_active = True
-                        st.session_state.date_filter_start = d0
-                        st.session_state.date_filter_end = d1
-                        st.rerun()
-                    else:
-                        st.warning("Start must be on/before End.")
-                if a2.button("Clear filter"):
-                    st.session_state.date_filter_active = False
-                    st.session_state.date_filter_start = None
-                    st.session_state.date_filter_end = None
-                    st.rerun()
-        with col_actions:
-            if st.session_state.date_filter_active:
-                st.markdown(
-                    f"""
-                    <div style="
-                        padding:10px 14px;
-                        border-radius:10px;
-                        background:#E8F5E9;
-                        border:1px solid #C8E6C9;
-                        font-weight:700;
-                        color:#1B5E20;">
-                        ✅ Filter: ON
-                        <div style="margin-top:6px; font-weight:600; color:#0B3D0B;">
-                            Range: {_pretty_selected_range()}
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    """
-                    <div style="
-                        padding:10px 14px;
-                        border-radius:10px;
-                        background:#F1F5F9;
-                        border:1px solid #CBD5E1;
-                        font-weight:700;
-                        color:#0F172A;">
-                        ⛔ Filter: OFF
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+    totals, summary, s_tot, s_sum, available = load_core_sheets(str(out_path), token)
 
     # Normalize totals
     totals = totals.copy()
@@ -634,136 +433,50 @@ try:
     if not summary.empty:
         summary = ensure_grand_total(summary, summary.columns[0])
 
-    # ---------- Optional filtered KPI via detail (download-only sheet) ----------
-    filtered_totals = None
-    net = paid = bal = rej = acc = 0.0
-    use_filtered = False
+    # KPIs (exclude the 'Grand Total' row to avoid double-summing)
+    def drop_gt(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty: return df
+        first = df.columns[0]
+        return df.loc[~df[first].astype(str).str.contains("grand total", case=False, na=False)]
 
-    if st.session_state.date_filter_active and (s_det in available) and span:
-        try:
-            detail_sheet, date_col = span[2], span[3]
-            head = pd.read_excel(
-                str(out_path),
-                sheet_name=detail_sheet,
-                engine=("pyxlsb" if str(out_path).lower().endswith(".xlsb") else "openpyxl"),
-                nrows=0
-            )
-            hdr = list(map(str, head.columns))
-            ins_col = next((c for c in hdr if str(c).strip().lower() in {"insurance","payer","company"}), None)
-            needed = ["Net Amount","NetAmount","Net","Paid","Balance","Rejected","Rejection","Accepted"]
-            present = [c for c in needed if c in hdr]
-            if not present:
-                raise RuntimeError("Required value columns not found in detail sheet.")
-            usecols = [date_col] + ([ins_col] if ins_col else []) + present
-            usecols = list(dict.fromkeys([c for c in usecols if c]))
+    totals_no_gt = drop_gt(totals)
+    net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
+    paid = ksum(totals_no_gt, "Paid")
+    bal  = ksum(totals_no_gt, "Balance")
+    rej  = ksum(totals_no_gt, "Rejected", "Rejection")
+    acc  = ksum(totals_no_gt, "Accepted")
 
-            df_small = _safe_read_cols(str(out_path), detail_sheet, usecols, token)
-            if not df_small.empty:
-                s_dates = _parse_dates_dayfirst(df_small[date_col])
-                mask = (s_dates.dt.date >= st.session_state.date_filter_start) & \
-                       (s_dates.dt.date <= st.session_state.date_filter_end)
-                df_filt = df_small.loc[mask].copy()
-                if not df_filt.empty:
-                    for c in present:
-                        df_filt[c] = pd.to_numeric(df_filt[c], errors="coerce").fillna(0.0)
-
-                    def pick(*cands):
-                        for c in cands:
-                            if c in df_filt.columns: return c
-                        return None
-                    net_col = pick("Net Amount","NetAmount","Net")
-                    paid_col = pick("Paid")
-                    bal_col  = pick("Balance")
-                    rej_col  = pick("Rejected","Rejection")
-                    acc_col  = pick("Accepted")
-
-                    net = float(df_filt[net_col].sum()) if net_col else 0.0
-                    paid = float(df_filt[paid_col].sum()) if paid_col else 0.0
-                    bal  = float(df_filt[bal_col].sum()) if bal_col else 0.0
-                    rej  = float(df_filt[rej_col].sum()) if rej_col else 0.0
-                    acc  = float(df_filt[acc_col].sum()) if acc_col else 0.0
-
-                    if ins_col:
-                        grp = df_filt.groupby(ins_col, dropna=False).agg({
-                            c: "sum" for c in [x for x in [net_col, paid_col, bal_col, rej_col, acc_col] if x]
-                        }).reset_index()
-                        ren = {}
-                        if net_col: ren[net_col] = "Net Amount"
-                        if paid_col: ren[paid_col] = "Paid"
-                        if bal_col: ren[bal_col] = "Balance"
-                        if rej_col: ren[rej_col] = "Rejected"
-                        if acc_col: ren[acc_col] = "Accepted"
-                        grp = grp.rename(columns=ren).rename(columns={ins_col: "Insurance"})
-                    else:
-                        grp = pd.DataFrame([{
-                            "Insurance": "All",
-                            "Net Amount": net, "Paid": paid, "Balance": bal,
-                            "Rejected": rej, "Accepted": acc
-                        }])
-
-                    filtered_totals = trim_empty_rows(grp)
-                    filtered_totals = drop_empty_insurance(filtered_totals, "Insurance")
-                    filtered_totals = ensure_grand_total(filtered_totals, "Insurance")
-                    use_filtered = True
-        except Exception:
-            use_filtered = False
-
-    if st.session_state.date_filter_active and span:
-        st.caption(
-            f"Showing data for **{_pretty_selected_range()}** "
-            + (f"(from `{span[2]}` → `{span[3]}`)" if span else "")
-        )
-
-    # ---------- KPIs ----------
     c0, c1, c2, c3, c4 = st.columns(5)
-    if not use_filtered:
-        def drop_grand_total(df: pd.DataFrame) -> pd.DataFrame:
-            if df is None or df.empty:
-                return df
-            first_col = df.columns[0]
-            return df.loc[~df[first_col].astype(str).str.contains("grand total", case=False, na=False)]
-        totals_no_gt = drop_grand_total(totals)
-        net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
-        paid = ksum(totals_no_gt, "Paid")
-        bal  = ksum(totals_no_gt, "Balance")
-        rej  = ksum(totals_no_gt, "Rejected", "Rejection")
-        acc  = ksum(totals_no_gt, "Accepted")
-
     c0.metric("Net Amount", f"{net:,.2f}")
     c1.metric("Paid",       f"{paid:,.2f}")
     c2.metric("Balance",    f"{bal:,.2f}")
     c3.metric("Rejected",   f"{rej:,.2f}")
     c4.metric("Accepted",   f"{acc:,.2f}")
 
-    # ---------- Chart ----------
+    # Chart
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter
-
-    def human_aed_compact(x, _pos=None):
+    def compact(x, _pos=None):
         ax = abs(x)
         if ax >= 1_000_000_000: return f"{x/1_000_000_000:.2f}B"
         if ax >= 1_000_000:     return f"{x/1_000_000:.2f}M"
-        if ax >= 1_000:         return f"{x/1_000:.0f}k"
+        if ax >= 1_000:         return f"{x/1_000:.0f}.k"
         return f"{x:,.0f}"
 
     labels = ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]
-    values = [net,          paid,   bal,       rej,        acc]
-    colors = ["#1E3A5F", "#2E7D32", "#F2B444", "#C62828", "#1976D2"]
+    values = [net, paid, bal, rej, acc]
+    colors = ["#1E3A5F","#2E7D32","#F2B444","#C62828","#1976D2"]
 
-    st.subheader("")
     fig, ax = plt.subplots(figsize=(8.5, 4.8), dpi=160)
     bars = ax.bar(labels, values, color=colors, edgecolor="none")
     ax.set_title("Amounts", fontsize=28, fontweight="900", loc="left", pad=8)
-    ax.yaxis.set_major_formatter(FuncFormatter(human_aed_compact))
+    ax.yaxis.set_major_formatter(FuncFormatter(compact))
     ax.grid(axis="y", linestyle="--", alpha=0.35)
     ax.set_axisbelow(True)
-    for spine in ["top", "right"]:
-        ax.spines[spine].set_visible(False)
-    ax.spines["left"].set_linewidth(1.2)
-    ax.spines["bottom"].set_linewidth(1.2)
+    for s in ["top","right"]: ax.spines[s].set_visible(False)
+    ax.spines["left"].set_linewidth(1.2); ax.spines["bottom"].set_linewidth(1.2)
     ax.tick_params(axis="x", labelsize=16, length=0)
     ax.tick_params(axis="y", labelsize=12)
-
     ymax = max(values) if values else 1.0
     for rect, v in zip(bars, values):
         x = rect.get_x() + rect.get_width() / 2
@@ -777,77 +490,52 @@ try:
     ax.set_ylim(0, ymax * 1.12 if ymax > 0 else 1)
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
-    plt.close(fig)
 
-    # ---------- Tabs (NO on-screen Aging Detail) ----------
+    # Tabs (no Aging Detail rendered)
     t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"])
 
     with t1:
-        if use_filtered and filtered_totals is not None and not filtered_totals.empty:
-            st.markdown(f"**Filtered Insurance Totals — {_pretty_selected_range()}**")
-            st.dataframe(style_grid(filtered_totals), use_container_width=True,
-                         height=full_height(filtered_totals))
-            st.divider()
         st.dataframe(style_grid(totals), use_container_width=True, height=full_height(totals))
         dl1, dl2 = st.columns(2)
         with dl1:
-            st.download_button(
-                "⬇️ Download full report (.xlsx)",
-                out_path.read_bytes(),
-                file_name=out_path.name,
-                use_container_width=True,
-                key=f"dl_xlsx_totals_{ck}_{st.session_state.year}"
-            )
+            st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(),
+                               file_name=out_path.name, use_container_width=True,
+                               key=f"dl_xlsx_totals_{ck}_{st.session_state.year}")
         with dl2:
-            st.download_button(
-                "⬇️ Export this table (CSV)",
-                totals.to_csv(index=False).encode("utf-8"),
-                file_name=f"{cfg['key']}_{st.session_state.year}_totals.csv",
-                use_container_width=True,
-                key=f"dl_csv_totals_{ck}_{st.session_state.year}"
-            )
+            st.download_button("⬇️ Export this table (CSV)",
+                               totals.to_csv(index=False).encode("utf-8"),
+                               file_name=f"{cfg['key']}_{st.session_state.year}_totals.csv",
+                               use_container_width=True,
+                               key=f"dl_csv_totals_{ck}_{st.session_state.year}")
 
     with t2:
         st.dataframe(style_grid(summary), use_container_width=True, height=full_height(summary))
         dl1, dl2 = st.columns(2)
         with dl1:
-            st.download_button(
-                "⬇️ Download full report (.xlsx)",
-                out_path.read_bytes(),
-                file_name=out_path.name,
-                use_container_width=True,
-                key=f"dl_xlsx_summary_{ck}_{st.session_state.year}"
-            )
+            st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(),
+                               file_name=out_path.name, use_container_width=True,
+                               key=f"dl_xlsx_summary_{ck}_{st.session_state.year}")
         with dl2:
-            st.download_button(
-                "⬇️ Export this table (CSV)",
-                summary.to_csv(index=False).encode("utf-8"),
-                file_name=f"{cfg['key']}_{st.session_state.year}_summary.csv",
-                use_container_width=True,
-                key=f"dl_csv_summary_{ck}_{st.session_state.year}"
-            )
+            st.download_button("⬇️ Export this table (CSV)",
+                               summary.to_csv(index=False).encode("utf-8"),
+                               file_name=f"{cfg['key']}_{st.session_state.year}_summary.csv",
+                               use_container_width=True,
+                               key=f"dl_csv_summary_{ck}_{st.session_state.year}")
 
     with t3:
         st.markdown("### Report Downloads")
-        st.write("To keep the app fast and stable, the **Aging Detail** sheet is not rendered on-screen.")
+        st.write("For performance, the **Aging Detail** sheet is not rendered on-screen.")
         c1, c2 = st.columns(2)
         with c1:
-            st.download_button(
-                "⬇️ Download full report (.xlsx)",
-                out_path.read_bytes(),
-                file_name=out_path.name,
-                use_container_width=True,
-                key=f"dl_xlsx_full_{ck}_{st.session_state.year}"
-            )
+            st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(),
+                               file_name=out_path.name, use_container_width=True,
+                               key=f"dl_xlsx_full_{ck}_{st.session_state.year}")
         with c2:
-            st.download_button(
-                "⬇️ Download Insurance Totals (CSV)",
-                totals.to_csv(index=False).encode("utf-8"),
-                file_name=f"{cfg['key']}_{st.session_state.year}_insurance_totals.csv",
-                use_container_width=True,
-                key=f"dl_csv_totals2_{ck}_{st.session_state.year}"
-            )
-        st.caption("Open the XLSX locally to inspect **Balance_Aging_Detail** if needed.")
+            st.download_button("⬇️ Download Insurance Totals (CSV)",
+                               totals.to_csv(index=False).encode("utf-8"),
+                               file_name=f"{cfg['key']}_{st.session_state.year}_insurance_totals.csv",
+                               use_container_width=True,
+                               key=f"dl_csv_totals2_{ck}_{st.session_state.year}")
 
 except Exception as e:
     try:
