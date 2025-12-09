@@ -8,10 +8,9 @@ openpyxl==3.1.5
 xlsxwriter==3.2.0
 pyxlsb==1.0.10
 
-# Parquet via fastparquet (no cmake toolchain needed)
+# Parquet (works fine without cramjam)
 fastparquet==2024.5.0
-# cramjam is optional; remove it to avoid Rust build on Python 3.13
 
-# Pin rich explicitly to avoid the platform upgrading it to 14.x
+# Prevent Streamlit’s helper from upgrading rich to 14.x
 rich==13.9.4
 
