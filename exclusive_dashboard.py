@@ -5,11 +5,14 @@ import hashlib
 import calendar
 from pathlib import Path
 from datetime import datetime, date
+
 import pandas as pd
 import streamlit as st
 
 # =========================== Page & Folders ===========================
 st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layout="wide")
+st.set_option("client.showErrorDetails", False)
+
 BASE = Path(__file__).parent
 DATA_DIR = BASE / "data"
 (DATA_DIR / "easyhealth").mkdir(parents=True, exist_ok=True)
@@ -115,10 +118,6 @@ def autodetect(xls: pd.ExcelFile):
 
 # ===== XLSB/XLSX source helpers =====
 def resolve_source_path(folder: Path, preferred: str = "source.xlsx") -> Path:
-    """
-    Pick whichever source exists in priority order:
-    1) source.xlsb, 2) source.xlsx, 3) source.xlsm, else fallback to preferred path.
-    """
     candidates = [folder / "source.xlsb", folder / "source.xlsx", folder / "source.xlsm"]
     for p in candidates:
         if p.exists():
@@ -126,12 +125,6 @@ def resolve_source_path(folder: Path, preferred: str = "source.xlsx") -> Path:
     return folder / preferred
 
 def save_uploaded_source(folder: Path, upload) -> Path:
-    """
-    Save uploaded file using its own extension:
-    - *.xlsb  => data/<center>/<year>/source.xlsb
-    - *.xlsx  => data/<center>/<year>/source.xlsx
-    - *.xlsm  => data/<center>/<year>/source.xlsm
-    """
     ext = Path(upload.name).suffix.lower()
     if ext not in {".xlsb", ".xlsx", ".xlsm"}:
         raise ValueError("Please upload an .xlsb, .xlsx, or .xlsm file.")
@@ -143,12 +136,10 @@ def save_uploaded_source(folder: Path, upload) -> Path:
 # ---------- caching ----------
 @st.cache_resource(show_spinner=True)
 def load_book(path: str, _token: float):
-    # openpyxl works for .xlsx/.xlsm; for .xlsb we read via pandas directly on parse
     return pd.ExcelFile(path, engine="openpyxl")
 
 @st.cache_data(show_spinner=True)
 def load_core_sheets(path: str, _token: float):
-    # If file is .xlsb, use pandas parse(engine="pyxlsb") per-sheet
     ext = Path(path).suffix.lower()
     if ext == ".xlsb":
         xlsb = pd.ExcelFile(path, engine="pyxlsb")
@@ -169,7 +160,6 @@ def load_core_sheets(path: str, _token: float):
 
 # ---------- memory-safe readers ----------
 def _safe_read_cols(path: str, sheet: str, usecols, _token: float) -> pd.DataFrame:
-    """Read only selected columns (as strings) for low memory."""
     ext = Path(path).suffix.lower()
     eng = "pyxlsb" if ext == ".xlsb" else "openpyxl"
     return pd.read_excel(path, sheet_name=sheet, engine=eng, usecols=usecols, dtype=str)
@@ -266,7 +256,6 @@ def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df2.loc[~blank_rows]
 
 def drop_empty_insurance(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
-    """Remove rows where Insurance is blank/None-like, but keep 'Grand Total'."""
     if df is None or df.empty or name_col not in df.columns:
         return df
     series = df[name_col].astype(str).fillna("").str.strip()
@@ -537,7 +526,6 @@ try:
     if span:
         dmin, dmax, detail_sheet, date_col = span
 
-    # Helper: pretty print current filter range
     def _pretty_selected_range() -> str:
         s = st.session_state.get("date_filter_start")
         e = st.session_state.get("date_filter_end")
@@ -551,7 +539,6 @@ try:
             return f"{s.strftime('%b %d')}–{e.strftime('%b %d, %Y')}"
         return f"{s.strftime('%b %d, %Y')}–{e.strftime('%b %d, %Y')}"
 
-    # clickable badge UI
     if span:
         label = _pretty_span(dmin, dmax)
         col_badge, col_actions = st.columns([6, 2])
@@ -631,7 +618,7 @@ try:
                     unsafe_allow_html=True,
                 )
 
-    # Normalize totals from workbook
+    # Normalize totals
     totals = totals.copy()
     if "Insurance" not in totals.columns and len(totals.columns) > 0:
         totals = totals.rename(columns={totals.columns[0]: "Insurance"})
@@ -647,22 +634,26 @@ try:
     if not summary.empty:
         summary = ensure_grand_total(summary, summary.columns[0])
 
-    # ---------- Load small slice for filter (memory-safe) ----------
+    # ---------- Optional filtered KPI via detail (download-only sheet) ----------
     filtered_totals = None
     net = paid = bal = rej = acc = 0.0
     use_filtered = False
 
     if st.session_state.date_filter_active and (s_det in available) and span:
-        # we only aggregate from detail to compute filtered KPIs/totals
         try:
             detail_sheet, date_col = span[2], span[3]
-            head = pd.read_excel(str(out_path), sheet_name=detail_sheet,
-                                 engine=("pyxlsb" if str(out_path).lower().endswith(".xlsb") else "openpyxl"),
-                                 nrows=0)
-            hdr = list(head.columns.astype(str))
+            head = pd.read_excel(
+                str(out_path),
+                sheet_name=detail_sheet,
+                engine=("pyxlsb" if str(out_path).lower().endswith(".xlsb") else "openpyxl"),
+                nrows=0
+            )
+            hdr = list(map(str, head.columns))
             ins_col = next((c for c in hdr if str(c).strip().lower() in {"insurance","payer","company"}), None)
             needed = ["Net Amount","NetAmount","Net","Paid","Balance","Rejected","Rejection","Accepted"]
             present = [c for c in needed if c in hdr]
+            if not present:
+                raise RuntimeError("Required value columns not found in detail sheet.")
             usecols = [date_col] + ([ins_col] if ins_col else []) + present
             usecols = list(dict.fromkeys([c for c in usecols if c]))
 
@@ -672,51 +663,52 @@ try:
                 mask = (s_dates.dt.date >= st.session_state.date_filter_start) & \
                        (s_dates.dt.date <= st.session_state.date_filter_end)
                 df_filt = df_small.loc[mask].copy()
-                for c in present:
-                    df_filt[c] = pd.to_numeric(df_filt[c], errors="coerce").fillna(0.0)
+                if not df_filt.empty:
+                    for c in present:
+                        df_filt[c] = pd.to_numeric(df_filt[c], errors="coerce").fillna(0.0)
 
-                def pick(*cands):
-                    for c in cands:
-                        if c in df_filt.columns: return c
-                    return None
-                net_col = pick("Net Amount","NetAmount","Net")
-                paid_col = pick("Paid")
-                bal_col  = pick("Balance")
-                rej_col  = pick("Rejected","Rejection")
-                acc_col  = pick("Accepted")
+                    def pick(*cands):
+                        for c in cands:
+                            if c in df_filt.columns: return c
+                        return None
+                    net_col = pick("Net Amount","NetAmount","Net")
+                    paid_col = pick("Paid")
+                    bal_col  = pick("Balance")
+                    rej_col  = pick("Rejected","Rejection")
+                    acc_col  = pick("Accepted")
 
-                net = float(df_filt[net_col].sum()) if net_col else 0.0
-                paid = float(df_filt[paid_col].sum()) if paid_col else 0.0
-                bal  = float(df_filt[bal_col].sum()) if bal_col else 0.0
-                rej  = float(df_filt[rej_col].sum()) if rej_col else 0.0
-                acc  = float(df_filt[acc_col].sum()) if acc_col else 0.0
+                    net = float(df_filt[net_col].sum()) if net_col else 0.0
+                    paid = float(df_filt[paid_col].sum()) if paid_col else 0.0
+                    bal  = float(df_filt[bal_col].sum()) if bal_col else 0.0
+                    rej  = float(df_filt[rej_col].sum()) if rej_col else 0.0
+                    acc  = float(df_filt[acc_col].sum()) if acc_col else 0.0
 
-                if ins_col:
-                    grp = df_filt.groupby(ins_col, dropna=False).agg({
-                        c: "sum" for c in [x for x in [net_col, paid_col, bal_col, rej_col, acc_col] if x]
-                    }).reset_index()
-                    ren = {}
-                    if net_col: ren[net_col] = "Net Amount"
-                    if paid_col: ren[paid_col] = "Paid"
-                    if bal_col: ren[bal_col] = "Balance"
-                    if rej_col: ren[rej_col] = "Rejected"
-                    if acc_col: ren[acc_col] = "Accepted"
-                    grp = grp.rename(columns=ren).rename(columns={ins_col: "Insurance"})
-                else:
-                    grp = pd.DataFrame([{
-                        "Insurance": "All",
-                        "Net Amount": net, "Paid": paid, "Balance": bal,
-                        "Rejected": rej, "Accepted": acc
-                    }])
+                    if ins_col:
+                        grp = df_filt.groupby(ins_col, dropna=False).agg({
+                            c: "sum" for c in [x for x in [net_col, paid_col, bal_col, rej_col, acc_col] if x]
+                        }).reset_index()
+                        ren = {}
+                        if net_col: ren[net_col] = "Net Amount"
+                        if paid_col: ren[paid_col] = "Paid"
+                        if bal_col: ren[bal_col] = "Balance"
+                        if rej_col: ren[rej_col] = "Rejected"
+                        if acc_col: ren[acc_col] = "Accepted"
+                        grp = grp.rename(columns=ren).rename(columns={ins_col: "Insurance"})
+                    else:
+                        grp = pd.DataFrame([{
+                            "Insurance": "All",
+                            "Net Amount": net, "Paid": paid, "Balance": bal,
+                            "Rejected": rej, "Accepted": acc
+                        }])
 
-                filtered_totals = trim_empty_rows(grp)
-                filtered_totals = drop_empty_insurance(filtered_totals, "Insurance")
-                filtered_totals = ensure_grand_total(filtered_totals, "Insurance")
-                use_filtered = True
+                    filtered_totals = trim_empty_rows(grp)
+                    filtered_totals = drop_empty_insurance(filtered_totals, "Insurance")
+                    filtered_totals = ensure_grand_total(filtered_totals, "Insurance")
+                    use_filtered = True
         except Exception:
             use_filtered = False
 
-    if st.session_state.date_filter_active:
+    if st.session_state.date_filter_active and span:
         st.caption(
             f"Showing data for **{_pretty_selected_range()}** "
             + (f"(from `{span[2]}` → `{span[3]}`)" if span else "")
@@ -751,12 +743,12 @@ try:
         ax = abs(x)
         if ax >= 1_000_000_000: return f"{x/1_000_000_000:.2f}B"
         if ax >= 1_000_000:     return f"{x/1_000_000:.2f}M"
-        if ax >= 1_000:         return f"{x/1_000:.0f}.k"
+        if ax >= 1_000:         return f"{x/1_000:.0f}k"
         return f"{x:,.0f}"
 
     labels = ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]
     values = [net,          paid,   bal,       rej,        acc]
-    colors = ["#1E3A5F", "#2E7D32", "#F2B444", "#C62828", "#1976D2"]  # navy, green, amber, red, blue
+    colors = ["#1E3A5F", "#2E7D32", "#F2B444", "#C62828", "#1976D2"]
 
     st.subheader("")
     fig, ax = plt.subplots(figsize=(8.5, 4.8), dpi=160)
@@ -785,6 +777,7 @@ try:
     ax.set_ylim(0, ymax * 1.12 if ymax > 0 else 1)
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
 
     # ---------- Tabs (NO on-screen Aging Detail) ----------
     t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"])
@@ -864,5 +857,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
 
