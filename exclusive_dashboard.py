@@ -22,7 +22,7 @@ CENTERS = {
         "key": "easyhealth",
         "name": "Easy Health Medical Clinic (MF8031)",
         "folder_root": DATA_DIR / "easyhealth",
-        "src_name": "source.xlsx",  # fallback name; auto-picks .xlsb/.xlsx/.xlsm
+        "src_name": "source.xlsx",  # fallback; auto-picks .xlsb/.xlsx/.xlsm anyway
         "out_name": "report.xlsx",
         "generator": BASE / "exclusive_report_with_aging_final.py",
     },
@@ -48,7 +48,7 @@ YEARS = [2024, 2025]
 # Canonical sheet names expected from generators
 SHEET_INS_TOT = "Insurance_Totals"
 SHEET_SUMMARY = "Balance_Aging_Summary"
-SHEET_DETAIL  = "Balance_Aging_Detail"
+SHEET_DETAIL  = "Balance_Aging_Detail"  # not rendered in the app (download only)
 
 # =============================== Helpers ==============================
 def sha1_short(path: Path) -> str:
@@ -85,7 +85,6 @@ def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
         res = _run(cmd + ["--out", str(out_path)])
         return res.stdout or "OK"
     except Exception:
-        # fallback CLI ordering
         res = _run([py, str(gen_path), "--out", str(out_path), str(src_path)])
         return res.stdout or "OK"
 
@@ -117,7 +116,8 @@ def autodetect(xls: pd.ExcelFile):
 # ===== XLSB/XLSX source helpers =====
 def resolve_source_path(folder: Path, preferred: str = "source.xlsx") -> Path:
     """
-    Priority: 1) source.xlsb, 2) source.xlsx, 3) source.xlsm, else fallback to preferred.
+    Pick whichever source exists in priority order:
+    1) source.xlsb, 2) source.xlsx, 3) source.xlsm, else fallback to preferred path.
     """
     candidates = [folder / "source.xlsb", folder / "source.xlsx", folder / "source.xlsm"]
     for p in candidates:
@@ -143,11 +143,22 @@ def save_uploaded_source(folder: Path, upload) -> Path:
 # ---------- caching ----------
 @st.cache_resource(show_spinner=True)
 def load_book(path: str, _token: float):
-    # Output reports are .xlsx written by generators → openpyxl is correct
+    # openpyxl works for .xlsx/.xlsm; for .xlsb we read via pandas directly on parse
     return pd.ExcelFile(path, engine="openpyxl")
 
 @st.cache_data(show_spinner=True)
 def load_core_sheets(path: str, _token: float):
+    # If file is .xlsb, use pandas parse(engine="pyxlsb") per-sheet
+    ext = Path(path).suffix.lower()
+    if ext == ".xlsb":
+        xlsb = pd.ExcelFile(path, engine="pyxlsb")
+        ins_tot, summary, detail, names = autodetect(xlsb)
+        if not ins_tot or not summary:
+            raise RuntimeError(f"Required sheets not found. Available: {', '.join(names)}")
+        df_ins  = pd.read_excel(path, sheet_name=ins_tot, engine="pyxlsb")
+        df_sum  = pd.read_excel(path, sheet_name=summary, engine="pyxlsb")
+        return df_ins, df_sum, ins_tot, summary, detail, names
+
     xls = load_book(path, _token)
     ins_tot, summary, detail, names = autodetect(xls)
     if not ins_tot or not summary:
@@ -156,25 +167,22 @@ def load_core_sheets(path: str, _token: float):
     df_sum  = xls.parse(summary)
     return df_ins, df_sum, ins_tot, summary, detail, names
 
-# --------- memory-safe readers ----------
+# ---------- memory-safe readers ----------
 def _safe_read_cols(path: str, sheet: str, usecols, _token: float) -> pd.DataFrame:
     """Read only selected columns (as strings) for low memory."""
-    return pd.read_excel(
-        path, sheet_name=sheet, engine="openpyxl",
-        usecols=usecols, dtype=str
-    )
+    ext = Path(path).suffix.lower()
+    eng = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+    return pd.read_excel(path, sheet_name=sheet, engine=eng, usecols=usecols, dtype=str)
 
 # ---------- date parsing (UAE style) ----------
 def _parse_dates_dayfirst(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.strip()
-    # Try dominant day-first patterns first
     if s.str.match(r"^\d{1,2}[-/]\d{1,2}[-/]\d{4}$").mean() > 0.8:
         for fmt in ("%d-%m-%Y", "%d/%m/%Y"):
             out = pd.to_datetime(s, format=fmt, errors="coerce")
             if out.notna().sum() >= int(0.8 * len(s)):
                 return out
         return pd.to_datetime(s, errors="coerce", dayfirst=True)
-    # Fallbacks
     for fmt in ("%Y-%m-%d", "%d-%m-%y", "%d/%m/%y"):
         out = pd.to_datetime(s, format=fmt, errors="coerce")
         if out.notna().sum() >= int(0.8 * len(s)):
@@ -184,8 +192,9 @@ def _parse_dates_dayfirst(series: pd.Series) -> pd.Series:
 @st.cache_data(show_spinner=False)
 def find_date_span(path: str, preferred_detail_sheet: str | None, _token: float):
     try:
-        xls = load_book(path, _token)
-        names = xls.sheet_names
+        ext = Path(path).suffix.lower()
+        eng = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+        names = pd.ExcelFile(path, engine=eng).sheet_names
 
         candidates = []
         if preferred_detail_sheet and preferred_detail_sheet in names:
@@ -197,7 +206,7 @@ def find_date_span(path: str, preferred_detail_sheet: str | None, _token: float)
             candidates = names
 
         for sheet in candidates:
-            head = pd.read_excel(path, sheet_name=sheet, engine="openpyxl", nrows=0)
+            head = pd.read_excel(path, sheet_name=sheet, engine=eng, nrows=0)
             cols = list(head.columns)
             if not cols:
                 continue
@@ -205,10 +214,7 @@ def find_date_span(path: str, preferred_detail_sheet: str | None, _token: float)
                         for k in ["date","dos","service","encounter","txn","transaction"])]
             if not date_like:
                 continue
-            df_small = pd.read_excel(
-                path, sheet_name=sheet, engine="openpyxl",
-                usecols=date_like, dtype=str
-            )
+            df_small = pd.read_excel(path, sheet_name=sheet, engine=eng, usecols=date_like, dtype=str)
             if df_small.empty:
                 continue
             best_col, best_cnt, best_min, best_max = None, -1, None, None
@@ -290,7 +296,7 @@ def style_grid(df: pd.DataFrame):
     if df.shape[1] == 0:
         return df.style
     df = df.copy()
-    df.index = range(1, len(df) + 1)  # 1-based index visible in UI
+    df.index = range(1, len(df) + 1)
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
@@ -329,54 +335,6 @@ def ksum(df: pd.DataFrame, *cands):
             return float(pd.to_numeric(df[col], errors="coerce").sum())
     return 0.0
 
-def recompute_totals_from_detail(df_detail: pd.DataFrame) -> pd.DataFrame:
-    """Build an Insurance_Totals-like table from the detail rows."""
-    if df_detail is None or df_detail.empty:
-        return pd.DataFrame()
-    name_col = None
-    for c in df_detail.columns:
-        if str(c).strip().lower() in {"insurance", "payer", "company"}:
-            name_col = c; break
-    if not name_col:
-        row = {
-            "Insurance": "All",
-            "Net Amount": ksum(df_detail, "Net Amount", "NetAmount", "Net"),
-            "Paid": ksum(df_detail, "Paid"),
-            "Balance": ksum(df_detail, "Balance"),
-            "Rejected": ksum(df_detail, "Rejected", "Rejection"),
-            "Accepted": ksum(df_detail, "Accepted"),
-        }
-        return pd.DataFrame([row])
-
-    out_cols = {
-        "Net Amount": ["Net Amount", "NetAmount", "Net"],
-        "Paid": ["Paid"],
-        "Balance": ["Balance"],
-        "Rejected": ["Rejected", "Rejection"],
-        "Accepted": ["Accepted"],
-    }
-    agg = {}
-    for friendly, cands in out_cols.items():
-        chosen = next((c for c in cands if c in df_detail.columns), None)
-        if chosen:
-            agg[chosen] = "sum"
-    if not agg:
-        return pd.DataFrame()
-
-    g = df_detail.groupby(name_col, dropna=False).agg(agg).reset_index()
-    rename_map = {}
-    for friendly, cands in out_cols.items():
-        for c in cands:
-            if c in g.columns:
-                rename_map[c] = friendly
-                break
-    g = g.rename(columns=rename_map)
-    g = g.rename(columns={name_col: "Insurance"})
-    for friendly in ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]:
-        if friendly not in g.columns:
-            g[friendly] = 0.0
-    return g
-
 # ---------- admin ----------
 def is_admin_mode() -> bool:
     secret_pwd = st.secrets.get("ADMIN_PASSWORD", "")
@@ -393,7 +351,6 @@ def is_admin_mode() -> bool:
                     st.error("Wrong password")
         return False
     else:
-        # View toggle when no password is set
         return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
 
 # ---------- state ----------
@@ -437,11 +394,7 @@ if (st.session_state.center_key != st.session_state.last_center_key) or (st.sess
     st.session_state.date_filter_start = None
     st.session_state.date_filter_end = None
 
-st.caption(
-    f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · "
-    f"Center: **{st.session_state.center_key or 'none'}** · "
-    f"Year: **{st.session_state.year or 'none'}**"
-)
+st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}** · Year: **{st.session_state.year or 'none'}**")
 
 # ---------- center select ----------
 ck = st.session_state.center_key
@@ -503,7 +456,6 @@ cfg = CENTERS[st.session_state.center_key]
 folder = cfg["folder_root"] / str(st.session_state.year)
 folder.mkdir(parents=True, exist_ok=True)
 
-# NEW: resolve .xlsb/.xlsx/.xlsm automatically for the source
 src_path = resolve_source_path(folder, preferred=cfg["src_name"])
 out_path = folder / cfg["out_name"]
 gen_path = cfg["generator"]
@@ -528,7 +480,7 @@ if st.button("◀ Choose another center", key="btn_back_center"):
         if "year" in st.query_params:
             del st.query_params["year"]
     except Exception:
-        pass
+        st.experimental_set_query_params()
     st.rerun()
 
 # ---------- admin panel ----------
@@ -606,7 +558,6 @@ try:
         with col_badge:
             with st.popover(f"📅 Data range: {label}", use_container_width=True):
                 st.markdown("**Quick months**")
-                # month chips covering the span year(s)
                 min_y, max_y = dmin.year, dmax.year
                 chips = []
                 for y in range(min_y, max_y + 1):
@@ -679,10 +630,6 @@ try:
                     """,
                     unsafe_allow_html=True,
                 )
-    else:
-        # No span found (still usable)
-        if st.session_state.date_filter_active:
-            st.info("Date filter is ON, but no detail date column was detected in the report.")
 
     # Normalize totals from workbook
     totals = totals.copy()
@@ -705,14 +652,17 @@ try:
     net = paid = bal = rej = acc = 0.0
     use_filtered = False
 
-    if st.session_state.date_filter_active and (detail_sheet and date_col):
+    if st.session_state.date_filter_active and (s_det in available) and span:
+        # we only aggregate from detail to compute filtered KPIs/totals
         try:
-            # probe headers
-            head = pd.read_excel(str(out_path), sheet_name=detail_sheet, engine="openpyxl", nrows=0)
+            detail_sheet, date_col = span[2], span[3]
+            head = pd.read_excel(str(out_path), sheet_name=detail_sheet,
+                                 engine=("pyxlsb" if str(out_path).lower().endswith(".xlsb") else "openpyxl"),
+                                 nrows=0)
             hdr = list(head.columns.astype(str))
             ins_col = next((c for c in hdr if str(c).strip().lower() in {"insurance","payer","company"}), None)
-            needed_amount_cols = ["Net Amount","NetAmount","Net","Paid","Balance","Rejected","Rejection","Accepted"]
-            present = [c for c in needed_amount_cols if c in hdr]
+            needed = ["Net Amount","NetAmount","Net","Paid","Balance","Rejected","Rejection","Accepted"]
+            present = [c for c in needed if c in hdr]
             usecols = [date_col] + ([ins_col] if ins_col else []) + present
             usecols = list(dict.fromkeys([c for c in usecols if c]))
 
@@ -722,7 +672,6 @@ try:
                 mask = (s_dates.dt.date >= st.session_state.date_filter_start) & \
                        (s_dates.dt.date <= st.session_state.date_filter_end)
                 df_filt = df_small.loc[mask].copy()
-
                 for c in present:
                     df_filt[c] = pd.to_numeric(df_filt[c], errors="coerce").fillna(0.0)
 
@@ -770,7 +719,7 @@ try:
     if st.session_state.date_filter_active:
         st.caption(
             f"Showing data for **{_pretty_selected_range()}** "
-            + (f"(from `{detail_sheet}` → `{date_col}`)" if detail_sheet and date_col else "")
+            + (f"(from `{span[2]}` → `{span[3]}`)" if span else "")
         )
 
     # ---------- KPIs ----------
@@ -794,7 +743,7 @@ try:
     c3.metric("Rejected",   f"{rej:,.2f}")
     c4.metric("Accepted",   f"{acc:,.2f}")
 
-    # ---------- Chart (styled) ----------
+    # ---------- Chart ----------
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter
 
@@ -802,7 +751,7 @@ try:
         ax = abs(x)
         if ax >= 1_000_000_000: return f"{x/1_000_000_000:.2f}B"
         if ax >= 1_000_000:     return f"{x/1_000_000:.2f}M"
-        if ax >= 1_000:         return f"{x/1_000:.0f}k"
+        if ax >= 1_000:         return f"{x/1_000:.0f}.k"
         return f"{x:,.0f}"
 
     labels = ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]
@@ -837,8 +786,8 @@ try:
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
 
-    # ---------- Tabs ----------
-    t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, SHEET_DETAIL])
+    # ---------- Tabs (NO on-screen Aging Detail) ----------
+    t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"])
 
     with t1:
         if use_filtered and filtered_totals is not None and not filtered_totals.empty:
@@ -886,81 +835,34 @@ try:
             )
 
     with t3:
-        st.caption("Loads only when you click, to keep things fast.")
-        if st.button("Load Balance_Aging_Detail (paged, memory-safe)"):
-            try:
-                detail_sheet2 = s_det or SHEET_DETAIL
-                if not detail_sheet2 or detail_sheet2 not in available:
-                    raise RuntimeError(f"Detail sheet not found. Available: {', '.join(available)}")
-
-                # Read just header to get columns
-                head = pd.read_excel(str(out_path), sheet_name=detail_sheet2, engine="openpyxl", nrows=0)
-                all_cols = list(head.columns.astype(str))
-                if not all_cols:
-                    st.warning("No columns found in detail sheet."); st.stop()
-
-                # Count rows cheaply by reading one column
-                first_col = all_cols[0]
-                col_only = pd.read_excel(
-                    str(out_path), sheet_name=detail_sheet2, engine="openpyxl",
-                    usecols=[first_col], dtype=str
-                )
-                total_rows = len(col_only)
-                st.info(f"Rows in sheet: {total_rows:,}")
-
-                # Paging controls
-                page_size = st.number_input("Rows per page", min_value=100, max_value=20000, step=1000, value=5000)
-                max_page = max(1, (total_rows + page_size - 1) // page_size)
-                page = st.number_input("Page", min_value=1, max_value=max_page, step=1, value=1)
-
-                start = (page - 1) * page_size
-                nrows = min(page_size, max(0, total_rows - start))
-
-                # Callable skiprows avoids building a huge list for big 'start'
-                def _skip(idx):
-                    # idx is 0-based including header row; keep header (0), skip data rows [1..start]
-                    return (idx != 0) and (1 <= idx <= start)
-
-                df_page = pd.read_excel(
-                    str(out_path), sheet_name=detail_sheet2, engine="openpyxl",
-                    skiprows=_skip, nrows=nrows
-                )
-
-                # Apply date filter to page if active
-                if st.session_state.date_filter_active and date_col and date_col in df_page.columns:
-                    s_dates3 = _parse_dates_dayfirst(df_page[date_col])
-                    mask3 = (s_dates3.dt.date >= (st.session_state.date_filter_start or date.min)) & \
-                            (s_dates3.dt.date <= (st.session_state.date_filter_end or date.max))
-                    df_page = df_page.loc[mask3].copy()
-
-                df_page = trim_empty_rows(df_page)
-                df_page.index = range(start + 1, start + 1 + len(df_page))
-                st.dataframe(df_page, use_container_width=True, height=full_height(df_page))
-
-                dl1, dl2 = st.columns(2)
-                with dl1:
-                    st.download_button(
-                        "⬇️ Download full report (.xlsx)",
-                        out_path.read_bytes(),
-                        file_name=out_path.name,
-                        use_container_width=True,
-                        key=f"dl_xlsx_detail_{ck}_{st.session_state.year}"
-                    )
-                with dl2:
-                    st.download_button(
-                        "⬇️ Export this page (CSV)",
-                        df_page.to_csv(index=False).encode("utf-8"),
-                        file_name=f"{cfg['key']}_{st.session_state.year}_detail_p{page}.csv",
-                        use_container_width=True,
-                        key=f"dl_csv_detail_{ck}_{st.session_state.year}_p{page}"
-                    )
-            except Exception as e:
-                st.error(str(e))
+        st.markdown("### Report Downloads")
+        st.write("To keep the app fast and stable, the **Aging Detail** sheet is not rendered on-screen.")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button(
+                "⬇️ Download full report (.xlsx)",
+                out_path.read_bytes(),
+                file_name=out_path.name,
+                use_container_width=True,
+                key=f"dl_xlsx_full_{ck}_{st.session_state.year}"
+            )
+        with c2:
+            st.download_button(
+                "⬇️ Download Insurance Totals (CSV)",
+                totals.to_csv(index=False).encode("utf-8"),
+                file_name=f"{cfg['key']}_{st.session_state.year}_insurance_totals.csv",
+                use_container_width=True,
+                key=f"dl_csv_totals2_{ck}_{st.session_state.year}"
+            )
+        st.caption("Open the XLSX locally to inspect **Balance_Aging_Detail** if needed.")
 
 except Exception as e:
     try:
-        names = pd.ExcelFile(str(out_path), engine="openpyxl").sheet_names
+        ext = Path(str(out_path)).suffix.lower()
+        eng = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+        names = pd.ExcelFile(str(out_path), engine=eng).sheet_names
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
 
