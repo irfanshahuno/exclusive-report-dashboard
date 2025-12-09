@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-import sys, os, glob, argparse
+import sys, os, glob
 from datetime import datetime
-from pathlib import Path
-from typing import Optional, Union
 import pandas as pd
-
-# Optional dependencies for styling/output
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 
 # ============================================================
-# CLI examples:
-#   python exclusive_report_with_aging_final.py input.xlsx --out Exclusive_Report_with_Aging.xlsx
-#   python exclusive_report_with_aging_final.py input.xlsb --out Report.xlsx --parquet source.parquet
-# If no input is passed, it picks the first .xls* (xlsx/xlsm/xlsb) excluding Rejection_Report.
+# Optional CLI:
+#   python exclusive_report_with_aging_final.py input.xlsx --out output.xlsx
+#   (Also supports .xlsb; engine chosen automatically by file extension)
+# If no args are provided, it auto-picks the first .xlsx/.xlsb (excluding Rejection_Report)
+# and writes Exclusive_Report_with_Aging.xlsx by default.
 # ============================================================
 
 # ---- Tuning knobs ----
@@ -22,75 +19,59 @@ DECIMALS = 2
 BINS   = [-1, 30, 45, 60, 90, float("inf")]
 LABELS = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
 
-# -------------------- Helpers --------------------
+def _choose_engine(input_file: str) -> str | None:
+    f = input_file.lower()
+    if f.endswith(".xlsb"):
+        return "pyxlsb"
+    if f.endswith(".xlsx") or f.endswith(".xlsm"):
+        return "openpyxl"
+    # let pandas guess for others
+    return None
 
-def find_default_input() -> Optional[str]:
-    # Prefer xlsb/xlsx/xlsm, exclude "Rejection_Report"
-    files = [f for f in glob.glob("*.xls*") if "Rejection_Report" not in f]
-    files.sort()
-    return files[0] if files else None
+def parse_cli() -> tuple[str, str]:
+    files = [f for f in (glob.glob("*.xlsx") + glob.glob("*.xlsb")) if "Rejection_Report" not in f]
+    input_file = None
+    out_file = "Exclusive_Report_with_Aging.xlsx"
 
-def parse_cli():
-    p = argparse.ArgumentParser(description="Exclusive Report with Aging")
-    p.add_argument("input", nargs="?", help="Input Excel (.xlsx/.xlsm/.xlsb)")
-    p.add_argument("--out", default="Exclusive_Report_with_Aging.xlsx", help="Output Excel filename")
-    p.add_argument("--sheet", default=None, help="Sheet name or index (default: first)")
-    p.add_argument("--parquet", default=None, help="Optional: also write a parquet file here")
-    args = p.parse_args()
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--out":
+            if i + 1 >= len(args):
+                raise SystemExit("error: --out requires a filename")
+            out_file = args[i + 1]; i += 2
+        elif a.startswith("-"):
+            raise SystemExit(f"unknown argument: {a}")
+        else:
+            input_file = a; i += 1
 
-    if args.input is None:
-        auto = find_default_input()
-        if not auto:
-            raise FileNotFoundError("❌ No Excel file found (xlsb/xlsx/xlsm).")
-        args.input = auto
+    if input_file is None:
+        if not files:
+            raise FileNotFoundError("❌ No Excel file found in this folder.")
+        input_file = files[0]
 
-    # sheet can be int index or string name
-    sheet = args.sheet
-    if sheet is not None:
-        try:
-            sheet = int(sheet)
-        except ValueError:
-            pass
-    return args.input, args.out, sheet, args.parquet
+    # normalize output extension
+    if not out_file.lower().endswith(".xlsx"):
+        out_file = os.path.splitext(out_file)[0] + ".xlsx"
 
-def read_any_excel(path: Union[str, Path], sheet: Optional[Union[int, str]] = None) -> pd.DataFrame:
-    path = Path(path)
-    ext = path.suffix.lower()
-    engine = "openpyxl"
-    if ext == ".xlsb":
-        engine = "pyxlsb"
-    # If sheet is None, pandas will load the first sheet by default
-    df = pd.read_excel(path, engine=engine, sheet_name=sheet)
-    # If user accidentally points to a multi-sheet returning dict, pick first
-    if isinstance(df, dict):
-        # choose first by order
-        first_key = next(iter(df))
-        df = df[first_key]
-    return df
-
-def to_parquet_if_requested(df: pd.DataFrame, parquet_path: Optional[str]):
-    if parquet_path:
-        outp = Path(parquet_path)
-        outp.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(outp, compression="snappy", index=False)
-        print(f"🪶 Wrote parquet: {outp} (size ≈ {round(outp.stat().st_size/1024/1024,2)} MB)")
-
-# -------------------- Main logic --------------------
+    return input_file, out_file
 
 def main():
     # ---- STEP 1: Locate Excel file ----
-    input_file, output_file, sheet, parquet_sidecar = parse_cli()
+    input_file, output_file = parse_cli()
     print(f"📂 Using input file: {input_file}")
     print(f"📝 Output will be: {output_file}")
-    if sheet is not None:
-        print(f"📄 Sheet: {sheet}")
 
-    # ---- STEP 2: Load Data (xlsb/xlsx/xlsm) ----
-    df = read_any_excel(input_file, sheet=sheet)
-    if df is None or df.empty:
-        raise ValueError("❌ Input sheet is empty.")
-    # Normalize columns
-    df.columns = df.columns.map(lambda c: str(c).strip())
+    engine = _choose_engine(input_file)
+    if engine:
+        print(f"🔧 Using read engine: {engine}")
+    else:
+        print("🔧 Using pandas default read engine")
+
+    # ---- STEP 2: Load Data ----
+    df = pd.read_excel(input_file, engine=engine)
+    df.columns = df.columns.str.strip()
 
     # ---- STEP 3: Convert numeric columns ----
     num_cols = [
@@ -110,16 +91,15 @@ def main():
     ]].sum(axis=1)
 
     # Base columns
-    for c in ["Rejected", "Accepted", "Balance"]:
-        if c not in df.columns:
-            df[c] = 0.0
-    df[["Rejected","Accepted","Balance"]] = df[["Rejected","Accepted","Balance"]].fillna(0.0)
+    df["Rejected"], df["Accepted"], df["Balance"] = 0.0, 0.0, 0.0
 
-    # Normalize status
+    # Normalize status for robust detection
     status_col = "ActivityStatus" if "ActivityStatus" in df.columns else None
+    denial_code_col = "DenialCode" if "DenialCode" in df.columns else None  # not strictly needed, but kept
+
     lower_status = df[status_col].astype(str).str.lower() if status_col else pd.Series("", index=df.index)
 
-    # Rejection/Denial handling
+    # Consider both 'rejected' and 'denied' as denial states
     mask_denied = lower_status.isin(["rejected", "denied"])
     net = df["ActivityIns"].clip(lower=0.0)
     paid = df["Paid"].clip(lower=0.0)
@@ -143,8 +123,10 @@ def main():
     df.loc[mask_denied, ["Accepted","Balance"]] = 0.0
 
     # ---- STEP 4B: Per-row identity reconciliation ----
+    # Ensure: ActivityIns == Paid + Balance + Rejected + Accepted (rounded)
     right_sum = (df["Paid"] + df["Balance"] + df["Rejected"] + df["Accepted"]).round(DECIMALS)
     drift = (df["ActivityIns"].round(DECIMALS) - right_sum).round(DECIMALS)
+    # Push residual drift into Accepted (typical micro-rounding)
     df["Accepted"] = (df["Accepted"] + drift).round(DECIMALS)
 
     # ---- STEP 5: Efficient Aging Calculation ----
@@ -185,8 +167,7 @@ def main():
             fill_value=0,
             observed=False
         )
-        pivot_summary = pivot_summary.reindex(columns=LABELS)
-        pivot_summary = pivot_summary.fillna(0)
+        pivot_summary = pivot_summary.reindex(columns=LABELS).fillna(0)
         pivot_summary["Grand Total"] = pivot_summary.sum(axis=1)
         pivot_summary.loc["Grand Total"] = pivot_summary.sum(axis=0)
         pivot_summary.reset_index(inplace=True)
@@ -210,6 +191,7 @@ def main():
         "Accepted": "Accepted"
     })
 
+    # Grand Total row
     gt_row = {
         "Insurance": "Grand Total",
         "Net Amount": totals["Net Amount"].sum(),
@@ -220,24 +202,25 @@ def main():
     }
     totals = pd.concat([totals, pd.DataFrame([gt_row])], ignore_index=True)
 
-    # Round for display
+    # Round money columns
     for c in ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]:
         totals[c] = pd.to_numeric(totals[c], errors="coerce").round(DECIMALS)
 
     # ---- STEP 9: Validation ----
     checks = {}
+    # Per-row balance
     row_sum = (df["Paid"] + df["Balance"] + df["Rejected"] + df["Accepted"]).round(DECIMALS)
     row_diff = (df["ActivityIns"].round(DECIMALS) - row_sum).round(DECIMALS)
     checks["A_rows_balanced"] = bool((row_diff == 0).all())
     checks["A_rows_unbalanced_count"] = int((row_diff != 0).sum())
     checks["A_max_abs_row_drift"] = float(row_diff.abs().max()) if len(row_diff) else 0.0
-
+    # Totals match
     tot_left  = float(df["ActivityIns"].sum().round(DECIMALS))
     tot_right = float((df["Paid"] + df["Balance"] + df["Rejected"] + df["Accepted"]).sum().round(DECIMALS))
     checks["B_totals_match"] = bool(tot_left == tot_right)
     checks["B_totals_left_net"] = tot_left
     checks["B_totals_right_sum"] = tot_right
-
+    # Aging detail vs summary (exclude GT row)
     if balance_df.empty:
         checks["C_aging_detail_equals_summary"] = True
         checks["C_balance_detail_sum"] = 0.0
@@ -245,17 +228,12 @@ def main():
     else:
         balance_total_detail = float(balance_df["Balance"].sum().round(DECIMALS))
         summary_no_gt = pivot_summary[pivot_summary["Insurance"] != "Grand Total"]
-        balance_total_summary = float(
-            summary_no_gt.drop(columns=["Insurance"]).sum(axis=1).sum().round(DECIMALS)
-        )
+        balance_total_summary = float(summary_no_gt.drop(columns=["Insurance"]).sum(axis=1).sum().round(DECIMALS))
         checks["C_aging_detail_equals_summary"] = bool(abs(balance_total_detail - balance_total_summary) < 0.01)
         checks["C_balance_detail_sum"] = balance_total_detail
         checks["C_balance_summary_sum"] = balance_total_summary
 
-    # ---- STEP 10: Optional Parquet sidecar ----
-    to_parquet_if_requested(df, parquet_sidecar)
-
-    # ---- STEP 11: Write to Excel ----
+    # ---- STEP 10: Write to Excel ----
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         df.to_excel(writer,                sheet_name="Exclusive_Report",        index=False)
         totals.to_excel(writer,            sheet_name="Insurance_Totals",        index=False)
@@ -263,7 +241,7 @@ def main():
         balance_df.to_excel(writer,        sheet_name="Balance_Aging_Detail",    index=False)
         pd.DataFrame([checks]).to_excel(writer, sheet_name="Validation",         index=False)
 
-    # ---- STEP 12: Styling ----
+    # ---- STEP 11: Styling Headers + Grand Total ----
     wb = load_workbook(output_file)
     header_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")  # blue
     total_fill  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")  # light orange
@@ -276,7 +254,7 @@ def main():
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # Highlight 'Grand Total' row (and last 'Grand Total' column in aging summary)
+        # Highlight 'Grand Total' row (and GT column in aging summary)
         if ws.title in ("Balance_Aging_Summary", "Insurance_Totals"):
             for r in range(2, ws.max_row + 1):
                 val = ws.cell(row=r, column=1).value
@@ -294,8 +272,20 @@ def main():
 
     print("💾 Saving file, please wait...")
     wb.save(output_file)
-    print("✅ File saved successfully!")
-    print(f"📁 Created: {output_file}")
+    print("✅ Excel saved:", output_file)
+
+    # ---- STEP 11B: Also save a Parquet copy (size printed) ----
+    try:
+        parquet_path = output_file.replace(".xlsx", ".parquet")
+        # Only the main detail sheet ("Exclusive_Report") is serialized to Parquet;
+        # that’s typically the largest table users want to size-check.
+        df.to_parquet(parquet_path, engine="fastparquet", compression="zstd")
+        size_mb = round(os.path.getsize(parquet_path) / 1_000_000, 2)
+        print(f"🪶 Parquet saved: {parquet_path}  ({size_mb} MB)")
+    except Exception as e:
+        print("⚠️ Could not write Parquet:", e)
+
+    print("📁 Done.")
 
 if __name__ == "__main__":
     main()
