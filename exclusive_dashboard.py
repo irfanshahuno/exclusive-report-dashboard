@@ -22,7 +22,7 @@ CENTERS = {
         "key": "easyhealth",
         "name": "Easy Health Medical Clinic (MF8031)",
         "folder_root": DATA_DIR / "easyhealth",
-        "src_name": "source.xlsx",
+        "src_name": "source.xlsx",  # fallback name; we will auto-pick .xlsb/.xlsx/.xlsm
         "out_name": "report.xlsx",
         "generator": BASE / "exclusive_report_with_aging_final.py",
     },
@@ -113,6 +113,33 @@ def autodetect(xls: pd.ExcelFile):
         detail  = _pick_sheet(names, wants_all=["aging","detail"]) or _pick_sheet(names, wants_any=["detail"])
     return ins_tot, summary, detail, names
 
+# ===== XLSB/XLSX source helpers (NEW) =====
+def resolve_source_path(folder: Path, preferred: str = "source.xlsx") -> Path:
+    """
+    Pick whichever source exists in priority order:
+    1) source.xlsb, 2) source.xlsx, 3) source.xlsm, else fallback to preferred path.
+    """
+    candidates = [folder / "source.xlsb", folder / "source.xlsx", folder / "source.xlsm"]
+    for p in candidates:
+        if p.exists():
+            return p
+    return folder / preferred
+
+def save_uploaded_source(folder: Path, upload) -> Path:
+    """
+    Save uploaded file using its own extension:
+    - *.xlsb  => data/<center>/<year>/source.xlsb
+    - *.xlsx  => data/<center>/<year>/source.xlsx
+    - *.xlsm  => data/<center>/<year>/source.xlsm
+    """
+    ext = Path(upload.name).suffix.lower()
+    if ext not in {".xlsb", ".xlsx", ".xlsm"}:
+        raise ValueError("Please upload an .xlsb, .xlsx, or .xlsm file.")
+    dst = folder / f"source{ext}"
+    folder.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes(upload.read())
+    return dst
+
 # ---------- caching ----------
 @st.cache_resource(show_spinner=True)
 def load_book(path: str, _token: float):
@@ -138,35 +165,21 @@ def _safe_read_cols(path: str, sheet: str, usecols, _token: float) -> pd.DataFra
 
 # ---------- date parsing (UAE style) ----------
 def _parse_dates_dayfirst(series: pd.Series) -> pd.Series:
-    """
-    Robust date parser that prefers UAE style (dd-mm-YYYY / dd/mm/YYYY),
-    but gracefully handles common alternatives.
-    """
     s = series.astype(str).str.strip()
-
-    # If values look like dd-mm-YYYY or dd/mm/YYYY, force exact + dayfirst
     if s.str.match(r"^\d{1,2}[-/]\d{1,2}[-/]\d{4}$").mean() > 0.8:
         for fmt in ("%d-%m-%Y", "%d/%m/%Y"):
             out = pd.to_datetime(s, format=fmt, errors="coerce")
             if out.notna().sum() >= int(0.8 * len(s)):
                 return out
         return pd.to_datetime(s, errors="coerce", dayfirst=True)
-
-    # Try common alternates
     for fmt in ("%Y-%m-%d", "%d-%m-%y", "%d/%m/%y"):
         out = pd.to_datetime(s, format=fmt, errors="coerce")
         if out.notna().sum() >= int(0.8 * len(s)):
             return out
-
-    # Last resort: prefer dayfirst
     return pd.to_datetime(s, errors="coerce", dayfirst=True)
 
 @st.cache_data(show_spinner=False)
 def find_date_span(path: str, preferred_detail_sheet: str | None, _token: float):
-    """
-    Detect min/max service dates and the most valid date column by reading ONLY candidate date columns.
-    Returns (min_date, max_date, sheet_used, date_col) or None.
-    """
     try:
         xls = load_book(path, _token)
         names = xls.sheet_names
@@ -197,7 +210,7 @@ def find_date_span(path: str, preferred_detail_sheet: str | None, _token: float)
                 continue
             best_col, best_cnt, best_min, best_max = None, -1, None, None
             for c in df_small.columns:
-                s = _parse_dates_dayfirst(df_small[c])   # <—— UAE-style parser
+                s = _parse_dates_dayfirst(df_small[c])
                 cnt = s.notna().sum()
                 if cnt > best_cnt and cnt > 0:
                     best_col = c
@@ -481,7 +494,9 @@ if st.session_state.year is None:
 cfg = CENTERS[st.session_state.center_key]
 folder = cfg["folder_root"] / str(st.session_state.year)
 folder.mkdir(parents=True, exist_ok=True)
-src_path = folder / cfg["src_name"]
+
+# NEW: resolve .xlsb/.xlsx/.xlsm automatically for the source
+src_path = resolve_source_path(folder, preferred=cfg["src_name"])
 out_path = folder / cfg["out_name"]
 gen_path = cfg["generator"]
 
@@ -513,21 +528,23 @@ if st.session_state.is_admin:
     st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
     with st.expander("⬆️ Upload/replace source Excel for this year", expanded=False):
         up = st.file_uploader(
-            f"Upload .xlsx for {st.session_state.year}",
-            type=["xlsx"],
+            f"Upload source Excel for {st.session_state.year} (.xlsb/.xlsx/.xlsm)",
+            type=["xlsb", "xlsx", "xlsm"],
             key=f"uploader_{st.session_state.center_key}_{st.session_state.year}",
         )
         if up:
-            folder.mkdir(parents=True, exist_ok=True)
-            src_path.write_bytes(up.read())
-            st.success(f"Saved to {src_path}")
+            try:
+                saved_to = save_uploaded_source(folder, up)
+                st.success(f"Saved to {saved_to.name}")
+            except Exception as e:
+                st.error(str(e))
 
     if st.button("↻ Rebuild report", use_container_width=True, key=f"rebuild_{ck}_{st.session_state.year}"):
         try:
             if not gen_path.exists():
                 st.error(f"Generator not found: {gen_path}")
             elif not src_path.exists():
-                st.error(f"No source file found for {st.session_state.year}. Please upload {src_path.name} first.")
+                st.error(f"No source file found for {st.session_state.year}. Please upload source.xlsb/.xlsx first.")
             else:
                 t0 = datetime.now()
                 msg = rebuild_report(gen_path, src_path, out_path)
@@ -689,12 +706,11 @@ try:
 
             df_small = _safe_read_cols(str(out_path), detail_sheet, usecols, token)
             if not df_small.empty:
-                s_dates = _parse_dates_dayfirst(df_small[date_col])  # <—— UAE-style parser
+                s_dates = _parse_dates_dayfirst(df_small[date_col])
                 mask = (s_dates.dt.date >= st.session_state.date_filter_start) & \
                        (s_dates.dt.date <= st.session_state.date_filter_end)
                 df_filt = df_small.loc[mask].copy()
 
-                # Coerce numerics after filtering
                 for c in present:
                     df_filt[c] = pd.to_numeric(df_filt[c], errors="coerce").fillna(0.0)
 
@@ -739,7 +755,6 @@ try:
         except Exception:
             use_filtered = False
 
-    # >>> Caption above KPIs when filtered
     if st.session_state.date_filter_active:
         st.caption(
             f"Showing data for **{_pretty_selected_range()}** "
@@ -897,7 +912,7 @@ try:
 
                 # Apply date filter to page if active
                 if st.session_state.date_filter_active and date_col and date_col in df_page.columns:
-                    s_dates3 = _parse_dates_dayfirst(df_page[date_col])  # <—— UAE-style parser
+                    s_dates3 = _parse_dates_dayfirst(df_page[date_col])
                     mask3 = (s_dates3.dt.date >= (st.session_state.date_filter_start or date.min)) & \
                             (s_dates3.dt.date <= (st.session_state.date_filter_end or date.max))
                     df_page = df_page.loc[mask3].copy()
@@ -932,5 +947,3 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
-
