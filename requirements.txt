@@ -1,9 +1,13 @@
 streamlit==1.39.0
 pandas==2.2.3
-numpy==1.26.4
-openpyxl==3.1.5      # for .xlsx/.xlsm
-pyxlsb==1.0.10       # for .xlsb
-pyarrow==15.0.2      # for parquet
+numpy==2.2.1
 matplotlib==3.9.2
+rich==14.2.0
+
+openpyxl==3.1.5
 xlsxwriter==3.2.0
-pillow==10.4.0
+pyxlsb==1.0.10
+
+# Parquet via fastparquet (no cmake toolchain needed)
+fastparquet==2024.5.0
+cramjam==2.8.3
