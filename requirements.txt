@@ -2,8 +2,8 @@ streamlit==1.39.0
 pandas==2.2.3
 numpy==2.2.1
 matplotlib==3.9.2
-rich==14.2.0
 
+# Excel
 openpyxl==3.1.5
 xlsxwriter==3.2.0
 pyxlsb==1.0.10
@@ -11,3 +11,6 @@ pyxlsb==1.0.10
 # Parquet via fastparquet (no cmake toolchain needed)
 fastparquet==2024.5.0
 cramjam==2.8.3
+
+# Let Streamlit pull a compatible rich (<14) automatically
+# (If you want to pin: rich==13.7.1)
