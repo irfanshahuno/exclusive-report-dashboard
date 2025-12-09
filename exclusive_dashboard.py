@@ -22,7 +22,7 @@ CENTERS = {
         "key": "easyhealth",
         "name": "Easy Health Medical Clinic (MF8031)",
         "folder_root": DATA_DIR / "easyhealth",
-        "src_name": "source.xlsx",  # fallback name; we will auto-pick .xlsb/.xlsx/.xlsm
+        "src_name": "source.xlsx",  # fallback name; auto-picks .xlsb/.xlsx/.xlsm
         "out_name": "report.xlsx",
         "generator": BASE / "exclusive_report_with_aging_final.py",
     },
@@ -85,6 +85,7 @@ def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
         res = _run(cmd + ["--out", str(out_path)])
         return res.stdout or "OK"
     except Exception:
+        # fallback CLI ordering
         res = _run([py, str(gen_path), "--out", str(out_path), str(src_path)])
         return res.stdout or "OK"
 
@@ -113,11 +114,10 @@ def autodetect(xls: pd.ExcelFile):
         detail  = _pick_sheet(names, wants_all=["aging","detail"]) or _pick_sheet(names, wants_any=["detail"])
     return ins_tot, summary, detail, names
 
-# ===== XLSB/XLSX source helpers (NEW) =====
+# ===== XLSB/XLSX source helpers =====
 def resolve_source_path(folder: Path, preferred: str = "source.xlsx") -> Path:
     """
-    Pick whichever source exists in priority order:
-    1) source.xlsb, 2) source.xlsx, 3) source.xlsm, else fallback to preferred path.
+    Priority: 1) source.xlsb, 2) source.xlsx, 3) source.xlsm, else fallback to preferred.
     """
     candidates = [folder / "source.xlsb", folder / "source.xlsx", folder / "source.xlsm"]
     for p in candidates:
@@ -143,6 +143,7 @@ def save_uploaded_source(folder: Path, upload) -> Path:
 # ---------- caching ----------
 @st.cache_resource(show_spinner=True)
 def load_book(path: str, _token: float):
+    # Output reports are .xlsx written by generators → openpyxl is correct
     return pd.ExcelFile(path, engine="openpyxl")
 
 @st.cache_data(show_spinner=True)
@@ -166,12 +167,14 @@ def _safe_read_cols(path: str, sheet: str, usecols, _token: float) -> pd.DataFra
 # ---------- date parsing (UAE style) ----------
 def _parse_dates_dayfirst(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.strip()
+    # Try dominant day-first patterns first
     if s.str.match(r"^\d{1,2}[-/]\d{1,2}[-/]\d{4}$").mean() > 0.8:
         for fmt in ("%d-%m-%Y", "%d/%m/%Y"):
             out = pd.to_datetime(s, format=fmt, errors="coerce")
             if out.notna().sum() >= int(0.8 * len(s)):
                 return out
         return pd.to_datetime(s, errors="coerce", dayfirst=True)
+    # Fallbacks
     for fmt in ("%Y-%m-%d", "%d-%m-%y", "%d/%m/%y"):
         out = pd.to_datetime(s, format=fmt, errors="coerce")
         if out.notna().sum() >= int(0.8 * len(s)):
@@ -287,7 +290,7 @@ def style_grid(df: pd.DataFrame):
     if df.shape[1] == 0:
         return df.style
     df = df.copy()
-    df.index = range(1, len(df) + 1)
+    df.index = range(1, len(df) + 1)  # 1-based index visible in UI
     first_col = df.columns[0]
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     fmt_map = {c: "{:,.2f}".format for c in num_cols}
@@ -390,6 +393,7 @@ def is_admin_mode() -> bool:
                     st.error("Wrong password")
         return False
     else:
+        # View toggle when no password is set
         return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
 
 # ---------- state ----------
@@ -433,7 +437,11 @@ if (st.session_state.center_key != st.session_state.last_center_key) or (st.sess
     st.session_state.date_filter_start = None
     st.session_state.date_filter_end = None
 
-st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}** · Year: **{st.session_state.year or 'none'}**")
+st.caption(
+    f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · "
+    f"Center: **{st.session_state.center_key or 'none'}** · "
+    f"Year: **{st.session_state.year or 'none'}**"
+)
 
 # ---------- center select ----------
 ck = st.session_state.center_key
@@ -520,7 +528,7 @@ if st.button("◀ Choose another center", key="btn_back_center"):
         if "year" in st.query_params:
             del st.query_params["year"]
     except Exception:
-        st.experimental_set_query_params()
+        pass
     st.rerun()
 
 # ---------- admin panel ----------
@@ -671,6 +679,10 @@ try:
                     """,
                     unsafe_allow_html=True,
                 )
+    else:
+        # No span found (still usable)
+        if st.session_state.date_filter_active:
+            st.info("Date filter is ON, but no detail date column was detected in the report.")
 
     # Normalize totals from workbook
     totals = totals.copy()
@@ -693,7 +705,7 @@ try:
     net = paid = bal = rej = acc = 0.0
     use_filtered = False
 
-    if st.session_state.date_filter_active and detail_sheet and date_col:
+    if st.session_state.date_filter_active and (detail_sheet and date_col):
         try:
             # probe headers
             head = pd.read_excel(str(out_path), sheet_name=detail_sheet, engine="openpyxl", nrows=0)
@@ -790,7 +802,7 @@ try:
         ax = abs(x)
         if ax >= 1_000_000_000: return f"{x/1_000_000_000:.2f}B"
         if ax >= 1_000_000:     return f"{x/1_000_000:.2f}M"
-        if ax >= 1_000:         return f"{x/1_000:.0f}.k"
+        if ax >= 1_000:         return f"{x/1_000:.0f}k"
         return f"{x:,.0f}"
 
     labels = ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]
@@ -902,12 +914,16 @@ try:
                 page = st.number_input("Page", min_value=1, max_value=max_page, step=1, value=1)
 
                 start = (page - 1) * page_size
-                skip = list(range(1, 1 + start))  # skip data rows before our page; keep header (row 0)
                 nrows = min(page_size, max(0, total_rows - start))
+
+                # Callable skiprows avoids building a huge list for big 'start'
+                def _skip(idx):
+                    # idx is 0-based including header row; keep header (0), skip data rows [1..start]
+                    return (idx != 0) and (1 <= idx <= start)
 
                 df_page = pd.read_excel(
                     str(out_path), sheet_name=detail_sheet2, engine="openpyxl",
-                    skiprows=skip, nrows=nrows
+                    skiprows=_skip, nrows=nrows
                 )
 
                 # Apply date filter to page if active
@@ -947,3 +963,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
