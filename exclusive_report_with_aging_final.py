@@ -5,7 +5,6 @@
 Exclusive Report with Aging — robust generator
 - Inputs: .xlsb / .xlsx / .xlsm
 - Outputs: Exclusive_Report, Insurance_Totals, Balance_Aging_Summary, Balance_Aging_Detail
-- Safe defaults for missing columns, tolerant date parsing, clear console messages
 """
 
 import argparse
@@ -173,8 +172,6 @@ def main():
     parser = argparse.ArgumentParser(description="Build Exclusive Report with Aging")
     parser.add_argument("input", nargs="?", help="Path to input Excel (.xlsb/.xlsx/.xlsm). If omitted, auto-detects in current folder.")
     parser.add_argument("--out", dest="out", default=OUTPUT_DEFAULT, help=f"Output Excel filename (default: {OUTPUT_DEFAULT})")
-    # Allow dashboard’s alternate calling convention: [script, --out, out, input]
-    # We'll post-process argv if needed.
     args, unknown = parser.parse_known_args()
 
     # Handle dashboard's alternate ordering: if args.input is None but an unknown looks like a file, use it
@@ -284,11 +281,9 @@ def main():
     print(f"✅ Done: {out_path}")
 
 if __name__ == "__main__":
-    # The argparse logic in main() handles the various calling styles.
     try:
         main()
     except Exception as e:
-        # Never hard-crash without a helpful message
         print(f"❌ Unexpected error: {e}", file=sys.stderr)
         sys.exit(99)
 
