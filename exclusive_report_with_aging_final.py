@@ -3,20 +3,15 @@ import argparse
 import glob
 from pathlib import Path
 from datetime import datetime
-import pandas as pd
 import numpy as np
+import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 
-REQUIRED_COLS = [
-    "ActivityIns","actRemitInsShare","actResub1RemitInsShare",
-    "actResub2RemitInsShare","actResub3RemitInsShare","TKBKAmountAct",
-    "ActivityStatus","DenialCode",
-    "SubmissionDate","ClaimDate","VisitDate",
-    "Insurance","PayerName","Insurer","Plan"
-]
+# ======================= Helpers =======================
 
 def choose_input(path_arg: str | None) -> Path:
+    """Choose input file; prefer .xlsb then .xlsx if no arg is given."""
     if path_arg:
         p = Path(path_arg).expanduser().resolve()
         if not p.exists():
@@ -24,7 +19,6 @@ def choose_input(path_arg: str | None) -> Path:
         if p.suffix.lower() not in (".xlsb", ".xlsx"):
             raise ValueError(f"❌ Input must be .xlsb or .xlsx, got: {p.suffix}")
         return p
-    # search current folder: prefer .xlsb, else .xlsx
     xlsb = [Path(x) for x in glob.glob("*.xlsb") if "Rejection_Report" not in x]
     xlsx = [Path(x) for x in glob.glob("*.xlsx") if "Rejection_Report" not in x]
     if xlsb:
@@ -34,28 +28,31 @@ def choose_input(path_arg: str | None) -> Path:
     raise FileNotFoundError("❌ No XLSB/XLSX file found in this folder.")
 
 def read_excel_any(path: Path) -> pd.DataFrame:
-    suffix = path.suffix.lower()
-    if suffix == ".xlsb":
+    """Read .xlsb with pyxlsb; .xlsx with openpyxl; trim header whitespace."""
+    if path.suffix.lower() == ".xlsb":
         df = pd.read_excel(path, engine="pyxlsb")
-    elif suffix == ".xlsx":
+    elif path.suffix.lower() == ".xlsx":
         df = pd.read_excel(path, engine="openpyxl")
     else:
-        raise ValueError(f"❌ Unsupported extension: {suffix}")
+        raise ValueError(f"❌ Unsupported extension: {path.suffix}")
     df.columns = df.columns.str.strip()
     return df
 
 def downcast_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """Shrink numeric memory footprint."""
     for col in df.select_dtypes(include=["int64","int32","int16","int8"]).columns:
         df[col] = pd.to_numeric(df[col], downcast="integer")
     for col in df.select_dtypes(include=["float64","float32"]).columns:
         df[col] = pd.to_numeric(df[col], downcast="float")
     return df
 
-def first_present_column(df, candidates):
+def first_present_column(df: pd.DataFrame, candidates):
     for c in candidates:
         if c in df.columns:
             return c
     return None
+
+# ======================= Main =======================
 
 def main():
     parser = argparse.ArgumentParser(description="Exclusive Report (robust; .xlsb/.xlsx input)")
@@ -70,7 +67,7 @@ def main():
     print(f"📂 Using input file: {in_path}")
     df = read_excel_any(in_path)
 
-    # --- Ensure numeric columns exist & are numeric ---
+    # --- Ensure numeric columns exist & numeric ---
     num_cols = [
         "ActivityIns","actRemitInsShare","actResub1RemitInsShare",
         "actResub2RemitInsShare","actResub3RemitInsShare","TKBKAmountAct"
@@ -132,10 +129,11 @@ def main():
     keep_cols = [c for c in keep_cols if c in df.columns]
     balance_df = df.loc[df["Balance"] > 0, keep_cols]
 
+    # Shrink memory
     df = downcast_numeric(df)
     balance_df = downcast_numeric(balance_df)
 
-    # --- Summary pivot ---
+    # --- Summary pivot (Balance Aging Summary) ---
     pivot_summary = pd.pivot_table(
         balance_df,
         index=insurance_col,
@@ -150,34 +148,62 @@ def main():
     pivot_summary.loc["Grand Total"] = pivot_summary.sum(axis=0)
     pivot_summary = pivot_summary.reset_index()
 
-    # --- Write Excel ---
+    # --- Insurance Totals (ActivityIns / Paid / Rejection / Accepted / Balance) ---
+    totals_cols = ["ActivityIns","Paid","Rejection","Accepted","Balance"]
+    insurance_totals = (
+        df.groupby(insurance_col, dropna=False)[totals_cols]
+          .sum(numeric_only=True)
+          .reset_index()
+    )
+    # Add Grand Total row
+    gt_vals = insurance_totals[totals_cols].sum(numeric_only=True)
+    gt_row = {insurance_col: "Grand Total", **gt_vals.to_dict()}
+    insurance_totals = pd.concat([insurance_totals, pd.DataFrame([gt_row])], ignore_index=True)
+
+    # ======================= Write Excel =======================
     print("📝 Writing Excel…")
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+        # Canonical (space) names expected by your dashboard
+        df.to_excel(writer, sheet_name="Exclusive Report", index=False)
+        insurance_totals.to_excel(writer, sheet_name="Insurance Totals", index=False)
+        pivot_summary.to_excel(writer, sheet_name="Balance Aging Summary", index=False)
+        balance_df.to_excel(writer, sheet_name="Balance Aging Detail", index=False)
+
+        # Backward-compatible underscore aliases (optional but harmless)
         df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
         pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
         balance_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
 
-    # --- Style headers & totals ---
+    # ======================= Style =======================
     wb = load_workbook(out_path)
     header_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
     total_fill  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
 
-    for ws in wb.worksheets:
+    def style_headers(ws):
         for c in range(1, ws.max_column + 1):
             cell = ws.cell(row=1, column=c)
             cell.fill = header_fill
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        if ws.title == "Balance_Aging_Summary":
-            # Grand Total row
-            for r in range(2, ws.max_row + 1):
-                if ws.cell(row=r, column=1).value == "Grand Total":
-                    for c in range(1, ws.max_column + 1):
-                        cell = ws.cell(row=r, column=c)
-                        cell.fill = total_fill
-                        cell.font = Font(bold=True)
-            # Grand Total column (last)
+    def style_grand_total_row(ws, key_col=1, label="Grand Total"):
+        for r in range(2, ws.max_row + 1):
+            if str(ws.cell(row=r, column=key_col).value) == label:
+                for c in range(1, ws.max_column + 1):
+                    cell = ws.cell(row=r, column=c)
+                    cell.fill = total_fill
+                    cell.font = Font(bold=True)
+                break
+
+    for name in [
+        "Exclusive Report","Insurance Totals","Balance Aging Summary","Balance Aging Detail",
+        "Exclusive_Report","Balance_Aging_Summary","Balance_Aging_Detail"
+    ]:
+        ws = wb[name]
+        style_headers(ws)
+        if name in ("Insurance Totals","Balance Aging Summary"):
+            style_grand_total_row(ws, key_col=1, label="Grand Total")
+        if name in ("Balance Aging Summary","Balance_Aging_Summary"):
             last_col = ws.max_column
             for r in range(1, ws.max_row + 1):
                 cell = ws.cell(row=r, column=last_col)
