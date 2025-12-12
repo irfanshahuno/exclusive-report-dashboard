@@ -19,8 +19,8 @@ import pandas as pd
 # ------------------------------ Config ------------------------------
 INS_TOT_SHEET = "Insurance_Totals"
 SUMMARY_SHEET = "Balance_Aging_Summary"
-DETAIL_SHEET  = "Balance_Aging_Detail"
-RAW_SHEET     = "Exclusive_Report"
+DETAIL_SHEET = "Balance_Aging_Detail"
+RAW_SHEET = "Exclusive_Report"
 
 NUM_COL_CANDIDATES = [
     "ActivityIns",
@@ -33,7 +33,7 @@ INSURANCE_COL_CANDIDATES = ["Insurance", "PayerName", "Insurer", "Plan"]
 
 DATE_COL_CANDIDATES = ["SubmissionDate", "ClaimDate", "VisitDate"]
 
-AGING_BINS   = [-1, 30, 45, 60, 90, float("inf")]
+AGING_BINS = [-1, 30, 45, 60, 90, float("inf")]
 AGING_LABELS = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
 
 OUTPUT_DEFAULT = "Exclusive_Report_with_Aging.xlsx"
@@ -89,18 +89,18 @@ def _compute_financials(df: pd.DataFrame) -> pd.DataFrame:
 
     # Initialize
     df["Rejection"] = 0.0
-    df["Accepted"]  = 0.0
-    df["Balance"]   = 0.0
+    df["Accepted"] = 0.0
+    df["Balance"] = 0.0
 
     # Logic
     lower_status = df["ActivityStatus"].astype(str).str.lower()
-    mask_paid    = df["Paid"] > 0
-    mask_reject  = (df["Paid"] == 0) & (lower_status == "rejected") & (df["DenialCode"].notna())
+    mask_paid = df["Paid"] > 0
+    mask_reject = (df["Paid"] == 0) & (lower_status == "rejected") & (df["DenialCode"].notna())
     mask_balance = (df["Paid"] == 0) & ~mask_reject
 
-    df.loc[mask_paid,   "Accepted"]  = df["ActivityIns"] - df["Paid"]
+    df.loc[mask_paid, "Accepted"] = df["ActivityIns"] - df["Paid"]
     df.loc[mask_reject, "Rejection"] = df["ActivityIns"]
-    df.loc[mask_balance,"Balance"]   = df["ActivityIns"]
+    df.loc[mask_balance,"Balance"] = df["ActivityIns"]
     return df
 
 def _compute_aging(df: pd.DataFrame) -> pd.DataFrame:
@@ -130,8 +130,8 @@ def _make_insurance_totals(df: pd.DataFrame, insurance_col: str) -> pd.DataFrame
     numerics = ["ActivityIns", "Paid", "Balance", "Rejection", "Accepted"]
     pivot = (
         df.groupby(insurance_col, dropna=False)[numerics]
-          .sum(numeric_only=True)
-          .reset_index()
+            .sum(numeric_only=True)
+            .reset_index()
     )
     # Clean empty/None insurance names
     pivot[insurance_col] = pivot[insurance_col].astype(str).str.strip().replace(
@@ -247,8 +247,8 @@ def main():
     # Styling (headers + Grand Totals highlight in summary/ins_totals)
     wb = load_workbook(out_path)
 
-    header_fill = PatternFill(start_color="2196F3", end_color="2196F3", fill_type="solid")   # blue
-    total_fill  = PatternFill(start_color="FFF7E0", end_color="FFF7E0", fill_type="solid")   # light yellow
+    header_fill = PatternFill(start_color="2196F3", end_color="2196F3", fill_type="solid")    # blue
+    total_fill = PatternFill(start_color="FFF7E0", end_color="FFF7E0", fill_type="solid")    # light yellow
 
     def style_headers(ws):
         for c in range(1, ws.max_column + 1):
@@ -284,10 +284,7 @@ def main():
     print(f"✅ Done: {out_path}")
 
 if __name__ == "__main__":
-    # Be extra tolerant to the dashboard's two call styles:
-    # 1) script <in> --out <out>
-    # 2) script --out <out> <in>
-    # The argparse logic above already handles both; just run.
+    # The argparse logic in main() handles the various calling styles.
     try:
         main()
     except Exception as e:
