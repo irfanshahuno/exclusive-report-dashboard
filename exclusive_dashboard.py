@@ -1,7 +1,7 @@
+# exclusive_dashboard.py
 import sys
 import subprocess
 import hashlib
-import os # <-- NECESSARY: Added for robust file deletion
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
@@ -21,7 +21,7 @@ CENTERS = {
         "key": "easyhealth",
         "name": "Easy Health Medical Clinic (MF8031)",
         "folder_root": DATA_DIR / "easyhealth",
-        "src_name": "source.xlsx",
+        "src_name": "source.xlsx",   # we will auto-pick .xlsb/.xlsx/.xlsm anyway
         "out_name": "report.xlsx",
         "generator": BASE / "exclusive_report_with_aging_final.py",
     },
@@ -86,7 +86,6 @@ def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
         res = _run(cmd + ["--out", str(out_path)])
         return res.stdout or "OK"
     except Exception:
-        # Fallback to alternate argument order for dashboard compatibility
         res = _run([py, str(gen_path), "--out", str(out_path), str(src_path)])
         return res.stdout or "OK"
 
@@ -120,36 +119,12 @@ def resolve_source_path(folder: Path, preferred: str = "source.xlsx") -> Path:
     return folder / preferred
 
 def save_uploaded_source(folder: Path, upload) -> Path:
-    """
-    Saves the uploaded file directly to disk, first clearing any old 'source' files.
-    FIX IMPLEMENTED: Uses Streamlit's buffer for efficient, low-memory disk writing,
-    preventing crashes with large files (e.g., 50MB).
-    """
     ext = Path(upload.name).suffix.lower()
     if ext not in {".xlsb", ".xlsx", ".xlsm"}:
         raise ValueError("Please upload an .xlsb, .xlsx, or .xlsm file.")
-
-    # 1. Clear any existing 'source' files to prevent conflicts
-    for name in ("source.xlsb", "source.xlsx", "source.xlsm"):
-        p = folder / name
-        if p.exists():
-            os.remove(p) # <--- Using os.remove
-            
-    # 2. Determine the destination path and ensure the folder exists
     dst = folder / f"source{ext}"
     folder.mkdir(parents=True, exist_ok=True)
-    
-    # 3. Write the new file content directly to disk efficiently
-    try:
-        # Use getbuffer().tobytes() to efficiently stream the file to disk
-        dst.write_bytes(upload.getbuffer().tobytes())
-    except AttributeError:
-        # Fallback if getbuffer() is unavailable (less efficient)
-        dst.write_bytes(upload.read()) 
-    
-    # 4. Critical: Clear caches so the new file is loaded upon rebuild/viewing
-    load_core_sheets.clear()
-    
+    dst.write_bytes(upload.read())
     return dst
 
 @st.cache_resource(show_spinner=True)
@@ -162,22 +137,20 @@ def load_core_sheets(path: str, _token: float):
     """Load ONLY the two light sheets. NO detail access at all."""
     ext = Path(path).suffix.lower()
     if ext == ".xlsb":
-        # Handle .xlsb with pyxlsb engine
         xlsb = pd.ExcelFile(path, engine="pyxlsb")
         ins_tot, summary, names = autodetect(xlsb)
         if not ins_tot or not summary:
             raise RuntimeError(f"Required sheets not found. Available: {', '.join(names)}")
-        df_ins = pd.read_excel(path, sheet_name=ins_tot, engine="pyxlsb")
-        df_sum = pd.read_excel(path, sheet_name=summary, engine="pyxlsb")
+        df_ins  = pd.read_excel(path, sheet_name=ins_tot, engine="pyxlsb")
+        df_sum  = pd.read_excel(path, sheet_name=summary, engine="pyxlsb")
         return df_ins, df_sum, ins_tot, summary, names
 
-    # Handle .xlsx/.xlsm with openpyxl
     xls = load_book(path, _token)
     ins_tot, summary, names = autodetect(xls)
     if not ins_tot or not summary:
         raise RuntimeError(f"Required sheets not found. Available: {', '.join(names)}")
-    df_ins = xls.parse(ins_tot)
-    df_sum = xls.parse(summary)
+    df_ins  = xls.parse(ins_tot)
+    df_sum  = xls.parse(summary)
     return df_ins, df_sum, ins_tot, summary, names
 
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -228,9 +201,9 @@ def style_grid(df: pd.DataFrame):
         .set_table_styles([
             {"selector": "table", "props": [("border-collapse", "collapse"), ("width", "100%")]},
             {"selector": "th.col_heading", "props": [("border", f"1px solid {border}"),
-                                                     ("background-color", header_bg),
-                                                     ("font-weight", "700"),
-                                                     ("color", header_font)]},
+                                                    ("background-color", header_bg),
+                                                    ("font-weight", "700"),
+                                                    ("color", header_font)]},
             {"selector": "th.row_heading", "props": [("border", f"1px solid {border}"),
                                                      ("background-color", "#FFFFFF"),
                                                      ("color", "#000000"),
@@ -378,7 +351,7 @@ gen_path = cfg["generator"]
 # Keep URL in sync
 if (st.query_params.get("center") != st.session_state.center_key) or (st.query_params.get("year") != str(st.session_state.year)):
     st.query_params["center"] = st.session_state.center_key
-    st.query_params["year"] = str(st.session_state.year)
+    st.query_params["year"]   = str(st.session_state.year)
 
 # Audit ribbon + SAFE mode info
 mt = mtime_token(out_path)
@@ -396,7 +369,6 @@ if st.button("◀ Choose another center", key="btn_back_center"):
         if "center" in st.query_params: del st.query_params["center"]
         if "year" in st.query_params: del st.query_params["year"]
     except Exception:
-        # Fallback for Streamlit versions that don't support deleting query params
         st.experimental_set_query_params()
     st.rerun()
 
@@ -411,9 +383,8 @@ if st.session_state.is_admin:
         )
         if up:
             try:
-                # This is the corrected function call
                 saved_to = save_uploaded_source(folder, up)
-                st.success(f"Saved to {saved_to.name}. Click 'Rebuild report' now.")
+                st.success(f"Saved to {saved_to.name}")
             except Exception as e:
                 st.error(str(e))
 
@@ -469,18 +440,18 @@ try:
         return df.loc[~df[first].astype(str).str.contains("grand total", case=False, na=False)]
 
     totals_no_gt = drop_gt(totals)
-    net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net", "ActivityIns") # Added ActivityIns as final fallback
+    net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
     paid = ksum(totals_no_gt, "Paid")
-    bal = ksum(totals_no_gt, "Balance")
-    rej = ksum(totals_no_gt, "Rejected", "Rejection")
-    acc = ksum(totals_no_gt, "Accepted")
+    bal  = ksum(totals_no_gt, "Balance")
+    rej  = ksum(totals_no_gt, "Rejected", "Rejection")
+    acc  = ksum(totals_no_gt, "Accepted")
 
     c0, c1, c2, c3, c4 = st.columns(5)
-    c0.metric("Net Amount", f"${net:,.2f}")
-    c1.metric("Paid", f"${paid:,.2f}")
-    c2.metric("Balance", f"${bal:,.2f}")
-    c3.metric("Rejected", f"${rej:,.2f}")
-    c4.metric("Accepted", f"${acc:,.2f}")
+    c0.metric("Net Amount", f"{net:,.2f}")
+    c1.metric("Paid",       f"{paid:,.2f}")
+    c2.metric("Balance",    f"{bal:,.2f}")
+    c3.metric("Rejected",   f"{rej:,.2f}")
+    c4.metric("Accepted",   f"{acc:,.2f}")
 
     # Chart
     import matplotlib.pyplot as plt
@@ -488,8 +459,8 @@ try:
     def compact(x, _pos=None):
         ax = abs(x)
         if ax >= 1_000_000_000: return f"{x/1_000_000_000:.2f}B"
-        if ax >= 1_000_000: return f"{x/1_000_000:.2f}M"
-        if ax >= 1_000: return f"{x/1_000:.0f}.k"
+        if ax >= 1_000_000:     return f"{x/1_000_000:.2f}M"
+        if ax >= 1_000:         return f"{x/1_000:.0f}.k"
         return f"{x:,.0f}"
 
     labels = ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]
@@ -509,7 +480,7 @@ try:
     ymax = max(values) if values else 1.0
     for rect, v in zip(bars, values):
         x = rect.get_x() + rect.get_width() / 2
-        label = f"${int(round(v)):,.0f}"
+        label = f"{int(round(v)):,.0f}"
         if v >= 0.08 * ymax:
             ax.text(x, v * 0.96, label, ha="center", va="top",
                     fontsize=16, fontweight="900", color="white")
@@ -524,43 +495,53 @@ try:
     t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"])
 
     with t1:
-        st.subheader("Totals by Insurance Payer")
         st.dataframe(style_grid(totals), use_container_width=True, height=full_height(totals))
-        
+        dl1, dl2 = st.columns(2)
+        with dl1:
+            st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(),
+                               file_name=out_path.name, use_container_width=True,
+                               key=f"dl_xlsx_totals_{ck}_{st.session_state.year}")
+        with dl2:
+            st.download_button("⬇️ Export this table (CSV)",
+                               totals.to_csv(index=False).encode("utf-8"),
+                               file_name=f"{cfg['key']}_{st.session_state.year}_totals.csv",
+                               use_container_width=True,
+                               key=f"dl_csv_totals_{ck}_{st.session_state.year}")
+
     with t2:
-        st.subheader("Balance Aging Summary")
         st.dataframe(style_grid(summary), use_container_width=True, height=full_height(summary))
-        
+        dl1, dl2 = st.columns(2)
+        with dl1:
+            st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(),
+                               file_name=out_path.name, use_container_width=True,
+                               key=f"dl_xlsx_summary_{ck}_{st.session_state.year}")
+        with dl2:
+            st.download_button("⬇️ Export this table (CSV)",
+                               summary.to_csv(index=False).encode("utf-8"),
+                               file_name=f"{cfg['key']}_{st.session_state.year}_summary.csv",
+                               use_container_width=True,
+                               key=f"dl_csv_summary_{ck}_{st.session_state.year}")
+
     with t3:
-        # Download buttons section
-        col_full, col_totals, col_summary = st.columns(3)
-
-        # Full Report Download
-        with col_full:
-            st.download_button("⬇️ Download Full Report (.xlsx)", out_path.read_bytes(),
-                                file_name=out_path.name, use_container_width=True,
-                                key=f"dl_xlsx_full_{ck}_{st.session_state.year}")
-            st.caption("Includes all sheets: Raw Data, Totals, Summary, and Detail.")
-
-        # Totals Table Export (CSV)
-        with col_totals:
-            st.download_button("⬇️ Export Insurance Totals (CSV)",
-                                totals.to_csv(index=False).encode("utf-8"),
-                                file_name=f"{cfg['key']}_{st.session_state.year}_totals.csv",
-                                use_container_width=True,
-                                key=f"dl_csv_totals_{ck}_{st.session_state.year}")
-            st.caption("Exports the 'Insurance Totals' table as CSV.")
-
-        # Summary Table Export (CSV)
-        with col_summary:
-            st.download_button("⬇️ Export Aging Summary (CSV)",
-                                summary.to_csv(index=False).encode("utf-8"),
-                                file_name=f"{cfg['key']}_{st.session_state.year}_summary.csv",
-                                use_container_width=True,
-                                key=f"dl_csv_summary_{ck}_{st.session_state.year}")
-            st.caption("Exports the 'Balance Aging Summary' table as CSV.")
-
+        st.markdown("### Report Downloads")
+        st.write("For performance, the **Aging Detail** sheet is not rendered on-screen.")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(),
+                               file_name=out_path.name, use_container_width=True,
+                               key=f"dl_xlsx_full_{ck}_{st.session_state.year}")
+        with c2:
+            st.download_button("⬇️ Download Insurance Totals (CSV)",
+                               totals.to_csv(index=False).encode("utf-8"),
+                               file_name=f"{cfg['key']}_{st.session_state.year}_insurance_totals.csv",
+                               use_container_width=True,
+                               key=f"dl_csv_totals2_{ck}_{st.session_state.year}")
 
 except Exception as e:
-    st.error("❌ Failed to load report data.")
-    st.exception(e)
+    try:
+        ext = Path(str(out_path)).suffix.lower()
+        eng = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+        names = pd.ExcelFile(str(out_path), engine=eng).sheet_names
+    except Exception:
+        names = []
+    st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
