@@ -1,15 +1,16 @@
-streamlit==1.39.0
-pandas==2.2.3
-numpy==2.2.1
-matplotlib==3.9.2
+# ==== Core dependencies ====
+pandas>=2.1
+numpy>=1.26
 
-# Excel
-openpyxl==3.1.5
-xlsxwriter==3.2.0
-pyxlsb==1.0.10
+# ==== Excel readers/writers ====
+openpyxl>=3.1.2      # for reading/writing .xlsx and styling
+pyxlsb>=1.0.10       # for reading .xlsb (binary Excel files)
 
-# Parquet (works fine without cramjam)
-fastparquet==2024.5.0
+# ==== Optional speed boost ====
+pyarrow>=15.0.0      # faster pandas operations (optional but recommended)
 
-# Prevent Streamlit’s helper from upgrading rich to 14.x
-rich==13.9.4
+# ==== Streamlit (if using dashboard) ====
+streamlit>=1.31
+
+# ==== System/runtime ====
+python-dateutil>=2.8
