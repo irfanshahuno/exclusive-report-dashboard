@@ -1,8 +1,8 @@
-# main.py — minimal, safe startup (moves heavy imports inside the route)
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, FileResponse
+# main.py — robust error-handling version
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import HTMLResponse, FileResponse, PlainTextResponse
 from pathlib import Path
-import tempfile, shutil, subprocess
+import tempfile, shutil, subprocess, traceback
 
 app = FastAPI(title="Exclusive Report Service")
 
@@ -22,8 +22,7 @@ def home():
     <p>Swagger UI: <a href="/docs">/docs</a></p>
     """
 
-def run_generator(src: Path, rtype: str) -> Path:
-    # choose your script + output name
+def run_generator(src: Path, rtype: str) -> tuple[Path, str]:
     if rtype == "pharmacy":
         script = "pharmacy_exclusive_report_with_aging.py"
         out = src.with_suffix("").with_name("Pharmacy_Exclusive_Report_with_Aging.xlsx")
@@ -31,67 +30,78 @@ def run_generator(src: Path, rtype: str) -> Path:
         script = "exclusive_report_with_aging_final.py"
         out = src.with_suffix("").with_name("report.xlsx")
 
-    # try both arg orders
+    last = None
     for cmd in (
         ["python", script, "--out", str(out), str(src)],
         ["python", script, str(src), "--out", str(out)],
     ):
         res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode == 0:
-            return out
+        if res.returncode == 0 and out.exists():
+            return out, (res.stdout or "OK")
         last = res
-    raise RuntimeError(f"Generator failed.\nSTDOUT:\n{last.stdout}\n\nSTDERR:\n{last.stderr}")
+    msg = f"Generator failed.\n\nCMD: {last.args}\n\nSTDOUT:\n{last.stdout}\n\nSTDERR:\n{last.stderr}"
+    raise RuntimeError(msg)
 
 @app.post("/process", response_class=HTMLResponse)
 async def process(rtype: str = Form(...), file: UploadFile = File(...)):
-    # lazy imports so startup never fails
-    import pandas as pd
+    try:
+        import pandas as pd  # lazy import so startup never fails
 
-    # save upload to temp
-    suffix = Path(file.filename).suffix
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
-        shutil.copyfileobj(file.file, tf)
-        src = Path(tf.name)
+        # Save upload to temp
+        suffix = Path(file.filename).suffix
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
+            shutil = __import__("shutil")
+            shutil.copyfileobj(file.file, tf)
+            src = Path(tf.name)
 
-    out_path = run_generator(src, rtype)
+        out_path, gen_log = run_generator(src, rtype)
 
-    # read the two small sheets only
-    totals  = pd.read_excel(out_path, sheet_name="Insurance_Totals", engine="openpyxl")
-    summary = pd.read_excel(out_path, sheet_name="Balance_Aging_Summary", engine="openpyxl")
+        # Read small sheets only
+        totals  = pd.read_excel(out_path, sheet_name="Insurance_Totals", engine="openpyxl")
+        summary = pd.read_excel(out_path, sheet_name="Balance_Aging_Summary", engine="openpyxl")
 
-    def drop_gt(df):
-        first = df.columns[0]
-        return df[~df[first].astype(str).str.contains("grand total", case=False, na=False)]
-    def ksum(df, *cols):
-        for c in cols:
-            if c in df.columns: 
-                return float(pd.to_numeric(df[c], errors="coerce").sum())
-        return 0.0
+        def drop_gt(df):
+            first = df.columns[0]
+            return df[~df[first].astype(str).str.contains("grand total", case=False, na=False)]
+        def ksum(df, *cols):
+            for c in cols:
+                if c in df.columns:
+                    return float(pd.to_numeric(df[c], errors="coerce").sum())
+            return 0.0
 
-    tng = drop_gt(totals)
-    kpi = f"""
-    <div style="display:flex;gap:16px;font-family:Arial">
-      <div><b>Net</b><br>{ksum(tng,'Net Amount','NetAmount','Net'):,.2f}</div>
-      <div><b>Paid</b><br>{ksum(tng,'Paid'):,.2f}</div>
-      <div><b>Balance</b><br>{ksum(tng,'Balance'):,.2f}</div>
-      <div><b>Rejected</b><br>{ksum(tng,'Rejected','Rejection'):,.2f}</div>
-      <div><b>Accepted</b><br>{ksum(tng,'Accepted'):,.2f}</div>
-    </div>
-    """
-    html = f"""
-      <h2>Result</h2>
-      {kpi}
-      <p><a href="/download?path={out_path}">⬇️ Download full Excel</a></p>
-      <h3>Insurance Totals</h3>
-      {totals.to_html(index=False)}
-      <h3>Balance Aging Summary</h3>
-      {summary.to_html(index=False)}
-      <p><a href="/">← New upload</a></p>
-    """
-    return HTMLResponse(html)
+        tng = drop_gt(totals)
+        kpi = f"""
+        <div style="display:flex;gap:16px;font-family:Arial">
+          <div><b>Net</b><br>{ksum(tng,'Net Amount','NetAmount','Net'):,.2f}</div>
+          <div><b>Paid</b><br>{ksum(tng,'Paid'):,.2f}</div>
+          <div><b>Balance</b><br>{ksum(tng,'Balance'):,.2f}</div>
+          <div><b>Rejected</b><br>{ksum(tng,'Rejected','Rejection'):,.2f}</div>
+          <div><b>Accepted</b><br>{ksum(tng,'Accepted'):,.2f}</div>
+        </div>
+        """
+
+        html = f"""
+          <h2>Result</h2>
+          {kpi}
+          <p><a href="/download?path={out_path}">⬇️ Download full Excel</a></p>
+          <details><summary>Generator log</summary><pre>{gen_log}</pre></details>
+          <h3>Insurance Totals</h3>
+          {totals.to_html(index=False)}
+          <h3>Balance Aging Summary</h3>
+          {summary.to_html(index=False)}
+          <p><a href="/">← New upload</a></p>
+        """
+        return HTMLResponse(html)
+
+    except Exception:
+        tb = traceback.format_exc()
+        # Show the real reason instead of 502
+        return PlainTextResponse(f"❌ Error while processing:\n\n{tb}", status_code=400)
 
 @app.get("/download")
 def download(path: str):
     p = Path(path)
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(str(p), filename=p.name)
 
