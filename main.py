@@ -1,9 +1,8 @@
-# main.py — Upload → Process (clinic/pharmacy) → Show KPIs & tables → Download Excel
+# main.py — minimal, safe startup (moves heavy imports inside the route)
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, FileResponse
-import subprocess, tempfile, shutil
 from pathlib import Path
-import pandas as pd
+import tempfile, shutil, subprocess
 
 app = FastAPI(title="Exclusive Report Service")
 
@@ -24,6 +23,7 @@ def home():
     """
 
 def run_generator(src: Path, rtype: str) -> Path:
+    # choose your script + output name
     if rtype == "pharmacy":
         script = "pharmacy_exclusive_report_with_aging.py"
         out = src.with_suffix("").with_name("Pharmacy_Exclusive_Report_with_Aging.xlsx")
@@ -31,7 +31,7 @@ def run_generator(src: Path, rtype: str) -> Path:
         script = "exclusive_report_with_aging_final.py"
         out = src.with_suffix("").with_name("report.xlsx")
 
-    # try both arg orders (your scripts accept either)
+    # try both arg orders
     for cmd in (
         ["python", script, "--out", str(out), str(src)],
         ["python", script, str(src), "--out", str(out)],
@@ -39,10 +39,15 @@ def run_generator(src: Path, rtype: str) -> Path:
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode == 0:
             return out
-    raise RuntimeError(f"Generator failed.")
+        last = res
+    raise RuntimeError(f"Generator failed.\nSTDOUT:\n{last.stdout}\n\nSTDERR:\n{last.stderr}")
 
 @app.post("/process", response_class=HTMLResponse)
 async def process(rtype: str = Form(...), file: UploadFile = File(...)):
+    # lazy imports so startup never fails
+    import pandas as pd
+
+    # save upload to temp
     suffix = Path(file.filename).suffix
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
         shutil.copyfileobj(file.file, tf)
@@ -50,7 +55,7 @@ async def process(rtype: str = Form(...), file: UploadFile = File(...)):
 
     out_path = run_generator(src, rtype)
 
-    # Show KPIs + two tables (small sheets) and a Download link
+    # read the two small sheets only
     totals  = pd.read_excel(out_path, sheet_name="Insurance_Totals", engine="openpyxl")
     summary = pd.read_excel(out_path, sheet_name="Balance_Aging_Summary", engine="openpyxl")
 
@@ -59,7 +64,8 @@ async def process(rtype: str = Form(...), file: UploadFile = File(...)):
         return df[~df[first].astype(str).str.contains("grand total", case=False, na=False)]
     def ksum(df, *cols):
         for c in cols:
-            if c in df.columns: return float(pd.to_numeric(df[c], errors="coerce").sum())
+            if c in df.columns: 
+                return float(pd.to_numeric(df[c], errors="coerce").sum())
         return 0.0
 
     tng = drop_gt(totals)
@@ -72,7 +78,6 @@ async def process(rtype: str = Form(...), file: UploadFile = File(...)):
       <div><b>Accepted</b><br>{ksum(tng,'Accepted'):,.2f}</div>
     </div>
     """
-
     html = f"""
       <h2>Result</h2>
       {kpi}
@@ -89,3 +94,4 @@ async def process(rtype: str = Form(...), file: UploadFile = File(...)):
 def download(path: str):
     p = Path(path)
     return FileResponse(str(p), filename=p.name)
+
