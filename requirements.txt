@@ -7,3 +7,8 @@ xlsxwriter==3.2.0
 pyxlsb==1.0.10
 fastparquet==2024.5.0
 rich==13.9.4
+fastapi==0.115.0
+uvicorn==0.30.1
+gunicorn==22.0.0
+python-multipart==0.0.9
+
