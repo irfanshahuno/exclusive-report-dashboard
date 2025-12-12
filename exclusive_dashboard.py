@@ -4,6 +4,8 @@ import subprocess
 import hashlib
 from pathlib import Path
 from datetime import datetime
+import io, zipfile
+
 import pandas as pd
 import streamlit as st
 
@@ -101,8 +103,8 @@ def _pick_sheet(sheet_names, wants_all=None, wants_any=None):
                 return sheet_names[i]
     return None
 
-def autodetect(xls: pd.ExcelFile):
-    names = xls.sheet_names
+def autodetect(xls_like) -> tuple[str | None, str | None, list[str]]:
+    names = xls_like.sheet_names
     ins_tot = SHEET_INS_TOT if SHEET_INS_TOT in names else None
     summary = SHEET_SUMMARY if SHEET_SUMMARY in names else None
     if ins_tot is None:
@@ -127,30 +129,53 @@ def save_uploaded_source(folder: Path, upload) -> Path:
     dst.write_bytes(upload.read())
     return dst
 
-@st.cache_resource(show_spinner=True)
-def load_book(path: str, _token: float):
-    # .xlsx/.xlsm via openpyxl; .xlsb handled per-sheet (see load_core_sheets)
-    return pd.ExcelFile(path, engine="openpyxl")
+def build_zip_bytes(file_path: Path) -> io.BytesIO:
+    """Create an in-memory ZIP containing `file_path`."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(file_path, arcname=file_path.name)
+    buf.seek(0)
+    return buf
 
+# -------------------- Fast, low-RAM sheet loading --------------------
+# Avoid constructing a full ExcelFile for .xlsx/.xlsm; read just 2 sheets.
 @st.cache_data(show_spinner=True)
 def load_core_sheets(path: str, _token: float):
-    """Load ONLY the two light sheets. NO detail access at all."""
+    """Load ONLY Insurance_Totals and Balance_Aging_Summary.
+       For .xlsb use pyxlsb; for .xlsx/.xlsm discover names cheaply and parse only those two sheets.
+    """
     ext = Path(path).suffix.lower()
     if ext == ".xlsb":
         xlsb = pd.ExcelFile(path, engine="pyxlsb")
         ins_tot, summary, names = autodetect(xlsb)
         if not ins_tot or not summary:
             raise RuntimeError(f"Required sheets not found. Available: {', '.join(names)}")
-        df_ins  = pd.read_excel(path, sheet_name=ins_tot, engine="pyxlsb")
-        df_sum  = pd.read_excel(path, sheet_name=summary, engine="pyxlsb")
+        df_ins = pd.read_excel(path, sheet_name=ins_tot, engine="pyxlsb")
+        df_sum = pd.read_excel(path, sheet_name=summary, engine="pyxlsb")
         return df_ins, df_sum, ins_tot, summary, names
 
-    xls = load_book(path, _token)
-    ins_tot, summary, names = autodetect(xls)
+    # .xlsx / .xlsm: get sheet names without parsing all data
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            names = [ws.title for ws in wb.worksheets]
+        finally:
+            wb.close()
+    except Exception:
+        # Fallback
+        names = pd.ExcelFile(path, engine="openpyxl").sheet_names
+
+    class Dummy:  # small helper to reuse autodetect
+        sheet_names = names
+
+    ins_tot, summary, names = autodetect(Dummy)
     if not ins_tot or not summary:
         raise RuntimeError(f"Required sheets not found. Available: {', '.join(names)}")
-    df_ins  = xls.parse(ins_tot)
-    df_sum  = xls.parse(summary)
+
+    # Read ONLY the two small sheets
+    df_ins = pd.read_excel(path, sheet_name=ins_tot, engine="openpyxl")
+    df_sum = pd.read_excel(path, sheet_name=summary, engine="openpyxl")
     return df_ins, df_sum, ins_tot, summary, names
 
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -173,7 +198,7 @@ def drop_empty_insurance(df: pd.DataFrame, name_col: str = "Insurance") -> pd.Da
 def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
     if df is None or df.empty or name_col not in df.columns:
         return df
-    if df[name_col].astype(str).str.lower().str.contains("grand total").any():
+    if df[name_col].astype(str).str.lower().str.contains("grand total", case=False, na=False).any():
         return df
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     gt = {c: pd.to_numeric(df[c], errors="coerce").sum() for c in num_cols}
@@ -357,7 +382,7 @@ if (st.query_params.get("center") != st.session_state.center_key) or (st.query_p
 mt = mtime_token(out_path)
 built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
 size_mb = (out_path.stat().st_size/1024/1024) if out_path.exists() else 0.0
-safe_note = "SAFE mode (large file)" if size_mb > SAFE_MB_LIMIT else "Normal mode"
+safe_note = "SAFE mode (ZIP download)" if size_mb > SAFE_MB_LIMIT else "Normal mode"
 st.caption(f"Built: **{built}** · Source: `{src_path}` · Report: `{out_path.name}` · Hash: `{sha1_short(out_path) if mt else '—'}`")
 st.caption(f"Runtime: **{safe_note}** · Report size: {size_mb:.1f} MB")
 
@@ -498,9 +523,11 @@ try:
         st.dataframe(style_grid(totals), use_container_width=True, height=full_height(totals))
         dl1, dl2 = st.columns(2)
         with dl1:
-            st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(),
-                               file_name=out_path.name, use_container_width=True,
-                               key=f"dl_xlsx_totals_{ck}_{st.session_state.year}")
+            # Stream the raw XLSX (no extra 50MB copy)
+            with open(out_path, "rb") as fh:
+                st.download_button("⬇️ Download full report (.xlsx)", data=fh,
+                                   file_name=out_path.name, use_container_width=True,
+                                   key=f"dl_xlsx_totals_{ck}_{st.session_state.year}")
         with dl2:
             st.download_button("⬇️ Export this table (CSV)",
                                totals.to_csv(index=False).encode("utf-8"),
@@ -512,9 +539,10 @@ try:
         st.dataframe(style_grid(summary), use_container_width=True, height=full_height(summary))
         dl1, dl2 = st.columns(2)
         with dl1:
-            st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(),
-                               file_name=out_path.name, use_container_width=True,
-                               key=f"dl_xlsx_summary_{ck}_{st.session_state.year}")
+            with open(out_path, "rb") as fh:
+                st.download_button("⬇️ Download full report (.xlsx)", data=fh,
+                                   file_name=out_path.name, use_container_width=True,
+                                   key=f"dl_xlsx_summary_{ck}_{st.session_state.year}")
         with dl2:
             st.download_button("⬇️ Export this table (CSV)",
                                summary.to_csv(index=False).encode("utf-8"),
@@ -527,9 +555,20 @@ try:
         st.write("For performance, the **Aging Detail** sheet is not rendered on-screen.")
         c1, c2 = st.columns(2)
         with c1:
-            st.download_button("⬇️ Download full report (.xlsx)", out_path.read_bytes(),
-                               file_name=out_path.name, use_container_width=True,
-                               key=f"dl_xlsx_full_{ck}_{st.session_state.year}")
+            if size_mb > SAFE_MB_LIMIT:
+                zip_buf = build_zip_bytes(out_path)
+                st.download_button("⬇️ Download full report (ZIP)",
+                                   data=zip_buf,
+                                   file_name=out_path.with_suffix('.zip').name,
+                                   use_container_width=True,
+                                   key=f"dl_zip_full_{ck}_{st.session_state.year}")
+            else:
+                with open(out_path, "rb") as fh:
+                    st.download_button("⬇️ Download full report (.xlsx)",
+                                       data=fh,
+                                       file_name=out_path.name,
+                                       use_container_width=True,
+                                       key=f"dl_xlsx_full_{ck}_{st.session_state.year}")
         with c2:
             st.download_button("⬇️ Download Insurance Totals (CSV)",
                                totals.to_csv(index=False).encode("utf-8"),
