@@ -4,15 +4,15 @@ from datetime import datetime
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 
-# ==== STEP 1: Locate Excel file ====
-files = glob.glob("*.xlsx")
+# ==== STEP 1: Locate Excel file (only .xlsb) ====
+files = glob.glob("*.xlsb")
 if not files:
-    raise FileNotFoundError("❌ No Excel file found in this folder.")
+    raise FileNotFoundError("❌ No XLSB file found in this folder.")
 input_file = [f for f in files if "Rejection_Report" not in f][0]
 print(f"📂 Using input file: {input_file}")
 
-# ==== STEP 2: Load Data ====
-df = pd.read_excel(input_file, engine="openpyxl")
+# ==== STEP 2: Load Data (.xlsb engine) ====
+df = pd.read_excel(input_file, engine="pyxlsb")
 df.columns = df.columns.str.strip()
 
 # ==== STEP 3: Convert numeric columns ====
@@ -68,7 +68,7 @@ insurance_col = next((c for c in ["Insurance","PayerName","Insurer","Plan"] if c
 if insurance_col not in df.columns:
     balance_df[insurance_col] = "Not Available"
 
-# ==== STEP 8: Pivot Summary (no warning) ====
+# ==== STEP 8: Pivot Summary ====
 pivot_summary = pd.pivot_table(
     balance_df,
     index=insurance_col,
@@ -76,7 +76,7 @@ pivot_summary = pd.pivot_table(
     values="Balance",
     aggfunc="sum",
     fill_value=0,
-    observed=False  # suppresses future warning
+    observed=False
 )
 
 pivot_summary = pivot_summary.reindex(columns=labels)
@@ -84,7 +84,7 @@ pivot_summary["Grand Total"] = pivot_summary.sum(axis=1)
 pivot_summary.loc["Grand Total"] = pivot_summary.sum(axis=0)
 pivot_summary.reset_index(inplace=True)
 
-# ==== STEP 9: Write to Excel ====
+# ==== STEP 9: Write to Excel (output as .xlsx) ====
 output_file = "Exclusive_Report_with_Aging.xlsx"
 with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
     df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
@@ -95,17 +95,15 @@ with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
 wb = load_workbook(output_file)
 
 for ws in wb.worksheets:
-    header_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")  # blue
-    total_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")  # light orange
+    header_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
+    total_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
 
-    # --- Style headers ---
     for c in range(1, ws.max_column + 1):
         cell = ws.cell(row=1, column=c)
         cell.fill = header_fill
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    # --- Highlight Grand Total row/column (only in summary sheet) ---
     if ws.title == "Balance_Aging_Summary":
         for r in range(2, ws.max_row + 1):
             val = ws.cell(row=r, column=1).value
@@ -114,16 +112,13 @@ for ws in wb.worksheets:
                     cell = ws.cell(row=r, column=c)
                     cell.fill = total_fill
                     cell.font = Font(bold=True)
-        # Grand Total column (last)
         col = ws.max_column
         for r in range(1, ws.max_row + 1):
             cell = ws.cell(row=r, column=col)
             cell.fill = total_fill
             cell.font = Font(bold=True)
 
-# ==== STEP 11: Save with progress message ====
-print("💾 Saving file, please wait... (this may take up to a minute for large files)")
+print("💾 Saving file, please wait...")
 wb.save(output_file)
 print("✅ File saved successfully!")
 print(f"📁 Created: {output_file}")
-
