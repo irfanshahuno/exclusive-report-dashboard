@@ -1,7 +1,7 @@
 import sys
 import subprocess
 import hashlib
-import os # <-- Added for robust file deletion
+import os # <-- NECESSARY: Added for robust file deletion
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
@@ -21,7 +21,7 @@ CENTERS = {
         "key": "easyhealth",
         "name": "Easy Health Medical Clinic (MF8031)",
         "folder_root": DATA_DIR / "easyhealth",
-        "src_name": "source.xlsx",  # we will auto-pick .xlsb/.xlsx/.xlsm anyway
+        "src_name": "source.xlsx",
         "out_name": "report.xlsx",
         "generator": BASE / "exclusive_report_with_aging_final.py",
     },
@@ -122,7 +122,7 @@ def resolve_source_path(folder: Path, preferred: str = "source.xlsx") -> Path:
 def save_uploaded_source(folder: Path, upload) -> Path:
     """
     Saves the uploaded file directly to disk, first clearing any old 'source' files.
-    FIX: Uses Streamlit's buffer for efficient, low-memory disk writing,
+    FIX IMPLEMENTED: Uses Streamlit's buffer for efficient, low-memory disk writing,
     preventing crashes with large files (e.g., 50MB).
     """
     ext = Path(upload.name).suffix.lower()
@@ -133,7 +133,7 @@ def save_uploaded_source(folder: Path, upload) -> Path:
     for name in ("source.xlsb", "source.xlsx", "source.xlsm"):
         p = folder / name
         if p.exists():
-            os.remove(p) 
+            os.remove(p) # <--- Using os.remove
             
     # 2. Determine the destination path and ensure the folder exists
     dst = folder / f"source{ext}"
@@ -141,7 +141,7 @@ def save_uploaded_source(folder: Path, upload) -> Path:
     
     # 3. Write the new file content directly to disk efficiently
     try:
-        # Preferred method for large Streamlit files: use getbuffer().tobytes()
+        # Use getbuffer().tobytes() to efficiently stream the file to disk
         dst.write_bytes(upload.getbuffer().tobytes())
     except AttributeError:
         # Fallback if getbuffer() is unavailable (less efficient)
@@ -411,7 +411,7 @@ if st.session_state.is_admin:
         )
         if up:
             try:
-                # The corrected save function is called here:
+                # This is the corrected function call
                 saved_to = save_uploaded_source(folder, up)
                 st.success(f"Saved to {saved_to.name}. Click 'Rebuild report' now.")
             except Exception as e:
