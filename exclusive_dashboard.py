@@ -1,19 +1,23 @@
-# exclusive_dashboard.py (CRASH‑SAFE LITE)
+# exclusive_dashboard.py (CRASH-SAFE LITE)
 # Streamlit dashboard for Exclusive Report with Aging — optimized for 50MB+ Excel files
 # Key changes vs your previous script:
 #  - Removed heavy Pandas Styler and all complex CSS
 #  - Single cached read of XLSX bytes for downloads
-#  - Removed date‑range scanning/filter (no re‑reading huge detail sheet)
-#  - Removed SHA‑1 hashing and bar chart
+#  - Removed date-range scanning/filter (no re-reading huge detail sheet)
+#  - Removed SHA-1 hashing and bar chart
 #  - Direct, minimal sheet reads to reduce memory
 
 import sys
 import subprocess
 from pathlib import Path
 from datetime import datetime
+from io import BytesIO  # <-- added
 
 import pandas as pd
 import streamlit as st
+
+# add imports for doctor performance helper
+from doctor_month_performance import load_minimal, build_report  # <-- added
 
 # =========================== Page & Folders ===========================
 st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layout="wide")
@@ -405,15 +409,19 @@ try:
     rej  = ksum(totals_no_gt, "Rejected", "Rejection")
     acc  = ksum(totals_no_gt, "Accepted")
 
+    # ---------- Tabs ----------
+    if ck in ("easyhealth", "excellent"):
+        t1, t2, t_doc, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, "Doc monthly performance", "Downloads"])
+    else:
+        t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"])
+        t_doc = None
+
     c0, c1, c2, c3, c4 = st.columns(5)
     c0.metric("Net Amount", f"{net:,.2f}")
     c1.metric("Paid",       f"{paid:,.2f}")
     c2.metric("Balance",    f"{bal:,.2f}")
     c3.metric("Rejected",   f"{rej:,.2f}")
     c4.metric("Accepted",   f"{acc:,.2f}")
-
-    # ---------- Tabs (no on‑screen Aging Detail) ----------
-    t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"])
 
     with t1:
         st.dataframe(totals, use_container_width=True, height=full_height(totals))
@@ -434,6 +442,42 @@ try:
             use_container_width=True,
             key=f"dl_csv_summary_{ck}_{st.session_state.year}"
         )
+
+    # ---- Doc monthly performance (only Easy Health / Excellent) ----
+    if t_doc is not None:
+        with t_doc:
+            st.caption("Upload an .xlsx with columns: VisitNo, VisitDate, DocName, Item Group, ActivityIns (Month/Year optional).")
+            up_perf = st.file_uploader(
+                "Upload Excel (.xlsx)", type=["xlsx"],
+                key=f"docperf_{ck}_{st.session_state.year}"
+            )
+
+            if up_perf is not None:
+                try:
+                    df_src = load_minimal(up_perf)     # fast, reads only needed cols/sheet
+                    result = build_report(df_src)      # builds doctor→month table + totals
+                    st.success("Report generated.")
+                    st.dataframe(
+                        result,
+                        use_container_width=True,
+                        height=min(800, 120 + 35 * max(1, len(result.index)))
+                    )
+
+                    # Download as Excel
+                    bio = BytesIO()
+                    with pd.ExcelWriter(bio, engine="openpyxl") as w:
+                        result.to_excel(w, sheet_name="Doctor_Performance", index=False)
+                    bio.seek(0)
+                    st.download_button(
+                        "⬇️ Download Doc_Performance_By_Month.xlsx",
+                        data=bio.getvalue(),
+                        file_name=f"{ck}_{st.session_state.year}_Doc_Performance_By_Month.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key=f"dl_docperf_{ck}_{st.session_state.year}"
+                    )
+                except Exception as ex:
+                    st.error(str(ex))
 
     with t3:
         st.markdown("### Report Download")
