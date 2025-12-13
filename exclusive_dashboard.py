@@ -16,6 +16,9 @@ import streamlit as st
 st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layout="wide")
 st.set_option("client.showErrorDetails", False)
 
+# 👉 External Doc Performance app URL
+DOC_PERF_URL = "https://doc-perf-app.streamlit.app"   # <-- replace with your deployed URL if different
+
 BASE = Path(__file__).parent
 DATA_DIR = BASE / "data"
 (DATA_DIR / "easyhealth").mkdir(parents=True, exist_ok=True)
@@ -471,10 +474,8 @@ if ck not in CENTERS and ck != DOC_PERF_KEY:
         if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
             st.session_state.center_key = "pharmacy"; st.session_state.year = None; st.rerun()
     with c4:
-        if st.container(border=True).button("Doc monthly performance", use_container_width=True, key="home_docperf"):
-            st.session_state.center_key = DOC_PERF_KEY
-            st.session_state.year = None
-            st.rerun()
+        # 👉 Open external Doc Performance app instead of internal route
+        st.link_button("Doc monthly performance", DOC_PERF_URL, use_container_width=True, key="home_docperf_link")
     st.stop()
 
 # ====================== Route: Doc Performance ======================
@@ -649,4 +650,3 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
