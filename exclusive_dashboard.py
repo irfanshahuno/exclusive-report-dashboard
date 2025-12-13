@@ -1,16 +1,22 @@
-# exclusive_dashboard.py (CRASH-SAFE LITE + Doc Performance 4th button)
-# Keeps original dashboard behavior. Adds a 4th home button: "Doc monthly performance".
+# exclusive_dashboard.py  — CRASH-SAFE LITE + Doc Performance (cards + month select + drilldown)
+# - Keeps the original 3-center dashboard behavior.
+# - Adds a 4th home card: "Doc monthly performance" styled to sit with the other three.
+# - Doc Perf flow:
+#     View: pick Center -> pick Current/Last Month -> see doctor list -> click a doctor -> see table
+#     Admin: upload raw xlsx/xlsb -> choose month -> Process & Save (creates small parquet snapshot)
+# - Parquet cache lives in data/<center>/docperf/YYYYMM.parquet
+# - Safe with large Excel: we never keep big frames in memory across reruns; parquet snapshots are tiny.
 
 import sys
 import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 from io import BytesIO
 
 import pandas as pd
 import streamlit as st
 
-# =========================== Page & Folders ===========================
+# ====================== Page & base folders ======================
 st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layout="wide")
 st.set_option("client.showErrorDetails", False)
 
@@ -20,16 +26,22 @@ DATA_DIR = BASE / "data"
 (DATA_DIR / "excellent").mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "excellent_pharmacy").mkdir(parents=True, exist_ok=True)
 
-# Special internal route key for the Doc Performance page
+# Route key for Doc Performance
 DOC_PERF_KEY = "__docperf__"
+YEARS = [2024, 2025]
 
-# =========================== Centers & Generators =====================
+# Canonical sheet names for the main Aging report
+SHEET_INS_TOT = "Insurance_Totals"
+SHEET_SUMMARY = "Balance_Aging_Summary"
+SHEET_DETAIL  = "Balance_Aging_Detail"
+
+# ====================== Centers config ======================
 CENTERS = {
     "easyhealth": {
         "key": "easyhealth",
         "name": "Easy Health Medical Clinic (MF8031)",
         "folder_root": DATA_DIR / "easyhealth",
-        "src_name": "source.xlsx",  # fallback; auto-picks .xlsb/.xlsx/.xlsm anyway
+        "src_name": "source.xlsx",  # fallback
         "out_name": "report.xlsx",
         "generator": BASE / "exclusive_report_with_aging_final.py",
     },
@@ -50,21 +62,13 @@ CENTERS = {
         "generator": BASE / "pharmacy_exclusive_report_with_aging.py",
     },
 }
-YEARS = [2024, 2025]
 
-# Canonical sheet names expected from generators
-SHEET_INS_TOT = "Insurance_Totals"
-SHEET_SUMMARY = "Balance_Aging_Summary"
-SHEET_DETAIL  = "Balance_Aging_Detail"  # not rendered in the app
-
-# =============================== Helpers ==============================
-
+# ====================== Small helpers ======================
 def mtime_token(p: Path) -> float:
     try:
         return p.stat().st_mtime
     except FileNotFoundError:
         return 0.0
-
 
 def _run(cmd):
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -75,7 +79,6 @@ def _run(cmd):
             + "\n\nSTDERR:\n" + (res.stderr or "(empty)")
         )
     return res
-
 
 def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
     py = sys.executable
@@ -88,16 +91,12 @@ def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
         res = _run([py, str(gen_path), "--out", str(out_path), str(src_path)])
         return res.stdout or "OK"
 
-
-# ===== XLSB/XLSX source helpers =====
-
 def resolve_source_path(folder: Path, preferred: str = "source.xlsx") -> Path:
     candidates = [folder / "source.xlsb", folder / "source.xlsx", folder / "source.xlsm"]
     for p in candidates:
         if p.exists():
             return p
     return folder / preferred
-
 
 def save_uploaded_source(folder: Path, upload) -> Path:
     ext = Path(upload.name).suffix.lower()
@@ -108,33 +107,28 @@ def save_uploaded_source(folder: Path, upload) -> Path:
     dst.write_bytes(upload.read())
     return dst
 
-
-# ---------- caching ----------
 @st.cache_data(max_entries=6, show_spinner=False)
 def get_report_bytes(path: str) -> bytes:
     return Path(path).read_bytes()
 
-
 @st.cache_data(show_spinner=True)
 def load_core_sheets(path: str, _token: float):
-    """Load only the two small sheets required for the UI."""
+    """Load only the two small sheets required for the main UI."""
     ext = Path(path).suffix.lower()
     engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
-
     try:
         df_ins = pd.read_excel(path, sheet_name=SHEET_INS_TOT, engine=engine)
         df_sum = pd.read_excel(path, sheet_name=SHEET_SUMMARY, engine=engine)
         return df_ins, df_sum, [SHEET_INS_TOT, SHEET_SUMMARY]
     except Exception as e:
-        # Fallback: list available sheets to help debugging
         try:
             names = pd.ExcelFile(path, engine=engine).sheet_names
         except Exception:
             names = []
-        raise RuntimeError(f"Required sheets not found or failed to load. Available: {', '.join(names) if names else '(none)'}\nOriginal error: {e}")
-
-
-# ---------- table & KPI helpers ----------
+        raise RuntimeError(
+            f"Required sheets not found or failed to load. "
+            f"Available: {', '.join(names) if names else '(none)'}\nOriginal error: {e}"
+        )
 
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -145,7 +139,6 @@ def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     blank_rows = df2.fillna("").astype(str).apply(lambda row: "".join(row).strip() == "", axis=1)
     return df2.loc[~blank_rows]
 
-
 def drop_empty_insurance(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
     if df is None or df.empty or name_col not in df.columns:
         return df
@@ -153,7 +146,6 @@ def drop_empty_insurance(df: pd.DataFrame, name_col: str = "Insurance") -> pd.Da
     bad = series.str.lower().isin(["", "none", "nan", "null", "na", "-", "--"])
     keep_grand = series.str.contains("grand total", case=False, na=False)
     return df.loc[~bad | keep_grand].copy()
-
 
 def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
     if df is None or df.empty or name_col not in df.columns:
@@ -167,11 +159,9 @@ def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.Data
     row[name_col] = "Grand Total"
     return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
 
-
 def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150) -> int:
     n = 0 if df is None else len(df)
     return header_px + (n * row_px) + padding_px
-
 
 def ksum(df: pd.DataFrame, *cands):
     for col in cands:
@@ -179,8 +169,6 @@ def ksum(df: pd.DataFrame, *cands):
             return float(pd.to_numeric(df[col], errors="coerce").sum())
     return 0.0
 
-
-# ---------- admin ----------
 def is_admin_mode() -> bool:
     secret_pwd = st.secrets.get("ADMIN_PASSWORD", "")
     if secret_pwd:
@@ -196,37 +184,165 @@ def is_admin_mode() -> bool:
                     st.error("Wrong password")
         return False
     else:
-        # If no password configured, allow manual toggle
         return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
 
+# ====================== Doc Performance helpers ======================
+def month_options():
+    """Return ("Current month", 'YYYYMM'), ("Last month", 'YYYYMM') based on today."""
+    today = date.today()
+    cur_ym = today.year * 100 + today.month
+    if today.month == 1:
+        last_ym = (today.year - 1) * 100 + 12
+    else:
+        last_ym = today.year * 100 + (today.month - 1)
+    return [("Current month", str(cur_ym)), ("Last month", str(last_ym))]
 
-# ---------- state ----------
+def yyyymm_to_label(yyyymm: str) -> str:
+    y = int(yyyymm[:4]); m = int(yyyymm[4:])
+    return f"{date(y, m, 1):%b %Y}"
+
+def docperf_folder(center_key: str) -> Path:
+    return (CENTERS[center_key]["folder_root"] / "docperf")
+
+def parquet_path(center_key: str, yyyymm: str) -> Path:
+    folder = docperf_folder(center_key) / yyyymm
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / "docperf.parquet"
+
+def csv_doctor_index_path(center_key: str, yyyymm: str) -> Path:
+    return docperf_folder(center_key) / yyyymm / "doctors.csv"
+
+def _read_any_excel(upload_or_path):
+    """Read minimal columns from .xlsx/.xlsb. Returns DataFrame."""
+    # We try engine based on extension; for UploadedFile there is no suffix, so try xlsx first, then xlsb.
+    try:
+        df = pd.read_excel(upload_or_path, engine="openpyxl")
+        return df
+    except Exception:
+        # second try xlsb
+        try:
+            df = pd.read_excel(upload_or_path, engine="pyxlsb")
+            return df
+        except Exception as e2:
+            raise RuntimeError(f"Failed to read Excel. Please upload .xlsx or .xlsb. Original error: {e2}")
+
+def build_docperf_report(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Expected columns (case-insensitive tolerated):
+      - VisitNo (unique visit id)
+      - VisitDate (date/datetime)
+      - DocName (doctor name)
+      - Item Group (service category)
+      - ActivityIns or Net Amount (money column)
+    Output columns:
+      Month, Year, Doc, Item Group, Visits (unique), Amount, Total (by doc), Avg/Visit
+    """
+    # Normalize columns (case-insensitive)
+    cols = {c.lower().strip(): c for c in df.columns}
+    def has(name): return name in cols
+    def col(name): return cols[name]
+
+    # Map tolerances
+    vno = col("visitno") if has("visitno") else None
+    vdt = col("visitdate") if has("visitdate") else None
+    dnm = col("docname") if has("docname") else None
+    igp = col("item group") if has("item group") else None
+
+    # Amount candidates
+    amt_col = None
+    for cand in ["activityins", "net amount", "netamount", "net"]:
+        if has(cand):
+            amt_col = cols[cand]; break
+    if not all([vno, vdt, dnm]) or igp is None or amt_col is None:
+        raise RuntimeError(
+            "Missing required columns. Need: VisitNo, VisitDate, DocName, Item Group, and ActivityIns/Net Amount."
+        )
+
+    df2 = df[[vno, vdt, dnm, igp, amt_col]].copy()
+    df2.rename(columns={
+        vno: "VisitNo", vdt: "VisitDate", dnm: "Doc", igp: "Item Group", amt_col: "Amount"
+    }, inplace=True)
+
+    # Coerce types
+    df2["VisitDate"] = pd.to_datetime(df2["VisitDate"], errors="coerce")
+    df2["Amount"] = pd.to_numeric(df2["Amount"], errors="coerce").fillna(0.0)
+
+    # Month/Year columns
+    df2["Year"] = df2["VisitDate"].dt.year
+    df2["MonthNum"] = df2["VisitDate"].dt.month
+    df2["Month"] = df2["VisitDate"].dt.month_name()
+
+    # Unique visits per Doc/Item Group within month
+    # We'll deduplicate (Doc, Item Group, VisitNo) per month.
+    base = df2.dropna(subset=["VisitNo", "Doc"])
+    # Group for the main table
+    grp = base.groupby(["Year", "MonthNum", "Month", "Doc", "Item Group"], dropna=False, as_index=False).agg(
+        Visits=("VisitNo", pd.Series.nunique),
+        Amount=("Amount", "sum"),
+    )
+
+    # Total by doc within that month (to compute Avg/Visit at doc level)
+    doc_totals = grp.groupby(["Year", "MonthNum", "Doc"], as_index=False).agg(
+        Total=("Amount", "sum"),
+        DocVisits=("Visits", "sum"),
+    )
+    out = grp.merge(doc_totals, on=["Year", "MonthNum", "Doc"], how="left")
+    out["Avg/Visit"] = (out["Total"] / out["DocVisits"]).round(2)
+
+    # Sort by Doc then Month order
+    out.sort_values(["Doc", "Year", "MonthNum", "Item Group"], inplace=True)
+    out.reset_index(drop=True, inplace=True)
+    # Final select & rename for clarity
+    out = out[["Month", "Year", "Doc", "Item Group", "Visits", "Amount", "Total", "Avg/Visit"]]
+    return out
+
+def filter_month(df: pd.DataFrame, yyyymm: str) -> pd.DataFrame:
+    y = int(yyyymm[:4]); m = int(yyyymm[4:])
+    return df.loc[(df["Year"] == y) & (df["Month"].eq(date(y, m, 1).strftime("%B")))].copy()
+
+def save_docperf_snapshot(center_key: str, yyyymm: str, df_month: pd.DataFrame):
+    p = parquet_path(center_key, yyyymm)
+    df_month.to_parquet(p, index=False)
+    # also write a small doctor index for fast "View" mode
+    doc_index = (df_month.groupby("Doc", as_index=False)
+                 .agg(Total=("Total", "max"), Visits=("Visits", "sum"))
+                 .sort_values(["Total", "Visits"], ascending=[False, False]))
+    doc_index.to_csv(csv_doctor_index_path(center_key, yyyymm), index=False)
+
+def load_docperf_snapshot(center_key: str, yyyymm: str) -> pd.DataFrame | None:
+    p = parquet_path(center_key, yyyymm)
+    if p.exists():
+        return pd.read_parquet(p)
+    return None
+
+def load_doctor_index(center_key: str, yyyymm: str) -> pd.DataFrame | None:
+    idx = csv_doctor_index_path(center_key, yyyymm)
+    if idx.exists():
+        return pd.read_csv(idx)
+    return None
+
+# ====================== Session state ======================
 for key, default in [
     ("center_key", None),
     ("last_center_key", None),
     ("year", None),
     ("last_year", None),
-    ("dp_center", None),          # for Doc Performance sub-page
+    ("dp_center", None),          # Doc Performance: selected center
+    ("dp_month", None),           # Doc Performance: selected yyyymm
+    ("dp_selected_doc", None),    # Doc Performance: selected doctor
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
-
-# ======================= Doc Performance Page ========================
+# ====================== Doc Performance Page ======================
 def render_docperf_page():
-    """Standalone Doc monthly performance flow (no dependency on main report)."""
     st.title("👨‍⚕️ Doc monthly performance")
-    st.caption("This tool runs independently from the main aging report.")
+    st.caption("Independent of the main aging report. Upload once in Admin; management views anytime.")
 
-    # choose center (Easy Health or Excellent)
-    dp_center = st.session_state.get("dp_center")
-    if not dp_center:
-        c0, c1, c2 = st.columns([1, 2, 2])
-        with c0:
-            if st.button("◀ Back to home", use_container_width=True):
-                st.session_state.center_key = None
-                st.session_state.year = None
-                st.rerun()
+    # Step 1: choose center
+    if st.session_state.dp_center is None:
+        st.markdown("#### Choose a center")
+        c1, c2 = st.columns(2)
         with c1:
             if st.button("Easy Health Medical Clinic (MF8031)", use_container_width=True):
                 st.session_state.dp_center = "easyhealth"; st.rerun()
@@ -235,67 +351,125 @@ def render_docperf_page():
                 st.session_state.dp_center = "excellent"; st.rerun()
         st.stop()
 
-    # lazy import (still render even if helper file missing)
-    try:
-        from doctor_month_performance import load_minimal, build_report
-        helper_ok = True
-    except Exception as e:
-        helper_ok = False
-        st.warning("Missing helper script: **doctor_month_performance.py** in repo root.")
-        st.code(str(e))
+    center_key = st.session_state.dp_center
+    center_name = CENTERS[center_key]["name"]
+    st.info(f"**Selected center:** {center_name}")
 
-    st.write(f"**Selected center:** {'Easy Health' if dp_center=='easyhealth' else 'Excellent Medical Center'}")
-    up = st.file_uploader(
-        "Upload Excel (.xlsx) with columns: VisitNo, VisitDate, DocName, Item Group, ActivityIns",
-        type=["xlsx"],
-        key=f"docperf_upload_{dp_center}",
-    )
-    run = st.button(
-        "▶ Run Doc monthly performance",
-        disabled=(not helper_ok or up is None),
-        use_container_width=True,
-        key=f"run_docperf_{dp_center}"
+    # Step 2: choose month (Current or Last)
+    opts = month_options()
+    labels = [f"{lab} ({yyyymm_to_label(ym)})" for lab, ym in opts]
+    ym_values = [ym for _, ym in opts]
+    if st.session_state.dp_month not in ym_values:
+        st.session_state.dp_month = ym_values[0]
+    pick = st.segmented_control(
+        "Choose month",
+        options=ym_values,
+        format_func=lambda ym: [lbl for lbl, val in zip(labels, ym_values) if val == ym][0],
+        key="dp_month"
     )
 
-    if helper_ok and up is not None and run:
-        try:
-            df_src = load_minimal(up)          # fast minimal read
-            result = build_report(df_src)      # compute table
-            st.success("Generated successfully.")
-            st.dataframe(result, use_container_width=True, height=min(850, 120 + 35 * max(1, len(result.index))))
+    # Tabs: View / Admin
+    t_view, t_admin = st.tabs(["👀 View (management)", "🛠️ Admin (upload & process)"])
 
+    # ---------- View tab ----------
+    with t_view:
+        df_snap = load_docperf_snapshot(center_key, st.session_state.dp_month)
+        if df_snap is None or df_snap.empty:
+            st.warning("No processed snapshot found for this month. Please ask Admin to upload and process.")
+        else:
+            # Doctor list (clickable via selectbox for reliability)
+            idx = load_doctor_index(center_key, st.session_state.dp_month)
+            if idx is None or idx.empty:
+                # build on the fly
+                idx = (df_snap.groupby("Doc", as_index=False)
+                            .agg(Total=("Total", "max"), Visits=("Visits", "sum"))
+                            .sort_values(["Total", "Visits"], ascending=[False, False]))
+            st.subheader(f"Doctors — {yyyymm_to_label(st.session_state.dp_month)}")
+            st.dataframe(idx, use_container_width=True, height=min(600, 120 + 35*max(1, len(idx))))
+
+            st.markdown("##### Open a doctor")
+            doc_names = idx["Doc"].tolist()
+            default_doc = st.session_state.dp_selected_doc or (doc_names[0] if doc_names else None)
+            selected_doc = st.selectbox("Choose doctor", doc_names, index=doc_names.index(default_doc) if default_doc in doc_names else 0)
+            st.session_state.dp_selected_doc = selected_doc
+
+            doc_df = df_snap.loc[df_snap["Doc"] == selected_doc].copy()
+            # Nice KPIs
+            total_amt = float(doc_df["Total"].max() if not doc_df.empty else 0.0)
+            total_vis = int(doc_df["Visits"].sum() if not doc_df.empty else 0)
+            avg = float((total_amt / total_vis) if total_vis else 0.0)
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Total", f"{total_amt:,.2f}")
+            k2.metric("Visits", f"{total_vis:,}")
+            k3.metric("Avg/Visit", f"{avg:,.2f}")
+
+            # Detailed table by Item Group
+            show = doc_df[["Item Group", "Visits", "Amount", "Total", "Avg/Visit"]].sort_values(
+                ["Amount", "Visits"], ascending=[False, False]
+            )
+            st.dataframe(show, use_container_width=True, height=min(600, 120 + 35*max(1, len(show))))
+
+            # Download
             bio = BytesIO()
             with pd.ExcelWriter(bio, engine="openpyxl") as w:
-                result.to_excel(w, sheet_name="Doctor_Performance", index=False)
+                idx.to_excel(w, sheet_name="Doctors_Index", index=False)
+                doc_df.to_excel(w, sheet_name="Selected_Doctor", index=False)
+                df_snap.to_excel(w, sheet_name="All_Doc_Perf", index=False)
             bio.seek(0)
             st.download_button(
-                "⬇️ Download Doc_Performance_By_Month.xlsx",
+                f"⬇️ Download Doc_Performance_{center_key}_{st.session_state.dp_month}.xlsx",
                 data=bio.getvalue(),
-                file_name=f"{dp_center}_{st.session_state.get('year') or ''}_Doc_Performance_By_Month.xlsx",
+                file_name=f"Doc_Performance_{center_key}_{st.session_state.dp_month}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
-        except Exception as ex:
-            st.error(str(ex))
 
-    # footer
+    # ---------- Admin tab ----------
+    with t_admin:
+        if not st.session_state.is_admin:
+            st.warning("Admin login required (click 🔒 Admin login at the top).")
+        else:
+            st.success("You are in ADMIN mode.")
+            st.caption("Upload the raw **doctor-wise** Excel (.xlsx or .xlsb). We'll process just the chosen month.")
+            up = st.file_uploader("Upload file", type=["xlsx", "xlsb"], key=f"dp_upload_{center_key}")
+            if st.button("▶ Process & Save snapshot", use_container_width=True, disabled=(up is None)):
+                try:
+                    raw = _read_any_excel(up)
+                    # Build full report across all months in the file
+                    rep = build_docperf_report(raw)
+                    # Filter to selected month (segmented control pick)
+                    month_df = filter_month(rep, st.session_state.dp_month)
+                    if month_df.empty:
+                        st.warning(f"No rows found for {yyyymm_to_label(st.session_state.dp_month)} in this file.")
+                    else:
+                        save_docperf_snapshot(center_key, st.session_state.dp_month, month_df)
+                        st.success(f"Snapshot saved for {center_name} — {yyyymm_to_label(st.session_state.dp_month)}")
+                        st.rerun()
+                except Exception as ex:
+                    st.error(str(ex))
+
+    # Footer actions
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("◀ Change center", use_container_width=True, key="dp_change_center"):
-            st.session_state.dp_center = None; st.rerun()
+        if st.button("◀ Change center", use_container_width=True):
+            st.session_state.dp_center = None
+            st.session_state.dp_month = None
+            st.session_state.dp_selected_doc = None
+            st.rerun()
     with c2:
-        if st.button("🏠 Back to main dashboard", use_container_width=True, key="dp_back_home"):
+        if st.button("🏠 Back to main dashboard", use_container_width=True):
             st.session_state.center_key = None
             st.session_state.year = None
             st.session_state.dp_center = None
+            st.session_state.dp_month = None
+            st.session_state.dp_selected_doc = None
             st.rerun()
 
-
-# ============================ Header ================================
+# ====================== Header & routing ======================
 st.title("📊 Exclusive Report with Aging — Dashboard")
 st.session_state.is_admin = is_admin_mode()
 
-# URL preselect
+# URL preselects
 qs = st.query_params
 if st.session_state.center_key is None and qs.get("center"):
     ck_qs = qs.get("center")
@@ -307,42 +481,59 @@ if st.session_state.year is None and qs.get("year"):
     except Exception:
         pass
 
-# Clear caches when selection changes
+# Reset caches when selection changes
 if (st.session_state.center_key != st.session_state.last_center_key) or (st.session_state.year != st.session_state.last_year):
-    load_core_sheets.clear()
-    get_report_bytes.clear()
+    load_core_sheets.clear(); get_report_bytes.clear()
     st.session_state.last_center_key = st.session_state.center_key
     st.session_state.last_year = st.session_state.year
 
 st.caption(f"Mode: **{'admin' if st.session_state.is_admin else 'view'}** · Center: **{st.session_state.center_key or 'none'}** · Year: **{st.session_state.year or 'none'}**")
 
-# ---------- center select (now with a 4th button) ----------
+# ====================== Home cards (4 buttons) ======================
 ck = st.session_state.center_key
 if ck not in CENTERS and ck != DOC_PERF_KEY:
     st.subheader("Choose a center")
+    # Card-like buttons (clean, attractive)
+    btn_css = """
+    <style>
+    .card-btn > button {
+        border: 2px solid #e5e7eb !important;
+        padding: 18px 14px !important;
+        border-radius: 14px !important;
+        font-weight: 600 !important;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.05) !important;
+    }
+    .card-btn > button:hover {
+        border-color: #93c5fd !important;
+        box-shadow: 0 6px 16px rgba(37,99,235,0.15) !important;
+    }
+    </style>
+    """
+    st.markdown(btn_css, unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        if st.button(CENTERS["easyhealth"]["name"], use_container_width=True):
+        if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy", help="Open Easy Health aging report"):
             st.session_state.center_key = "easyhealth"; st.session_state.year = None; st.rerun()
     with c2:
-        if st.button(CENTERS["excellent"]["name"], use_container_width=True):
+        if st.container(border=True).button(CENTERS["excellent"]["name"], use_container_width=True, key="home_exc", help="Open Excellent aging report"):
             st.session_state.center_key = "excellent"; st.session_state.year = None; st.rerun()
     with c3:
-        if st.button(CENTERS["pharmacy"]["name"], use_container_width=True):
+        if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm", help="Open Pharmacy aging report"):
             st.session_state.center_key = "pharmacy"; st.session_state.year = None; st.rerun()
     with c4:
-        if st.button("Doc monthly performance", use_container_width=True):
+        if st.container(border=True).button("Doc monthly performance", use_container_width=True, key="home_docperf", help="Doctor-wise monthly KPIs (separate tool)"):
             st.session_state.center_key = DOC_PERF_KEY
             st.session_state.year = None
             st.rerun()
     st.stop()
 
-# Route to the Doc Performance page if user clicked the 4th button
+# ====================== Route: Doc Performance ======================
 if st.session_state.center_key == DOC_PERF_KEY:
     render_docperf_page()
     st.stop()
 
-# ---------- year select ----------
+# ====================== Main aging dashboard (original) ======================
+# Year select
 st.subheader("Select Year")
 ycols = st.columns(len(YEARS))
 for i, y in enumerate(YEARS):
@@ -369,9 +560,9 @@ for i, y in enumerate(YEARS):
                 st.session_state.year = y
                 st.rerun()
 
-# Auto-pick latest year with a report else fallback
+# Auto-pick latest year that has a report
 if st.session_state.year is None:
-    cfg_tmp = CENTERS[ck]
+    cfg_tmp = CENTERS[st.session_state.center_key]
     found = None
     for y in reversed(YEARS):
         folder_try = (cfg_tmp["folder_root"] / str(y))
@@ -381,7 +572,7 @@ if st.session_state.year is None:
     st.session_state.year = found or YEARS[-1]
     st.rerun()
 
-# ---------- resolve paths ----------
+# Resolve paths
 cfg = CENTERS[st.session_state.center_key]
 folder = cfg["folder_root"] / str(st.session_state.year)
 folder.mkdir(parents=True, exist_ok=True)
@@ -395,26 +586,26 @@ if (st.query_params.get("center") != st.session_state.center_key) or (st.query_p
     st.query_params["center"] = st.session_state.center_key
     st.query_params["year"]   = str(st.session_state.year)
 
-# Audit ribbon (light)
+# Audit ribbon
 mt = mtime_token(out_path)
 built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
 st.caption(f"Built: **{built}** · Source: `{src_path}` · Report: `{out_path.name}`")
 
-# ---------- back to center picker ----------
+# Back button
 if st.button("◀ Choose another center", key="btn_back_center"):
     st.session_state.center_key = None
     st.session_state.year = None
     st.session_state.dp_center = None
+    st.session_state.dp_month = None
+    st.session_state.dp_selected_doc = None
     try:
-        if "center" in st.query_params:
-            del st.query_params["center"]
-        if "year" in st.query_params:
-            del st.query_params["year"]
+        if "center" in st.query_params: del st.query_params["center"]
+        if "year" in st.query_params:   del st.query_params["year"]
     except Exception:
         st.experimental_set_query_params()
     st.rerun()
 
-# ---------- admin panel ----------
+# Admin panel
 if st.session_state.is_admin:
     st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
     with st.expander("⬆️ Upload/replace source Excel for this year", expanded=False):
@@ -430,7 +621,7 @@ if st.session_state.is_admin:
             except Exception as e:
                 st.error(str(e))
 
-    if st.button("↻ Rebuild report", use_container_width=True, key=f"rebuild_{ck}_{st.session_state.year}"):
+    if st.button("↻ Rebuild report", use_container_width=True, key=f"rebuild_{st.session_state.center_key}_{st.session_state.year}"):
         try:
             if not gen_path.exists():
                 st.error(f"Generator not found: {gen_path}")
@@ -447,7 +638,7 @@ if st.session_state.is_admin:
         except Exception as e:
             st.error(str(e))
 
-# ---------- render ----------
+# Render main tables
 token = mtime_token(out_path)
 if token == 0.0:
     msg = f"Report not found for {cfg['name']} ({st.session_state.year})."
@@ -457,7 +648,6 @@ if token == 0.0:
     st.stop()
 
 try:
-    # Load core sheets (only the two small ones)
     totals, summary, _ = load_core_sheets(str(out_path), token)
 
     # Normalize totals
@@ -476,23 +666,20 @@ try:
     if not summary.empty:
         summary = ensure_grand_total(summary, summary.columns[0])
 
-    # ---------- KPIs (exclude Grand Total row for sums) ----------
-    def drop_grand_total(df: pd.DataFrame) -> pd.DataFrame:
-        if df is None or df.empty:
-            return df
-        first_col = df.columns[0]
-        return df.loc[~df[first_col].astype(str).str.contains("grand total", case=False, na=False)]
+    # KPIs (exclude Grand Total for sums)
+    def drop_gt(df):
+        if df is None or df.empty: return df
+        f = df.columns[0]
+        return df.loc[~df[f].astype(str).str.contains("grand total", case=False, na=False)]
+    totals_no_gt = drop_gt(totals)
 
-    totals_no_gt = drop_grand_total(totals)
     net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
     paid = ksum(totals_no_gt, "Paid")
     bal  = ksum(totals_no_gt, "Balance")
     rej  = ksum(totals_no_gt, "Rejected", "Rejection")
     acc  = ksum(totals_no_gt, "Accepted")
 
-    # ---------- Tabs ----------
     t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"])
-
     c0, c1, c2, c3, c4 = st.columns(5)
     c0.metric("Net Amount", f"{net:,.2f}")
     c1.metric("Paid",       f"{paid:,.2f}")
@@ -507,7 +694,7 @@ try:
             totals.to_csv(index=False).encode("utf-8"),
             file_name=f"{cfg['key']}_{st.session_state.year}_insurance_totals.csv",
             use_container_width=True,
-            key=f"dl_csv_totals_{ck}_{st.session_state.year}"
+            key=f"dl_csv_totals_{st.session_state.center_key}_{st.session_state.year}"
         )
 
     with t2:
@@ -517,7 +704,7 @@ try:
             summary.to_csv(index=False).encode("utf-8"),
             file_name=f"{cfg['key']}_{st.session_state.year}_summary.csv",
             use_container_width=True,
-            key=f"dl_csv_summary_{ck}_{st.session_state.year}"
+            key=f"dl_csv_summary_{st.session_state.center_key}_{st.session_state.year}"
         )
 
     with t3:
@@ -528,7 +715,7 @@ try:
             get_report_bytes(str(out_path)),
             file_name=out_path.name,
             use_container_width=True,
-            key=f"dl_xlsx_full_{ck}_{st.session_state.year}"
+            key=f"dl_xlsx_full_{st.session_state.center_key}_{st.session_state.year}"
         )
 
 except Exception as e:
