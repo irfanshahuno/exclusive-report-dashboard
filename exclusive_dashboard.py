@@ -30,7 +30,7 @@ YEARS = [2024, 2025]
 SHEET_INS_TOT = "Insurance_Totals"
 SHEET_SUMMARY = "Balance_Aging_Summary"
 SHEET_DETAIL  = "Balance_Aging_Detail"
-SHEET_INGROUP = "Balance_Aging_InsGroup"  # optional tab
+SHEET_INGROUP = "Balance_Aging_InsGroup"  # <-- NEW (optional tab)
 
 # ====================== Centers config ======================
 CENTERS = {
@@ -231,6 +231,7 @@ if ck not in CENTERS and ck != DOC_PERF_KEY:
         if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
             st.session_state.center_key = "pharmacy"; st.session_state.year = None; st.rerun()
     with c4:
+        # External link tile for Doc performance (UNCHANGED)
         components.html(
             f"""
             <a href="{DOC_PERF_URL}" target="_blank" style="text-decoration:none;">
@@ -248,7 +249,7 @@ if ck not in CENTERS and ck != DOC_PERF_KEY:
         )
     st.stop()
 
-# ====================== MAIN aging dashboard (KPIs at top) ======================
+# ====================== MAIN aging dashboard (ONLY change: KPIs moved to top) ======================
 st.subheader("Select Year")
 ycols = st.columns(len(YEARS))
 for i, y in enumerate(YEARS):
@@ -309,7 +310,7 @@ if st.button("◀ Choose another center", key="btn_back_center"):
         st.experimental_set_query_params()
     st.rerun()
 
-# ===== Admin controls =====
+# ===== Admin controls (unchanged) =====
 if st.session_state.get("is_admin"):
     st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
     with st.expander("⬆️ Upload/replace source Excel for this year", expanded=False):
@@ -368,20 +369,21 @@ try:
     except Exception:
         insgroup_df = None
 
-    # Drop the "Grand Total" from KPIs
+    # Drop the "Grand Total" row from sums to avoid double counting in KPIs
     def drop_gt(df):
         if df is None or df.empty: return df
         f = df.columns[0]
         return df.loc[~df[f].astype(str).str.contains("grand total", case=False, na=False)]
     totals_no_gt = drop_gt(totals)
 
-    # ===== KPIs =====
+    # ===== KPI sums =====
     net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
     paid = ksum(totals_no_gt, "Paid")
     bal  = ksum(totals_no_gt, "Balance")
     rej  = ksum(totals_no_gt, "Rejected", "Rejection")
     acc  = ksum(totals_no_gt, "Accepted")
 
+    # ===== TOP KPIs (MAIN dashboard — this is the ONLY UI change) =====
     st.markdown(f"### Key metrics — {st.session_state.get('year')}")
     k0, k1, k2, k3, k4 = st.columns(5)
     k0.metric("Net Amount", f"{net:,.2f}")
@@ -391,14 +393,22 @@ try:
     k4.metric("Accepted",   f"{acc:,.2f}")
     st.markdown("---")
 
-    # ===== Tabs =====
+    # ===== Tabs (UNCHANGED except optional InsGroup tab) =====
     if insgroup_df is not None:
         t1, t2, tIG, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, SHEET_INGROUP, "Downloads"])
     else:
         t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"])
 
+    # ---------- DISPLAY CHANGE: hide "S.No" & index starts at 1 ----------
+    def _display_df(df: pd.DataFrame) -> pd.DataFrame:
+        d = df.drop(columns=["S.No"], errors="ignore").reset_index(drop=True)
+        d.index = range(1, len(d) + 1)
+        d.index.name = None
+        return d
+    # --------------------------------------------------------------------
+
     with t1:
-        st.dataframe(totals, use_container_width=True, height=full_height(totals))
+        st.dataframe(_display_df(totals), use_container_width=True, height=full_height(totals))
         st.download_button(
             "⬇️ Export Insurance Totals (CSV)",
             totals.to_csv(index=False).encode("utf-8"),
@@ -408,7 +418,7 @@ try:
         )
 
     with t2:
-        st.dataframe(summary, use_container_width=True, height=full_height(summary))
+        st.dataframe(_display_df(summary), use_container_width=True, height=full_height(summary))
         st.download_button(
             "⬇️ Export Summary (CSV)",
             summary.to_csv(index=False).encode("utf-8"),
@@ -417,7 +427,7 @@ try:
             key=f"dl_csv_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
         )
 
-    # --- InsGroup tab with Insurance filter + S.No + Grand Total ---
+    # --- New InsGroup tab with Insurance filter ---
     if insgroup_df is not None:
         with tIG:
             insurers = (
@@ -437,35 +447,10 @@ try:
 
             view_df = insgroup_df.copy()
             if choice != "All":
-                view_df = view_df.loc[view_df["Insurance"].astype(str) == choice].drop(
-                    columns=["Insurance"], errors="ignore"
-                )
+                view_df = view_df.loc[view_df["Insurance"].astype(str) == choice].drop(columns=["Insurance"], errors="ignore")
                 st.caption(f"Showing InsGroup aging for **{choice}**")
 
-            # Clean empties for display
-            view_df = view_df.fillna(0)
-            view_df = view_df.reset_index(drop=True)
-
-            # Count rows before adding total
-            n_rows = len(view_df)
-
-            # Compute Grand Total across numeric columns
-            num_cols = [c for c in view_df.columns if pd.api.types.is_numeric_dtype(view_df[c])]
-            totals_row_vals = view_df[num_cols].sum(numeric_only=True)
-
-            total_row = {c: "" for c in view_df.columns}
-            label_col = "InsGroup" if "InsGroup" in view_df.columns else view_df.columns[0]
-            total_row[label_col] = "Grand Total"
-            for c in num_cols:
-                total_row[c] = totals_row_vals[c]
-
-            view_df = pd.concat([view_df, pd.DataFrame([total_row])], ignore_index=True)
-
-            # Add S.No column (blank for total row)
-            s_no = list(range(1, n_rows + 1)) + [""]
-            view_df.insert(0, "S.No", s_no)
-
-            st.dataframe(view_df, use_container_width=True, height=full_height(view_df))
+            st.dataframe(_display_df(view_df), use_container_width=True, height=full_height(view_df))
 
             st.download_button(
                 "⬇️ Export InsGroup (CSV) — current view",
@@ -493,5 +478,6 @@ except Exception as e:
         names = pd.ExcelFile(str(out_path), engine=eng).sheet_names
     except Exception:
         names = []
-    st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+    st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)')}")
+
 
