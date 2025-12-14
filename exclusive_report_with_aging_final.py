@@ -102,6 +102,16 @@ def ensure_insurance_column(df: pd.DataFrame) -> pd.DataFrame:
         df["Insurance"] = df[insurance_col]
     return df
 
+# ---- NEW: normalize InsGroup / subgroup column ----
+def ensure_insgroup_column(df: pd.DataFrame) -> pd.DataFrame:
+    cand = next((c for c in ["InsGroup", "Item Group", "ItemGroup", "ServiceGroup", "Item_Group"] if c in df.columns), None)
+    if cand:
+        df["InsGroup"] = df[cand]
+    else:
+        df["InsGroup"] = "-"
+    df["InsGroup"] = df["InsGroup"].fillna("-").astype(str).str.strip()
+    return df
+
 def build_balance_aging_summary(balance_df: pd.DataFrame) -> pd.DataFrame:
     labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
     pivot_summary = pd.pivot_table(
@@ -117,6 +127,22 @@ def build_balance_aging_summary(balance_df: pd.DataFrame) -> pd.DataFrame:
     pivot_summary.loc["Grand Total"] = pivot_summary.sum(axis=0)
     pivot_summary.reset_index(inplace=True)
     return pivot_summary
+
+# ---- NEW: Insurance × InsGroup aging pivot ----
+def build_balance_aging_insgroup(balance_df: pd.DataFrame) -> pd.DataFrame:
+    labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
+    pivot_ig = pd.pivot_table(
+        balance_df,
+        index=["Insurance", "InsGroup"],
+        columns="AgingBucket",
+        values="Balance",
+        aggfunc="sum",
+        fill_value=0,
+        observed=False,
+    ).reindex(columns=labels)
+    pivot_ig["Grand Total"] = pivot_ig.sum(axis=1)
+    pivot_ig = pivot_ig.reset_index()
+    return pivot_ig
 
 def build_insurance_totals(df: pd.DataFrame) -> pd.DataFrame:
     insurance_totals = (
@@ -189,9 +215,11 @@ def main():
     df = compute_measures(df)
     df = add_aging(df)
     df = ensure_insurance_column(df)
+    df = ensure_insgroup_column(df)   # <-- NEW
 
     balance_df = df.loc[df["Balance"] > 0].copy()
     pivot_summary = build_balance_aging_summary(balance_df)
+    pivot_insgroup = build_balance_aging_insgroup(balance_df)  # <-- NEW
     insurance_totals = build_insurance_totals(df)
 
     # Write sheets (skip "Exclusive_Report" if disabled)
@@ -200,6 +228,7 @@ def main():
             df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
         insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
         pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
+        pivot_insgroup.to_excel(writer, sheet_name="Balance_Aging_InsGroup", index=False)  # <-- NEW
         balance_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
 
         meta = pd.DataFrame([{
@@ -215,3 +244,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
