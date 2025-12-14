@@ -57,7 +57,7 @@ def style_headers(wb):
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal="center", vertical="center")
         # grand total highlights
-        if ws.title in ("Balance_Aging_Summary", "Insurance_Totals"):
+        if ws.title in ("Balance_Aging_Summary", "Insurance_Totals", "Balance_Aging_Plan"):
             for r in range(2, ws.max_row + 1):
                 first = ws.cell(row=r, column=1).value
                 if str(first).strip().lower() in ("grand total", "grand_total", "totals", "total"):
@@ -65,12 +65,12 @@ def style_headers(wb):
                         gt = ws.cell(row=r, column=c)
                         gt.fill = total_fill
                         gt.font = Font(bold=True)
-            if ws.title == "Balance_Aging_Summary":
-                last_col = ws.max_column
-                for r in range(1, ws.max_row + 1):
-                    gt = ws.cell(row=r, column=last_col)
-                    gt.fill = total_fill
-                    gt.font = Font(bold=True)
+            # color the last column (Grand Total)
+            last_col = ws.max_column
+            for r in range(1, ws.max_row + 1):
+                gt = ws.cell(row=r, column=last_col)
+                gt.fill = total_fill
+                gt.font = Font(bold=True)
 
 # =================== TIMER START ===================
 t0 = time.time()
@@ -92,6 +92,8 @@ col_paid  = ci_get(df, ["Remitted Amount","Remitted Amount (Paid)","Paid","Remit
 col_stat  = ci_get(df, ["ClaimStatus","Status","ResponseType"])
 col_payer = ci_get(df, ["Insurance","PayerName","Insurer","Plan","InsurancePlan"])
 col_date  = ci_get(df, ["ClaimDate","RxDate","DispenseDate","SubmissionDate","VisitDate","DOS","DateOfService"])
+# NEW: Plan (Pharmacy)
+col_plan  = ci_get(df, ["Plan","InsurancePlan","PlanName","PolicyPlan","Product","Policy","Plan Code","Plan_Name"])
 
 missing = []
 if not col_net:  missing.append("Claim Amount (net)")
@@ -103,6 +105,8 @@ if not col_payer:
     col_payer = "Insurance"; df[col_payer] = "Not Available"
 if not col_date:
     col_date = "ClaimDate"; df[col_date] = pd.NaT
+if not col_plan:
+    col_plan = "Plan"; df[col_plan] = "-"  # ensure we can build the Plan sheet even if missing
 
 # =================== PROCESS ===================
 print("⚙️ Processing metrics…")
@@ -143,7 +147,8 @@ df.rename(columns={
     col_net: "NetAmount",
     col_paid: "Paid",
     col_payer: "Insurance",
-    col_date: "RefDate"
+    col_date: "RefDate",
+    col_plan: "Plan",
 }, inplace=True)
 
 # Round money cols
@@ -204,6 +209,34 @@ insurance_totals = pd.concat([insurance_totals, pd.DataFrame([gt])], ignore_inde
 # Pretty column names for dashboard
 insurance_totals = insurance_totals.rename(columns={"NetAmount": "Net Amount"})
 
+# ===== NEW: Balance_Aging_Plan (Insurance + Plan) =====
+if balance_df.empty:
+    pivot_plan = pd.DataFrame({"Insurance": [], "Plan": []})
+    for lab in LABELS:
+        pivot_plan[lab] = []
+    pivot_plan["Grand Total"] = []
+else:
+    plan_tmp = balance_df.copy()
+    plan_tmp["Plan"] = plan_tmp["Plan"].fillna("-").astype(str).str.strip()
+    pivot_plan = pd.pivot_table(
+        plan_tmp,
+        index=["Insurance", "Plan"],
+        columns="AgingBucket",
+        values="Balance",
+        aggfunc="sum",
+        fill_value=0,
+        observed=False
+    )
+    pivot_plan = pivot_plan.reindex(columns=LABELS).fillna(0)
+    pivot_plan["Grand Total"] = pivot_plan.sum(axis=1)
+
+    # Add an overall Grand Total row (across all insurance+plan)
+    overall = {"Insurance": "Grand Total", "Plan": ""}
+    for col in LABELS + ["Grand Total"]:
+        overall[col] = pivot_plan[col].sum() if col in pivot_plan.columns else 0
+    pivot_plan = pivot_plan.reset_index()
+    pivot_plan = pd.concat([pivot_plan, pd.DataFrame([overall])], ignore_index=True)
+
 t2 = time.time()
 print(f"⚙️ Processing time: {t2 - t1:.2f}s")
 
@@ -245,6 +278,8 @@ with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
     insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
     pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
     balance_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
+    # NEW sheet:
+    pivot_plan.to_excel(writer, sheet_name="Balance_Aging_Plan", index=False)
     pd.DataFrame([checks]).to_excel(writer, sheet_name="Validation", index=False)
 
 wb = load_workbook(out_path)
@@ -259,4 +294,5 @@ print("✅ Self-checks summary:")
 for k, v in checks.items():
     print(f"   - {k}: {v}")
 print(f"✅ Saved: {out_path.name}")
+
 
