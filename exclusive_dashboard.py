@@ -30,6 +30,7 @@ YEARS = [2024, 2025]
 SHEET_INS_TOT = "Insurance_Totals"
 SHEET_SUMMARY = "Balance_Aging_Summary"
 SHEET_DETAIL  = "Balance_Aging_Detail"
+SHEET_INGROUP = "Balance_Aging_InsGroup"  # <-- NEW (optional tab)
 
 # ====================== Centers config ======================
 CENTERS = {
@@ -359,6 +360,15 @@ try:
     if not summary.empty:
         summary = ensure_grand_total(summary, summary.columns[0])
 
+    # Optionally load the InsGroup sheet (no errors if missing)
+    ext = Path(str(out_path)).suffix.lower()
+    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+    try:
+        insgroup_df = pd.read_excel(str(out_path), sheet_name=SHEET_INGROUP, engine=engine)
+        insgroup_df = trim_empty_rows(insgroup_df)
+    except Exception:
+        insgroup_df = None
+
     # Drop the "Grand Total" row from sums to avoid double counting in KPIs
     def drop_gt(df):
         if df is None or df.empty: return df
@@ -383,8 +393,11 @@ try:
     k4.metric("Accepted",   f"{acc:,.2f}")
     st.markdown("---")
 
-    # ===== Tabs (UNCHANGED) =====
-    t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"])
+    # ===== Tabs (UNCHANGED except optional InsGroup tab) =====
+    if insgroup_df is not None:
+        t1, t2, tIG, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, SHEET_INGROUP, "Downloads"])
+    else:
+        t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"])
 
     with t1:
         st.dataframe(totals, use_container_width=True, height=full_height(totals))
@@ -406,6 +419,18 @@ try:
             key=f"dl_csv_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
         )
 
+    # New optional InsGroup tab
+    if insgroup_df is not None:
+        with tIG:
+            st.dataframe(insgroup_df, use_container_width=True, height=full_height(insgroup_df))
+            st.download_button(
+                "⬇️ Export InsGroup Summary (CSV)",
+                insgroup_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"{cfg['key']}_{st.session_state.get('year')}_insgroup.csv",
+                use_container_width=True,
+                key=f"dl_csv_insgroup_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
+            )
+
     with t3:
         st.markdown("### Report Download")
         st.write("Open the XLSX locally to inspect **Balance_Aging_Detail** if needed.")
@@ -425,3 +450,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
