@@ -2,6 +2,7 @@
 
 import sys
 import subprocess
+import re
 from pathlib import Path
 from datetime import datetime, date
 
@@ -30,6 +31,9 @@ SHEET_INS_TOT = "Insurance_Totals"
 SHEET_SUMMARY = "Balance_Aging_Summary"
 SHEET_DETAIL  = "Balance_Aging_Detail"
 SHEET_INGROUP = "Balance_Aging_InsGroup"  # optional tab if present
+
+# ===== robust Grand Total match (handles 'Grand Total', 'total', spacing, case) =====
+GT_PAT = re.compile(r'^\s*(grand\s*total|total)\s*$', re.I)
 
 # ====================== Centers config ======================
 CENTERS = {
@@ -142,16 +146,36 @@ def drop_empty_insurance(df: pd.DataFrame, name_col: str = "Insurance") -> pd.Da
     return df.loc[~bad | keep_grand].copy()
 
 def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
+    """Ensure a Grand Total/Total row exists; if not, append one computed from numeric cols."""
     if df is None or df.empty or name_col not in df.columns:
         return df
-    if df[name_col].astype(str).str.lower().str.contains("grand total").any():
+    if df[name_col].astype(str).str.match(GT_PAT).any():
         return df
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    gt = {c: pd.to_numeric(df[c], errors="coerce").sum() for c in num_cols}
+    gt_vals = {c: pd.to_numeric(df[c], errors="coerce").sum() for c in num_cols}
     row = {c: "" for c in df.columns}
-    row.update(gt)
+    row.update(gt_vals)
     row[name_col] = "Grand Total"
     return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+
+def move_grand_total_last(df: pd.DataFrame) -> pd.DataFrame:
+    """Put the (Grand) Total row at the bottom; if missing, create it first."""
+    if df is None or df.empty:
+        return df
+    first = df.columns[0]
+    if not df[first].astype(str).str.match(GT_PAT).any():
+        df = ensure_grand_total(df, first)
+    mask = df[first].astype(str).str.match(GT_PAT)
+    body = df.loc[~mask]
+    gt   = df.loc[mask]
+    return pd.concat([body, gt], ignore_index=True)
+
+def drop_gt(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop GT/Total rows (for KPI sums only)."""
+    if df is None or df.empty:
+        return df
+    first = df.columns[0]
+    return df.loc[~df[first].astype(str).str.match(GT_PAT)]
 
 def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150) -> int:
     n = 0 if df is None else len(df)
@@ -411,24 +435,7 @@ try:
     except Exception:
         insgroup_df = None
 
-    # Helper: move "Grand Total" to last row if present
-    def move_grand_total_last(df: pd.DataFrame) -> pd.DataFrame:
-        if df is None or df.empty:
-            return df
-        first = df.columns[0]
-        mask = df[first].astype(str).str.contains("grand total", case=False, na=False)
-        if not mask.any():
-            return df
-        body = df.loc[~mask]
-        gt = df.loc[mask]
-        return pd.concat([body, gt], ignore_index=True)
-
-    # Drop the "Grand Total" row from sums to avoid double counting in KPIs
-    def drop_gt(df):
-        if df is None or df.empty:
-            return df
-        f = df.columns[0]
-        return df.loc[~df[f].astype(str).str.contains("grand total", case=False, na=False)]
+    # KPI sums should not double-count the GT row
     totals_no_gt = drop_gt(totals)
 
     # ===== KPI sums =====
@@ -496,7 +503,7 @@ try:
                 insgroup_df["Insurance"]
                 .dropna()
                 .astype(str)
-                .loc[lambda s: ~s.str.contains("grand total", case=False, na=False)]
+                .loc[lambda s: ~s.str.match(GT_PAT)]
                 .sort_values()
                 .unique()
                 .tolist()
@@ -546,4 +553,5 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
 
