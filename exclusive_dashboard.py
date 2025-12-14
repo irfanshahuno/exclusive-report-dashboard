@@ -1,6 +1,6 @@
 # exclusive_dashboard.py — CRASH-SAFE LITE (Aging dashboard only)
 # Home has 4 cards: Easy Health, Excellent, Pharmacy, and an EXTERNAL
-# link to your Doc Monthly Performance app (no internal doc-perf page).
+# Doc Monthly Performance button that opens your Streamlit app in a new tab.
 
 import sys
 import subprocess
@@ -141,10 +141,10 @@ def drop_empty_insurance(df: pd.DataFrame, name_col: str = "Insurance") -> pd.Da
     keep_grand = series.str.contains("grand total", case=False, na=False)
     return df.loc[~bad | keep_grand].copy()
 
-def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
+def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pdDataFrame:
     if df is None or df.empty or name_col not in df.columns:
         return df
-    if df[name_col].astype(str).str.lower().str.contains("grand total").any():
+    if df[name_col].astype(str).str.lower().str_contains("grand total").any():
         return df
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     gt = {c: pd.to_numeric(df[c], errors="coerce").sum() for c in num_cols}
@@ -253,21 +253,30 @@ if ck not in CENTERS:
             st.session_state.year = None
             st.rerun()
     with c4:
-        # Pure external link card (no internal page)
+        # Pure external button (opens your app directly)
         st.markdown(
             f"""
             <a href="{DOC_PERF_URL}" target="_blank" style="text-decoration:none;">
-              <div style="
-                  border:2px solid #e5e7eb;border-radius:14px;padding:18px 14px;
-                  font-weight:600;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.05);
-                  color:inherit;">
+              <button style="
+                  border: 2px solid #e5e7eb;
+                  border-radius: 14px;
+                  padding: 18px 14px;
+                  width: 100%;
+                  font-weight: 600;
+                  text-align: center;
+                  background-color: white;
+                  color: black;
+                  cursor: pointer;
+                  box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+              "
+              onmouseover="this.style.borderColor='#60a5fa'; this.style.boxShadow='0 6px 16px rgba(37,99,235,0.15)'"
+              onmouseout="this.style.borderColor='#e5e7eb'; this.style.boxShadow='0 2px 6px rgba(0,0,0,0.05)'">
                 Doc monthly performance
-              </div>
+              </button>
             </a>
             """,
             unsafe_allow_html=True,
         )
-        st.caption(f"[Open external app ↗]({DOC_PERF_URL})")
     st.stop()
 
 # ====================== Main aging dashboard ======================
@@ -454,4 +463,3 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
