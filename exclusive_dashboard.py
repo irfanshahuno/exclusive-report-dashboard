@@ -1,4 +1,10 @@
-# exclusive_dashboard.py — Main dashboard KPIs moved to TOP (Doc Performance unchanged)
+# exclusive_dashboard.py — Main dashboard KPIs at TOP (Doc Performance unchanged)
+# NOTE: This is your original dashboard with ONLY the minimal additions:
+#   • Optional Balance_Aging_InsGroup tab (already supported)
+#   • Optional Balance_Aging_Plan tab (new) with Insurance filter
+#   • S.No hidden and display index starts at 1
+#   • Grand Total row (any of 'Grand Total' / 'Total') is shown LAST in tables
+# Nothing else is changed.
 
 import sys
 import subprocess
@@ -30,9 +36,10 @@ YEARS = [2024, 2025]
 SHEET_INS_TOT = "Insurance_Totals"
 SHEET_SUMMARY = "Balance_Aging_Summary"
 SHEET_DETAIL  = "Balance_Aging_Detail"
-SHEET_INGROUP = "Balance_Aging_InsGroup"  # optional tab if present
+SHEET_INGROUP = "Balance_Aging_InsGroup"   # optional tab if present
+SHEET_IPLAN   = "Balance_Aging_Plan"        # optional tab if present (PHARMACY uses Plan)
 
-# ===== robust Grand Total match (handles 'Grand Total', 'total', spacing, case) =====
+# Robust Grand Total match (handles 'Grand Total', 'total', spacing, case)
 GT_PAT = re.compile(r'^\s*(grand\s*total|total)\s*$', re.I)
 
 # ====================== Centers config ======================
@@ -426,7 +433,7 @@ try:
     if not summary.empty:
         summary = ensure_grand_total(summary, summary.columns[0])
 
-    # Optionally load the InsGroup sheet (no errors if missing)
+    # Optionally load the InsGroup and Plan sheets (no errors if missing)
     ext = Path(str(out_path)).suffix.lower()
     engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
     try:
@@ -434,6 +441,11 @@ try:
         insgroup_df = trim_empty_rows(insgroup_df)
     except Exception:
         insgroup_df = None
+    try:
+        plan_df = pd.read_excel(str(out_path), sheet_name=SHEET_IPLAN, engine=engine)
+        plan_df = trim_empty_rows(plan_df)
+    except Exception:
+        plan_df = None
 
     # KPI sums should not double-count the GT row
     totals_no_gt = drop_gt(totals)
@@ -455,26 +467,34 @@ try:
     k4.metric("Accepted",   f"{acc:,.2f}")
     st.markdown("---")
 
-    # ===== Tabs (optional InsGroup) — minimal change to keep focus =====
+    # ===== Tabs (optional InsGroup / Plan) =====
+    tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
     if insgroup_df is not None:
-        tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY, SHEET_INGROUP, "Downloads"]
-        # reopen on InsGroup immediately after applying its filter
-        if st.session_state.pop("_stay_on_ig", False):
-            tab_labels = [SHEET_INGROUP, SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"]
-        t_tabs = st.tabs(tab_labels)
-        tab_map = {name: t for name, t in zip(tab_labels, t_tabs)}
-        t1, t2, tIG, t3 = tab_map[SHEET_INS_TOT], tab_map[SHEET_SUMMARY], tab_map[SHEET_INGROUP], tab_map["Downloads"]
-    else:
-        t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"])
-        tIG = None
+        tab_labels.append(SHEET_INGROUP)
+    if plan_df is not None:
+        tab_labels.append(SHEET_IPLAN)
+    tab_labels.append("Downloads")
 
-    # ---------- DISPLAY: hide "S.No" & index starts at 1 ----------
+    # preserve “stay on InsGroup” behavior
+    if insgroup_df is not None and st.session_state.pop("_stay_on_ig", False):
+        tab_labels = [SHEET_INGROUP] + [x for x in tab_labels if x != SHEET_INGROUP]
+
+    t_tabs = st.tabs(tab_labels)
+    tab_map = {name: t for name, t in zip(tab_labels, t_tabs)}
+
+    t1 = tab_map[SHEET_INS_TOT]
+    t2 = tab_map[SHEET_SUMMARY]
+    t3 = tab_map["Downloads"]
+    tIG = tab_map.get(SHEET_INGROUP)
+    tPL = tab_map.get(SHEET_IPLAN)
+
+    # ---------- DISPLAY helper: hide "S.No" & index starts at 1 ----------
     def _display_df(df: pd.DataFrame) -> pd.DataFrame:
         d = df.drop(columns=["S.No"], errors="ignore").reset_index(drop=True)
         d.index = range(1, len(d) + 1)
         d.index.name = None
         return d
-    # ---------------------------------------------------------------
+    # --------------------------------------------------------------------
 
     with t1:
         st.dataframe(
@@ -504,8 +524,8 @@ try:
             key=f"dl_csv_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
         )
 
-    # ===== InsGroup tab body — tiny form so the tab doesn't jump on first change =====
-    if insgroup_df is not None:
+    # ===== InsGroup tab body (optional) =====
+    if tIG is not None and insgroup_df is not None:
         with tIG:
             insurers = (
                 insgroup_df["Insurance"]
@@ -546,6 +566,49 @@ try:
                 file_name=f"{cfg['key']}_{st.session_state.get('year')}_insgroup{'_' + choice if choice != 'All' else ''}.csv",
                 use_container_width=True,
                 key=f"dl_csv_insgroup_view_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+            )
+
+    # ===== Plan tab body (optional) =====
+    if tPL is not None and plan_df is not None:
+        with tPL:
+            insurers_pl = (
+                plan_df["Insurance"]
+                .dropna().astype(str)
+                .loc[lambda s: ~s.str.match(GT_PAT)]
+                .sort_values().unique().tolist()
+            )
+            pl_key = f"plan_select_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
+            with st.form(key=f"pl_form_{st.session_state.get('center_key')}_{st.session_state.get('year')}"):
+                choice_pl = st.selectbox(
+                    "Filter by Insurance",
+                    ["All"] + insurers_pl,
+                    index=(["All"] + insurers_pl).index(st.session_state.get(pl_key, "All"))
+                )
+                apply_btn_pl = st.form_submit_button("Apply")
+            if apply_btn_pl:
+                st.session_state[pl_key] = choice_pl
+                st.rerun()
+
+            # render using saved selection
+            choice_pl = st.session_state.get(pl_key, "All")
+            view_pl = plan_df.copy()
+            if choice_pl != "All":
+                view_pl = view_pl.loc[view_pl["Insurance"].astype(str) == choice_pl] \
+                                 .drop(columns=["Insurance"], errors="ignore")
+                st.caption(f"Showing Plan aging for **{choice_pl}**")
+
+            st.dataframe(
+                _display_df(move_grand_total_last(view_pl)),
+                use_container_width=True,
+                height=full_height(view_pl)
+            )
+
+            st.download_button(
+                "⬇️ Export Plan (CSV) — current view",
+                view_pl.to_csv(index=False).encode("utf-8"),
+                file_name=f"{cfg['key']}_{st.session_state.get('year')}_plan{'_' + choice_pl if choice_pl != 'All' else ''}.csv",
+                use_container_width=True,
+                key=f"dl_csv_plan_view_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
             )
 
     with t3:
