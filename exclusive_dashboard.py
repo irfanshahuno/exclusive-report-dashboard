@@ -455,11 +455,18 @@ try:
     k4.metric("Accepted",   f"{acc:,.2f}")
     st.markdown("---")
 
-    # ===== Tabs (optional InsGroup) =====
+    # ===== Tabs (optional InsGroup) — minimal change to keep focus =====
     if insgroup_df is not None:
-        t1, t2, tIG, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, SHEET_INGROUP, "Downloads"])
+        tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY, SHEET_INGROUP, "Downloads"]
+        # reopen on InsGroup immediately after applying its filter
+        if st.session_state.pop("_stay_on_ig", False):
+            tab_labels = [SHEET_INGROUP, SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"]
+        t_tabs = st.tabs(tab_labels)
+        tab_map = {name: t for name, t in zip(tab_labels, t_tabs)}
+        t1, t2, tIG, t3 = tab_map[SHEET_INS_TOT], tab_map[SHEET_SUMMARY], tab_map[SHEET_INGROUP], tab_map["Downloads"]
     else:
         t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"])
+        tIG = None
 
     # ---------- DISPLAY: hide "S.No" & index starts at 1 ----------
     def _display_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -497,23 +504,30 @@ try:
             key=f"dl_csv_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
         )
 
+    # ===== InsGroup tab body — tiny form so the tab doesn't jump on first change =====
     if insgroup_df is not None:
         with tIG:
             insurers = (
                 insgroup_df["Insurance"]
-                .dropna()
-                .astype(str)
+                .dropna().astype(str)
                 .loc[lambda s: ~s.str.match(GT_PAT)]
-                .sort_values()
-                .unique()
-                .tolist()
+                .sort_values().unique().tolist()
             )
-            choice = st.selectbox(
-                "Filter by Insurance",
-                ["All"] + insurers,
-                key=f"insgroup_select_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-            )
+            ig_key = f"insgroup_select_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
+            with st.form(key=f"ig_form_{st.session_state.get('center_key')}_{st.session_state.get('year')}"):
+                choice = st.selectbox(
+                    "Filter by Insurance",
+                    ["All"] + insurers,
+                    index=(["All"] + insurers).index(st.session_state.get(ig_key, "All"))
+                )
+                apply_btn = st.form_submit_button("Apply")
+            if apply_btn:
+                st.session_state[ig_key] = choice
+                st.session_state["_stay_on_ig"] = True
+                st.rerun()
 
+            # render using saved selection
+            choice = st.session_state.get(ig_key, "All")
             view_df = insgroup_df.copy()
             if choice != "All":
                 view_df = view_df.loc[view_df["Insurance"].astype(str) == choice] \
@@ -553,5 +567,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
 
