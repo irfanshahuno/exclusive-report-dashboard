@@ -411,6 +411,18 @@ try:
     except Exception:
         insgroup_df = None
 
+    # Helper: move "Grand Total" to last row if present
+    def move_grand_total_last(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        first = df.columns[0]
+        mask = df[first].astype(str).str.contains("grand total", case=False, na=False)
+        if not mask.any():
+            return df
+        body = df.loc[~mask]
+        gt = df.loc[mask]
+        return pd.concat([body, gt], ignore_index=True)
+
     # Drop the "Grand Total" row from sums to avoid double counting in KPIs
     def drop_gt(df):
         if df is None or df.empty:
@@ -442,16 +454,20 @@ try:
     else:
         t1, t2, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"])
 
-    # ---------- DISPLAY CHANGE: hide "S.No" & index starts at 1 ----------
+    # ---------- DISPLAY: hide "S.No" & index starts at 1 ----------
     def _display_df(df: pd.DataFrame) -> pd.DataFrame:
         d = df.drop(columns=["S.No"], errors="ignore").reset_index(drop=True)
         d.index = range(1, len(d) + 1)
         d.index.name = None
         return d
-    # --------------------------------------------------------------------
+    # ---------------------------------------------------------------
 
     with t1:
-        st.dataframe(_display_df(totals), use_container_width=True, height=full_height(totals))
+        st.dataframe(
+            _display_df(move_grand_total_last(totals)),
+            use_container_width=True,
+            height=full_height(totals)
+        )
         st.download_button(
             "⬇️ Export Insurance Totals (CSV)",
             totals.to_csv(index=False).encode("utf-8"),
@@ -461,7 +477,11 @@ try:
         )
 
     with t2:
-        st.dataframe(_display_df(summary), use_container_width=True, height=full_height(summary))
+        st.dataframe(
+            _display_df(move_grand_total_last(summary)),
+            use_container_width=True,
+            height=full_height(summary)
+        )
         st.download_button(
             "⬇️ Export Summary (CSV)",
             summary.to_csv(index=False).encode("utf-8"),
@@ -493,7 +513,11 @@ try:
                                  .drop(columns=["Insurance"], errors="ignore")
                 st.caption(f"Showing InsGroup aging for **{choice}**")
 
-            st.dataframe(_display_df(view_df), use_container_width=True, height=full_height(view_df))
+            st.dataframe(
+                _display_df(move_grand_total_last(view_df)),
+                use_container_width=True,
+                height=full_height(view_df)
+            )
 
             st.download_button(
                 "⬇️ Export InsGroup (CSV) — current view",
@@ -522,6 +546,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
-
 
