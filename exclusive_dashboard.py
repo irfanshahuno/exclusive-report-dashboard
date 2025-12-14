@@ -419,16 +419,37 @@ try:
             key=f"dl_csv_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
         )
 
-    # New optional InsGroup tab
+    # --- New InsGroup tab with Insurance filter ---
     if insgroup_df is not None:
         with tIG:
-            st.dataframe(insgroup_df, use_container_width=True, height=full_height(insgroup_df))
+            insurers = (
+                insgroup_df["Insurance"]
+                .dropna()
+                .astype(str)
+                .loc[lambda s: ~s.str.contains("grand total", case=False, na=False)]
+                .sort_values()
+                .unique()
+                .tolist()
+            )
+            choice = st.selectbox(
+                "Filter by Insurance",
+                ["All"] + insurers,
+                key=f"insgroup_select_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+            )
+
+            view_df = insgroup_df.copy()
+            if choice != "All":
+                view_df = view_df.loc[view_df["Insurance"].astype(str) == choice].drop(columns=["Insurance"], errors="ignore")
+                st.caption(f"Showing InsGroup aging for **{choice}**")
+
+            st.dataframe(view_df, use_container_width=True, height=full_height(view_df))
+
             st.download_button(
-                "⬇️ Export InsGroup Summary (CSV)",
-                insgroup_df.to_csv(index=False).encode("utf-8"),
-                file_name=f"{cfg['key']}_{st.session_state.get('year')}_insgroup.csv",
+                "⬇️ Export InsGroup (CSV) — current view",
+                view_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"{cfg['key']}_{st.session_state.get('year')}_insgroup{'_' + choice if choice != 'All' else ''}.csv",
                 use_container_width=True,
-                key=f"dl_csv_insgroup_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
+                key=f"dl_csv_insgroup_view_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
             )
 
     with t3:
