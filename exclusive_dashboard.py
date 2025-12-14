@@ -11,14 +11,14 @@ from io import BytesIO
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components  # <-- for external link tile
+import streamlit.components.v1 as components  # kept (not strictly needed now)
 
 # ====================== Page & base folders ======================
 st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layout="wide")
 st.set_option("client.showErrorDetails", False)
 
-# 👉 External Doc Performance app URL
-DOC_PERF_URL = "https://doc-perf-app-k3ommugummiwahmwgwruhq.streamlit.app/"
+# 👉 External Doc Performance app URL (updated)
+DOC_PERF_URL = "https://doctor-performance-app-tjwqgmptk8fbo57t4qrfqr.streamlit.app/"
 
 BASE = Path(__file__).parent
 DATA_DIR = BASE / "data"
@@ -475,22 +475,13 @@ if ck not in CENTERS and ck != DOC_PERF_KEY:
         if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
             st.session_state.center_key = "pharmacy"; st.session_state.year = None; st.rerun()
     with c4:
-        # 👉 External tile link (opens in a new tab)
-        components.html(
-            f"""
-            <a href="{DOC_PERF_URL}" target="_blank" style="text-decoration:none;">
-              <div style="
-                  border:2px solid #e5e7eb;border-radius:14px;padding:18px 14px;
-                  font-weight:600;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.05);
-                  color:inherit;
-              " onmouseover="this.style.borderColor='#93c5fd'; this.style.boxShadow='0 6px 16px rgba(37,99,235,0.15)';"
-                onmouseout="this.style.borderColor='#e5e7eb'; this.style.boxShadow='0 2px 6px rgba(0,0,0,.05)';">
-                Doc monthly performance
-              </div>
-            </a>
-            """,
-            height=90,
-        )
+        # Acts like a center button (internal page)
+        if st.container(border=True).button("Doc monthly performance", use_container_width=True, key="home_docperf"):
+            st.session_state.center_key = DOC_PERF_KEY
+            st.session_state.year = None
+            st.rerun()
+        # Small external link under the card
+        st.caption(f"[Open external app ↗]({DOC_PERF_URL})")
     st.stop()
 
 # ====================== Route: Doc Performance ======================
@@ -665,3 +656,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
