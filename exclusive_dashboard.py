@@ -4,7 +4,6 @@ import sys
 import subprocess
 from pathlib import Path
 from datetime import datetime, date
-from io import BytesIO
 
 import pandas as pd
 import streamlit as st
@@ -30,7 +29,7 @@ YEARS = [2024, 2025]
 SHEET_INS_TOT = "Insurance_Totals"
 SHEET_SUMMARY = "Balance_Aging_Summary"
 SHEET_DETAIL  = "Balance_Aging_Detail"
-SHEET_INGROUP = "Balance_Aging_InsGroup"  # <-- NEW (optional tab)
+SHEET_INGROUP = "Balance_Aging_InsGroup"  # optional tab if present
 
 # ====================== Centers config ======================
 CENTERS = {
@@ -62,8 +61,10 @@ CENTERS = {
 
 # ====================== Small helpers ======================
 def mtime_token(p: Path) -> float:
-    try: return p.stat().st_mtime
-    except FileNotFoundError: return 0.0
+    try:
+        return p.stat().st_mtime
+    except FileNotFoundError:
+        return 0.0
 
 def _run(cmd):
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -88,7 +89,8 @@ def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
 
 def resolve_source_path(folder: Path, preferred: str = "source.xlsx") -> Path:
     for p in [folder / "source.xlsb", folder / "source.xlsx", folder / "source.xlsm"]:
-        if p.exists(): return p
+        if p.exists():
+            return p
     return folder / preferred
 
 def save_uploaded_source(folder: Path, upload) -> Path:
@@ -113,52 +115,65 @@ def load_core_sheets(path: str, _token: float):
         df_sum = pd.read_excel(path, sheet_name=SHEET_SUMMARY, engine=engine)
         return df_ins, df_sum, [SHEET_INS_TOT, SHEET_SUMMARY]
     except Exception as e:
-        try: names = pd.ExcelFile(path, engine=engine).sheet_names
-        except Exception: names = []
+        try:
+            names = pd.ExcelFile(path, engine=engine).sheet_names
+        except Exception:
+            names = []
         raise RuntimeError(
             f"Required sheets not found or failed to load. "
             f"Available: {', '.join(names) if names else '(none)'}\nOriginal error: {e}"
         )
 
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty: return df
+    if df is None or df.empty:
+        return df
     df2 = df.dropna(how="all")
-    if df2.empty: return df2
+    if df2.empty:
+        return df2
     blank_rows = df2.fillna("").astype(str).apply(lambda r: "".join(r).strip() == "", axis=1)
     return df2.loc[~blank_rows]
 
 def drop_empty_insurance(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
-    if df is None or df.empty or name_col not in df.columns: return df
+    if df is None or df.empty or name_col not in df.columns:
+        return df
     series = df[name_col].astype(str).fillna("").str.strip()
     bad = series.str.lower().isin(["", "none", "nan", "null", "na", "-", "--"])
     keep_grand = series.str.contains("grand total", case=False, na=False)
     return df.loc[~bad | keep_grand].copy()
 
 def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
-    if df is None or df.empty or name_col not in df.columns: return df
-    if df[name_col].astype(str).str.lower().str.contains("grand total").any(): return df
+    if df is None or df.empty or name_col not in df.columns:
+        return df
+    if df[name_col].astype(str).str.lower().str.contains("grand total").any():
+        return df
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     gt = {c: pd.to_numeric(df[c], errors="coerce").sum() for c in num_cols}
-    row = {c: "" for c in df.columns}; row.update(gt); row[name_col] = "Grand Total"
+    row = {c: "" for c in df.columns}
+    row.update(gt)
+    row[name_col] = "Grand Total"
     return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
 
 def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150) -> int:
-    n = 0 if df is None else len(df); return header_px + (n * row_px) + padding_px
+    n = 0 if df is None else len(df)
+    return header_px + (n * row_px) + padding_px
 
 def ksum(df: pd.DataFrame, *cands):
     for col in cands:
-        if col in df.columns: return float(pd.to_numeric(df[col], errors="coerce").sum())
+        if col in df.columns:
+            return float(pd.to_numeric(df[col], errors="coerce").sum())
     return 0.0
 
 def is_admin_mode() -> bool:
     secret_pwd = st.secrets.get("ADMIN_PASSWORD", "")
     if secret_pwd:
-        if st.session_state.get("is_admin", False): return True
+        if st.session_state.get("is_admin", False):
+            return True
         with st.popover("🔒 Admin login"):
             pwd = st.text_input("Password", type="password", key="admin_pwd")
             if st.button("Login"):
                 if pwd == secret_pwd:
-                    st.session_state.is_admin = True; st.rerun()
+                    st.session_state.is_admin = True
+                    st.rerun()
                 else:
                     st.error("Wrong password")
         return False
@@ -173,7 +188,8 @@ def month_options():
     return [("Current month", str(cur_ym)), ("Last month", str(last_ym))]
 
 def yyyymm_to_label(yyyymm: str) -> str:
-    y = int(yyyymm[:4]); m = int(yyyymm[4:])
+    y = int(yyyymm[:4])
+    m = int(yyyymm[4:])
     return f"{date(y, m, 1):%b %Y}"
 
 # ====================== Header & routing ======================
@@ -183,14 +199,18 @@ st.session_state.is_admin = is_admin_mode()
 qs = st.query_params
 if st.session_state.get("center_key") is None and qs.get("center"):
     ck_qs = qs.get("center")
-    if ck_qs in CENTERS or ck_qs == DOC_PERF_KEY: st.session_state.center_key = ck_qs
+    if ck_qs in CENTERS or ck_qs == DOC_PERF_KEY:
+        st.session_state.center_key = ck_qs
 if st.session_state.get("year") is None and qs.get("year"):
-    try: st.session_state.year = int(qs.get("year"))
-    except Exception: pass
+    try:
+        st.session_state.year = int(qs.get("year"))
+    except Exception:
+        pass
 
 if (st.session_state.get("center_key") != st.session_state.get("last_center_key")) or \
    (st.session_state.get("year") != st.session_state.get("last_year")):
-    load_core_sheets.clear(); get_report_bytes.clear()
+    load_core_sheets.clear()
+    get_report_bytes.clear()
     st.session_state.last_center_key = st.session_state.get("center_key")
     st.session_state.last_year = st.session_state.get("year")
 
@@ -223,13 +243,19 @@ if ck not in CENTERS and ck != DOC_PERF_KEY:
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
-            st.session_state.center_key = "easyhealth"; st.session_state.year = None; st.rerun()
+            st.session_state.center_key = "easyhealth"
+            st.session_state.year = None
+            st.rerun()
     with c2:
         if st.container(border=True).button(CENTERS["excellent"]["name"], use_container_width=True, key="home_exc"):
-            st.session_state.center_key = "excellent"; st.session_state.year = None; st.rerun()
+            st.session_state.center_key = "excellent"
+            st.session_state.year = None
+            st.rerun()
     with c3:
         if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
-            st.session_state.center_key = "pharmacy"; st.session_state.year = None; st.rerun()
+            st.session_state.center_key = "pharmacy"
+            st.session_state.year = None
+            st.rerun()
     with c4:
         # External link tile for Doc performance (UNCHANGED)
         components.html(
@@ -249,7 +275,7 @@ if ck not in CENTERS and ck != DOC_PERF_KEY:
         )
     st.stop()
 
-# ====================== MAIN aging dashboard (ONLY change: KPIs moved to top) ======================
+# ====================== MAIN aging dashboard (KPIs moved to top) ======================
 st.subheader("Select Year")
 ycols = st.columns(len(YEARS))
 for i, y in enumerate(YEARS):
@@ -271,7 +297,8 @@ for i, y in enumerate(YEARS):
                 """, unsafe_allow_html=True)
         else:
             if st.button(str(y), use_container_width=True, key=f"year_btn_{y}"):
-                st.session_state.year = y; st.rerun()
+                st.session_state.year = y
+                st.rerun()
 
 # Pick a year automatically if none
 if st.session_state.get("year") is None:
@@ -279,8 +306,11 @@ if st.session_state.get("year") is None:
     found = None
     for y in reversed(YEARS):
         out_try = (cfg_tmp["folder_root"] / str(y) / cfg_tmp["out_name"])
-        if out_try.exists(): found = y; break
-    st.session_state.year = found or YEARS[-1]; st.rerun()
+        if out_try.exists():
+            found = y
+            break
+    st.session_state.year = found or YEARS[-1]
+    st.rerun()
 
 cfg = CENTERS[st.session_state.get("center_key")]
 folder = cfg["folder_root"] / str(st.session_state.get("year"))
@@ -294,7 +324,7 @@ gen_path = cfg["generator"]
 if (st.query_params.get("center") != st.session_state.get("center_key")) or \
    (st.query_params.get("year") != str(st.session_state.get("year"))):
     st.query_params["center"] = st.session_state.get("center_key")
-    st.query_params["year"]   = str(st.session_state.get("year"))
+    st.query_params["year"] = str(st.session_state.get("year"))
 
 mt = mtime_token(out_path)
 built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
@@ -304,8 +334,10 @@ if st.button("◀ Choose another center", key="btn_back_center"):
     st.session_state.center_key = None
     st.session_state.year = None
     try:
-        if "center" in st.query_params: del st.query_params["center"]
-        if "year" in st.query_params:   del st.query_params["year"]
+        if "center" in st.query_params:
+            del st.query_params["center"]
+        if "year" in st.query_params:
+            del st.query_params["year"]
     except Exception:
         st.experimental_set_query_params()
     st.rerun()
@@ -320,19 +352,27 @@ if st.session_state.get("is_admin"):
             key=f"uploader_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
         if up:
-            try: st.success(f"Saved to {save_uploaded_source(folder, up).name}")
-            except Exception as e: st.error(str(e))
+            try:
+                st.success(f"Saved to {save_uploaded_source(folder, up).name}")
+            except Exception as e:
+                st.error(str(e))
 
     if st.button("↻ Rebuild report", use_container_width=True,
                  key=f"rebuild_{st.session_state.get('center_key')}_{st.session_state.get('year')}"):
         try:
-            if not gen_path.exists(): st.error(f"Generator not found: {gen_path}")
-            elif not src_path.exists(): st.error(f"No source file found. Please upload source.xlsb/.xlsx first.")
+            if not gen_path.exists():
+                st.error(f"Generator not found: {gen_path}")
+            elif not src_path.exists():
+                st.error("No source file found. Please upload source.xlsb/.xlsx first.")
             else:
-                t0 = datetime.now(); msg = rebuild_report(gen_path, src_path, out_path); t1 = datetime.now()
+                t0 = datetime.now()
+                msg = rebuild_report(gen_path, src_path, out_path)
+                t1 = datetime.now()
                 st.success(f"Report rebuilt successfully in {(t1 - t0).total_seconds():.1f}s.")
-                if msg.strip(): st.code(msg, language="bash")
-            load_core_sheets.clear(); get_report_bytes.clear()
+                if msg.strip():
+                    st.code(msg, language="bash")
+            load_core_sheets.clear()
+            get_report_bytes.clear()
         except Exception as e:
             st.error(str(e))
 
@@ -340,8 +380,10 @@ if st.session_state.get("is_admin"):
 token = mtime_token(out_path)
 if token == 0.0:
     msg = f"Report not found for {cfg['name']} ({st.session_state.get('year')})."
-    if st.session_state.get("is_admin"): msg += " (Upload source and click Rebuild.)"
-    st.warning(msg); st.stop()
+    if st.session_state.get("is_admin"):
+        msg += " (Upload source and click Rebuild.)"
+    st.warning(msg)
+    st.stop()
 
 try:
     totals, summary, _ = load_core_sheets(str(out_path), token)
@@ -349,7 +391,7 @@ try:
     totals = totals.copy()
     if "Insurance" not in totals.columns and len(totals.columns) > 0:
         totals = totals.rename(columns={totals.columns[0]: "Insurance"})
-    for a in ["NetAmount","Net amount","Net"]:
+    for a in ["NetAmount", "Net amount", "Net"]:
         if a in totals.columns and "Net Amount" not in totals.columns:
             totals = totals.rename(columns={a: "Net Amount"})
     totals = trim_empty_rows(totals)
@@ -371,7 +413,8 @@ try:
 
     # Drop the "Grand Total" row from sums to avoid double counting in KPIs
     def drop_gt(df):
-        if df is None or df.empty: return df
+        if df is None or df.empty:
+            return df
         f = df.columns[0]
         return df.loc[~df[f].astype(str).str.contains("grand total", case=False, na=False)]
     totals_no_gt = drop_gt(totals)
@@ -383,7 +426,7 @@ try:
     rej  = ksum(totals_no_gt, "Rejected", "Rejection")
     acc  = ksum(totals_no_gt, "Accepted")
 
-    # ===== TOP KPIs (MAIN dashboard — this is the ONLY UI change) =====
+    # ===== TOP KPIs =====
     st.markdown(f"### Key metrics — {st.session_state.get('year')}")
     k0, k1, k2, k3, k4 = st.columns(5)
     k0.metric("Net Amount", f"{net:,.2f}")
@@ -393,7 +436,7 @@ try:
     k4.metric("Accepted",   f"{acc:,.2f}")
     st.markdown("---")
 
-    # ===== Tabs (UNCHANGED except optional InsGroup tab) =====
+    # ===== Tabs (optional InsGroup) =====
     if insgroup_df is not None:
         t1, t2, tIG, t3 = st.tabs([SHEET_INS_TOT, SHEET_SUMMARY, SHEET_INGROUP, "Downloads"])
     else:
@@ -427,7 +470,6 @@ try:
             key=f"dl_csv_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
         )
 
-    # --- New InsGroup tab with Insurance filter ---
     if insgroup_df is not None:
         with tIG:
             insurers = (
@@ -447,7 +489,8 @@ try:
 
             view_df = insgroup_df.copy()
             if choice != "All":
-                view_df = view_df.loc[view_df["Insurance"].astype(str) == choice].drop(columns=["Insurance"], errors="ignore")
+                view_df = view_df.loc[view_df["Insurance"].astype(str) == choice] \
+                                 .drop(columns=["Insurance"], errors="ignore")
                 st.caption(f"Showing InsGroup aging for **{choice}**")
 
             st.dataframe(_display_df(view_df), use_container_width=True, height=full_height(view_df))
@@ -478,6 +521,7 @@ except Exception as e:
         names = pd.ExcelFile(str(out_path), engine=eng).sheet_names
     except Exception:
         names = []
-    st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)')}")
+    st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
 
 
