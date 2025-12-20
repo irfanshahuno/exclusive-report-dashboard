@@ -4,7 +4,8 @@
 #   • Optional Balance_Aging_Plan tab (new) with Insurance filter
 #   • S.No hidden and display index starts at 1
 #   • Grand Total row (any of 'Grand Total' / 'Total') is shown LAST in tables
-#   • NEW: Button under Balance KPI shows Balance Pending Detail (new sheet) if present
+#   • Balance button shows ONLY Aging summary (NO detail rows)
+#   • Shows "Grand Total - Klaim Sold" = (Grand Total - SoldToKlaim YES)
 # Nothing else is changed.
 
 import sys
@@ -46,7 +47,7 @@ SHEET_PENDING_DETAIL = "Balance_Pending_Detail"
 # Robust Grand Total match (handles 'Grand Total', 'total', spacing, case)
 GT_PAT = re.compile(r'^\s*(grand\s*total|total)\s*$', re.I)
 
-# NEW: session-state toggle for Balance detail panel
+# NEW: session-state toggle for Balance panel
 if "show_balance_detail" not in st.session_state:
     st.session_state.show_balance_detail = False
 
@@ -143,20 +144,18 @@ def load_core_sheets(path: str, _token: float):
             f"Available: {', '.join(names) if names else '(none)'}\nOriginal error: {e}"
         )
 
-# NEW: load Balance pending detail safely (cached)
+# NEW: load Balance pending detail safely (cached) – new sheet first, then fallback to old
 @st.cache_data(show_spinner=True)
 def load_balance_detail_sheet(path: str, _token: float):
     ext = Path(path).suffix.lower()
     engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
 
-    # 1) Try new sheet first
     try:
         df = pd.read_excel(path, sheet_name=SHEET_PENDING_DETAIL, engine=engine)
         return df, SHEET_PENDING_DETAIL
     except Exception:
         pass
 
-    # 2) Fallback to old sheet
     try:
         df = pd.read_excel(path, sheet_name=SHEET_DETAIL, engine=engine)
         return df, SHEET_DETAIL
@@ -273,7 +272,11 @@ if (st.session_state.get("center_key") != st.session_state.get("last_center_key"
     get_report_bytes.clear()
     st.session_state.last_center_key = st.session_state.get("center_key")
     st.session_state.last_year = st.session_state.get("year")
-    st.session_state.show_balance_detail = False  # reset when switching center/year
+    st.session_state.show_balance_detail = False  # reset
+    # clear filters to avoid stale selections
+    for k in ["bal_stage_filter", "bal_sold_filter"]:
+        if k in st.session_state:
+            del st.session_state[k]
 
 st.caption(
     f"Mode: **{'admin' if st.session_state.get('is_admin') else 'view'}** · "
@@ -494,7 +497,7 @@ try:
     k0.metric("Net Amount", f"{net:,.2f}")
     k1.metric("Paid",       f"{paid:,.2f}")
 
-    # UPDATED: Balance button toggles the detail panel
+    # Balance button toggles the summary panel
     with k2:
         st.metric("Balance", f"{bal:,.2f}")
         if st.button("🔎 Balance", use_container_width=True, key="btn_balance_under_kpi"):
@@ -512,37 +515,81 @@ try:
         return d
     # --------------------------------------------------------------------
 
-    # NEW: Balance detail panel (shows Balance_Pending_Detail if present)
+    # NEW: Balance panel (SUMMARY ONLY — NO detail rows)
     if st.session_state.show_balance_detail:
         df_bal_detail, used_sheet = load_balance_detail_sheet(str(out_path), token)
+
         if df_bal_detail is None or df_bal_detail.empty:
-            st.warning("No balance detail sheet found in this report.")
+            st.warning("No balance sheet found in this report.")
         else:
-            st.subheader(f"Balance Detail — {used_sheet}")
+            st.subheader(f"Balance Summary — {used_sheet}")
 
-            # optional small filters only if columns exist (does not affect old sheet)
-            if "PendingStage" in df_bal_detail.columns:
-                stages = ["All"] + sorted(df_bal_detail["PendingStage"].dropna().astype(str).unique().tolist())
+            stage_col = "PendingStage" if "PendingStage" in df_bal_detail.columns else None
+            sold_col  = "SoldToKlaim" if "SoldToKlaim" in df_bal_detail.columns else None
+
+            if stage_col:
+                stages = ["All"] + sorted(df_bal_detail[stage_col].dropna().astype(str).unique().tolist())
                 sel_stage = st.selectbox("Pending Stage", stages, index=0, key="bal_stage_filter")
-                if sel_stage != "All":
-                    df_bal_detail = df_bal_detail.loc[df_bal_detail["PendingStage"].astype(str) == sel_stage]
+            else:
+                sel_stage = "All"
 
-            if "SoldToKlaim" in df_bal_detail.columns:
+            if sold_col:
                 sel_sold = st.selectbox("Sold to Klaim", ["All", "YES", "NO"], index=0, key="bal_sold_filter")
-                if sel_sold != "All":
-                    df_bal_detail = df_bal_detail.loc[df_bal_detail["SoldToKlaim"].astype(str) == sel_sold]
+            else:
+                sel_sold = "All"
 
-            st.dataframe(
-                _display_df(df_bal_detail),
-                use_container_width=True,
-                height=full_height(df_bal_detail)
-            )
+            view = df_bal_detail.copy()
 
-            c_close, c_sp = st.columns([1, 5])
-            with c_close:
-                if st.button("Close", key="btn_close_balance_detail", use_container_width=True):
-                    st.session_state.show_balance_detail = False
-                    st.rerun()
+            if stage_col and sel_stage != "All":
+                view = view.loc[view[stage_col].astype(str) == sel_stage]
+
+            if sold_col and sel_sold != "All":
+                view = view.loc[view[sold_col].astype(str) == sel_sold]
+
+            bucket_col = "AgingBucket" if "AgingBucket" in view.columns else None
+            bal_col = "Balance" if "Balance" in view.columns else None
+
+            if not bucket_col or not bal_col:
+                st.error("Cannot build aging summary (missing AgingBucket or Balance column).")
+            else:
+                labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
+
+                def summarize_series(df_):
+                    s = (
+                        df_.groupby(bucket_col)[bal_col]
+                        .sum()
+                        .reindex(labels, fill_value=0)
+                    )
+                    return s
+
+                # Main row label
+                main_name = sel_stage if sel_stage != "All" else "Grand Total"
+
+                all_tot = summarize_series(view)
+
+                summary_tbl = pd.DataFrame([all_tot.values], columns=labels)
+                summary_tbl.insert(0, "Row", main_name)
+                summary_tbl["Grand Total"] = summary_tbl[labels].sum(axis=1)
+
+                # Add "Grand Total - Klaim Sold" = total - sold (only when Sold filter is All)
+                if sold_col and sel_sold == "All":
+                    sold_view = view.loc[view[sold_col].astype(str).str.upper() == "YES"]
+                    sold_tot = summarize_series(sold_view) if not sold_view.empty else pd.Series([0]*len(labels), index=labels)
+
+                    remaining = (all_tot - sold_tot).clip(lower=0)
+                    rem_df = pd.DataFrame([remaining.values], columns=labels)
+                    rem_df.insert(0, "Row", "Grand Total - Klaim Sold")
+                    rem_df["Grand Total"] = rem_df[labels].sum(axis=1)
+
+                    summary_tbl = pd.concat([summary_tbl, rem_df], ignore_index=True)
+
+                st.dataframe(summary_tbl, use_container_width=True)
+
+                c_close, c_sp = st.columns([1, 5])
+                with c_close:
+                    if st.button("Close", key="btn_close_balance_detail", use_container_width=True):
+                        st.session_state.show_balance_detail = False
+                        st.rerun()
 
         st.markdown("---")
 
@@ -617,7 +664,6 @@ try:
                 st.session_state["_stay_on_ig"] = True
                 st.rerun()
 
-            # render using saved selection
             choice = st.session_state.get(ig_key, "All")
             view_df = insgroup_df.copy()
             if choice != "All":
@@ -660,7 +706,6 @@ try:
                 st.session_state[pl_key] = choice_pl
                 st.rerun()
 
-            # render using saved selection
             choice_pl = st.session_state.get(pl_key, "All")
             view_pl = plan_df.copy()
             if choice_pl != "All":
