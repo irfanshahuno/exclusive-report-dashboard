@@ -4,8 +4,7 @@
 #   • Optional Balance_Aging_Plan tab (new) with Insurance filter
 #   • S.No hidden and display index starts at 1
 #   • Grand Total row (any of 'Grand Total' / 'Total') is shown LAST in tables
-#   • NEW: Button under Balance KPI opens Balance Details view
-#   • NEW: Option-2 dropdown in Insurance_Totals tab opens Balance Details by insurance
+#   • NEW: Button under Balance KPI (ONLY)
 # Nothing else is changed.
 
 import sys
@@ -459,35 +458,17 @@ try:
     rej  = ksum(totals_no_gt, "Rejected", "Rejection")
     acc  = ksum(totals_no_gt, "Accepted")
 
-    # ====================== NEW: Balance Details view router ======================
-    view = st.query_params.get("view", "main")
-    selected_ins = st.query_params.get("insurance", None)
-
-    if view == "balance" and selected_ins:
-        st.subheader(f"Balance Details — {selected_ins}")
-
-        if st.button("⬅ Back to dashboard", use_container_width=True, key="btn_back_from_balance_details"):
-            st.query_params.pop("view", None)
-            st.query_params.pop("insurance", None)
-            st.rerun()
-
-        st.info("Initial vs Resubmitted balance will be added here once you provide the formula/logic.")
-        st.stop()
-    # ============================================================================
-
     # ===== TOP KPIs =====
     st.markdown(f"### Key metrics — {st.session_state.get('year')}")
     k0, k1, k2, k3, k4 = st.columns(5)
     k0.metric("Net Amount", f"{net:,.2f}")
     k1.metric("Paid",       f"{paid:,.2f}")
 
-    # NEW: button under Balance KPI
+    # NEW: ONLY button under Balance KPI (no routing, no extra page)
     with k2:
         st.metric("Balance", f"{bal:,.2f}")
-        if st.button("🔎 Balance details", use_container_width=True, key="btn_balance_details_top"):
-            st.query_params["view"] = "balance"
-            st.query_params["insurance"] = "All"
-            st.rerun()
+        if st.button("🔎 Balance", use_container_width=True, key="btn_balance_under_kpi"):
+            st.info("Balance details app will be linked here later (coming soon).")
 
     k3.metric("Rejected",   f"{rej:,.2f}")
     k4.metric("Accepted",   f"{acc:,.2f}")
@@ -523,25 +504,6 @@ try:
     # --------------------------------------------------------------------
 
     with t1:
-        # NEW: Option-2 dropdown + button (opens Balance Details page)
-        table_df = move_grand_total_last(totals).copy()
-
-        ins_list = (
-            table_df["Insurance"]
-            .dropna()
-            .astype(str)
-            .loc[lambda s: ~s.str.match(GT_PAT)]
-            .unique()
-            .tolist()
-        )
-        sel = st.selectbox("Select Insurance to open Balance Details", ["(Select)"] + ins_list, key="sel_ins_balance_details")
-
-        if sel != "(Select)":
-            if st.button("🔎 Open Balance Details", use_container_width=True, key="btn_open_balance_details_from_totals"):
-                st.query_params["view"] = "balance"
-                st.query_params["insurance"] = sel
-                st.rerun()
-
         st.dataframe(
             _display_df(move_grand_total_last(totals)),
             use_container_width=True,
