@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import sys, os, hashlib, argparse
+import os, hashlib, argparse
 from datetime import datetime
 import pandas as pd
 from openpyxl import load_workbook
@@ -11,6 +11,11 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # =========================================
 WRITE_EXCLUSIVE_SHEET = False  # <-- leave False to skip that sheet
 
+# =========================================
+# SOLD TO KLAIM insurers (keyword match)
+# =========================================
+SOLD_TO_KLAIM_KEYS = {"DAMAN", "FMC", "NEXTCARE", "SUKOON", "ALMADALLAH"}
+
 # -------------------- helpers --------------------
 def sha1_short(path: str) -> str:
     h = hashlib.sha1()
@@ -20,12 +25,9 @@ def sha1_short(path: str) -> str:
     return h.hexdigest()[:12]
 
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="Build Exclusive_Report_with_Aging from an input .xlsx"
-    )
+    p = argparse.ArgumentParser(description="Build Exclusive_Report_with_Aging from an input .xlsx")
     p.add_argument("input_xlsx", help="Path to source Excel (.xlsx)")
-    p.add_argument("--out", dest="out_xlsx", required=True,
-                   help="Path to write the output workbook (.xlsx)")
+    p.add_argument("--out", dest="out_xlsx", required=True, help="Path to write the output workbook (.xlsx)")
     args = p.parse_args()
 
     if not os.path.exists(args.input_xlsx):
@@ -102,7 +104,6 @@ def ensure_insurance_column(df: pd.DataFrame) -> pd.DataFrame:
         df["Insurance"] = df[insurance_col]
     return df
 
-# ---- NEW: normalize InsGroup / subgroup column ----
 def ensure_insgroup_column(df: pd.DataFrame) -> pd.DataFrame:
     cand = next((c for c in ["InsGroup", "Item Group", "ItemGroup", "ServiceGroup", "Item_Group"] if c in df.columns), None)
     if cand:
@@ -128,7 +129,6 @@ def build_balance_aging_summary(balance_df: pd.DataFrame) -> pd.DataFrame:
     pivot_summary.reset_index(inplace=True)
     return pivot_summary
 
-# ---- NEW: Insurance × InsGroup aging pivot ----
 def build_balance_aging_insgroup(balance_df: pd.DataFrame) -> pd.DataFrame:
     labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
     pivot_ig = pd.pivot_table(
@@ -141,8 +141,7 @@ def build_balance_aging_insgroup(balance_df: pd.DataFrame) -> pd.DataFrame:
         observed=False,
     ).reindex(columns=labels)
     pivot_ig["Grand Total"] = pivot_ig.sum(axis=1)
-    pivot_ig = pivot_ig.reset_index()
-    return pivot_ig
+    return pivot_ig.reset_index()
 
 def build_insurance_totals(df: pd.DataFrame) -> pd.DataFrame:
     insurance_totals = (
@@ -160,8 +159,60 @@ def build_insurance_totals(df: pd.DataFrame) -> pd.DataFrame:
         "Rejected": insurance_totals["Rejected"].sum(),
         "Accepted": insurance_totals["Accepted"].sum(),
     }
-    insurance_totals = pd.concat([insurance_totals, pd.DataFrame([total_row])], ignore_index=True)
-    return insurance_totals
+    return pd.concat([insurance_totals, pd.DataFrame([total_row])], ignore_index=True)
+
+# =========================================
+# NEW: Build Pending Detail sheet (ALL columns)
+# - Determine PendingStage from Status:
+#   Not Submitted / Submitted => Initial pending
+#   Not Submitted(Resub- 1)/Submitted(Resub- 1) => Resub1 pending
+#   Not Submitted(Resub- 2)/Submitted(Resub- 2) => Resub2 pending
+#   Not Submitted(Resub- 3)/Submitted(Resub- 3) => Resub3 pending
+# - Sold to Klaim: if Insurance contains DAMAN/FMC/NEXTCARE/SUKOON/ALMADALLAH
+# - At the end: SoldNote column (blank or "Sold to Klaim (InsuranceName)")
+# =========================================
+def build_balance_pending_detail(balance_df: pd.DataFrame) -> pd.DataFrame:
+    out = balance_df.copy()
+
+    # Status may not exist in some files
+    if "Status" not in out.columns:
+        out["Status"] = ""
+
+    status = out["Status"].fillna("").astype(str).str.strip()
+    s = status.str.lower()
+
+    is_submitted_like = s.str.contains("submitted", na=False)  # catches "Submitted" and "Not Submitted"
+    has_r1 = s.str.contains("resub- 1", na=False) | s.str.contains("resub-1", na=False) | s.str.contains("resub 1", na=False)
+    has_r2 = s.str.contains("resub- 2", na=False) | s.str.contains("resub-2", na=False) | s.str.contains("resub 2", na=False)
+    has_r3 = s.str.contains("resub- 3", na=False) | s.str.contains("resub-3", na=False) | s.str.contains("resub 3", na=False)
+
+    out["PendingStage"] = "Unknown / Other"
+    out.loc[is_submitted_like & ~has_r1 & ~has_r2 & ~has_r3, "PendingStage"] = "Initial Submission Pending"
+    out.loc[is_submitted_like & has_r1, "PendingStage"] = "Resubmission 1 Pending"
+    out.loc[is_submitted_like & has_r2, "PendingStage"] = "Resubmission 2 Pending"
+    out.loc[is_submitted_like & has_r3, "PendingStage"] = "Resubmission 3 Pending"
+
+    # Sold-to-Klaim based on Insurance name
+    ins = out.get("Insurance", pd.Series(["Not Available"] * len(out), index=out.index))
+    ins_str = ins.fillna("").astype(str).str.strip()
+    ins_upper = ins_str.str.upper()
+
+    sold_mask = pd.Series(False, index=out.index)
+    for k in SOLD_TO_KLAIM_KEYS:
+        sold_mask = sold_mask | ins_upper.str.contains(k.upper(), na=False)
+
+    out["SoldToKlaim"] = sold_mask.map(lambda v: "YES" if v else "NO")
+
+    # IMPORTANT: user wants note "at the end"
+    out["SoldNote"] = ""
+    out.loc[sold_mask, "SoldNote"] = "Sold to Klaim (" + ins_str.loc[sold_mask] + ")"
+
+    # Put the new columns at the very end (exactly as requested)
+    new_cols = ["PendingStage", "SoldToKlaim", "SoldNote"]
+    base_cols = [c for c in out.columns if c not in new_cols]
+    out = out[base_cols + new_cols]
+
+    return out
 
 # -------------------- styling --------------------
 HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
@@ -178,13 +229,16 @@ def apply_styling(output_file: str):
     wb = load_workbook(output_file)
     for ws in wb.worksheets:
         style_headers(ws)
+
         if ws.title == "Balance_Aging_Summary":
+            # highlight grand total row + last column
             for r in range(2, ws.max_row + 1):
                 if ws.cell(row=r, column=1).value == "Grand Total":
                     for c in range(1, ws.max_column + 1):
                         cell = ws.cell(row=r, column=c)
                         cell.fill = TOTAL_FILL
                         cell.font = Font(bold=True)
+
             last_col = ws.max_column
             for r in range(1, ws.max_row + 1):
                 cell = ws.cell(row=r, column=last_col)
@@ -198,6 +252,7 @@ def apply_styling(output_file: str):
                         cell = ws.cell(row=r, column=c)
                         cell.fill = TOTAL_FILL
                         cell.font = Font(bold=True)
+
     wb.save(output_file)
 
 # -------------------- main --------------------
@@ -215,21 +270,28 @@ def main():
     df = compute_measures(df)
     df = add_aging(df)
     df = ensure_insurance_column(df)
-    df = ensure_insgroup_column(df)   # <-- NEW
+    df = ensure_insgroup_column(df)
 
     balance_df = df.loc[df["Balance"] > 0].copy()
+
     pivot_summary = build_balance_aging_summary(balance_df)
-    pivot_insgroup = build_balance_aging_insgroup(balance_df)  # <-- NEW
+    pivot_insgroup = build_balance_aging_insgroup(balance_df)
     insurance_totals = build_insurance_totals(df)
 
-    # Write sheets (skip "Exclusive_Report" if disabled)
+    # NEW: pending detail full columns + sold note at end
+    pending_detail_df = build_balance_pending_detail(balance_df)
+
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
         if WRITE_EXCLUSIVE_SHEET:
             df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
+
         insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
         pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
-        pivot_insgroup.to_excel(writer, sheet_name="Balance_Aging_InsGroup", index=False)  # <-- NEW
+        pivot_insgroup.to_excel(writer, sheet_name="Balance_Aging_InsGroup", index=False)
         balance_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
+
+        # NEW SHEET
+        pending_detail_df.to_excel(writer, sheet_name="Balance_Pending_Detail", index=False)
 
         meta = pd.DataFrame([{
             "InputFile": os.path.basename(input_file),
