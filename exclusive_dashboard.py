@@ -4,7 +4,7 @@
 #   • Optional Balance_Aging_Plan tab (new) with Insurance filter
 #   • S.No hidden and display index starts at 1
 #   • Grand Total row (any of 'Grand Total' / 'Total') is shown LAST in tables
-#   • NEW: Button under Balance KPI (ONLY)
+#   • NEW: Button under Balance KPI shows Balance Pending Detail (new sheet) if present
 # Nothing else is changed.
 
 import sys
@@ -40,8 +40,15 @@ SHEET_DETAIL  = "Balance_Aging_Detail"
 SHEET_INGROUP = "Balance_Aging_InsGroup"   # optional tab if present
 SHEET_IPLAN   = "Balance_Aging_Plan"        # optional tab if present (PHARMACY uses Plan)
 
+# NEW: pending detail sheet (created by your updated report script)
+SHEET_PENDING_DETAIL = "Balance_Pending_Detail"
+
 # Robust Grand Total match (handles 'Grand Total', 'total', spacing, case)
 GT_PAT = re.compile(r'^\s*(grand\s*total|total)\s*$', re.I)
+
+# NEW: session-state toggle for Balance detail panel
+if "show_balance_detail" not in st.session_state:
+    st.session_state.show_balance_detail = False
 
 # ====================== Centers config ======================
 CENTERS = {
@@ -135,6 +142,26 @@ def load_core_sheets(path: str, _token: float):
             f"Required sheets not found or failed to load. "
             f"Available: {', '.join(names) if names else '(none)'}\nOriginal error: {e}"
         )
+
+# NEW: load Balance pending detail safely (cached)
+@st.cache_data(show_spinner=True)
+def load_balance_detail_sheet(path: str, _token: float):
+    ext = Path(path).suffix.lower()
+    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+
+    # 1) Try new sheet first
+    try:
+        df = pd.read_excel(path, sheet_name=SHEET_PENDING_DETAIL, engine=engine)
+        return df, SHEET_PENDING_DETAIL
+    except Exception:
+        pass
+
+    # 2) Fallback to old sheet
+    try:
+        df = pd.read_excel(path, sheet_name=SHEET_DETAIL, engine=engine)
+        return df, SHEET_DETAIL
+    except Exception:
+        return None, None
 
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -242,9 +269,11 @@ if st.session_state.get("year") is None and qs.get("year"):
 if (st.session_state.get("center_key") != st.session_state.get("last_center_key")) or \
    (st.session_state.get("year") != st.session_state.get("last_year")):
     load_core_sheets.clear()
+    load_balance_detail_sheet.clear()
     get_report_bytes.clear()
     st.session_state.last_center_key = st.session_state.get("center_key")
     st.session_state.last_year = st.session_state.get("year")
+    st.session_state.show_balance_detail = False  # reset when switching center/year
 
 st.caption(
     f"Mode: **{'admin' if st.session_state.get('is_admin') else 'view'}** · "
@@ -404,6 +433,7 @@ if st.session_state.get("is_admin"):
                 if msg.strip():
                     st.code(msg, language="bash")
             load_core_sheets.clear()
+            load_balance_detail_sheet.clear()
             get_report_bytes.clear()
         except Exception as e:
             st.error(str(e))
@@ -464,15 +494,57 @@ try:
     k0.metric("Net Amount", f"{net:,.2f}")
     k1.metric("Paid",       f"{paid:,.2f}")
 
-    # NEW: ONLY button under Balance KPI (no routing, no extra page)
+    # UPDATED: Balance button toggles the detail panel
     with k2:
         st.metric("Balance", f"{bal:,.2f}")
         if st.button("🔎 Balance", use_container_width=True, key="btn_balance_under_kpi"):
-            st.info("Balance details app will be linked here later (coming soon).")
+            st.session_state.show_balance_detail = True
 
     k3.metric("Rejected",   f"{rej:,.2f}")
     k4.metric("Accepted",   f"{acc:,.2f}")
     st.markdown("---")
+
+    # ---------- DISPLAY helper: hide "S.No" & index starts at 1 ----------
+    def _display_df(df: pd.DataFrame) -> pd.DataFrame:
+        d = df.drop(columns=["S.No"], errors="ignore").reset_index(drop=True)
+        d.index = range(1, len(d) + 1)
+        d.index.name = None
+        return d
+    # --------------------------------------------------------------------
+
+    # NEW: Balance detail panel (shows Balance_Pending_Detail if present)
+    if st.session_state.show_balance_detail:
+        df_bal_detail, used_sheet = load_balance_detail_sheet(str(out_path), token)
+        if df_bal_detail is None or df_bal_detail.empty:
+            st.warning("No balance detail sheet found in this report.")
+        else:
+            st.subheader(f"Balance Detail — {used_sheet}")
+
+            # optional small filters only if columns exist (does not affect old sheet)
+            if "PendingStage" in df_bal_detail.columns:
+                stages = ["All"] + sorted(df_bal_detail["PendingStage"].dropna().astype(str).unique().tolist())
+                sel_stage = st.selectbox("Pending Stage", stages, index=0, key="bal_stage_filter")
+                if sel_stage != "All":
+                    df_bal_detail = df_bal_detail.loc[df_bal_detail["PendingStage"].astype(str) == sel_stage]
+
+            if "SoldToKlaim" in df_bal_detail.columns:
+                sel_sold = st.selectbox("Sold to Klaim", ["All", "YES", "NO"], index=0, key="bal_sold_filter")
+                if sel_sold != "All":
+                    df_bal_detail = df_bal_detail.loc[df_bal_detail["SoldToKlaim"].astype(str) == sel_sold]
+
+            st.dataframe(
+                _display_df(df_bal_detail),
+                use_container_width=True,
+                height=full_height(df_bal_detail)
+            )
+
+            c_close, c_sp = st.columns([1, 5])
+            with c_close:
+                if st.button("Close", key="btn_close_balance_detail", use_container_width=True):
+                    st.session_state.show_balance_detail = False
+                    st.rerun()
+
+        st.markdown("---")
 
     # ===== Tabs (optional InsGroup / Plan) =====
     tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
@@ -494,14 +566,6 @@ try:
     t3 = tab_map["Downloads"]
     tIG = tab_map.get(SHEET_INGROUP)
     tPL = tab_map.get(SHEET_IPLAN)
-
-    # ---------- DISPLAY helper: hide "S.No" & index starts at 1 ----------
-    def _display_df(df: pd.DataFrame) -> pd.DataFrame:
-        d = df.drop(columns=["S.No"], errors="ignore").reset_index(drop=True)
-        d.index = range(1, len(d) + 1)
-        d.index.name = None
-        return d
-    # --------------------------------------------------------------------
 
     with t1:
         st.dataframe(
