@@ -4,8 +4,11 @@
 #   • Optional Balance_Aging_Plan tab (new) with Insurance filter
 #   • S.No hidden and display index starts at 1
 #   • Grand Total row (any of 'Grand Total' / 'Total') is shown LAST in tables
-#   • Balance button shows ONLY Aging summary (NO detail rows)
-#   • Shows "Grand Total - Klaim Sold" = (Grand Total - SoldToKlaim YES)
+#   • NEW: Balance button shows ONE summary table:
+#       PendingStage rows (Initial/Resub1/Resub2/Resub3/Unknown) × Aging buckets
+#       + Grand Total row
+#       + extra line after Grand Total: "Grand Total - Klaim Insurance"
+#   • Insurance_Totals highlights Klaim insurances (Daman/FMC/NextCare/Sukoon/Almadallah)
 # Nothing else is changed.
 
 import sys
@@ -50,6 +53,9 @@ GT_PAT = re.compile(r'^\s*(grand\s*total|total)\s*$', re.I)
 # NEW: session-state toggle for Balance panel
 if "show_balance_detail" not in st.session_state:
     st.session_state.show_balance_detail = False
+
+# Klaim insurance keywords (highlight + deduction line)
+KLAIM_KEYS = ["DAMAN", "FMC", "NEXTCARE", "SUKOON", "ALMADALLAH"]
 
 # ====================== Centers config ======================
 CENTERS = {
@@ -144,9 +150,12 @@ def load_core_sheets(path: str, _token: float):
             f"Available: {', '.join(names) if names else '(none)'}\nOriginal error: {e}"
         )
 
-# NEW: load Balance pending detail safely (cached) – new sheet first, then fallback to old
 @st.cache_data(show_spinner=True)
 def load_balance_detail_sheet(path: str, _token: float):
+    """
+    Prefer Balance_Pending_Detail; fallback to Balance_Aging_Detail.
+    Returns (df, sheet_name) or (None, None).
+    """
     ext = Path(path).suffix.lower()
     engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
 
@@ -272,11 +281,7 @@ if (st.session_state.get("center_key") != st.session_state.get("last_center_key"
     get_report_bytes.clear()
     st.session_state.last_center_key = st.session_state.get("center_key")
     st.session_state.last_year = st.session_state.get("year")
-    st.session_state.show_balance_detail = False  # reset
-    # clear filters to avoid stale selections
-    for k in ["bal_stage_filter", "bal_sold_filter"]:
-        if k in st.session_state:
-            del st.session_state[k]
+    st.session_state.show_balance_detail = False
 
 st.caption(
     f"Mode: **{'admin' if st.session_state.get('is_admin') else 'view'}** · "
@@ -497,11 +502,10 @@ try:
     k0.metric("Net Amount", f"{net:,.2f}")
     k1.metric("Paid",       f"{paid:,.2f}")
 
-    # Balance button toggles the summary panel
     with k2:
         st.metric("Balance", f"{bal:,.2f}")
         if st.button("🔎 Balance", use_container_width=True, key="btn_balance_under_kpi"):
-            st.session_state.show_balance_detail = True
+            st.session_state.show_balance_detail = not st.session_state.show_balance_detail
 
     k3.metric("Rejected",   f"{rej:,.2f}")
     k4.metric("Accepted",   f"{acc:,.2f}")
@@ -515,7 +519,7 @@ try:
         return d
     # --------------------------------------------------------------------
 
-    # NEW: Balance panel (SUMMARY ONLY — NO detail rows)
+    # ===================== BALANCE SUMMARY (ONE TABLE) =====================
     if st.session_state.show_balance_detail:
         df_bal_detail, used_sheet = load_balance_detail_sheet(str(out_path), token)
 
@@ -524,74 +528,90 @@ try:
         else:
             st.subheader(f"Balance Summary — {used_sheet}")
 
-            stage_col = "PendingStage" if "PendingStage" in df_bal_detail.columns else None
-            sold_col  = "SoldToKlaim" if "SoldToKlaim" in df_bal_detail.columns else None
+            stage_col  = "PendingStage" if "PendingStage" in df_bal_detail.columns else None
+            bucket_col = "AgingBucket"  if "AgingBucket"  in df_bal_detail.columns else None
+            bal_col    = "Balance"      if "Balance"      in df_bal_detail.columns else None
+            ins_col    = "Insurance"    if "Insurance"    in df_bal_detail.columns else None
 
-            if stage_col:
-                stages = ["All"] + sorted(df_bal_detail[stage_col].dropna().astype(str).unique().tolist())
-                sel_stage = st.selectbox("Pending Stage", stages, index=0, key="bal_stage_filter")
-            else:
-                sel_stage = "All"
-
-            if sold_col:
-                sel_sold = st.selectbox("Sold to Klaim", ["All", "YES", "NO"], index=0, key="bal_sold_filter")
-            else:
-                sel_sold = "All"
-
-            view = df_bal_detail.copy()
-
-            if stage_col and sel_stage != "All":
-                view = view.loc[view[stage_col].astype(str) == sel_stage]
-
-            if sold_col and sel_sold != "All":
-                view = view.loc[view[sold_col].astype(str) == sel_sold]
-
-            bucket_col = "AgingBucket" if "AgingBucket" in view.columns else None
-            bal_col = "Balance" if "Balance" in view.columns else None
-
-            if not bucket_col or not bal_col:
-                st.error("Cannot build aging summary (missing AgingBucket or Balance column).")
+            if not stage_col or not bucket_col or not bal_col:
+                st.error("Missing required columns (PendingStage / AgingBucket / Balance) in Balance_Pending_Detail.")
             else:
                 labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
+                stage_order = [
+                    "Initial Submission Pending",
+                    "Resubmission 1 Pending",
+                    "Resubmission 2 Pending",
+                    "Resubmission 3 Pending",
+                    "Unknown / Other",
+                ]
 
-                def summarize_series(df_):
-                    s = (
-                        df_.groupby(bucket_col)[bal_col]
-                        .sum()
-                        .reindex(labels, fill_value=0)
-                    )
-                    return s
+                pivot = pd.pivot_table(
+                    df_bal_detail,
+                    index=stage_col,
+                    columns=bucket_col,
+                    values=bal_col,
+                    aggfunc="sum",
+                    fill_value=0,
+                    observed=False,
+                )
 
-                # Main row label
-                main_name = sel_stage if sel_stage != "All" else "Grand Total"
+                for c in labels:
+                    if c not in pivot.columns:
+                        pivot[c] = 0
+                pivot = pivot[labels]
 
-                all_tot = summarize_series(view)
+                existing = [s for s in stage_order if s in pivot.index.astype(str).tolist()]
+                extras = [s for s in pivot.index.astype(str).tolist() if s not in existing]
+                pivot = pivot.reindex(existing + extras)
 
-                summary_tbl = pd.DataFrame([all_tot.values], columns=labels)
-                summary_tbl.insert(0, "Row", main_name)
-                summary_tbl["Grand Total"] = summary_tbl[labels].sum(axis=1)
+                pivot["Grand Total"] = pivot.sum(axis=1)
 
-                # Add "Grand Total - Klaim Sold" = total - sold (only when Sold filter is All)
-                if sold_col and sel_sold == "All":
-                    sold_view = view.loc[view[sold_col].astype(str).str.upper() == "YES"]
-                    sold_tot = summarize_series(sold_view) if not sold_view.empty else pd.Series([0]*len(labels), index=labels)
+                gt_row = pd.DataFrame([pivot[labels + ["Grand Total"]].sum(axis=0)], index=["Grand Total"])
+                pivot2 = pd.concat([pivot, gt_row])
 
-                    remaining = (all_tot - sold_tot).clip(lower=0)
-                    rem_df = pd.DataFrame([remaining.values], columns=labels)
-                    rem_df.insert(0, "Row", "Grand Total - Klaim Sold")
-                    rem_df["Grand Total"] = rem_df[labels].sum(axis=1)
+                # After GT line add "Grand Total - Klaim Insurance"
+                if ins_col and ins_col in df_bal_detail.columns:
+                    ins_ser = df_bal_detail[ins_col].astype(str).fillna("")
+                    klaim_mask = ins_ser.str.upper().apply(lambda x: any(k in x for k in KLAIM_KEYS))
+                    klaim_df = df_bal_detail.loc[klaim_mask].copy()
 
-                    summary_tbl = pd.concat([summary_tbl, rem_df], ignore_index=True)
+                    if not klaim_df.empty:
+                        klaim_piv = pd.pivot_table(
+                            klaim_df,
+                            index=stage_col,
+                            columns=bucket_col,
+                            values=bal_col,
+                            aggfunc="sum",
+                            fill_value=0,
+                            observed=False,
+                        )
+                        for c in labels:
+                            if c not in klaim_piv.columns:
+                                klaim_piv[c] = 0
+                        klaim_piv = klaim_piv[labels]
+                        klaim_total = klaim_piv.sum(axis=0)  # per bucket
 
-                st.dataframe(summary_tbl, use_container_width=True)
+                        gt_total = pivot2.loc["Grand Total", labels]
+                        remaining = (gt_total - klaim_total).clip(lower=0)
 
-                c_close, c_sp = st.columns([1, 5])
+                        rem_row = pd.DataFrame(
+                            [list(remaining.values) + [float(remaining.sum())]],
+                            columns=labels + ["Grand Total"],
+                            index=["Grand Total - Klaim Insurance"]
+                        )
+                        pivot2 = pd.concat([pivot2, rem_row])
+
+                out = pivot2.reset_index().rename(columns={"index": "Pending Stage"})
+                st.dataframe(out, use_container_width=True)
+
+                c_close, _ = st.columns([1, 5])
                 with c_close:
                     if st.button("Close", key="btn_close_balance_detail", use_container_width=True):
                         st.session_state.show_balance_detail = False
                         st.rerun()
 
         st.markdown("---")
+    # =================== END BALANCE SUMMARY ===================
 
     # ===== Tabs (optional InsGroup / Plan) =====
     tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
@@ -614,12 +634,23 @@ try:
     tIG = tab_map.get(SHEET_INGROUP)
     tPL = tab_map.get(SHEET_IPLAN)
 
+    # ===== Insurance Totals (highlight Klaim insurances) =====
     with t1:
-        st.dataframe(
-            _display_df(move_grand_total_last(totals)),
-            use_container_width=True,
-            height=full_height(totals)
-        )
+        tot_view = move_grand_total_last(totals).copy()
+
+        def _is_klaim_ins(x: str) -> bool:
+            x = ("" if x is None else str(x)).upper()
+            return any(k in x for k in KLAIM_KEYS)
+
+        if "Insurance" in tot_view.columns:
+            sty = tot_view.style.apply(
+                lambda r: ["background-color:#FFF3CD; font-weight:700;" if _is_klaim_ins(r["Insurance"]) else "" for _ in r],
+                axis=1
+            )
+            st.dataframe(sty, use_container_width=True, height=full_height(tot_view))
+        else:
+            st.dataframe(_display_df(tot_view), use_container_width=True, height=full_height(tot_view))
+
         st.download_button(
             "⬇️ Export Insurance Totals (CSV)",
             totals.to_csv(index=False).encode("utf-8"),
@@ -729,7 +760,7 @@ try:
 
     with t3:
         st.markdown("### Report Download")
-        st.write("Open the XLSX locally to inspect **Balance_Aging_Detail** if needed.")
+        st.write("Open the XLSX locally to inspect details if needed.")
         st.download_button(
             "⬇️ Download full report (.xlsx)",
             get_report_bytes(str(out_path)),
