@@ -62,6 +62,9 @@ require_view_access()
 # External Doc Performance app URL (kept as-is; doc-perf code/behavior unchanged)
 DOC_PERF_URL = "https://doctor-performance-app-tjwqgmptk8fbo57t4qrfqr.streamlit.app/"
 
+# ✅ NEW: Balance Attempt Aging app URL (opens on Balance click)
+BALANCE_ATTEMPT_URL = "https://balance-attempt-aging-dashboard-eigtoins4ai9hd9r7jsmen.streamlit.app/"
+
 BASE = Path(__file__).parent
 DATA_DIR = BASE / "data"
 (DATA_DIR / "easyhealth").mkdir(parents=True, exist_ok=True)
@@ -531,7 +534,23 @@ try:
     k0, k1, k2, k3, k4 = st.columns(5)
     k0.metric("Net Amount", f"{net:,.2f}")
     k1.metric("Paid", f"{paid:,.2f}")
-    k2.metric("Balance", f"{bal:,.2f}")
+
+    # ✅ ONLY CHANGE: Balance becomes clickable (opens your Balance Attempt Aging app in new tab)
+    with k2:
+        components.html(
+            f"""
+            <a href="{BALANCE_ATTEMPT_URL}" target="_blank" style="text-decoration:none;">
+              <div style="padding: 6px 2px;">
+                <div style="font-size:14px;color:#6b7280;margin-bottom:2px;">Balance</div>
+                <div style="font-size:44px;font-weight:700;color:#111827;line-height:1.05;">
+                  {bal:,.2f}
+                </div>
+              </div>
+            </a>
+            """,
+            height=92,
+        )
+
     k3.metric("Rejected", f"{rej:,.2f}")
     k4.metric("Accepted", f"{acc:,.2f}")
     st.markdown("---")
@@ -710,5 +729,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
 
