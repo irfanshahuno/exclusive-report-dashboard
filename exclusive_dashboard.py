@@ -4,7 +4,11 @@
 #   • Optional Balance_Aging_Plan tab (new) with Insurance filter
 #   • S.No hidden and display index starts at 1
 #   • Grand Total row (any of 'Grand Total' / 'Total') is shown LAST in tables
-# Nothing else is changed.
+#
+# IMPORTANT FIX (to stop crashes):
+#   ✅ InsGroup/Plan are now LAZY-LOADED (only read when their tab is opened)
+#   ✅ We only read sheet_names once (cheap) to decide whether to show optional tabs
+# Everything else is kept the same.
 
 import sys
 import subprocess
@@ -231,6 +235,29 @@ def is_admin_mode() -> bool:
         return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
 
 
+# ===== NEW: cheap sheet name fetch (cached) =====
+@st.cache_data(show_spinner=False)
+def get_sheet_names(path: str, token: float):
+    ext = Path(path).suffix.lower()
+    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+    try:
+        return pd.ExcelFile(path, engine=engine).sheet_names
+    except Exception:
+        return []
+
+
+# ===== NEW: lazy optional sheet loader (cached) =====
+@st.cache_data(show_spinner=True)
+def load_optional_sheet(path: str, token: float, sheet_name: str):
+    ext = Path(path).suffix.lower()
+    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+    try:
+        df = pd.read_excel(path, sheet_name=sheet_name, engine=engine)
+        return trim_empty_rows(df)
+    except Exception:
+        return None
+
+
 # ====================== Doc Performance helpers (UNCHANGED) ======================
 def month_options():
     today = date.today()
@@ -262,11 +289,14 @@ if st.session_state.get("year") is None and qs.get("year"):
     except Exception:
         pass
 
+# If center/year changed, clear caches so old file data doesn't persist
 if (st.session_state.get("center_key") != st.session_state.get("last_center_key")) or (
     st.session_state.get("year") != st.session_state.get("last_year")
 ):
     load_core_sheets.clear()
     get_report_bytes.clear()
+    get_sheet_names.clear()
+    load_optional_sheet.clear()
     st.session_state.last_center_key = st.session_state.get("center_key")
     st.session_state.last_year = st.session_state.get("year")
 
@@ -319,7 +349,6 @@ if ck not in CENTERS and ck != DOC_PERF_KEY:
             st.rerun()
 
     with c4:
-        # External link tile for Doc performance (UNCHANGED)
         components.html(
             f"""
             <a href="{DOC_PERF_URL}" target="_blank" style="text-decoration:none;">
@@ -420,7 +449,11 @@ if st.session_state.get("is_admin"):
             except Exception as e:
                 st.error(str(e))
 
-    if st.button("↻ Rebuild report", use_container_width=True, key=f"rebuild_{st.session_state.get('center_key')}_{st.session_state.get('year')}"):
+    if st.button(
+        "↻ Rebuild report",
+        use_container_width=True,
+        key=f"rebuild_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+    ):
         try:
             if not gen_path.exists():
                 st.error(f"Generator not found: {gen_path}")
@@ -433,8 +466,12 @@ if st.session_state.get("is_admin"):
                 st.success(f"Report rebuilt successfully in {(t1 - t0).total_seconds():.1f}s.")
                 if msg.strip():
                     st.code(msg, language="bash")
+
+                # clear caches after rebuild
                 load_core_sheets.clear()
                 get_report_bytes.clear()
+                get_sheet_names.clear()
+                load_optional_sheet.clear()
         except Exception as e:
             st.error(str(e))
 
@@ -465,22 +502,6 @@ try:
     if not summary.empty:
         summary = ensure_grand_total(summary, summary.columns[0])
 
-    # Optionally load the InsGroup and Plan sheets (no errors if missing)
-    ext = Path(str(out_path)).suffix.lower()
-    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
-
-    try:
-        insgroup_df = pd.read_excel(str(out_path), sheet_name=SHEET_INGROUP, engine=engine)
-        insgroup_df = trim_empty_rows(insgroup_df)
-    except Exception:
-        insgroup_df = None
-
-    try:
-        plan_df = pd.read_excel(str(out_path), sheet_name=SHEET_IPLAN, engine=engine)
-        plan_df = trim_empty_rows(plan_df)
-    except Exception:
-        plan_df = None
-
     # KPI sums should not double-count the GT row
     totals_no_gt = drop_gt(totals)
 
@@ -503,15 +524,17 @@ try:
     st.markdown("---")
 
     # ===== Tabs (optional InsGroup / Plan) =====
+    sheet_names = get_sheet_names(str(out_path), token)
+
     tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
-    if insgroup_df is not None:
+    if SHEET_INGROUP in sheet_names:
         tab_labels.append(SHEET_INGROUP)
-    if plan_df is not None:
+    if SHEET_IPLAN in sheet_names:
         tab_labels.append(SHEET_IPLAN)
     tab_labels.append("Downloads")
 
     # preserve “stay on InsGroup” behavior
-    if insgroup_df is not None and st.session_state.pop("_stay_on_ig", False):
+    if (SHEET_INGROUP in sheet_names) and st.session_state.pop("_stay_on_ig", False):
         tab_labels = [SHEET_INGROUP] + [x for x in tab_labels if x != SHEET_INGROUP]
 
     t_tabs = st.tabs(tab_labels)
@@ -559,9 +582,14 @@ try:
             key=f"dl_csv_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
-    # ===== InsGroup tab body (optional) =====
-    if tIG is not None and insgroup_df is not None:
+    # ===== InsGroup tab body (optional) — LAZY LOAD HERE =====
+    if tIG is not None:
         with tIG:
+            insgroup_df = load_optional_sheet(str(out_path), token, SHEET_INGROUP)
+            if insgroup_df is None or insgroup_df.empty:
+                st.info("InsGroup sheet not found (or empty).")
+                st.stop()
+
             insurers = (
                 insgroup_df["Insurance"]
                 .dropna()
@@ -587,7 +615,6 @@ try:
                 st.session_state["_stay_on_ig"] = True
                 st.rerun()
 
-            # render using saved selection
             choice = st.session_state.get(ig_key, "All")
             view_df = insgroup_df.copy()
             if choice != "All":
@@ -610,9 +637,14 @@ try:
                 key=f"dl_csv_insgroup_view_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
             )
 
-    # ===== Plan tab body (optional) =====
-    if tPL is not None and plan_df is not None:
+    # ===== Plan tab body (optional) — LAZY LOAD HERE =====
+    if tPL is not None:
         with tPL:
+            plan_df = load_optional_sheet(str(out_path), token, SHEET_IPLAN)
+            if plan_df is None or plan_df.empty:
+                st.info("Plan sheet not found (or empty).")
+                st.stop()
+
             insurers_pl = (
                 plan_df["Insurance"]
                 .dropna()
@@ -637,7 +669,6 @@ try:
                 st.session_state[pl_key] = choice_pl
                 st.rerun()
 
-            # render using saved selection
             choice_pl = st.session_state.get(pl_key, "All")
             view_pl = plan_df.copy()
             if choice_pl != "All":
@@ -679,5 +710,6 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
 
 
