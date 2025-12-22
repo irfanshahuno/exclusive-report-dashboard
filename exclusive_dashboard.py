@@ -6,10 +6,8 @@
 #   • Grand Total row (any of 'Grand Total' / 'Total') is shown LAST in tables
 #   • NEW: View password gate (Emc@2026)
 # ✅ NEEDFUL CHANGES (as per your request):
-#   1) Title changed to "Excellent Medical Group"
-#   2) Home buttons order: Excellent Medical Center, Excellent Pharmacy, Easy Health
-#   3) Removed Doc monthly performance button (and DOC_PERF_URL)
-#   4) Home KPIs show in 3 SEPARATE LINES (one center per row)
+#   1) Home page: "Choose a center" moved to TOP (above KPIs)
+#   2) Home page: Balance value is clickable (opens BALANCE_ATTEMPT_URL) for each center
 # Nothing else is changed.
 
 import sys
@@ -64,7 +62,7 @@ st.set_option("client.showErrorDetails", False)
 # NEW: enforce view login first
 require_view_access()
 
-# ✅ NEW: Balance Attempt Aging app URL (opens on Balance click)
+# ✅ Balance Attempt Aging app URL (opens on Balance click)
 BALANCE_ATTEMPT_URL = "https://balance-attempt-aging-dashboard-eigtoins4ai9hd9r7jsmen.streamlit.app/"
 
 BASE = Path(__file__).parent
@@ -73,7 +71,6 @@ DATA_DIR = BASE / "data"
 (DATA_DIR / "excellent").mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "excellent_pharmacy").mkdir(parents=True, exist_ok=True)
 
-# (Removed Doc Performance constants, as requested)
 YEARS = [2024, 2025]
 
 # Canonical sheet names for main Aging report
@@ -275,7 +272,7 @@ def is_admin_mode() -> bool:
         return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
 
 
-# ====================== (NEW) Home KPIs helper ======================
+# ====================== (Home KPIs helper) ======================
 def pick_latest_year_with_report(cfg0: dict):
     for y in reversed(YEARS):
         p = cfg0["folder_root"] / str(y) / cfg0["out_name"]
@@ -355,46 +352,7 @@ st.caption(
 # ====================== Home cards ======================
 ck = st.session_state.get("center_key")
 if ck not in CENTERS:
-    # ✅ KPIs on home page (3 separate lines)
-    st.subheader("Key metrics (All centers)")
-
-    y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent")
-    y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy")
-    y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth")
-
-    # ---- 1) Excellent Medical Center ----
-    st.markdown("### Excellent Medical Center (MF4777)")
-    st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
-    a0, a1, a2, a3, a4 = st.columns(5)
-    a0.metric("Net Amount", f"{net_exc:,.2f}")
-    a1.metric("Paid", f"{paid_exc:,.2f}")
-    a2.metric("Balance", f"{bal_exc:,.2f}")
-    a3.metric("Rejected", f"{rej_exc:,.2f}")
-    a4.metric("Accepted", f"{acc_exc:,.2f}")
-    st.markdown("---")
-
-    # ---- 2) Excellent Pharmacy ----
-    st.markdown("### Excellent Pharmacy (PF3205)")
-    st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
-    b0, b1, b2, b3, b4 = st.columns(5)
-    b0.metric("Net Amount", f"{net_ph:,.2f}")
-    b1.metric("Paid", f"{paid_ph:,.2f}")
-    b2.metric("Balance", f"{bal_ph:,.2f}")
-    b3.metric("Rejected", f"{rej_ph:,.2f}")
-    b4.metric("Accepted", f"{acc_ph:,.2f}")
-    st.markdown("---")
-
-    # ---- 3) Easy Health ----
-    st.markdown("### Easy Health Medical Clinic (MF8031)")
-    st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
-    c0, c1, c2, c3, c4 = st.columns(5)
-    c0.metric("Net Amount", f"{net_eh:,.2f}")
-    c1.metric("Paid", f"{paid_eh:,.2f}")
-    c2.metric("Balance", f"{bal_eh:,.2f}")
-    c3.metric("Rejected", f"{rej_eh:,.2f}")
-    c4.metric("Accepted", f"{acc_eh:,.2f}")
-
-    st.markdown("---")
+    # ✅ NEEDFUL FIX 1: Choose a center moved to TOP (above KPIs)
     st.subheader("Choose a center")
 
     btn_css = """
@@ -434,6 +392,93 @@ if ck not in CENTERS:
             st.session_state.center_key = "easyhealth"
             st.session_state.year = None
             st.rerun()
+
+    st.markdown("---")
+
+    # ✅ KPIs on home page (3 separate lines)
+    st.subheader("Key metrics (All centers)")
+
+    y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent")
+    y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy")
+    y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth")
+
+    # ---- 1) Excellent Medical Center ----
+    st.markdown("### Excellent Medical Center (MF4777)")
+    st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
+    a0, a1, a2, a3, a4 = st.columns(5)
+    a0.metric("Net Amount", f"{net_exc:,.2f}")
+    a1.metric("Paid", f"{paid_exc:,.2f}")
+
+    # ✅ NEEDFUL FIX 2: Balance clickable on HOME
+    with a2:
+        components.html(
+            f"""
+            <a href="{BALANCE_ATTEMPT_URL}" target="_blank" style="text-decoration:none;">
+              <div style="padding: 2px 2px;">
+                <div style="font-size:14px;color:#6b7280;margin-bottom:2px;">Balance</div>
+                <div style="font-size:28px;font-weight:700;color:#111827;line-height:1.05;">
+                  {bal_exc:,.2f}
+                </div>
+              </div>
+            </a>
+            """,
+            height=72,
+        )
+
+    a3.metric("Rejected", f"{rej_exc:,.2f}")
+    a4.metric("Accepted", f"{acc_exc:,.2f}")
+    st.markdown("---")
+
+    # ---- 2) Excellent Pharmacy ----
+    st.markdown("### Excellent Pharmacy (PF3205)")
+    st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
+    b0, b1, b2, b3, b4 = st.columns(5)
+    b0.metric("Net Amount", f"{net_ph:,.2f}")
+    b1.metric("Paid", f"{paid_ph:,.2f}")
+
+    with b2:
+        components.html(
+            f"""
+            <a href="{BALANCE_ATTEMPT_URL}" target="_blank" style="text-decoration:none;">
+              <div style="padding: 2px 2px;">
+                <div style="font-size:14px;color:#6b7280;margin-bottom:2px;">Balance</div>
+                <div style="font-size:28px;font-weight:700;color:#111827;line-height:1.05;">
+                  {bal_ph:,.2f}
+                </div>
+              </div>
+            </a>
+            """,
+            height=72,
+        )
+
+    b3.metric("Rejected", f"{rej_ph:,.2f}")
+    b4.metric("Accepted", f"{acc_ph:,.2f}")
+    st.markdown("---")
+
+    # ---- 3) Easy Health ----
+    st.markdown("### Easy Health Medical Clinic (MF8031)")
+    st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
+    c0, c1_, c2, c3, c4 = st.columns(5)
+    c0.metric("Net Amount", f"{net_eh:,.2f}")
+    c1_.metric("Paid", f"{paid_eh:,.2f}")
+
+    with c2:
+        components.html(
+            f"""
+            <a href="{BALANCE_ATTEMPT_URL}" target="_blank" style="text-decoration:none;">
+              <div style="padding: 2px 2px;">
+                <div style="font-size:14px;color:#6b7280;margin-bottom:2px;">Balance</div>
+                <div style="font-size:28px;font-weight:700;color:#111827;line-height:1.05;">
+                  {bal_eh:,.2f}
+                </div>
+              </div>
+            </a>
+            """,
+            height=72,
+        )
+
+    c3.metric("Rejected", f"{rej_eh:,.2f}")
+    c4.metric("Accepted", f"{acc_eh:,.2f}")
 
     st.stop()
 
@@ -596,7 +641,7 @@ try:
     k0.metric("Net Amount", f"{net:,.2f}")
     k1.metric("Paid", f"{paid:,.2f}")
 
-    # ✅ ONLY CHANGE: Balance becomes clickable (opens your Balance Attempt Aging app in new tab)
+    # Balance clickable (unchanged center page behavior)
     with k2:
         components.html(
             f"""
@@ -624,7 +669,6 @@ try:
         tab_labels.append(SHEET_IPLAN)
     tab_labels.append("Downloads")
 
-    # preserve “stay on InsGroup” behavior
     if insgroup_df is not None and st.session_state.pop("_stay_on_ig", False):
         tab_labels = [SHEET_INGROUP] + [x for x in tab_labels if x != SHEET_INGROUP]
 
@@ -637,7 +681,6 @@ try:
     tIG = tab_map.get(SHEET_INGROUP)
     tPL = tab_map.get(SHEET_IPLAN)
 
-    # ---------- DISPLAY helper: hide "S.No" & index starts at 1 ----------
     def _display_df(df: pd.DataFrame) -> pd.DataFrame:
         d = df.drop(columns=["S.No"], errors="ignore").reset_index(drop=True)
         d.index = range(1, len(d) + 1)
@@ -672,7 +715,6 @@ try:
             key=f"dl_csv_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
-    # ===== InsGroup tab body (optional) =====
     if tIG is not None and insgroup_df is not None:
         with tIG:
             insurers = (
@@ -699,7 +741,6 @@ try:
                 st.session_state["_stay_on_ig"] = True
                 st.rerun()
 
-            # render using saved selection
             choice = st.session_state.get(ig_key, "All")
             view_df = insgroup_df.copy()
             if choice != "All":
@@ -722,7 +763,6 @@ try:
                 key=f"dl_csv_insgroup_view_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
             )
 
-    # ===== Plan tab body (optional) =====
     if tPL is not None and plan_df is not None:
         with tPL:
             insurers_pl = (
@@ -748,7 +788,6 @@ try:
                 st.session_state[pl_key] = choice_pl
                 st.rerun()
 
-            # render using saved selection
             choice_pl = st.session_state.get(pl_key, "All")
             view_pl = plan_df.copy()
             if choice_pl != "All":
