@@ -14,9 +14,9 @@
 #        - Revenue Management Cycle 2025
 #      When clicked, show SAME dashboard but default to that year.
 #   4) Add "⬅ Change Year" button so management can go back anytime.
-#   5) Make ALL center header color SAME (GREEN only).
-#   6) Remove year selector buttons on center page when landing year is chosen (no need to show 2025 in 2024 flow).
-#   7) Make buttons feel BLUE when clicked/active (CSS), including Change Year button.
+# ✅ NEW NEEDFUL (TODAY):
+#   5) Make year buttons + center buttons BIGGER and BLACK/WHITE (with black on click / white text)
+#   6) Make center NAME headings DARK BLUE (instead of green)
 # Nothing else is changed.
 
 import sys
@@ -71,38 +71,58 @@ st.set_option("client.showErrorDetails", False)
 # NEW: enforce view login first
 require_view_access()
 
-# ✅ NEEDFUL: Button styling (click/active blue), including Change Year button
+# ✅ NEEDFUL (UPDATED): Bigger BLACK/WHITE buttons + active black bg / white text
 st.markdown(
     """
 <style>
-/* Default buttons */
-.stButton > button {
-  background: white !important;
-  color: #111827 !important;
-  border: 1px solid #d1d5db !important;
-  border-radius: 12px !important;
-  font-weight: 700 !important;
-  padding: 0.65rem 1rem !important;
+/* =========================================
+   GLOBAL BUTTON STYLE (BIGGER + BLACK/WHITE)
+   ========================================= */
+div.stButton > button {
+  width: 100% !important;
+  min-height: 58px !important;
+  padding: 14px 22px !important;
+  font-size: 18px !important;
+  font-weight: 800 !important;
+
+  background: #ffffff !important;
+  color: #000000 !important;
+  border: 2px solid #000000 !important;
+  border-radius: 14px !important;
+  box-shadow: none !important;
 }
 
 /* Hover */
-.stButton > button:hover {
-  border-color: #2563eb !important;
-  color: #2563eb !important;
+div.stButton > button:hover {
+  background: #000000 !important;
+  color: #ffffff !important;
+  border-color: #000000 !important;
 }
 
 /* Active press (click) */
-.stButton > button:active {
-  background: #2563eb !important;
-  color: white !important;
-  border-color: #1d4ed8 !important;
+div.stButton > button:active {
+  background: #000000 !important;
+  color: #ffffff !important;
+  border-color: #000000 !important;
 }
 
 /* Focus (after click) */
-.stButton > button:focus {
+div.stButton > button:focus,
+div.stButton > button:focus-visible {
   outline: none !important;
-  box-shadow: 0 0 0 3px rgba(37,99,235,0.25) !important;
-  border-color: #2563eb !important;
+  box-shadow: none !important;
+  border-color: #000000 !important;
+  background: #000000 !important;
+  color: #ffffff !important;
+}
+
+/* =========================================
+   Center name dark blue helper class
+   ========================================= */
+.center-title {
+  color: #0B2D5C !important;   /* dark blue */
+  font-weight: 900 !important;
+  margin-bottom: 0 !important;
 }
 </style>
 """,
@@ -209,13 +229,6 @@ CENTERS = {
         "out_name": "Pharmacy_Exclusive_Report_with_Aging.xlsx",
         "generator": BASE / "pharmacy_exclusive_report_with_aging.py",
     },
-}
-
-# ✅ NEEDFUL: SAME GREEN for ALL centers (no blue/purple)
-CENTER_COLORS = {
-    "excellent": ("#059669", "#047857"),
-    "pharmacy": ("#059669", "#047857"),
-    "easyhealth": ("#059669", "#047857"),
 }
 
 
@@ -477,43 +490,29 @@ st.caption(
 # ====================== Home cards ======================
 ck = st.session_state.get("center_key")
 if ck not in CENTERS:
-    # ✅ NEEDFUL FIX 1: Choose a center moved to TOP (above KPIs)
+    # ✅ Choose a center moved to TOP (above KPIs)
     st.subheader("Choose a center")
 
-    btn_css = """
-    <style>
-    .card-btn > button {
-        border: 2px solid #e5e7eb !important;
-        padding: 18px 14px !important;
-        border-radius: 14px !important;
-        font-weight: 600 !important;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.05) !important;
-    }
-    .card-btn > button:hover {
-        border-color: #93c5fd !important;
-        box-shadow: 0 6px 16px rgba(37,99,235,0.15) !important;
-    }
-    </style>
-    """
-    st.markdown(btn_css, unsafe_allow_html=True)
+    # ✅ NEEDFUL: remove old card CSS so global black/white applies
+    # (No extra CSS here — global style already handles button look)
 
     # ✅ Order: Excellent, Pharmacy, EasyHealth
     c1, c2, c3 = st.columns(3)
 
     with c1:
-        if st.container(border=True).button(CENTERS["excellent"]["name"], use_container_width=True, key="home_exc"):
+        if st.button(CENTERS["excellent"]["name"], use_container_width=True, key="home_exc"):
             st.session_state.center_key = "excellent"
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
 
     with c2:
-        if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
+        if st.button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
             st.session_state.center_key = "pharmacy"
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
 
     with c3:
-        if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
+        if st.button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
             st.session_state.center_key = "easyhealth"
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
@@ -528,13 +527,13 @@ if ck not in CENTERS:
     y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth")
 
     # ---- 1) Excellent Medical Center ----
-    st.markdown('<h3 style="color:#059669;margin-bottom:0;">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
+    st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
     a0, a1, a2, a3, a4 = st.columns(5)
     a0.metric("Net Amount", f"{net_exc:,.2f}")
     a1.metric("Paid", f"{paid_exc:,.2f}")
 
-    # ✅ NEEDFUL FIX 2: Balance clickable on HOME
+    # Balance clickable on HOME
     with a2:
         components.html(
             f"""
@@ -555,7 +554,7 @@ if ck not in CENTERS:
     st.markdown("---")
 
     # ---- 2) Excellent Pharmacy ----
-    st.markdown('<h3 style="color:#059669;margin-bottom:0;">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
+    st.markdown('<h3 class="center-title">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
     b0, b1, b2, b3, b4 = st.columns(5)
     b0.metric("Net Amount", f"{net_ph:,.2f}")
@@ -581,7 +580,7 @@ if ck not in CENTERS:
     st.markdown("---")
 
     # ---- 3) Easy Health ----
-    st.markdown('<h3 style="color:#059669;margin-bottom:0;">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
+    st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
     c0, c1_, c2, c3, c4 = st.columns(5)
     c0.metric("Net Amount", f"{net_eh:,.2f}")
@@ -608,7 +607,8 @@ if ck not in CENTERS:
     st.stop()
 
 # ====================== MAIN aging dashboard (KPIs moved to top) ======================
-# ✅ NEEDFUL: show Select Year ONLY if not coming from landing
+# ✅ Keep this section as-is (it will still work). If you want, we can remove the old blue block later.
+# Show Select Year ONLY if not coming from landing
 if st.session_state.get("rcm_year") is None:
     st.subheader("Select Year")
 
@@ -619,9 +619,9 @@ if st.session_state.get("rcm_year") is None:
                 st.markdown(
                     f"""
                     <div style="
-                      background-color:#2196F3;color:white;text-align:center;
-                      padding:0.8em;border-radius:6px;font-weight:700;font-size:1.1em;
-                      border:2px solid #1976D2;">
+                      background-color:#000000;color:white;text-align:center;
+                      padding:0.8em;border-radius:12px;font-weight:800;font-size:1.1em;
+                      border:2px solid #000000;">
                       {y}
                     </div>
                     """,
@@ -634,7 +634,7 @@ if st.session_state.get("rcm_year") is None:
 
 # Pick a year automatically if none
 if st.session_state.get("year") is None:
-    # ✅ NEEDFUL: prefer landing-selected year if present
+    # prefer landing-selected year if present
     if st.session_state.get("rcm_year") in YEARS:
         st.session_state.year = st.session_state.get("rcm_year")
         st.rerun()
@@ -666,31 +666,9 @@ if (st.query_params.get("center") != st.session_state.get("center_key")) or \
 mt = mtime_token(out_path)
 built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
 
-# ✅ NEEDFUL: colored center header per center (NOW SAME GREEN for all)
-c_key = st.session_state.get("center_key")
-cA, cB = CENTER_COLORS.get(c_key, ("#059669", "#047857"))
-
-st.markdown(
-    f"""
-    <div style="
-        background: linear-gradient(90deg, {cA}, {cB});
-        padding: 14px 18px;
-        border-radius: 14px;
-        margin-bottom: 8px;
-        color: white;
-    ">
-        <div style="font-size:26px;font-weight:800;">
-            {cfg["name"]}
-        </div>
-        <div style="font-size:14px;opacity:0.9;margin-top:2px;">
-            Year: {st.session_state.get("year")}
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.caption(f"Built: **{built}** · Source: {src_path} · Report: {out_path.name}")
+# ✅ NEEDFUL: center header name should be DARK BLUE (not green gradient)
+st.markdown(f"<h2 class='center-title' style='margin-top:0;'>{cfg['name']}</h2>", unsafe_allow_html=True)
+st.caption(f"Year: **{st.session_state.get('year')}** · Built: **{built}** · Source: {src_path} · Report: {out_path.name}")
 
 if st.button("◀ Choose another center", key="btn_back_center"):
     st.session_state.center_key = None
@@ -986,3 +964,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
