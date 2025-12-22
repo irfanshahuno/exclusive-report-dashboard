@@ -8,6 +8,11 @@
 # ✅ NEEDFUL CHANGES (as per your request):
 #   1) Home page: "Choose a center" moved to TOP (above KPIs)
 #   2) Home page: Balance value is clickable (opens BALANCE_ATTEMPT_URL) for each center
+# ✅ NEW NEEDFUL CHANGE (as per your request NOW):
+#   3) After password -> show landing page with ONLY 2 buttons:
+#        - Revenue Management Cycle 2024
+#        - Revenue Management Cycle 2025
+#      Then show the SAME dashboard, filtered to selected year by default.
 # Nothing else is changed.
 
 import sys
@@ -61,6 +66,47 @@ st.set_option("client.showErrorDetails", False)
 
 # NEW: enforce view login first
 require_view_access()
+
+# ✅ NEW: Landing Year Selection (ONLY 2 buttons) ==================
+def require_year_selection() -> None:
+    """
+    After view password, force a first window:
+    - Excellent Medical Group
+    - Revenue Cycle Management
+    - 2 buttons:
+        Revenue Management Cycle 2024
+        Revenue Management Cycle 2025
+    Once selected, proceed to the existing dashboard.
+    """
+    if st.session_state.get("rcm_year") in (2024, 2025):
+        return
+
+    st.title("📊 Excellent Medical Group")
+    st.caption("Revenue Cycle Management")
+
+    st.markdown("### Select Report Year")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Revenue Management Cycle 2024", use_container_width=True, key="rcm_2024"):
+            st.session_state.rcm_year = 2024
+            # reset routing to home, but keep logic same
+            st.session_state.center_key = None
+            st.session_state.year = 2024
+            st.rerun()
+
+    with c2:
+        if st.button("Revenue Management Cycle 2025", use_container_width=True, key="rcm_2025"):
+            st.session_state.rcm_year = 2025
+            st.session_state.center_key = None
+            st.session_state.year = 2025
+            st.rerun()
+
+    st.stop()
+
+
+require_year_selection()
+# ================================================================
 
 # ✅ Balance Attempt Aging app URL (opens on Balance click)
 BALANCE_ATTEMPT_URL = "https://balance-attempt-aging-dashboard-eigtoins4ai9hd9r7jsmen.streamlit.app/"
@@ -274,6 +320,14 @@ def is_admin_mode() -> bool:
 
 # ====================== (Home KPIs helper) ======================
 def pick_latest_year_with_report(cfg0: dict):
+    # ✅ NEEDFUL CHANGE: Prefer the year selected on landing page
+    forced = st.session_state.get("rcm_year")
+    if forced in YEARS:
+        p_forced = cfg0["folder_root"] / str(forced) / cfg0["out_name"]
+        if p_forced.exists():
+            return forced
+
+    # fallback to original behavior
     for y in reversed(YEARS):
         p = cfg0["folder_root"] / str(y) / cfg0["out_name"]
         if p.exists():
@@ -336,6 +390,10 @@ if st.session_state.get("year") is None and qs.get("year"):
     except Exception:
         pass
 
+# ✅ NEEDFUL CHANGE: If user selected landing year, default current year to it (only when None)
+if st.session_state.get("year") is None and st.session_state.get("rcm_year") in YEARS:
+    st.session_state.year = st.session_state.get("rcm_year")
+
 if (st.session_state.get("center_key") != st.session_state.get("last_center_key")) or \
    (st.session_state.get("year") != st.session_state.get("last_year")):
     load_core_sheets.clear()
@@ -378,19 +436,20 @@ if ck not in CENTERS:
     with c1:
         if st.container(border=True).button(CENTERS["excellent"]["name"], use_container_width=True, key="home_exc"):
             st.session_state.center_key = "excellent"
-            st.session_state.year = None
+            # ✅ keep default year = landing year
+            st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
 
     with c2:
         if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
             st.session_state.center_key = "pharmacy"
-            st.session_state.year = None
+            st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
 
     with c3:
         if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
             st.session_state.center_key = "easyhealth"
-            st.session_state.year = None
+            st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
 
     st.markdown("---")
@@ -507,6 +566,11 @@ for i, y in enumerate(YEARS):
 
 # Pick a year automatically if none
 if st.session_state.get("year") is None:
+    # ✅ prefer landing-selected year if present
+    if st.session_state.get("rcm_year") in YEARS:
+        st.session_state.year = st.session_state.get("rcm_year")
+        st.rerun()
+
     cfg_tmp = CENTERS[st.session_state.get("center_key")]
     found = None
     for y in reversed(YEARS):
@@ -537,7 +601,7 @@ st.caption(f"Built: **{built}** · Source: {src_path} · Report: {out_path.name}
 
 if st.button("◀ Choose another center", key="btn_back_center"):
     st.session_state.center_key = None
-    st.session_state.year = None
+    st.session_state.year = st.session_state.get("rcm_year")
     try:
         if "center" in st.query_params:
             del st.query_params["center"]
@@ -829,5 +893,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
 
