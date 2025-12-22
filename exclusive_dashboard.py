@@ -5,17 +5,15 @@
 #   • S.No hidden and display index starts at 1
 #   • Grand Total row (any of 'Grand Total' / 'Total') is shown LAST in tables
 #   • NEW: View password gate (Emc@2026)
-# ✅ NEEDFUL CHANGES (as per your request earlier):
-#   1) Home page: "Choose a center" moved to TOP (above KPIs)
-#   2) Home page: Balance value is clickable (opens BALANCE_ATTEMPT_URL) for each center
-# ✅ NEEDFUL CHANGES (as per your latest request):
-#   3) After password: show landing page with ONLY 2 buttons (2024/2025)
-#   4) Add "⬅ Change Year" button so management can go back anytime
+# ✅ NEEDFUL CHANGES:
+#   • After password: landing page with ONLY 2 buttons (2024/2025) + Change Year
 # ✅ PREMIUM SOOTHING UI (ONLY VISUAL):
-#   5) Soft background + premium light-blue buttons
-#   6) KPI section becomes premium cards (soothing + easier for eyes)
-#   7) Center names dark navy
-#   8) Balance card same bold + slight different color + clickable
+#   • Soft background + premium light-blue buttons
+#   • KPI section becomes premium cards (soothing)
+#   • Center names dark navy
+#   • Balance card clickable and same bold with slight different color
+# ✅ FIX:
+#   • KPI numbers auto-fit inside KPI box (no overflow)
 # Nothing else is changed.
 
 import sys
@@ -74,7 +72,7 @@ require_view_access()
 BALANCE_ATTEMPT_URL = "https://balance-attempt-aging-dashboard-eigtoins4ai9hd9r7jsmen.streamlit.app/"
 
 # =========================================================
-# ✅ PREMIUM + SOOTHING UI (ONLY STYLES)
+# ✅ PREMIUM + SOOTHING UI (ONLY STYLES) + ✅ AUTO-FIT KPI
 # =========================================================
 st.markdown(
     """
@@ -142,6 +140,7 @@ div.stButton > button:focus-visible{
   border-radius: 16px;
   padding: 14px 16px;
   box-shadow: 0 8px 18px rgba(11,45,92,0.06);
+  min-width: 0; /* important for overflow handling inside grid */
 }
 .kpi-label{
   font-size: 13px;
@@ -149,11 +148,17 @@ div.stButton > button:focus-visible{
   font-weight: 750;
   margin-bottom: 6px;
 }
+
+/* ✅ AUTO-FIT number inside card */
 .kpi-value{
-  font-size: 30px;
+  font-size: clamp(18px, 2.2vw, 30px);  /* auto fit based on screen */
   font-weight: 900;
   color: #111827;
   letter-spacing: 0.2px;
+
+  white-space: nowrap;                  /* keep number in one line */
+  overflow: hidden;                     /* hide overflow */
+  text-overflow: ellipsis;              /* show ... if too long */
 }
 
 /* Balance featured: same bold, slight different color */
@@ -196,29 +201,29 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str):
 
     html = f"""
     <div class="kpi-grid">
-      <div class="kpi-card">
+      <div class="kpi-card" title="{fmt(net)}">
         <div class="kpi-label">Net Amount</div>
         <div class="kpi-value">{fmt(net)}</div>
       </div>
 
-      <div class="kpi-card">
+      <div class="kpi-card" title="{fmt(paid)}">
         <div class="kpi-label">Paid</div>
         <div class="kpi-value">{fmt(paid)}</div>
       </div>
 
-      <a class="kpi-link" href="{balance_url}" target="_blank">
+      <a class="kpi-link" href="{balance_url}" target="_blank" title="{fmt(bal)}">
         <div class="kpi-card balance">
           <div class="kpi-label">Balance</div>
           <div class="kpi-value">{fmt(bal)}</div>
         </div>
       </a>
 
-      <div class="kpi-card">
+      <div class="kpi-card" title="{fmt(rej)}">
         <div class="kpi-label">Rejected</div>
         <div class="kpi-value">{fmt(rej)}</div>
       </div>
 
-      <div class="kpi-card">
+      <div class="kpi-card" title="{fmt(acc)}">
         <div class="kpi-label">Accepted</div>
         <div class="kpi-value">{fmt(acc)}</div>
       </div>
@@ -486,13 +491,11 @@ def is_admin_mode() -> bool:
 
 # ====================== (Home KPIs helper) ======================
 def pick_latest_year_with_report(cfg0: dict):
-    # prefer landing-selected year first
     forced = st.session_state.get("rcm_year")
     if forced in YEARS:
         p_forced = cfg0["folder_root"] / str(forced) / cfg0["out_name"]
         if p_forced.exists():
             return forced
-    # fallback to latest available
     for y in reversed(YEARS):
         p = cfg0["folder_root"] / str(y) / cfg0["out_name"]
         if p.exists():
@@ -501,10 +504,6 @@ def pick_latest_year_with_report(cfg0: dict):
 
 
 def load_center_kpis(center_key: str):
-    """
-    Returns: (year, net, paid, bal, rej, acc) or (None, 0,0,0,0,0) if not found.
-    Minimal: reuses existing sheet logic.
-    """
     cfg0 = CENTERS[center_key]
     y = pick_latest_year_with_report(cfg0)
     if y is None:
@@ -561,7 +560,6 @@ if st.session_state.get("year") is None and qs.get("year"):
     except Exception:
         pass
 
-# default year from landing
 if st.session_state.get("year") is None and st.session_state.get("rcm_year") in YEARS:
     st.session_state.year = st.session_state.get("rcm_year")
 
@@ -583,7 +581,6 @@ ck = st.session_state.get("center_key")
 if ck not in CENTERS:
     st.subheader("Choose a center")
 
-    # Order: Excellent, Pharmacy, EasyHealth
     c1, c2, c3 = st.columns(3)
 
     with c1:
@@ -605,26 +602,22 @@ if ck not in CENTERS:
             st.rerun()
 
     st.markdown("---")
-
     st.subheader("Key metrics (All centers)")
 
     y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent")
     y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy")
     y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth")
 
-    # 1) Excellent Medical Center
     st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
     render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, BALANCE_ATTEMPT_URL)
     st.markdown("---")
 
-    # 2) Excellent Pharmacy
     st.markdown('<h3 class="center-title">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
     render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, BALANCE_ATTEMPT_URL)
     st.markdown("---")
 
-    # 3) Easy Health
     st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
     render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, BALANCE_ATTEMPT_URL)
@@ -632,7 +625,6 @@ if ck not in CENTERS:
     st.stop()
 
 # ====================== MAIN aging dashboard ======================
-# Show Select Year ONLY if not coming from landing
 if st.session_state.get("rcm_year") is None:
     st.subheader("Select Year")
     ycols = st.columns(len(YEARS))
@@ -657,7 +649,6 @@ if st.session_state.get("rcm_year") is None:
                     st.session_state.year = y
                     st.rerun()
 
-# Pick a year automatically if none
 if st.session_state.get("year") is None:
     if st.session_state.get("rcm_year") in YEARS:
         st.session_state.year = st.session_state.get("rcm_year")
@@ -681,7 +672,6 @@ src_path = resolve_source_path(folder, preferred=cfg["src_name"])
 out_path = folder / cfg["out_name"]
 gen_path = cfg["generator"]
 
-# Keep URL query in sync
 if (st.query_params.get("center") != st.session_state.get("center_key")) or \
    (st.query_params.get("year") != str(st.session_state.get("year"))):
     st.query_params["center"] = st.session_state.get("center_key")
@@ -690,7 +680,6 @@ if (st.query_params.get("center") != st.session_state.get("center_key")) or \
 mt = mtime_token(out_path)
 built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
 
-# Premium center header card (soothing)
 st.markdown(
     f"""
     <div style="
@@ -726,7 +715,6 @@ if st.button("◀ Choose another center", key="btn_back_center"):
         st.experimental_set_query_params()
     st.rerun()
 
-# ===== Admin controls (unchanged) =====
 if st.session_state.get("is_admin"):
     st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
 
@@ -760,7 +748,6 @@ if st.session_state.get("is_admin"):
         except Exception as e:
             st.error(str(e))
 
-# ===== Load report and render =====
 token = mtime_token(out_path)
 if token == 0.0:
     msg = f"Report not found for {cfg['name']} ({st.session_state.get('year')})."
@@ -788,7 +775,6 @@ try:
     if not summary.empty:
         summary = ensure_grand_total(summary, summary.columns[0])
 
-    # Optionally load the InsGroup and Plan sheets (no errors if missing)
     ext = Path(str(out_path)).suffix.lower()
     engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
 
@@ -804,22 +790,18 @@ try:
     except Exception:
         plan_df = None
 
-    # KPI sums should not double-count the GT row
     totals_no_gt = drop_gt(totals)
 
-    # ===== KPI sums =====
     net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
     paid = ksum(totals_no_gt, "Paid")
     bal = ksum(totals_no_gt, "Balance")
     rej = ksum(totals_no_gt, "Rejected", "Rejection")
     acc = ksum(totals_no_gt, "Accepted")
 
-    # ===== TOP KPIs (PREMIUM CARDS) =====
     st.markdown(f"### Key metrics — {st.session_state.get('year')}")
     render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL)
     st.markdown("---")
 
-    # ===== Tabs (optional InsGroup / Plan) =====
     tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
     if insgroup_df is not None:
         tab_labels.append(SHEET_INGROUP)
