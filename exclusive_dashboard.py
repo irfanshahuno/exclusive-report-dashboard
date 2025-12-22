@@ -9,15 +9,13 @@
 #   1) Home page: "Choose a center" moved to TOP (above KPIs)
 #   2) Home page: Balance value is clickable (opens BALANCE_ATTEMPT_URL) for each center
 # ✅ NEEDFUL CHANGES (as per your latest request):
-#   3) After password: show landing page with ONLY 2 buttons:
-#        - Revenue Management Cycle 2024
-#        - Revenue Management Cycle 2025
-#      When clicked, show SAME dashboard but default to that year.
-#   4) Add "⬅ Change Year" button so management can go back anytime.
-# ✅ PREMIUM UI (NEEDFUL):
-#   5) Buttons: Premium light-blue style (bigger), dark-blue active/selected
-#   6) Center names: Dark blue (instead of green)
-#   7) Center header: Premium light-blue card instead of green gradient
+#   3) After password: show landing page with ONLY 2 buttons (2024/2025)
+#   4) Add "⬅ Change Year" button so management can go back anytime
+# ✅ PREMIUM SOOTHING UI (ONLY VISUAL):
+#   5) Soft background + premium light-blue buttons
+#   6) KPI section becomes premium cards (soothing + easier for eyes)
+#   7) Center names dark navy
+#   8) Balance card same bold + slight different color + clickable
 # Nothing else is changed.
 
 import sys
@@ -72,13 +70,24 @@ st.set_option("client.showErrorDetails", False)
 # NEW: enforce view login first
 require_view_access()
 
+# ✅ Balance Attempt Aging app URL (opens on Balance click)
+BALANCE_ATTEMPT_URL = "https://balance-attempt-aging-dashboard-eigtoins4ai9hd9r7jsmen.streamlit.app/"
+
 # =========================================================
-# ✅ PREMIUM UI (ONLY STYLES)
+# ✅ PREMIUM + SOOTHING UI (ONLY STYLES)
 # =========================================================
 st.markdown(
     """
 <style>
-/* ===== Premium Buttons (Light-blue) ===== */
+/* ---------- Page background (soothing) ---------- */
+.stApp{
+  background: linear-gradient(180deg, #F7FAFF 0%, #FFFFFF 45%) !important;
+}
+
+/* Reduce harsh separators */
+hr{ border: none !important; height:1px !important; background:#E6EEF8 !important; }
+
+/* ---------- Premium Buttons (Light-blue) ---------- */
 div.stButton > button{
   width: 100% !important;
   min-height: 58px !important;
@@ -119,20 +128,104 @@ div.stButton > button:focus-visible{
   margin-bottom: 0 !important;
 }
 
-/* Premium section labels */
-.premium-subtle{
-  color: #334155 !important;
-  font-weight: 700 !important;
+/* ---------- KPI Cards (premium + soothing) ---------- */
+.kpi-grid{
+  display:grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 10px;
+  margin-bottom: 10px;
+}
+.kpi-card{
+  background: rgba(255,255,255,0.92);
+  border: 1.4px solid #E3ECFA;
+  border-radius: 16px;
+  padding: 14px 16px;
+  box-shadow: 0 8px 18px rgba(11,45,92,0.06);
+}
+.kpi-label{
+  font-size: 13px;
+  color: #64748B;
+  font-weight: 750;
+  margin-bottom: 6px;
+}
+.kpi-value{
+  font-size: 30px;
+  font-weight: 900;
+  color: #111827;
+  letter-spacing: 0.2px;
 }
 
-/* Optional: slightly nicer metric values */
-div[data-testid="stMetricValue"]{
-  font-weight: 800 !important;
+/* Balance featured: same bold, slight different color */
+.kpi-card.balance{
+  background: linear-gradient(180deg, #F1F7FF 0%, #FFFFFF 100%);
+  border-color: #CFE3FF;
+}
+.kpi-card.balance .kpi-value{
+  color:#0B2D5C; /* slight different premium navy */
+}
+
+/* Links inside cards look clean */
+.kpi-link{
+  text-decoration:none !important;
+  color: inherit !important;
+  display:block !important;
+}
+.kpi-link:hover .kpi-card{
+  border-color:#6FA4FF;
+  box-shadow: 0 10px 22px rgba(11,45,92,0.10);
+}
+
+/* Mobile */
+@media (max-width: 1100px){
+  .kpi-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 </style>
 """,
     unsafe_allow_html=True,
 )
+
+
+def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str):
+    """Premium KPI cards (Balance card clickable)."""
+    def fmt(x):
+        try:
+            return f"{float(x):,.2f}"
+        except Exception:
+            return "—"
+
+    html = f"""
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Net Amount</div>
+        <div class="kpi-value">{fmt(net)}</div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">Paid</div>
+        <div class="kpi-value">{fmt(paid)}</div>
+      </div>
+
+      <a class="kpi-link" href="{balance_url}" target="_blank">
+        <div class="kpi-card balance">
+          <div class="kpi-label">Balance</div>
+          <div class="kpi-value">{fmt(bal)}</div>
+        </div>
+      </a>
+
+      <div class="kpi-card">
+        <div class="kpi-label">Rejected</div>
+        <div class="kpi-value">{fmt(rej)}</div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">Accepted</div>
+        <div class="kpi-value">{fmt(acc)}</div>
+      </div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
 
 # ====================== NEW: YEAR LANDING PAGE (NEEDFUL) ======================
 def reset_year_selection():
@@ -162,7 +255,6 @@ def require_year_selection():
 
     st.title("📊 Excellent Medical Group")
     st.caption("Revenue Cycle Management")
-
     st.markdown("### Select Report Year")
 
     c1, c2 = st.columns(2)
@@ -184,10 +276,6 @@ def require_year_selection():
 
 require_year_selection()
 # =================================================================
-
-
-# ✅ Balance Attempt Aging app URL (opens on Balance click)
-BALANCE_ATTEMPT_URL = "https://balance-attempt-aging-dashboard-eigtoins4ai9hd9r7jsmen.streamlit.app/"
 
 BASE = Path(__file__).parent
 DATA_DIR = BASE / "data"
@@ -398,14 +486,13 @@ def is_admin_mode() -> bool:
 
 # ====================== (Home KPIs helper) ======================
 def pick_latest_year_with_report(cfg0: dict):
-    # ✅ NEEDFUL: prefer landing-selected year first
+    # prefer landing-selected year first
     forced = st.session_state.get("rcm_year")
     if forced in YEARS:
         p_forced = cfg0["folder_root"] / str(forced) / cfg0["out_name"]
         if p_forced.exists():
             return forced
-
-    # fallback to original behavior
+    # fallback to latest available
     for y in reversed(YEARS):
         p = cfg0["folder_root"] / str(y) / cfg0["out_name"]
         if p.exists():
@@ -453,7 +540,6 @@ def load_center_kpis(center_key: str):
 
 
 # ====================== Header & routing ======================
-# ✅ NEEDFUL: title + Change Year button
 t1, t2 = st.columns([6, 2])
 with t1:
     st.title("📊 Excellent Medical Group")
@@ -475,7 +561,7 @@ if st.session_state.get("year") is None and qs.get("year"):
     except Exception:
         pass
 
-# ✅ NEEDFUL: default year from landing
+# default year from landing
 if st.session_state.get("year") is None and st.session_state.get("rcm_year") in YEARS:
     st.session_state.year = st.session_state.get("rcm_year")
 
@@ -497,7 +583,7 @@ ck = st.session_state.get("center_key")
 if ck not in CENTERS:
     st.subheader("Choose a center")
 
-    # ✅ Order: Excellent, Pharmacy, EasyHealth
+    # Order: Excellent, Pharmacy, EasyHealth
     c1, c2, c3 = st.columns(3)
 
     with c1:
@@ -526,90 +612,29 @@ if ck not in CENTERS:
     y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy")
     y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth")
 
-    # ---- 1) Excellent Medical Center ----
+    # 1) Excellent Medical Center
     st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
-    a0, a1, a2, a3, a4 = st.columns(5)
-    a0.metric("Net Amount", f"{net_exc:,.2f}")
-    a1.metric("Paid", f"{paid_exc:,.2f}")
-
-    with a2:
-        components.html(
-            f"""
-            <a href="{BALANCE_ATTEMPT_URL}" target="_blank" style="text-decoration:none;">
-              <div style="padding: 2px 2px;">
-                <div style="font-size:14px;color:#6b7280;margin-bottom:2px;">Balance</div>
-                <div style="font-size:28px;font-weight:800;color:#111827;line-height:1.05;">
-                  {bal_exc:,.2f}
-                </div>
-              </div>
-            </a>
-            """,
-            height=72,
-        )
-
-    a3.metric("Rejected", f"{rej_exc:,.2f}")
-    a4.metric("Accepted", f"{acc_exc:,.2f}")
+    render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, BALANCE_ATTEMPT_URL)
     st.markdown("---")
 
-    # ---- 2) Excellent Pharmacy ----
+    # 2) Excellent Pharmacy
     st.markdown('<h3 class="center-title">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
-    b0, b1, b2, b3, b4 = st.columns(5)
-    b0.metric("Net Amount", f"{net_ph:,.2f}")
-    b1.metric("Paid", f"{paid_ph:,.2f}")
-
-    with b2:
-        components.html(
-            f"""
-            <a href="{BALANCE_ATTEMPT_URL}" target="_blank" style="text-decoration:none;">
-              <div style="padding: 2px 2px;">
-                <div style="font-size:14px;color:#6b7280;margin-bottom:2px;">Balance</div>
-                <div style="font-size:28px;font-weight:800;color:#111827;line-height:1.05;">
-                  {bal_ph:,.2f}
-                </div>
-              </div>
-            </a>
-            """,
-            height=72,
-        )
-
-    b3.metric("Rejected", f"{rej_ph:,.2f}")
-    b4.metric("Accepted", f"{acc_ph:,.2f}")
+    render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, BALANCE_ATTEMPT_URL)
     st.markdown("---")
 
-    # ---- 3) Easy Health ----
+    # 3) Easy Health
     st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
-    c0, c1_, c2, c3, c4 = st.columns(5)
-    c0.metric("Net Amount", f"{net_eh:,.2f}")
-    c1_.metric("Paid", f"{paid_eh:,.2f}")
-
-    with c2:
-        components.html(
-            f"""
-            <a href="{BALANCE_ATTEMPT_URL}" target="_blank" style="text-decoration:none;">
-              <div style="padding: 2px 2px;">
-                <div style="font-size:14px;color:#6b7280;margin-bottom:2px;">Balance</div>
-                <div style="font-size:28px;font-weight:800;color:#111827;line-height:1.05;">
-                  {bal_eh:,.2f}
-                </div>
-              </div>
-            </a>
-            """,
-            height=72,
-        )
-
-    c3.metric("Rejected", f"{rej_eh:,.2f}")
-    c4.metric("Accepted", f"{acc_eh:,.2f}")
+    render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, BALANCE_ATTEMPT_URL)
 
     st.stop()
 
-# ====================== MAIN aging dashboard (KPIs moved to top) ======================
-# ✅ NEEDFUL: show Select Year ONLY if not coming from landing
+# ====================== MAIN aging dashboard ======================
+# Show Select Year ONLY if not coming from landing
 if st.session_state.get("rcm_year") is None:
     st.subheader("Select Year")
-
     ycols = st.columns(len(YEARS))
     for i, y in enumerate(YEARS):
         with ycols[i]:
@@ -634,7 +659,6 @@ if st.session_state.get("rcm_year") is None:
 
 # Pick a year automatically if none
 if st.session_state.get("year") is None:
-    # ✅ NEEDFUL: prefer landing-selected year if present
     if st.session_state.get("rcm_year") in YEARS:
         st.session_state.year = st.session_state.get("rcm_year")
         st.rerun()
@@ -666,7 +690,7 @@ if (st.query_params.get("center") != st.session_state.get("center_key")) or \
 mt = mtime_token(out_path)
 built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
 
-# ✅ PREMIUM: center header as premium card + dark blue title
+# Premium center header card (soothing)
 st.markdown(
     f"""
     <div style="
@@ -680,7 +704,7 @@ st.markdown(
         <div style="font-size:26px;font-weight:900;color:#0B2D5C;">
             {cfg["name"]}
         </div>
-        <div style="font-size:14px;color:#334155;margin-top:2px;font-weight:700;">
+        <div style="font-size:14px;color:#334155;margin-top:2px;font-weight:750;">
             Year: {st.session_state.get("year")}
         </div>
     </div>
@@ -790,30 +814,9 @@ try:
     rej = ksum(totals_no_gt, "Rejected", "Rejection")
     acc = ksum(totals_no_gt, "Accepted")
 
-    # ===== TOP KPIs =====
+    # ===== TOP KPIs (PREMIUM CARDS) =====
     st.markdown(f"### Key metrics — {st.session_state.get('year')}")
-    k0, k1, k2, k3, k4 = st.columns(5)
-    k0.metric("Net Amount", f"{net:,.2f}")
-    k1.metric("Paid", f"{paid:,.2f}")
-
-    # Balance clickable (unchanged center page behavior)
-    with k2:
-        components.html(
-            f"""
-            <a href="{BALANCE_ATTEMPT_URL}" target="_blank" style="text-decoration:none;">
-              <div style="padding: 6px 2px;">
-                <div style="font-size:14px;color:#6b7280;margin-bottom:2px;">Balance</div>
-                <div style="font-size:44px;font-weight:800;color:#111827;line-height:1.05;">
-                  {bal:,.2f}
-                </div>
-              </div>
-            </a>
-            """,
-            height=92,
-        )
-
-    k3.metric("Rejected", f"{rej:,.2f}")
-    k4.metric("Accepted", f"{acc:,.2f}")
+    render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL)
     st.markdown("---")
 
     # ===== Tabs (optional InsGroup / Plan) =====
