@@ -14,8 +14,9 @@
 #        - Revenue Management Cycle 2025
 #      When clicked, show SAME dashboard but default to that year.
 #   4) Add "⬅ Change Year" button so management can go back anytime.
-#   5) Center header (center page) should be colored per center:
-#        - Clinic = Blue, Pharmacy = Purple, EasyHealth = Green
+#   5) Make ALL center header color SAME (GREEN only).
+#   6) Remove year selector buttons on center page when landing year is chosen (no need to show 2025 in 2024 flow).
+#   7) Make buttons feel BLUE when clicked/active (CSS), including Change Year button.
 # Nothing else is changed.
 
 import sys
@@ -70,6 +71,43 @@ st.set_option("client.showErrorDetails", False)
 # NEW: enforce view login first
 require_view_access()
 
+# ✅ NEEDFUL: Button styling (click/active blue), including Change Year button
+st.markdown(
+    """
+<style>
+/* Default buttons */
+.stButton > button {
+  background: white !important;
+  color: #111827 !important;
+  border: 1px solid #d1d5db !important;
+  border-radius: 12px !important;
+  font-weight: 700 !important;
+  padding: 0.65rem 1rem !important;
+}
+
+/* Hover */
+.stButton > button:hover {
+  border-color: #2563eb !important;
+  color: #2563eb !important;
+}
+
+/* Active press (click) */
+.stButton > button:active {
+  background: #2563eb !important;
+  color: white !important;
+  border-color: #1d4ed8 !important;
+}
+
+/* Focus (after click) */
+.stButton > button:focus {
+  outline: none !important;
+  box-shadow: 0 0 0 3px rgba(37,99,235,0.25) !important;
+  border-color: #2563eb !important;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 # ====================== NEW: YEAR LANDING PAGE (NEEDFUL) ======================
 def reset_year_selection():
@@ -173,11 +211,11 @@ CENTERS = {
     },
 }
 
-# ✅ NEW: colors per center (used in center header)
+# ✅ NEEDFUL: SAME GREEN for ALL centers (no blue/purple)
 CENTER_COLORS = {
-    "excellent": ("#2563eb", "#1e40af"),   # Blue
-    "pharmacy": ("#7c3aed", "#5b21b6"),    # Purple
-    "easyhealth": ("#059669", "#047857"),  # Green
+    "excellent": ("#059669", "#047857"),
+    "pharmacy": ("#059669", "#047857"),
+    "easyhealth": ("#059669", "#047857"),
 }
 
 
@@ -490,7 +528,7 @@ if ck not in CENTERS:
     y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth")
 
     # ---- 1) Excellent Medical Center ----
-    st.markdown('<h3 style="color:#2563eb;margin-bottom:0;">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
+    st.markdown('<h3 style="color:#059669;margin-bottom:0;">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
     a0, a1, a2, a3, a4 = st.columns(5)
     a0.metric("Net Amount", f"{net_exc:,.2f}")
@@ -517,7 +555,7 @@ if ck not in CENTERS:
     st.markdown("---")
 
     # ---- 2) Excellent Pharmacy ----
-    st.markdown('<h3 style="color:#7c3aed;margin-bottom:0;">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
+    st.markdown('<h3 style="color:#059669;margin-bottom:0;">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
     b0, b1, b2, b3, b4 = st.columns(5)
     b0.metric("Net Amount", f"{net_ph:,.2f}")
@@ -570,27 +608,29 @@ if ck not in CENTERS:
     st.stop()
 
 # ====================== MAIN aging dashboard (KPIs moved to top) ======================
-st.subheader("Select Year")
+# ✅ NEEDFUL: show Select Year ONLY if not coming from landing
+if st.session_state.get("rcm_year") is None:
+    st.subheader("Select Year")
 
-ycols = st.columns(len(YEARS))
-for i, y in enumerate(YEARS):
-    with ycols[i]:
-        if st.session_state.get("year") == y:
-            st.markdown(
-                f"""
-                <div style="
-                  background-color:#2196F3;color:white;text-align:center;
-                  padding:0.8em;border-radius:6px;font-weight:700;font-size:1.1em;
-                  border:2px solid #1976D2;">
-                  {y}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        else:
-            if st.button(str(y), use_container_width=True, key=f"year_btn_{y}"):
-                st.session_state.year = y
-                st.rerun()
+    ycols = st.columns(len(YEARS))
+    for i, y in enumerate(YEARS):
+        with ycols[i]:
+            if st.session_state.get("year") == y:
+                st.markdown(
+                    f"""
+                    <div style="
+                      background-color:#2196F3;color:white;text-align:center;
+                      padding:0.8em;border-radius:6px;font-weight:700;font-size:1.1em;
+                      border:2px solid #1976D2;">
+                      {y}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                if st.button(str(y), use_container_width=True, key=f"year_btn_{y}"):
+                    st.session_state.year = y
+                    st.rerun()
 
 # Pick a year automatically if none
 if st.session_state.get("year") is None:
@@ -626,10 +666,9 @@ if (st.query_params.get("center") != st.session_state.get("center_key")) or \
 mt = mtime_token(out_path)
 built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
 
-
-# ✅ NEEDFUL: colored center header per center (does NOT remove anything)
+# ✅ NEEDFUL: colored center header per center (NOW SAME GREEN for all)
 c_key = st.session_state.get("center_key")
-cA, cB = CENTER_COLORS.get(c_key, ("#374151", "#111827"))
+cA, cB = CENTER_COLORS.get(c_key, ("#059669", "#047857"))
 
 st.markdown(
     f"""
