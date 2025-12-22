@@ -14,9 +14,10 @@
 #        - Revenue Management Cycle 2025
 #      When clicked, show SAME dashboard but default to that year.
 #   4) Add "⬅ Change Year" button so management can go back anytime.
-# ✅ NEW NEEDFUL (TODAY):
-#   5) Make year buttons + center buttons BIGGER and BLACK/WHITE (with black on click / white text)
-#   6) Make center NAME headings DARK BLUE (instead of green)
+# ✅ PREMIUM UI (NEEDFUL):
+#   5) Buttons: Premium light-blue style (bigger), dark-blue active/selected
+#   6) Center names: Dark blue (instead of green)
+#   7) Center header: Premium light-blue card instead of green gradient
 # Nothing else is changed.
 
 import sys
@@ -71,58 +72,62 @@ st.set_option("client.showErrorDetails", False)
 # NEW: enforce view login first
 require_view_access()
 
-# ✅ NEEDFUL (UPDATED): Bigger BLACK/WHITE buttons + active black bg / white text
+# =========================================================
+# ✅ PREMIUM UI (ONLY STYLES)
+# =========================================================
 st.markdown(
     """
 <style>
-/* =========================================
-   GLOBAL BUTTON STYLE (BIGGER + BLACK/WHITE)
-   ========================================= */
-div.stButton > button {
+/* ===== Premium Buttons (Light-blue) ===== */
+div.stButton > button{
   width: 100% !important;
   min-height: 58px !important;
   padding: 14px 22px !important;
   font-size: 18px !important;
   font-weight: 800 !important;
 
-  background: #ffffff !important;
-  color: #000000 !important;
-  border: 2px solid #000000 !important;
+  background: #EEF6FF !important;              /* premium light blue */
+  color: #0B2D5C !important;                   /* navy text */
+  border: 1.8px solid #B6D4FF !important;      /* soft border */
   border-radius: 14px !important;
-  box-shadow: none !important;
+
+  box-shadow: 0 3px 10px rgba(11, 45, 92, 0.10) !important;
 }
 
 /* Hover */
-div.stButton > button:hover {
-  background: #000000 !important;
-  color: #ffffff !important;
-  border-color: #000000 !important;
+div.stButton > button:hover{
+  background: #DCEBFF !important;
+  border-color: #6FA4FF !important;
+  box-shadow: 0 6px 16px rgba(11, 45, 92, 0.14) !important;
 }
 
-/* Active press (click) */
-div.stButton > button:active {
-  background: #000000 !important;
-  color: #ffffff !important;
-  border-color: #000000 !important;
-}
-
-/* Focus (after click) */
+/* Active/Selected feel */
+div.stButton > button:active,
 div.stButton > button:focus,
-div.stButton > button:focus-visible {
+div.stButton > button:focus-visible{
+  background: #0B2D5C !important;              /* navy active */
+  color: #ffffff !important;
+  border-color: #0B2D5C !important;
   outline: none !important;
   box-shadow: none !important;
-  border-color: #000000 !important;
-  background: #000000 !important;
-  color: #ffffff !important;
 }
 
-/* =========================================
-   Center name dark blue helper class
-   ========================================= */
-.center-title {
-  color: #0B2D5C !important;   /* dark blue */
+/* Center titles */
+.center-title{
+  color: #0B2D5C !important;
   font-weight: 900 !important;
   margin-bottom: 0 !important;
+}
+
+/* Premium section labels */
+.premium-subtle{
+  color: #334155 !important;
+  font-weight: 700 !important;
+}
+
+/* Optional: slightly nicer metric values */
+div[data-testid="stMetricValue"]{
+  font-weight: 800 !important;
 }
 </style>
 """,
@@ -490,36 +495,31 @@ st.caption(
 # ====================== Home cards ======================
 ck = st.session_state.get("center_key")
 if ck not in CENTERS:
-    # ✅ Choose a center moved to TOP (above KPIs)
     st.subheader("Choose a center")
-
-    # ✅ NEEDFUL: remove old card CSS so global black/white applies
-    # (No extra CSS here — global style already handles button look)
 
     # ✅ Order: Excellent, Pharmacy, EasyHealth
     c1, c2, c3 = st.columns(3)
 
     with c1:
-        if st.button(CENTERS["excellent"]["name"], use_container_width=True, key="home_exc"):
+        if st.container(border=True).button(CENTERS["excellent"]["name"], use_container_width=True, key="home_exc"):
             st.session_state.center_key = "excellent"
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
 
     with c2:
-        if st.button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
+        if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
             st.session_state.center_key = "pharmacy"
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
 
     with c3:
-        if st.button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
+        if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
             st.session_state.center_key = "easyhealth"
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
 
     st.markdown("---")
 
-    # ✅ KPIs on home page (3 separate lines)
     st.subheader("Key metrics (All centers)")
 
     y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent")
@@ -533,14 +533,13 @@ if ck not in CENTERS:
     a0.metric("Net Amount", f"{net_exc:,.2f}")
     a1.metric("Paid", f"{paid_exc:,.2f}")
 
-    # Balance clickable on HOME
     with a2:
         components.html(
             f"""
             <a href="{BALANCE_ATTEMPT_URL}" target="_blank" style="text-decoration:none;">
               <div style="padding: 2px 2px;">
                 <div style="font-size:14px;color:#6b7280;margin-bottom:2px;">Balance</div>
-                <div style="font-size:28px;font-weight:700;color:#111827;line-height:1.05;">
+                <div style="font-size:28px;font-weight:800;color:#111827;line-height:1.05;">
                   {bal_exc:,.2f}
                 </div>
               </div>
@@ -566,7 +565,7 @@ if ck not in CENTERS:
             <a href="{BALANCE_ATTEMPT_URL}" target="_blank" style="text-decoration:none;">
               <div style="padding: 2px 2px;">
                 <div style="font-size:14px;color:#6b7280;margin-bottom:2px;">Balance</div>
-                <div style="font-size:28px;font-weight:700;color:#111827;line-height:1.05;">
+                <div style="font-size:28px;font-weight:800;color:#111827;line-height:1.05;">
                   {bal_ph:,.2f}
                 </div>
               </div>
@@ -592,7 +591,7 @@ if ck not in CENTERS:
             <a href="{BALANCE_ATTEMPT_URL}" target="_blank" style="text-decoration:none;">
               <div style="padding: 2px 2px;">
                 <div style="font-size:14px;color:#6b7280;margin-bottom:2px;">Balance</div>
-                <div style="font-size:28px;font-weight:700;color:#111827;line-height:1.05;">
+                <div style="font-size:28px;font-weight:800;color:#111827;line-height:1.05;">
                   {bal_eh:,.2f}
                 </div>
               </div>
@@ -607,8 +606,7 @@ if ck not in CENTERS:
     st.stop()
 
 # ====================== MAIN aging dashboard (KPIs moved to top) ======================
-# ✅ Keep this section as-is (it will still work). If you want, we can remove the old blue block later.
-# Show Select Year ONLY if not coming from landing
+# ✅ NEEDFUL: show Select Year ONLY if not coming from landing
 if st.session_state.get("rcm_year") is None:
     st.subheader("Select Year")
 
@@ -619,9 +617,11 @@ if st.session_state.get("rcm_year") is None:
                 st.markdown(
                     f"""
                     <div style="
-                      background-color:#000000;color:white;text-align:center;
-                      padding:0.8em;border-radius:12px;font-weight:800;font-size:1.1em;
-                      border:2px solid #000000;">
+                      background-color:#0B2D5C;color:white;text-align:center;
+                      padding:0.85em;border-radius:14px;font-weight:900;font-size:1.1em;
+                      border:2px solid #0B2D5C;
+                      box-shadow: 0 6px 16px rgba(11,45,92,0.18);
+                    ">
                       {y}
                     </div>
                     """,
@@ -634,7 +634,7 @@ if st.session_state.get("rcm_year") is None:
 
 # Pick a year automatically if none
 if st.session_state.get("year") is None:
-    # prefer landing-selected year if present
+    # ✅ NEEDFUL: prefer landing-selected year if present
     if st.session_state.get("rcm_year") in YEARS:
         st.session_state.year = st.session_state.get("rcm_year")
         st.rerun()
@@ -666,9 +666,29 @@ if (st.query_params.get("center") != st.session_state.get("center_key")) or \
 mt = mtime_token(out_path)
 built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
 
-# ✅ NEEDFUL: center header name should be DARK BLUE (not green gradient)
-st.markdown(f"<h2 class='center-title' style='margin-top:0;'>{cfg['name']}</h2>", unsafe_allow_html=True)
-st.caption(f"Year: **{st.session_state.get('year')}** · Built: **{built}** · Source: {src_path} · Report: {out_path.name}")
+# ✅ PREMIUM: center header as premium card + dark blue title
+st.markdown(
+    f"""
+    <div style="
+        background: #F5FAFF;
+        border: 1.5px solid #CFE3FF;
+        padding: 14px 18px;
+        border-radius: 16px;
+        margin-bottom: 8px;
+        box-shadow: 0 6px 18px rgba(11, 45, 92, 0.08);
+    ">
+        <div style="font-size:26px;font-weight:900;color:#0B2D5C;">
+            {cfg["name"]}
+        </div>
+        <div style="font-size:14px;color:#334155;margin-top:2px;font-weight:700;">
+            Year: {st.session_state.get("year")}
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.caption(f"Built: **{built}** · Source: {src_path} · Report: {out_path.name}")
 
 if st.button("◀ Choose another center", key="btn_back_center"):
     st.session_state.center_key = None
@@ -783,7 +803,7 @@ try:
             <a href="{BALANCE_ATTEMPT_URL}" target="_blank" style="text-decoration:none;">
               <div style="padding: 6px 2px;">
                 <div style="font-size:14px;color:#6b7280;margin-bottom:2px;">Balance</div>
-                <div style="font-size:44px;font-weight:700;color:#111827;line-height:1.05;">
+                <div style="font-size:44px;font-weight:800;color:#111827;line-height:1.05;">
                   {bal:,.2f}
                 </div>
               </div>
@@ -964,4 +984,3 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
