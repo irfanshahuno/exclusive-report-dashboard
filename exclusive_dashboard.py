@@ -14,6 +14,8 @@
 #   • Balance card clickable and same bold with slight different color
 # ✅ FIX:
 #   • KPI numbers auto-fit inside KPI box (no overflow)
+# ✅ NEW NEEDFUL:
+#   • EasyHealth should NOT appear in 2024 (exists only in 2025)
 # Nothing else is changed.
 
 import sys
@@ -21,6 +23,7 @@ import subprocess
 import re
 from pathlib import Path
 from datetime import datetime, date
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
@@ -330,6 +333,14 @@ CENTERS = {
 }
 
 
+# ====================== NEW: Availability rule ======================
+def is_center_available(center_key: str, year: Optional[int]) -> bool:
+    # EasyHealth exists only in 2025
+    if center_key == "easyhealth" and year == 2024:
+        return False
+    return True
+
+
 # ====================== Small helpers ======================
 def mtime_token(p: Path) -> float:
     try:
@@ -563,6 +574,17 @@ if st.session_state.get("year") is None and qs.get("year"):
 if st.session_state.get("year") is None and st.session_state.get("rcm_year") in YEARS:
     st.session_state.year = st.session_state.get("rcm_year")
 
+# ✅ NEW: Block EasyHealth in 2024 (even via URL)
+if st.session_state.get("center_key") == "easyhealth" and st.session_state.get("year") == 2024:
+    st.session_state.center_key = None
+    try:
+        if "center" in st.query_params:
+            del st.query_params["center"]
+    except Exception:
+        pass
+    st.warning("Easy Health is available only in 2025. Please select another center.")
+    st.rerun()
+
 if (st.session_state.get("center_key") != st.session_state.get("last_center_key")) or \
    (st.session_state.get("year") != st.session_state.get("last_year")):
     load_core_sheets.clear()
@@ -595,18 +617,19 @@ if ck not in CENTERS:
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
 
-    with c3:
-        if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
-            st.session_state.center_key = "easyhealth"
-            st.session_state.year = st.session_state.get("rcm_year")
-            st.rerun()
+    # ✅ Show EasyHealth button ONLY if selected year is NOT 2024
+    if st.session_state.get("rcm_year") != 2024:
+        with c3:
+            if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
+                st.session_state.center_key = "easyhealth"
+                st.session_state.year = st.session_state.get("rcm_year")
+                st.rerun()
 
     st.markdown("---")
     st.subheader("Key metrics (All centers)")
 
     y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent")
     y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy")
-    y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth")
 
     st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
@@ -616,11 +639,14 @@ if ck not in CENTERS:
     st.markdown('<h3 class="center-title">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
     render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, BALANCE_ATTEMPT_URL)
-    st.markdown("---")
 
-    st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
-    st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
-    render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, BALANCE_ATTEMPT_URL)
+    # ✅ Show EasyHealth KPIs ONLY if selected year is NOT 2024
+    if st.session_state.get("rcm_year") != 2024:
+        st.markdown("---")
+        y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth")
+        st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
+        st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
+        render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, BALANCE_ATTEMPT_URL)
 
     st.stop()
 
@@ -662,6 +688,19 @@ if st.session_state.get("year") is None:
             found = y
             break
     st.session_state.year = found or YEARS[-1]
+    st.rerun()
+
+# ✅ Safety: if someone tries to open EasyHealth for 2024 here too
+if st.session_state.get("center_key") == "easyhealth" and st.session_state.get("year") == 2024:
+    st.session_state.center_key = None
+    try:
+        if "center" in st.query_params:
+            del st.query_params["center"]
+        if "year" in st.query_params:
+            del st.query_params["year"]
+    except Exception:
+        pass
+    st.warning("Easy Health is available only in 2025. Please select another center.")
     st.rerun()
 
 cfg = CENTERS[st.session_state.get("center_key")]
@@ -730,7 +769,11 @@ if st.session_state.get("is_admin"):
             except Exception as e:
                 st.error(str(e))
 
-    if st.button("↻ Rebuild report", use_container_width=True, key=f"rebuild_{st.session_state.get('center_key')}_{st.session_state.get('year')}"):
+    if st.button(
+        "↻ Rebuild report",
+        use_container_width=True,
+        key=f"rebuild_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+    ):
         try:
             if not gen_path.exists():
                 st.error(f"Generator not found: {gen_path}")
