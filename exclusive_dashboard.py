@@ -1,11 +1,9 @@
-# exclusive_dashboard.py — Main dashboard KPIs at TOP (Doc Performance unchanged)
-# NOTE: This is your original dashboard with ONLY the minimal additions:
-#   • Optional Balance_Aging_InsGroup tab (already supported)
-#   • Optional Balance_Aging_Plan tab (new) with Insurance filter
-#   • S.No hidden and display index starts at 1
-#   • Grand Total row (any of 'Grand Total' / 'Total') is shown LAST in tables
-#   • NEW: View password gate (Emc@2026)
-# Nothing else is changed.
+# exclusive_dashboard.py — Minimal changes ONLY (as requested)
+# Changes done:
+# 1) Dashboard name changed to "Excellent Medical Group"
+# 2) Home buttons order: Excellent Medical Center, Excellent Pharmacy, Easy Health (Doc performance removed)
+# 3) Main (home) page shows KPIs for EACH center (Net/Paid/Balance/Rejected/Accepted) without selecting a center
+# Everything else remains the same.
 
 import sys
 import subprocess
@@ -31,7 +29,7 @@ def require_view_access() -> None:
     if st.session_state.get("is_view_auth", False):
         return
 
-    st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layout="wide")
+    st.set_page_config(page_title="Excellent Medical Group", layout="wide")
     st.set_option("client.showErrorDetails", False)
 
     st.title("🔒 Dashboard Access")
@@ -53,14 +51,11 @@ def require_view_access() -> None:
 
 
 # ====================== Page & base folders ======================
-st.set_page_config(page_title="Exclusive Report with Aging — Dashboard", layout="wide")
+st.set_page_config(page_title="Excellent Medical Group", layout="wide")
 st.set_option("client.showErrorDetails", False)
 
 # NEW: enforce view login first
 require_view_access()
-
-# External Doc Performance app URL (kept as-is; doc-perf code/behavior unchanged)
-DOC_PERF_URL = "https://doctor-performance-app-tjwqgmptk8fbo57t4qrfqr.streamlit.app/"
 
 # ✅ NEW: Balance Attempt Aging app URL (opens on Balance click)
 BALANCE_ATTEMPT_URL = "https://balance-attempt-aging-dashboard-eigtoins4ai9hd9r7jsmen.streamlit.app/"
@@ -71,7 +66,6 @@ DATA_DIR = BASE / "data"
 (DATA_DIR / "excellent").mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "excellent_pharmacy").mkdir(parents=True, exist_ok=True)
 
-DOC_PERF_KEY = "__docperf__"
 YEARS = [2024, 2025]
 
 # Canonical sheet names for main Aging report
@@ -273,28 +267,62 @@ def is_admin_mode() -> bool:
         return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
 
 
-# ====================== Doc Performance helpers (UNCHANGED) ======================
-def month_options():
-    today = date.today()
-    cur_ym = today.year * 100 + today.month
-    last_ym = (today.year - 1) * 100 + 12 if today.month == 1 else today.year * 100 + (today.month - 1)
-    return [("Current month", str(cur_ym)), ("Last month", str(last_ym))]
+# ====================== (NEW) Home KPIs for each center ======================
+def pick_latest_year_with_report(center_cfg: dict) -> int | None:
+    for y in reversed(YEARS):
+        p = center_cfg["folder_root"] / str(y) / center_cfg["out_name"]
+        if p.exists():
+            return y
+    return None
 
 
-def yyyymm_to_label(yyyymm: str) -> str:
-    y = int(yyyymm[:4])
-    m = int(yyyymm[4:])
-    return f"{date(y, m, 1):%b %Y}"
+def load_center_kpis(center_key: str):
+    """
+    Returns: (year, net, paid, bal, rej, acc) or (None, 0,0,0,0,0) if not found.
+    Minimal: reuses existing sheet logic.
+    """
+    cfg0 = CENTERS[center_key]
+    y = pick_latest_year_with_report(cfg0)
+    if y is None:
+        return None, 0.0, 0.0, 0.0, 0.0, 0.0
+
+    outp = cfg0["folder_root"] / str(y) / cfg0["out_name"]
+    tok = mtime_token(outp)
+    if tok == 0.0:
+        return None, 0.0, 0.0, 0.0, 0.0, 0.0
+
+    totals, _, _ = load_core_sheets(str(outp), tok)
+    totals = totals.copy()
+
+    if "Insurance" not in totals.columns and len(totals.columns) > 0:
+        totals = totals.rename(columns={totals.columns[0]: "Insurance"})
+
+    for a in ["NetAmount", "Net amount", "Net"]:
+        if a in totals.columns and "Net Amount" not in totals.columns:
+            totals = totals.rename(columns={a: "Net Amount"})
+
+    totals = trim_empty_rows(totals)
+    totals = drop_empty_insurance(totals, "Insurance")
+    totals = ensure_grand_total(totals, "Insurance")
+
+    totals_no_gt = drop_gt(totals)
+
+    net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
+    paid = ksum(totals_no_gt, "Paid")
+    bal = ksum(totals_no_gt, "Balance")
+    rej = ksum(totals_no_gt, "Rejected", "Rejection")
+    acc = ksum(totals_no_gt, "Accepted")
+    return y, net, paid, bal, rej, acc
 
 
 # ====================== Header & routing ======================
-st.title("📊 Exclusive Report with Aging — Dashboard")
+st.title("📊 Excellent Medical Group")
 st.session_state.is_admin = is_admin_mode()
 
 qs = st.query_params
 if st.session_state.get("center_key") is None and qs.get("center"):
     ck_qs = qs.get("center")
-    if ck_qs in CENTERS or ck_qs == DOC_PERF_KEY:
+    if ck_qs in CENTERS:
         st.session_state.center_key = ck_qs
 
 if st.session_state.get("year") is None and qs.get("year"):
@@ -316,9 +344,49 @@ st.caption(
     f"Year: **{st.session_state.get('year') or 'none'}**"
 )
 
-# ====================== Home cards (4 buttons) ======================
+# ====================== Home cards (3 buttons + KPIs) ======================
 ck = st.session_state.get("center_key")
-if ck not in CENTERS and ck != DOC_PERF_KEY:
+if ck not in CENTERS:
+    st.subheader("Key metrics (All centers)")
+
+    # Load KPIs (safe: show zeros if report missing)
+    y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent")
+    y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy")
+    y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth")
+
+    r1, r2, r3 = st.columns(3)
+
+    with r1:
+        st.markdown("### Excellent Medical Center (MF4777)")
+        st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
+        a0, a1, a2, a3, a4 = st.columns(5)
+        a0.metric("Net", f"{net_exc:,.2f}")
+        a1.metric("Paid", f"{paid_exc:,.2f}")
+        a2.metric("Balance", f"{bal_exc:,.2f}")
+        a3.metric("Rejected", f"{rej_exc:,.2f}")
+        a4.metric("Accepted", f"{acc_exc:,.2f}")
+
+    with r2:
+        st.markdown("### Excellent Pharmacy (PF3205)")
+        st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
+        b0, b1, b2, b3, b4 = st.columns(5)
+        b0.metric("Net", f"{net_ph:,.2f}")
+        b1.metric("Paid", f"{paid_ph:,.2f}")
+        b2.metric("Balance", f"{bal_ph:,.2f}")
+        b3.metric("Rejected", f"{rej_ph:,.2f}")
+        b4.metric("Accepted", f"{acc_ph:,.2f}")
+
+    with r3:
+        st.markdown("### Easy Health Medical Clinic (MF8031)")
+        st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
+        c0, c1, c2, c3, c4 = st.columns(5)
+        c0.metric("Net", f"{net_eh:,.2f}")
+        c1.metric("Paid", f"{paid_eh:,.2f}")
+        c2.metric("Balance", f"{bal_eh:,.2f}")
+        c3.metric("Rejected", f"{rej_eh:,.2f}")
+        c4.metric("Accepted", f"{acc_eh:,.2f}")
+
+    st.markdown("---")
     st.subheader("Choose a center")
 
     btn_css = """
@@ -338,42 +406,27 @@ if ck not in CENTERS and ck != DOC_PERF_KEY:
     """
     st.markdown(btn_css, unsafe_allow_html=True)
 
-    c1, c2, c3, c4 = st.columns(4)
+    # ✅ Order required: Excellent Medical Center, Excellent Pharmacy, Easy Health
+    c1, c2, c3 = st.columns(3)
 
     with c1:
-        if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
-            st.session_state.center_key = "easyhealth"
-            st.session_state.year = None
-            st.rerun()
-
-    with c2:
         if st.container(border=True).button(CENTERS["excellent"]["name"], use_container_width=True, key="home_exc"):
             st.session_state.center_key = "excellent"
             st.session_state.year = None
             st.rerun()
 
-    with c3:
+    with c2:
         if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
             st.session_state.center_key = "pharmacy"
             st.session_state.year = None
             st.rerun()
 
-    with c4:
-        components.html(
-            f"""
-            <a href="{DOC_PERF_URL}" target="_blank" style="text-decoration:none;">
-              <div style="
-                border:2px solid #e5e7eb;border-radius:14px;padding:18px 14px;
-                font-weight:600;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.05);
-                color:inherit;"
-                onmouseover="this.style.borderColor='#93c5fd'; this.style.boxShadow='0 6px 16px rgba(37,99,235,0.15)';"
-                onmouseout="this.style.borderColor='#e5e7eb'; this.style.boxShadow='0 2px 6px rgba(0,0,0,.05)';">
-                Doc monthly performance
-              </div>
-            </a>
-            """,
-            height=90,
-        )
+    with c3:
+        if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
+            st.session_state.center_key = "easyhealth"
+            st.session_state.year = None
+            st.rerun()
+
     st.stop()
 
 # ====================== MAIN aging dashboard (KPIs moved to top) ======================
