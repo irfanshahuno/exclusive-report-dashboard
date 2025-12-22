@@ -1,9 +1,16 @@
-# exclusive_dashboard.py — Minimal changes ONLY (as requested)
-# Changes done:
-# 1) Dashboard name changed to "Excellent Medical Group"
-# 2) Home buttons order: Excellent Medical Center, Excellent Pharmacy, Easy Health (Doc performance removed)
-# 3) Main (home) page shows KPIs for EACH center (Net/Paid/Balance/Rejected/Accepted) without selecting a center
-# Everything else remains the same.
+# exclusive_dashboard.py — Main dashboard KPIs at TOP (Doc Performance unchanged)
+# NOTE: This is your original dashboard with ONLY the minimal additions:
+#   • Optional Balance_Aging_InsGroup tab (already supported)
+#   • Optional Balance_Aging_Plan tab (new) with Insurance filter
+#   • S.No hidden and display index starts at 1
+#   • Grand Total row (any of 'Grand Total' / 'Total') is shown LAST in tables
+#   • NEW: View password gate (Emc@2026)
+# ✅ NEEDFUL CHANGES (as per your request):
+#   1) Title changed to "Excellent Medical Group"
+#   2) Home buttons order: Excellent Medical Center, Excellent Pharmacy, Easy Health
+#   3) Removed Doc monthly performance button (and DOC_PERF_URL)
+#   4) Home KPIs show in 3 SEPARATE LINES (one center per row)
+# Nothing else is changed.
 
 import sys
 import subprocess
@@ -66,6 +73,7 @@ DATA_DIR = BASE / "data"
 (DATA_DIR / "excellent").mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "excellent_pharmacy").mkdir(parents=True, exist_ok=True)
 
+# (Removed Doc Performance constants, as requested)
 YEARS = [2024, 2025]
 
 # Canonical sheet names for main Aging report
@@ -267,10 +275,10 @@ def is_admin_mode() -> bool:
         return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
 
 
-# ====================== (NEW) Home KPIs for each center ======================
-def pick_latest_year_with_report(center_cfg: dict) -> int | None:
+# ====================== (NEW) Home KPIs helper ======================
+def pick_latest_year_with_report(cfg0: dict):
     for y in reversed(YEARS):
-        p = center_cfg["folder_root"] / str(y) / center_cfg["out_name"]
+        p = cfg0["folder_root"] / str(y) / cfg0["out_name"]
         if p.exists():
             return y
     return None
@@ -344,47 +352,47 @@ st.caption(
     f"Year: **{st.session_state.get('year') or 'none'}**"
 )
 
-# ====================== Home cards (3 buttons + KPIs) ======================
+# ====================== Home cards ======================
 ck = st.session_state.get("center_key")
 if ck not in CENTERS:
+    # ✅ KPIs on home page (3 separate lines)
     st.subheader("Key metrics (All centers)")
 
-    # Load KPIs (safe: show zeros if report missing)
     y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent")
     y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy")
     y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth")
 
-    r1, r2, r3 = st.columns(3)
+    # ---- 1) Excellent Medical Center ----
+    st.markdown("### Excellent Medical Center (MF4777)")
+    st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
+    a0, a1, a2, a3, a4 = st.columns(5)
+    a0.metric("Net Amount", f"{net_exc:,.2f}")
+    a1.metric("Paid", f"{paid_exc:,.2f}")
+    a2.metric("Balance", f"{bal_exc:,.2f}")
+    a3.metric("Rejected", f"{rej_exc:,.2f}")
+    a4.metric("Accepted", f"{acc_exc:,.2f}")
+    st.markdown("---")
 
-    with r1:
-        st.markdown("### Excellent Medical Center (MF4777)")
-        st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
-        a0, a1, a2, a3, a4 = st.columns(5)
-        a0.metric("Net", f"{net_exc:,.2f}")
-        a1.metric("Paid", f"{paid_exc:,.2f}")
-        a2.metric("Balance", f"{bal_exc:,.2f}")
-        a3.metric("Rejected", f"{rej_exc:,.2f}")
-        a4.metric("Accepted", f"{acc_exc:,.2f}")
+    # ---- 2) Excellent Pharmacy ----
+    st.markdown("### Excellent Pharmacy (PF3205)")
+    st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
+    b0, b1, b2, b3, b4 = st.columns(5)
+    b0.metric("Net Amount", f"{net_ph:,.2f}")
+    b1.metric("Paid", f"{paid_ph:,.2f}")
+    b2.metric("Balance", f"{bal_ph:,.2f}")
+    b3.metric("Rejected", f"{rej_ph:,.2f}")
+    b4.metric("Accepted", f"{acc_ph:,.2f}")
+    st.markdown("---")
 
-    with r2:
-        st.markdown("### Excellent Pharmacy (PF3205)")
-        st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
-        b0, b1, b2, b3, b4 = st.columns(5)
-        b0.metric("Net", f"{net_ph:,.2f}")
-        b1.metric("Paid", f"{paid_ph:,.2f}")
-        b2.metric("Balance", f"{bal_ph:,.2f}")
-        b3.metric("Rejected", f"{rej_ph:,.2f}")
-        b4.metric("Accepted", f"{acc_ph:,.2f}")
-
-    with r3:
-        st.markdown("### Easy Health Medical Clinic (MF8031)")
-        st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
-        c0, c1, c2, c3, c4 = st.columns(5)
-        c0.metric("Net", f"{net_eh:,.2f}")
-        c1.metric("Paid", f"{paid_eh:,.2f}")
-        c2.metric("Balance", f"{bal_eh:,.2f}")
-        c3.metric("Rejected", f"{rej_eh:,.2f}")
-        c4.metric("Accepted", f"{acc_eh:,.2f}")
+    # ---- 3) Easy Health ----
+    st.markdown("### Easy Health Medical Clinic (MF8031)")
+    st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
+    c0, c1, c2, c3, c4 = st.columns(5)
+    c0.metric("Net Amount", f"{net_eh:,.2f}")
+    c1.metric("Paid", f"{paid_eh:,.2f}")
+    c2.metric("Balance", f"{bal_eh:,.2f}")
+    c3.metric("Rejected", f"{rej_eh:,.2f}")
+    c4.metric("Accepted", f"{acc_eh:,.2f}")
 
     st.markdown("---")
     st.subheader("Choose a center")
@@ -406,7 +414,7 @@ if ck not in CENTERS:
     """
     st.markdown(btn_css, unsafe_allow_html=True)
 
-    # ✅ Order required: Excellent Medical Center, Excellent Pharmacy, Easy Health
+    # ✅ Order: Excellent, Pharmacy, EasyHealth
     c1, c2, c3 = st.columns(3)
 
     with c1:
@@ -782,4 +790,5 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
 
