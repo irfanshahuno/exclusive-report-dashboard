@@ -5,14 +5,17 @@
 #   • S.No hidden and display index starts at 1
 #   • Grand Total row (any of 'Grand Total' / 'Total') is shown LAST in tables
 #   • NEW: View password gate (Emc@2026)
-# ✅ NEEDFUL CHANGES (as per your request):
+# ✅ NEEDFUL CHANGES (as per your request earlier):
 #   1) Home page: "Choose a center" moved to TOP (above KPIs)
 #   2) Home page: Balance value is clickable (opens BALANCE_ATTEMPT_URL) for each center
-# ✅ NEW NEEDFUL CHANGE (as per your request NOW):
-#   3) After password -> show landing page with ONLY 2 buttons:
+# ✅ NEEDFUL CHANGES (as per your latest request):
+#   3) After password: show landing page with ONLY 2 buttons:
 #        - Revenue Management Cycle 2024
 #        - Revenue Management Cycle 2025
-#      Then show the SAME dashboard, filtered to selected year by default.
+#      When clicked, show SAME dashboard but default to that year.
+#   4) Add "⬅ Change Year" button so management can go back anytime.
+#   5) Center header (center page) should be colored per center:
+#        - Clinic = Blue, Pharmacy = Purple, EasyHealth = Green
 # Nothing else is changed.
 
 import sys
@@ -67,16 +70,29 @@ st.set_option("client.showErrorDetails", False)
 # NEW: enforce view login first
 require_view_access()
 
-# ✅ NEW: Landing Year Selection (ONLY 2 buttons) ==================
-def require_year_selection() -> None:
+
+# ====================== NEW: YEAR LANDING PAGE (NEEDFUL) ======================
+def reset_year_selection():
+    # back to landing page
+    st.session_state.rcm_year = None
+    st.session_state.center_key = None
+    st.session_state.year = None
+    try:
+        if "center" in st.query_params:
+            del st.query_params["center"]
+        if "year" in st.query_params:
+            del st.query_params["year"]
+    except Exception:
+        pass
+    st.rerun()
+
+
+def require_year_selection():
     """
-    After view password, force a first window:
-    - Excellent Medical Group
-    - Revenue Cycle Management
-    - 2 buttons:
-        Revenue Management Cycle 2024
-        Revenue Management Cycle 2025
-    Once selected, proceed to the existing dashboard.
+    After view password:
+    Show ONLY two buttons:
+      - Revenue Management Cycle 2024
+      - Revenue Management Cycle 2025
     """
     if st.session_state.get("rcm_year") in (2024, 2025):
         return
@@ -88,15 +104,13 @@ def require_year_selection() -> None:
 
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("Revenue Management Cycle 2024", use_container_width=True, key="rcm_2024"):
+        if st.button("Revenue Management Cycle 2024", use_container_width=True, key="rcm_btn_2024"):
             st.session_state.rcm_year = 2024
-            # reset routing to home, but keep logic same
             st.session_state.center_key = None
             st.session_state.year = 2024
             st.rerun()
-
     with c2:
-        if st.button("Revenue Management Cycle 2025", use_container_width=True, key="rcm_2025"):
+        if st.button("Revenue Management Cycle 2025", use_container_width=True, key="rcm_btn_2025"):
             st.session_state.rcm_year = 2025
             st.session_state.center_key = None
             st.session_state.year = 2025
@@ -106,7 +120,8 @@ def require_year_selection() -> None:
 
 
 require_year_selection()
-# ================================================================
+# =================================================================
+
 
 # ✅ Balance Attempt Aging app URL (opens on Balance click)
 BALANCE_ATTEMPT_URL = "https://balance-attempt-aging-dashboard-eigtoins4ai9hd9r7jsmen.streamlit.app/"
@@ -156,6 +171,13 @@ CENTERS = {
         "out_name": "Pharmacy_Exclusive_Report_with_Aging.xlsx",
         "generator": BASE / "pharmacy_exclusive_report_with_aging.py",
     },
+}
+
+# ✅ NEW: colors per center (used in center header)
+CENTER_COLORS = {
+    "excellent": ("#2563eb", "#1e40af"),   # Blue
+    "pharmacy": ("#7c3aed", "#5b21b6"),    # Purple
+    "easyhealth": ("#059669", "#047857"),  # Green
 }
 
 
@@ -320,7 +342,7 @@ def is_admin_mode() -> bool:
 
 # ====================== (Home KPIs helper) ======================
 def pick_latest_year_with_report(cfg0: dict):
-    # ✅ NEEDFUL CHANGE: Prefer the year selected on landing page
+    # ✅ NEEDFUL: prefer landing-selected year first
     forced = st.session_state.get("rcm_year")
     if forced in YEARS:
         p_forced = cfg0["folder_root"] / str(forced) / cfg0["out_name"]
@@ -375,7 +397,14 @@ def load_center_kpis(center_key: str):
 
 
 # ====================== Header & routing ======================
-st.title("📊 Excellent Medical Group")
+# ✅ NEEDFUL: title + Change Year button
+t1, t2 = st.columns([6, 2])
+with t1:
+    st.title("📊 Excellent Medical Group")
+with t2:
+    if st.button("⬅ Change Year", use_container_width=True, key="btn_change_year"):
+        reset_year_selection()
+
 st.session_state.is_admin = is_admin_mode()
 
 qs = st.query_params
@@ -390,7 +419,7 @@ if st.session_state.get("year") is None and qs.get("year"):
     except Exception:
         pass
 
-# ✅ NEEDFUL CHANGE: If user selected landing year, default current year to it (only when None)
+# ✅ NEEDFUL: default year from landing
 if st.session_state.get("year") is None and st.session_state.get("rcm_year") in YEARS:
     st.session_state.year = st.session_state.get("rcm_year")
 
@@ -436,7 +465,6 @@ if ck not in CENTERS:
     with c1:
         if st.container(border=True).button(CENTERS["excellent"]["name"], use_container_width=True, key="home_exc"):
             st.session_state.center_key = "excellent"
-            # ✅ keep default year = landing year
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
 
@@ -462,7 +490,7 @@ if ck not in CENTERS:
     y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth")
 
     # ---- 1) Excellent Medical Center ----
-    st.markdown("### Excellent Medical Center (MF4777)")
+    st.markdown('<h3 style="color:#2563eb;margin-bottom:0;">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
     a0, a1, a2, a3, a4 = st.columns(5)
     a0.metric("Net Amount", f"{net_exc:,.2f}")
@@ -489,7 +517,7 @@ if ck not in CENTERS:
     st.markdown("---")
 
     # ---- 2) Excellent Pharmacy ----
-    st.markdown("### Excellent Pharmacy (PF3205)")
+    st.markdown('<h3 style="color:#7c3aed;margin-bottom:0;">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
     b0, b1, b2, b3, b4 = st.columns(5)
     b0.metric("Net Amount", f"{net_ph:,.2f}")
@@ -515,7 +543,7 @@ if ck not in CENTERS:
     st.markdown("---")
 
     # ---- 3) Easy Health ----
-    st.markdown("### Easy Health Medical Clinic (MF8031)")
+    st.markdown('<h3 style="color:#059669;margin-bottom:0;">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
     c0, c1_, c2, c3, c4 = st.columns(5)
     c0.metric("Net Amount", f"{net_eh:,.2f}")
@@ -566,7 +594,7 @@ for i, y in enumerate(YEARS):
 
 # Pick a year automatically if none
 if st.session_state.get("year") is None:
-    # ✅ prefer landing-selected year if present
+    # ✅ NEEDFUL: prefer landing-selected year if present
     if st.session_state.get("rcm_year") in YEARS:
         st.session_state.year = st.session_state.get("rcm_year")
         st.rerun()
@@ -597,6 +625,32 @@ if (st.query_params.get("center") != st.session_state.get("center_key")) or \
 
 mt = mtime_token(out_path)
 built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
+
+
+# ✅ NEEDFUL: colored center header per center (does NOT remove anything)
+c_key = st.session_state.get("center_key")
+cA, cB = CENTER_COLORS.get(c_key, ("#374151", "#111827"))
+
+st.markdown(
+    f"""
+    <div style="
+        background: linear-gradient(90deg, {cA}, {cB});
+        padding: 14px 18px;
+        border-radius: 14px;
+        margin-bottom: 8px;
+        color: white;
+    ">
+        <div style="font-size:26px;font-weight:800;">
+            {cfg["name"]}
+        </div>
+        <div style="font-size:14px;opacity:0.9;margin-top:2px;">
+            Year: {st.session_state.get("year")}
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.caption(f"Built: **{built}** · Source: {src_path} · Report: {out_path.name}")
 
 if st.button("◀ Choose another center", key="btn_back_center"):
@@ -893,4 +947,3 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
