@@ -7,6 +7,7 @@
 #   • NEW: View password gate (Emc@2026)
 # ✅ NEEDFUL CHANGES:
 #   • After password: landing page with ONLY 2 buttons (2024/2025) + Change Year
+#   • ✅ NEW: Hide/remove EasyHealth in 2024 (ONLY) — no other changes
 # ✅ PREMIUM SOOTHING UI (ONLY VISUAL):
 #   • Soft background + premium light-blue buttons
 #   • KPI section becomes premium cards (soothing)
@@ -576,6 +577,23 @@ st.caption(
     f"Year: **{st.session_state.get('year') or 'none'}**"
 )
 
+# ====================== ✅ HIDE EASYHEALTH IN 2024 (ONLY) ======================
+# Block direct access via URL or session state when year selection is 2024
+if st.session_state.get("rcm_year") == 2024:
+    if st.session_state.get("center_key") == "easyhealth" or st.query_params.get("center") == "easyhealth":
+        st.warning("Easy Health is available only in 2025.")
+        st.session_state.center_key = None
+        st.session_state.year = 2024
+        try:
+            if "center" in st.query_params:
+                del st.query_params["center"]
+            if "year" in st.query_params:
+                del st.query_params["year"]
+        except Exception:
+            pass
+        st.rerun()
+# ============================================================================
+
 # ====================== Home cards ======================
 ck = st.session_state.get("center_key")
 if ck not in CENTERS:
@@ -596,17 +614,18 @@ if ck not in CENTERS:
             st.rerun()
 
     with c3:
-        if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
-            st.session_state.center_key = "easyhealth"
-            st.session_state.year = st.session_state.get("rcm_year")
-            st.rerun()
+        # ✅ EasyHealth hidden in 2024 only
+        if st.session_state.get("rcm_year") != 2024:
+            if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
+                st.session_state.center_key = "easyhealth"
+                st.session_state.year = st.session_state.get("rcm_year")
+                st.rerun()
 
     st.markdown("---")
     st.subheader("Key metrics (All centers)")
 
     y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent")
     y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy")
-    y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth")
 
     st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
@@ -618,9 +637,13 @@ if ck not in CENTERS:
     render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, BALANCE_ATTEMPT_URL)
     st.markdown("---")
 
-    st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
-    st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
-    render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, BALANCE_ATTEMPT_URL)
+    # ✅ EasyHealth KPI section hidden in 2024 only
+    if st.session_state.get("rcm_year") != 2024:
+        y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth")
+
+        st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
+        st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
+        render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, BALANCE_ATTEMPT_URL)
 
     st.stop()
 
