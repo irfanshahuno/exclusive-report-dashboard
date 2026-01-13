@@ -255,15 +255,16 @@ def require_year_selection():
     Show ONLY two buttons:
       - Revenue Management Cycle 2024
       - Revenue Management Cycle 2025
+      - Revenue Management Cycle 2026
     """
-    if st.session_state.get("rcm_year") in (2024, 2025):
+    if st.session_state.get("rcm_year") in (2024, 2025, 2026):
         return
 
     st.title("📊 Excellent Medical Group")
     st.caption("Revenue Cycle Management")
     st.markdown("### Select Report Year")
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("Revenue Management Cycle 2024", use_container_width=True, key="rcm_btn_2024"):
             st.session_state.rcm_year = 2024
@@ -275,6 +276,12 @@ def require_year_selection():
             st.session_state.rcm_year = 2025
             st.session_state.center_key = None
             st.session_state.year = 2025
+            st.rerun()
+    with c3:
+        if st.button("Revenue Management Cycle 2026", use_container_width=True, key="rcm_btn_2026"):
+            st.session_state.rcm_year = 2026
+            st.session_state.center_key = None
+            st.session_state.year = 2026
             st.rerun()
 
     st.stop()
@@ -289,7 +296,7 @@ DATA_DIR = BASE / "data"
 (DATA_DIR / "excellent").mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "excellent_pharmacy").mkdir(parents=True, exist_ok=True)
 
-YEARS = [2024, 2025]
+YEARS = [2024, 2025, 2026]
 
 # Canonical sheet names for main Aging report
 SHEET_INS_TOT = "Insurance_Totals"
