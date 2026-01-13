@@ -252,7 +252,7 @@ def reset_year_selection():
 def require_year_selection():
     """
     After view password:
-    Show ONLY two buttons:
+    Show ONLY buttons:
       - Revenue Management Cycle 2024
       - Revenue Management Cycle 2025
       - Revenue Management Cycle 2026
@@ -498,52 +498,51 @@ def is_admin_mode() -> bool:
 
 
 # ====================== (Home KPIs helper) ======================
-def pick_latest_year_with_report(cfg0: dict):
-    forced = st.session_state.get("rcm_year")
-    if forced in YEARS:
-        p_forced = cfg0["folder_root"] / str(forced) / cfg0["out_name"]
-        if p_forced.exists():
-            return forced
-    for y in reversed(YEARS):
-        p = cfg0["folder_root"] / str(y) / cfg0["out_name"]
-        if p.exists():
-            return y
-    return None
-
-
-def load_center_kpis(center_key: str):
+def load_center_kpis(center_key: str, year: int):
+    """
+    IMPORTANT:
+    - Uses ONLY the selected year.
+    - If report for that year is missing, returns zeros (NO fallback to other years).
+    """
     cfg0 = CENTERS[center_key]
-    y = pick_latest_year_with_report(cfg0)
-    if y is None:
-        return None, 0.0, 0.0, 0.0, 0.0, 0.0
 
-    outp = cfg0["folder_root"] / str(y) / cfg0["out_name"]
+    if year not in YEARS:
+        return year, 0.0, 0.0, 0.0, 0.0, 0.0
+
+    outp = cfg0["folder_root"] / str(year) / cfg0["out_name"]
+    if not outp.exists():
+        return year, 0.0, 0.0, 0.0, 0.0, 0.0
+
     tok = mtime_token(outp)
     if tok == 0.0:
-        return None, 0.0, 0.0, 0.0, 0.0, 0.0
+        return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
-    totals, _, _ = load_core_sheets(str(outp), tok)
-    totals = totals.copy()
+    try:
+        totals, _, _ = load_core_sheets(str(outp), tok)
+        totals = totals.copy()
 
-    if "Insurance" not in totals.columns and len(totals.columns) > 0:
-        totals = totals.rename(columns={totals.columns[0]: "Insurance"})
+        if "Insurance" not in totals.columns and len(totals.columns) > 0:
+            totals = totals.rename(columns={totals.columns[0]: "Insurance"})
 
-    for a in ["NetAmount", "Net amount", "Net"]:
-        if a in totals.columns and "Net Amount" not in totals.columns:
-            totals = totals.rename(columns={a: "Net Amount"})
+        for a in ["NetAmount", "Net amount", "Net"]:
+            if a in totals.columns and "Net Amount" not in totals.columns:
+                totals = totals.rename(columns={a: "Net Amount"})
 
-    totals = trim_empty_rows(totals)
-    totals = drop_empty_insurance(totals, "Insurance")
-    totals = ensure_grand_total(totals, "Insurance")
+        totals = trim_empty_rows(totals)
+        totals = drop_empty_insurance(totals, "Insurance")
+        totals = ensure_grand_total(totals, "Insurance")
 
-    totals_no_gt = drop_gt(totals)
+        totals_no_gt = drop_gt(totals)
 
-    net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
-    paid = ksum(totals_no_gt, "Paid")
-    bal = ksum(totals_no_gt, "Balance")
-    rej = ksum(totals_no_gt, "Rejected", "Rejection")
-    acc = ksum(totals_no_gt, "Accepted")
-    return y, net, paid, bal, rej, acc
+        net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
+        paid = ksum(totals_no_gt, "Paid")
+        bal = ksum(totals_no_gt, "Balance")
+        rej = ksum(totals_no_gt, "Rejected", "Rejection")
+        acc = ksum(totals_no_gt, "Accepted")
+
+        return year, net, paid, bal, rej, acc
+    except Exception:
+        return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
 
 # ====================== Header & routing ======================
@@ -631,8 +630,10 @@ if ck not in CENTERS:
     st.markdown("---")
     st.subheader("Key metrics (All centers)")
 
-    y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent")
-    y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy")
+    sel_year = st.session_state.get("rcm_year")
+
+    y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent", sel_year)
+    y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy", sel_year)
 
     st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
@@ -646,7 +647,7 @@ if ck not in CENTERS:
 
     # ✅ EasyHealth KPI section hidden in 2024 only
     if st.session_state.get("rcm_year") != 2024:
-        y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth")
+        y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth", sel_year)
 
         st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
         st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
