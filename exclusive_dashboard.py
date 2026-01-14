@@ -15,114 +15,27 @@
 #   • Balance card clickable and same bold with slight different color
 # ✅ FIX:
 #   • KPI numbers auto-fit inside KPI box (no overflow)
-# ✅ NEEDFUL (S3 STORAGE):
-#   • Save/load source + report from S3 so Streamlit Cloud restart won't delete files
+# ✅ PERFORMANCE FIX (NEEDFUL):
+#   • Lazy-load InsGroup/Plan sheets ONLY when their tab is opened (prevents slow clicks)
 # Nothing else is changed.
 
 import sys
 import subprocess
 import re
 from pathlib import Path
-from datetime import datetime, date
-import io
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components  # used only for the home-card link
-
-# ====================== ✅ NEEDFUL: S3 IMPORTS ======================
-import boto3
-from botocore.exceptions import ClientError
 
 
-# ====================== ✅ NEEDFUL: S3 CONFIG FROM SECRETS ======================
-def _sget(k: str, default: str = "") -> str:
-    try:
-        return str(st.secrets.get(k, default) or default)
-    except Exception:
-        return default
-
-
-AWS_ACCESS_KEY_ID = _sget("AWS_ACCESS_KEY_ID")
-AWS_SECRET_ACCESS_KEY = _sget("AWS_SECRET_ACCESS_KEY")
-AWS_DEFAULT_REGION = _sget("AWS_DEFAULT_REGION", _sget("AWS_REGION", "eu-north-1"))
-
-S3_BUCKET = _sget("S3_BUCKET")
-S3_PREFIX = _sget("S3_PREFIX", "").strip().strip("/")
-
-
-def s3_enabled() -> bool:
-    return bool(S3_BUCKET and AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY and AWS_DEFAULT_REGION)
-
-
-def s3_client():
-    if not s3_enabled():
-        return None
-    return boto3.client(
-        "s3",
-        region_name=AWS_DEFAULT_REGION,
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-    )
-
-
-def s3_key(*parts: str) -> str:
-    # builds "prefix/part1/part2/..."
-    clean = [p.strip("/").replace("\\", "/") for p in parts if p is not None and str(p).strip() != ""]
-    key = "/".join(clean)
-    if S3_PREFIX:
-        return f"{S3_PREFIX}/{key}"
-    return key
-
-
-def s3_head(key: str):
-    cli = s3_client()
-    if not cli:
-        return None
-    try:
-        return cli.head_object(Bucket=S3_BUCKET, Key=key)
-    except ClientError:
-        return None
-
-
-def s3_exists(key: str) -> bool:
-    return s3_head(key) is not None
-
-
-def s3_last_modified(key: str):
-    h = s3_head(key)
-    if not h:
-        return None
-    return h.get("LastModified")
-
-
-def s3_download_to_file(key: str, local_path: Path) -> bool:
-    cli = s3_client()
-    if not cli:
-        return False
-    try:
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        cli.download_file(S3_BUCKET, key, str(local_path))
-        return True
-    except ClientError:
-        return False
-
-
-def s3_upload_file(local_path: Path, key: str) -> bool:
-    cli = s3_client()
-    if not cli:
-        return False
-    try:
-        cli.upload_file(str(local_path), S3_BUCKET, key)
-        return True
-    except ClientError as e:
-        st.error(f"S3 upload failed: {e}")
-        return False
-
+# ====================== Page config ======================
+st.set_page_config(page_title="Excellent Medical Group", layout="wide")
+st.set_option("client.showErrorDetails", False)
 
 # ====================== VIEW PASSWORD (NEW) ======================
-# ✅ Needful: allow secrets override, fallback to original default
-VIEW_PASSWORD = _sget("VIEW_PASSWORD", "Emc@2026")
+# Prefer Streamlit Secrets if provided; fallback keeps your original default.
+VIEW_PASSWORD = st.secrets.get("VIEW_PASSWORD", "Emc@2026")
 
 
 def require_view_access() -> None:
@@ -133,9 +46,6 @@ def require_view_access() -> None:
     """
     if st.session_state.get("is_view_auth", False):
         return
-
-    st.set_page_config(page_title="Excellent Medical Group", layout="wide")
-    st.set_option("client.showErrorDetails", False)
 
     st.title("🔒 Dashboard Access")
     st.info("Enter the view password to open the dashboard.")
@@ -154,10 +64,6 @@ def require_view_access() -> None:
 
     st.stop()
 
-
-# ====================== Page & base folders ======================
-st.set_page_config(page_title="Excellent Medical Group", layout="wide")
-st.set_option("client.showErrorDetails", False)
 
 # NEW: enforce view login first
 require_view_access()
@@ -506,6 +412,14 @@ def load_core_sheets(path: str, _token: float):
         )
 
 
+# ✅ PERFORMANCE FIX: Optional sheets cached and loaded ONLY when their tab is opened
+@st.cache_data(show_spinner=True)
+def load_optional_sheet(path: str, _token: float, sheet_name: str):
+    ext = Path(path).suffix.lower()
+    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+    return pd.read_excel(path, sheet_name=sheet_name, engine=engine)
+
+
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -590,69 +504,6 @@ def is_admin_mode() -> bool:
         return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
 
 
-# ====================== ✅ NEEDFUL: S3 SYNC HELPERS (MINIMAL) ======================
-def s3_paths_for(center_key: str, year: int, out_name: str):
-    # try 3 source extensions (same as your local logic)
-    base = f"{center_key}/{year}"
-    src_candidates = [
-        s3_key(base, "source.xlsb"),
-        s3_key(base, "source.xlsx"),
-        s3_key(base, "source.xlsm"),
-    ]
-    out_key = s3_key(base, out_name)
-    return src_candidates, out_key
-
-
-def s3_sync_down_if_missing(center_key: str, year: int, folder: Path, out_name: str):
-    """
-    If local source/report missing, pull from S3 (if exists).
-    Keeps your local paths working with minimal changes.
-    """
-    if not s3_enabled():
-        return
-
-    src_keys, out_key = s3_paths_for(center_key, year, out_name)
-
-    # download source (first existing)
-    local_src_xlsb = folder / "source.xlsb"
-    local_src_xlsx = folder / "source.xlsx"
-    local_src_xlsm = folder / "source.xlsm"
-
-    if not (local_src_xlsb.exists() or local_src_xlsx.exists() or local_src_xlsm.exists()):
-        for k in src_keys:
-            ext = Path(k).suffix.lower()
-            lp = folder / f"source{ext}"
-            if s3_exists(k):
-                s3_download_to_file(k, lp)
-                break
-
-    # download report if missing
-    local_out = folder / out_name
-    if not local_out.exists() and s3_exists(out_key):
-        s3_download_to_file(out_key, local_out)
-
-
-def s3_sync_up_report(center_key: str, year: int, local_report: Path, out_name: str):
-    if not s3_enabled() or not local_report.exists():
-        return
-    _, out_key = s3_paths_for(center_key, year, out_name)
-    s3_upload_file(local_report, out_key)
-
-
-def s3_sync_up_source(center_key: str, year: int, local_source: Path):
-    if not s3_enabled() or not local_source.exists():
-        return
-    key = s3_key(f"{center_key}/{year}", local_source.name)
-    s3_upload_file(local_source, key)
-
-
-def s3_built_time(center_key: str, year: int, out_name: str):
-    if not s3_enabled():
-        return None
-    _, out_key = s3_paths_for(center_key, year, out_name)
-    return s3_last_modified(out_key)
-
-
 # ====================== (Home KPIs helper) ======================
 def load_center_kpis(center_key: str, year: int):
     """
@@ -666,10 +517,6 @@ def load_center_kpis(center_key: str, year: int):
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
     outp = cfg0["folder_root"] / str(year) / cfg0["out_name"]
-
-    # ✅ NEEDFUL: if local missing, try S3 download
-    s3_sync_down_if_missing(center_key, year, cfg0["folder_root"] / str(year), cfg0["out_name"])
-
     if not outp.exists():
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
@@ -733,6 +580,7 @@ if st.session_state.get("year") is None and st.session_state.get("rcm_year") in 
 if (st.session_state.get("center_key") != st.session_state.get("last_center_key")) or \
    (st.session_state.get("year") != st.session_state.get("last_year")):
     load_core_sheets.clear()
+    load_optional_sheet.clear()
     get_report_bytes.clear()
     st.session_state.last_center_key = st.session_state.get("center_key")
     st.session_state.last_year = st.session_state.get("year")
@@ -744,7 +592,6 @@ st.caption(
 )
 
 # ====================== ✅ HIDE EASYHEALTH IN 2024 (ONLY) ======================
-# Block direct access via URL or session state when year selection is 2024
 if st.session_state.get("rcm_year") == 2024:
     if st.session_state.get("center_key") == "easyhealth" or st.query_params.get("center") == "easyhealth":
         st.warning("Easy Health is available only in 2025.")
@@ -859,9 +706,6 @@ cfg = CENTERS[st.session_state.get("center_key")]
 folder = cfg["folder_root"] / str(st.session_state.get("year"))
 folder.mkdir(parents=True, exist_ok=True)
 
-# ✅ NEEDFUL: download source/report from S3 if local missing
-s3_sync_down_if_missing(cfg["key"], int(st.session_state.get("year")), folder, cfg["out_name"])
-
 src_path = resolve_source_path(folder, preferred=cfg["src_name"])
 out_path = folder / cfg["out_name"]
 gen_path = cfg["generator"]
@@ -871,13 +715,8 @@ if (st.query_params.get("center") != st.session_state.get("center_key")) or \
     st.query_params["center"] = st.session_state.get("center_key")
     st.query_params["year"] = str(st.session_state.get("year"))
 
-# ✅ NEEDFUL: show built time from S3 if available, else local
-mt_local = mtime_token(out_path)
-mt_s3 = s3_built_time(cfg["key"], int(st.session_state.get("year")), cfg["out_name"])
-if mt_s3 is not None:
-    built = mt_s3.astimezone().strftime("%Y-%m-%d %H:%M")
-else:
-    built = "—" if not mt_local else datetime.fromtimestamp(mt_local).strftime("%Y-%m-%d %H:%M")
+mt = mtime_token(out_path)
+built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
 
 st.markdown(
     f"""
@@ -925,14 +764,7 @@ if st.session_state.get("is_admin"):
         )
         if up:
             try:
-                saved = save_uploaded_source(folder, up)
-                st.success(f"Saved to {saved.name}")
-
-                # ✅ NEEDFUL: upload source to S3
-                if s3_enabled():
-                    s3_sync_up_source(cfg["key"], int(st.session_state.get("year")), saved)
-                    st.info(f"S3 saved: s3://{S3_BUCKET}/{s3_key(cfg['key'], str(st.session_state.get('year')), saved.name)}")
-
+                st.success(f"Saved to {save_uploaded_source(folder, up).name}")
             except Exception as e:
                 st.error(str(e))
 
@@ -949,23 +781,13 @@ if st.session_state.get("is_admin"):
                 st.success(f"Report rebuilt successfully in {(t1 - t0).total_seconds():.1f}s.")
                 if msg.strip():
                     st.code(msg, language="bash")
-
-                # ✅ NEEDFUL: upload report to S3
-                if s3_enabled():
-                    s3_sync_up_report(cfg["key"], int(st.session_state.get("year")), out_path, cfg["out_name"])
-                    st.info(f"S3 report saved: s3://{S3_BUCKET}/{s3_key(cfg['key'], str(st.session_state.get('year')), cfg['out_name'])}")
-
                 load_core_sheets.clear()
+                load_optional_sheet.clear()
                 get_report_bytes.clear()
         except Exception as e:
             st.error(str(e))
 
 token = mtime_token(out_path)
-if token == 0.0:
-    # ✅ NEEDFUL: last attempt pull from S3, then stop if missing
-    s3_sync_down_if_missing(cfg["key"], int(st.session_state.get("year")), folder, cfg["out_name"])
-    token = mtime_token(out_path)
-
 if token == 0.0:
     msg = f"Report not found for {cfg['name']} ({st.session_state.get('year')})."
     if st.session_state.get("is_admin"):
@@ -992,21 +814,6 @@ try:
     if not summary.empty:
         summary = ensure_grand_total(summary, summary.columns[0])
 
-    ext = Path(str(out_path)).suffix.lower()
-    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
-
-    try:
-        insgroup_df = pd.read_excel(str(out_path), sheet_name=SHEET_INGROUP, engine=engine)
-        insgroup_df = trim_empty_rows(insgroup_df)
-    except Exception:
-        insgroup_df = None
-
-    try:
-        plan_df = pd.read_excel(str(out_path), sheet_name=SHEET_IPLAN, engine=engine)
-        plan_df = trim_empty_rows(plan_df)
-    except Exception:
-        plan_df = None
-
     totals_no_gt = drop_gt(totals)
 
     net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
@@ -1019,14 +826,26 @@ try:
     render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL)
     st.markdown("---")
 
-    tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
-    if insgroup_df is not None:
-        tab_labels.append(SHEET_INGROUP)
-    if plan_df is not None:
-        tab_labels.append(SHEET_IPLAN)
-    tab_labels.append("Downloads")
+    # Tabs (optional tabs are shown only if the sheet exists — but loaded lazily)
+    tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"]
 
-    if insgroup_df is not None and st.session_state.pop("_stay_on_ig", False):
+    # We check existence cheaply (sheet name list) without loading full data repeatedly.
+    ext = Path(str(out_path)).suffix.lower()
+    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+    try:
+        sheet_names = pd.ExcelFile(str(out_path), engine=engine).sheet_names
+    except Exception:
+        sheet_names = []
+
+    has_insgroup = SHEET_INGROUP in sheet_names
+    has_plan = SHEET_IPLAN in sheet_names
+
+    if has_insgroup:
+        tab_labels.insert(2, SHEET_INGROUP)
+    if has_plan:
+        tab_labels.insert(3 if has_insgroup else 2, SHEET_IPLAN)
+
+    if has_insgroup and st.session_state.pop("_stay_on_ig", False):
         tab_labels = [SHEET_INGROUP] + [x for x in tab_labels if x != SHEET_INGROUP]
 
     t_tabs = st.tabs(tab_labels)
@@ -1072,100 +891,120 @@ try:
             key=f"dl_csv_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
-    if tIG is not None and insgroup_df is not None:
+    # ✅ PERFORMANCE FIX: InsGroup loaded only when tab is actually opened
+    if tIG is not None and has_insgroup:
         with tIG:
-            insurers = (
-                insgroup_df["Insurance"]
-                .dropna()
-                .astype(str)
-                .loc[lambda s: ~s.str.match(GT_PAT)]
-                .sort_values()
-                .unique()
-                .tolist()
-            )
-            ig_key = f"insgroup_select_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
+            try:
+                insgroup_df = load_optional_sheet(str(out_path), token, SHEET_INGROUP)
+                insgroup_df = trim_empty_rows(insgroup_df)
+            except Exception:
+                insgroup_df = None
 
-            with st.form(key=f"ig_form_{st.session_state.get('center_key')}_{st.session_state.get('year')}"):
-                choice = st.selectbox(
-                    "Filter by Insurance",
-                    ["All"] + insurers,
-                    index=(["All"] + insurers).index(st.session_state.get(ig_key, "All")),
+            if insgroup_df is None or insgroup_df.empty or "Insurance" not in insgroup_df.columns:
+                st.warning("InsGroup sheet is missing or empty.")
+            else:
+                insurers = (
+                    insgroup_df["Insurance"]
+                    .dropna()
+                    .astype(str)
+                    .loc[lambda s: ~s.str.match(GT_PAT)]
+                    .sort_values()
+                    .unique()
+                    .tolist()
                 )
-                apply_btn = st.form_submit_button("Apply")
+                ig_key = f"insgroup_select_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
 
-            if apply_btn:
-                st.session_state[ig_key] = choice
-                st.session_state["_stay_on_ig"] = True
-                st.rerun()
+                with st.form(key=f"ig_form_{st.session_state.get('center_key')}_{st.session_state.get('year')}"):
+                    choice = st.selectbox(
+                        "Filter by Insurance",
+                        ["All"] + insurers,
+                        index=(["All"] + insurers).index(st.session_state.get(ig_key, "All")),
+                    )
+                    apply_btn = st.form_submit_button("Apply")
 
-            choice = st.session_state.get(ig_key, "All")
-            view_df = insgroup_df.copy()
-            if choice != "All":
-                view_df = (
-                    view_df.loc[view_df["Insurance"].astype(str) == choice]
-                    .drop(columns=["Insurance"], errors="ignore")
+                if apply_btn:
+                    st.session_state[ig_key] = choice
+                    st.session_state["_stay_on_ig"] = True
+                    st.rerun()
+
+                choice = st.session_state.get(ig_key, "All")
+                view_df = insgroup_df.copy()
+                if choice != "All":
+                    view_df = (
+                        view_df.loc[view_df["Insurance"].astype(str) == choice]
+                        .drop(columns=["Insurance"], errors="ignore")
+                    )
+
+                st.caption(f"Showing InsGroup aging for **{choice}**")
+                st.dataframe(
+                    _display_df(move_grand_total_last(view_df)),
+                    use_container_width=True,
+                    height=full_height(view_df),
+                )
+                st.download_button(
+                    "⬇️ Export InsGroup (CSV) — current view",
+                    view_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_insgroup{'_' + choice if choice != 'All' else ''}.csv",
+                    use_container_width=True,
+                    key=f"dl_csv_insgroup_view_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
                 )
 
-            st.caption(f"Showing InsGroup aging for **{choice}**")
-            st.dataframe(
-                _display_df(move_grand_total_last(view_df)),
-                use_container_width=True,
-                height=full_height(view_df),
-            )
-            st.download_button(
-                "⬇️ Export InsGroup (CSV) — current view",
-                view_df.to_csv(index=False).encode("utf-8"),
-                file_name=f"{cfg['key']}_{st.session_state.get('year')}_insgroup{'_' + choice if choice != 'All' else ''}.csv",
-                use_container_width=True,
-                key=f"dl_csv_insgroup_view_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-            )
-
-    if tPL is not None and plan_df is not None:
+    # ✅ PERFORMANCE FIX: Plan loaded only when tab is actually opened
+    if tPL is not None and has_plan:
         with tPL:
-            insurers_pl = (
-                plan_df["Insurance"]
-                .dropna()
-                .astype(str)
-                .loc[lambda s: ~s.str.match(GT_PAT)]
-                .sort_values()
-                .unique()
-                .tolist()
-            )
-            pl_key = f"plan_select_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
+            try:
+                plan_df = load_optional_sheet(str(out_path), token, SHEET_IPLAN)
+                plan_df = trim_empty_rows(plan_df)
+            except Exception:
+                plan_df = None
 
-            with st.form(key=f"pl_form_{st.session_state.get('center_key')}_{st.session_state.get('year')}"):
-                choice_pl = st.selectbox(
-                    "Filter by Insurance",
-                    ["All"] + insurers_pl,
-                    index=(["All"] + insurers_pl).index(st.session_state.get(pl_key, "All")),
+            if plan_df is None or plan_df.empty or "Insurance" not in plan_df.columns:
+                st.warning("Plan sheet is missing or empty.")
+            else:
+                insurers_pl = (
+                    plan_df["Insurance"]
+                    .dropna()
+                    .astype(str)
+                    .loc[lambda s: ~s.str.match(GT_PAT)]
+                    .sort_values()
+                    .unique()
+                    .tolist()
                 )
-                apply_btn_pl = st.form_submit_button("Apply")
+                pl_key = f"plan_select_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
 
-            if apply_btn_pl:
-                st.session_state[pl_key] = choice_pl
-                st.rerun()
+                with st.form(key=f"pl_form_{st.session_state.get('center_key')}_{st.session_state.get('year')}"):
+                    choice_pl = st.selectbox(
+                        "Filter by Insurance",
+                        ["All"] + insurers_pl,
+                        index=(["All"] + insurers_pl).index(st.session_state.get(pl_key, "All")),
+                    )
+                    apply_btn_pl = st.form_submit_button("Apply")
 
-            choice_pl = st.session_state.get(pl_key, "All")
-            view_pl = plan_df.copy()
-            if choice_pl != "All":
-                view_pl = (
-                    view_pl.loc[view_pl["Insurance"].astype(str) == choice_pl]
-                    .drop(columns=["Insurance"], errors="ignore")
+                if apply_btn_pl:
+                    st.session_state[pl_key] = choice_pl
+                    st.rerun()
+
+                choice_pl = st.session_state.get(pl_key, "All")
+                view_pl = plan_df.copy()
+                if choice_pl != "All":
+                    view_pl = (
+                        view_pl.loc[view_pl["Insurance"].astype(str) == choice_pl]
+                        .drop(columns=["Insurance"], errors="ignore")
+                    )
+
+                st.caption(f"Showing Plan aging for **{choice_pl}**")
+                st.dataframe(
+                    _display_df(move_grand_total_last(view_pl)),
+                    use_container_width=True,
+                    height=full_height(view_pl),
                 )
-
-            st.caption(f"Showing Plan aging for **{choice_pl}**")
-            st.dataframe(
-                _display_df(move_grand_total_last(view_pl)),
-                use_container_width=True,
-                height=full_height(view_pl),
-            )
-            st.download_button(
-                "⬇️ Export Plan (CSV) — current view",
-                view_pl.to_csv(index=False).encode("utf-8"),
-                file_name=f"{cfg['key']}_{st.session_state.get('year')}_plan{'_' + choice_pl if choice_pl != 'All' else ''}.csv",
-                use_container_width=True,
-                key=f"dl_csv_plan_view_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-            )
+                st.download_button(
+                    "⬇️ Export Plan (CSV) — current view",
+                    view_pl.to_csv(index=False).encode("utf-8"),
+                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_plan{'_' + choice_pl if choice_pl != 'All' else ''}.csv",
+                    use_container_width=True,
+                    key=f"dl_csv_plan_view_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                )
 
     with t3:
         st.markdown("### Report Download")
