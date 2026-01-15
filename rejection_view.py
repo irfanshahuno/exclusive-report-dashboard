@@ -1,160 +1,213 @@
-import pandas as pd
+# rejection_view.py
+# Rejection Analysis page (called from exclusive_dashboard.py only when ?view=rejection)
+# ✅ Fixes NameError + avoids running at import-time
+# ✅ No password re-check, no redirect to view mode
+# ✅ Works with Streamlit query params coming from main dashboard
+
 import streamlit as st
+import pandas as pd
 from pathlib import Path
 
-SHEET_DETAIL = "Balance_Aging_Detail"
 
-@st.cache_data(show_spinner=False)
-def _load_detail(report_path: str, token: float) -> pd.DataFrame:
-    ext = Path(report_path).suffix.lower()
-    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
-    df = pd.read_excel(report_path, sheet_name=SHEET_DETAIL, engine=engine)
-    return df
-
-def _safe_num(x):
+def _safe_int(x, default=None):
     try:
-        return float(pd.to_numeric(x, errors="coerce").fillna(0).sum())
+        return int(x)
     except Exception:
-        return 0.0
+        return default
 
-def render_rejection_page(center_key: str, year: int, report_path: str, center_name: str, built_text: str, back_center: str):
-    st.markdown(f"# ❌ Rejection Analysis — {center_name}")
-    st.caption(f"Year: **{year}** · Built: **{built_text}** · Report: `{Path(report_path).name}`")
 
-    # Back button: remove view param only (keep center/year)
-    c1, c2 = st.columns([1, 3])
-    with c1:
-        if st.button("⬅ Back", use_container_width=True, key="rej_back_btn"):
-            try:
-                if "view" in st.query_params:
-                    del st.query_params["view"]
-            except Exception:
-                pass
-            st.rerun()
-    with c2:
-        st.write("")
+def _read_excel(path: Path, sheet: str):
+    ext = path.suffix.lower()
+    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+    return pd.read_excel(str(path), sheet_name=sheet, engine=engine)
 
-    rp = Path(report_path)
-    if not rp.exists():
-        st.warning("Report file not found for this year/center.")
+
+def _pick_col(df, candidates):
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def _to_num(s):
+    return pd.to_numeric(s, errors="coerce").fillna(0)
+
+
+def render_rejection_page(center_key: str, year: int, centers: dict, base_dir=None, data_dir=None):
+    """
+    Required by exclusive_dashboard.py:
+      render_rejection_page(center_key=..., year=..., centers=..., base_dir=..., data_dir=...)
+    """
+    st.markdown("## ❌ Rejection Analysis")
+
+    if center_key not in centers:
+        st.error("Invalid center key.")
         return
 
-    # ✅ FAST MODE: do NOT load detail unless user asks
-    st.markdown("### Downloads")
-    st.download_button(
-        "⬇️ Download full report (.xlsx)",
-        rp.read_bytes(),
-        file_name=rp.name,
-        use_container_width=True,
-        key=f"rej_dl_full_{center_key}_{year}",
-    )
+    cfg = centers[center_key]
+    folder = Path(cfg["folder_root"]) / str(year)
+    report_path = folder / cfg["out_name"]
 
-    st.markdown("---")
-    st.markdown("### View (optional)")
-    st.info("To keep dashboard fast, the detail table loads only when you click **Load Detail Table**.")
+    st.caption(f"Center: **{cfg['name']}**  ·  Year: **{year}**")
+    st.write("---")
 
-    load_now = st.button("📄 Load Detail Table", use_container_width=True, key=f"rej_load_{center_key}_{year}")
-    if not load_now:
-        st.stop()
+    if not report_path.exists():
+        st.warning(f"No report found for this center/year:\n\n{report_path}")
+        return
 
-    token = rp.stat().st_mtime
-    try:
-        df = _load_detail(str(rp), token)
-    except Exception as e:
-        st.error(f"Could not load `{SHEET_DETAIL}` sheet: {e}")
-        st.stop()
+    # Try to load a rejection-related sheet (you can adjust sheet names here if your file differs)
+    sheet_candidates = [
+        "Rejection_Analysis",
+        "Rejection Analysis",
+        "Rejected_Analysis",
+        "Rejected Analysis",
+        "Rejections",
+        "Rejected",
+        "Insurance_Totals",  # fallback (will still show rejected totals if available)
+    ]
 
-    if df is None or df.empty:
-        st.warning("Detail sheet is empty.")
-        st.stop()
+    df = None
+    used_sheet = None
+    last_err = None
+    for s in sheet_candidates:
+        try:
+            df = _read_excel(report_path, s)
+            used_sheet = s
+            break
+        except Exception as e:
+            last_err = e
 
-    # Try to detect column names
-    cols = {c.lower().strip(): c for c in df.columns}
+    if df is None:
+        st.error("Could not find any rejection sheet in the report.")
+        st.write("Tried sheets:", sheet_candidates)
+        st.write("Last error:", last_err)
+        # show available sheets for debugging
+        try:
+            ext = report_path.suffix.lower()
+            engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+            names = pd.ExcelFile(str(report_path), engine=engine).sheet_names
+            st.info("Available sheets: " + ", ".join(names))
+        except Exception:
+            pass
+        return
 
-    paid_col = cols.get("paid")
-    status_col = cols.get("activitystatus") or cols.get("status")
-    denial_col = cols.get("denialcode") or cols.get("denial code") or cols.get("denial_code")
-    ins_col = cols.get("insurance") or cols.get("payer") or cols.get("insurer")
-    amt_col = cols.get("net amount") or cols.get("netamount") or cols.get("amount") or cols.get("claimamount")
+    df = df.dropna(how="all")
+    df.columns = [str(c).strip() for c in df.columns]
 
-    # Build rejection rule like your screenshot: Paid=0 AND status=rejected AND denialcode not empty
-    dff = df.copy()
+    st.caption(f"Loaded sheet: **{used_sheet}**")
+    st.write("")
 
-    if paid_col:
-        dff[paid_col] = pd.to_numeric(dff[paid_col], errors="coerce").fillna(0)
+    # ====== Smart column detection (works with different file formats) ======
+    col_ins = _pick_col(df, ["Insurance", "Payer", "Insurer", "TPA", "Company"])
+    col_plan = _pick_col(df, ["Plan", "Plan Name", "Policy", "Network Plan"])
+    col_code = _pick_col(df, ["Rejection Code", "Code", "Denial Code", "Reject Code"])
+    col_reason = _pick_col(df, ["Rejection Reason", "Reason", "Denial Reason", "Reject Reason", "Comment", "Remarks"])
+    col_amount = _pick_col(df, ["Rejected Amount", "Rejected", "Rejection Amount", "Amount", "Net Amount", "NetAmount"])
+    col_count = _pick_col(df, ["Count", "Rejected Count", "Claims", "No of Claims", "Total Claims"])
 
-    if status_col:
-        dff[status_col] = dff[status_col].astype(str)
+    # If fallback is Insurance_Totals, we might only have totals columns
+    # We will still show it, but disable deep filters if columns missing.
+    filters = st.columns(4)
 
-    if denial_col:
-        dff[denial_col] = dff[denial_col].astype(str)
-
-    mask = pd.Series(True, index=dff.index)
-
-    if paid_col:
-        mask &= (dff[paid_col] == 0)
-
-    if status_col:
-        mask &= dff[status_col].str.lower().str.contains("reject")
-
-    if denial_col:
-        mask &= dff[denial_col].str.strip().ne("") & ~dff[denial_col].str.lower().isin(["nan", "none", "null"])
-
-    rej = dff.loc[mask].copy()
-
-    # KPIs
-    if amt_col and amt_col in rej.columns:
-        rej_amt = _safe_num(rej[amt_col])
-    else:
-        rej_amt = 0.0
-
-    rej_cnt = len(rej)
-
-    top_denial = "—"
-    if denial_col and denial_col in rej.columns and rej_cnt > 0:
-        top_denial = (
-            rej[denial_col]
+    def _make_filter(colname):
+        if not colname:
+            return None, None
+        vals = (
+            df[colname]
+            .dropna()
             .astype(str)
-            .value_counts()
-            .head(1)
-            .index[0]
+            .str.strip()
+            .replace({"nan": ""})
         )
+        vals = sorted([v for v in vals.unique().tolist() if v and v.lower() not in ("grand total", "total")])
+        return colname, ["All"] + vals
 
+    f_ins = _make_filter(col_ins)
+    f_plan = _make_filter(col_plan)
+    f_code = _make_filter(col_code)
+    # reason can be huge — we'll do a text search instead
+    reason_search = None
+
+    with filters[0]:
+        sel_ins = None
+        if f_ins:
+            sel_ins = st.selectbox("Insurance", f_ins[1], index=0)
+    with filters[1]:
+        sel_plan = None
+        if f_plan:
+            sel_plan = st.selectbox("Plan", f_plan[1], index=0)
+    with filters[2]:
+        sel_code = None
+        if f_code:
+            sel_code = st.selectbox("Rejection Code", f_code[1], index=0)
+    with filters[3]:
+        reason_search = st.text_input("Search reason text", value="", placeholder="type words...")
+
+    view = df.copy()
+
+    if col_ins and sel_ins and sel_ins != "All":
+        view = view[view[col_ins].astype(str).str.strip() == sel_ins]
+    if col_plan and sel_plan and sel_plan != "All":
+        view = view[view[col_plan].astype(str).str.strip() == sel_plan]
+    if col_code and sel_code and sel_code != "All":
+        view = view[view[col_code].astype(str).str.strip() == sel_code]
+    if reason_search and col_reason:
+        view = view[view[col_reason].astype(str).str.contains(reason_search, case=False, na=False)]
+
+    # ====== KPIs ======
     k1, k2, k3 = st.columns(3)
-    k1.metric("Rejected Amount", f"{rej_amt:,.2f}")
-    k2.metric("Rejected Count", f"{rej_cnt:,}")
-    k3.metric("Top Denial Code", top_denial)
 
-    st.markdown("---")
+    total_amt = _to_num(view[col_amount]).sum() if col_amount else 0
+    total_cnt = _to_num(view[col_count]).sum() if col_count else len(view)
 
-    # Filters
-    f1, f2 = st.columns(2)
-    ins_choice = "All"
-    denial_choice = "All"
+    with k1:
+        st.metric("Rejected Amount", f"{total_amt:,.2f}")
+    with k2:
+        st.metric("Rejected Count", f"{int(total_cnt):,}")
+    with k3:
+        st.metric("Rows", f"{len(view):,}")
 
-    if ins_col and ins_col in rej.columns:
-        ins_list = sorted([x for x in rej[ins_col].dropna().astype(str).unique().tolist() if x.strip() != ""])
-        with f1:
-            ins_choice = st.selectbox("Insurance", ["All"] + ins_list, index=0)
+    st.write("---")
 
-    if denial_col and denial_col in rej.columns:
-        denial_list = sorted([x for x in rej[denial_col].dropna().astype(str).unique().tolist() if x.strip() != ""])
-        with f2:
-            denial_choice = st.selectbox("Denial Code", ["All"] + denial_list, index=0)
+    # ====== Top tables ======
+    if col_reason:
+        st.subheader("Top Rejection Reasons")
+        grp_cols = [col_reason]
+        if col_code:
+            grp_cols = [col_code, col_reason]
 
-    view = rej
-    if ins_col and ins_choice != "All":
-        view = view.loc[view[ins_col].astype(str) == ins_choice]
-    if denial_col and denial_choice != "All":
-        view = view.loc[view[denial_col].astype(str) == denial_choice]
+        agg = view.groupby(grp_cols, dropna=False).agg(
+            Amount=(col_amount, lambda s: _to_num(s).sum()) if col_amount else ("__dummy__", "size"),
+            Count=(col_count, lambda s: _to_num(s).sum()) if col_count else ("__dummy__", "size"),
+        ).reset_index()
 
-    st.markdown("### Rejected Detail")
+        if "Amount" in agg.columns:
+            agg = agg.sort_values("Amount", ascending=False)
+        else:
+            agg = agg.sort_values("Count", ascending=False)
+
+        st.dataframe(agg.head(50), use_container_width=True)
+
+    if col_ins:
+        st.subheader("Insurance Summary")
+        agg2 = view.groupby([col_ins], dropna=False).agg(
+            Amount=(col_amount, lambda s: _to_num(s).sum()) if col_amount else ("__dummy__", "size"),
+            Count=(col_count, lambda s: _to_num(s).sum()) if col_count else ("__dummy__", "size"),
+        ).reset_index()
+        if "Amount" in agg2.columns:
+            agg2 = agg2.sort_values("Amount", ascending=False)
+        else:
+            agg2 = agg2.sort_values("Count", ascending=False)
+        st.dataframe(agg2, use_container_width=True)
+
+    st.subheader("Detailed Rows")
     st.dataframe(view, use_container_width=True, height=650)
 
+    # ====== Download ======
     st.download_button(
-        "⬇️ Export current view (CSV)",
+        "⬇️ Download current filtered rejection rows (CSV)",
         view.to_csv(index=False).encode("utf-8"),
-        file_name=f"{center_key}_{year}_rejection_view.csv",
+        file_name=f"{center_key}_{year}_rejection_filtered.csv",
         use_container_width=True,
-        key=f"rej_dl_view_{center_key}_{year}",
+        key=f"dl_rej_{center_key}_{year}",
     )
