@@ -27,141 +27,14 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components  # used only for the home-card link
 
-# ====================== NEEDFUL: S3 (SW3) PERSISTENCE ======================
-# Minimal: upload on save/rebuild + download when missing OR S3 newer.
-# Requires secrets:
-#   S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION (or AWS_REGION)
-# Optional:
-#   S3_PREFIX (e.g., "emc-dashboard")
-try:
-    import boto3
-    from botocore.exceptions import ClientError
-except Exception:
-    boto3 = None
-    ClientError = Exception
-
-
-def _get_secret(name: str, default: str = "") -> str:
-    try:
-        v = st.secrets.get(name, default)
-        return str(v) if v is not None else default
-    except Exception:
-        return default
-
-
-def _s3_cfg():
-    bucket = _get_secret("S3_BUCKET", "").strip()
-    prefix = _get_secret("S3_PREFIX", "").strip().strip("/")
-    region = (_get_secret("AWS_DEFAULT_REGION", "") or _get_secret("AWS_REGION", "")).strip()
-    ak = _get_secret("AWS_ACCESS_KEY_ID", "").strip()
-    sk = _get_secret("AWS_SECRET_ACCESS_KEY", "").strip()
-
-    enabled = bool(bucket and region and ak and sk and boto3 is not None)
-    return enabled, bucket, prefix, region, ak, sk
-
-
-def _s3_client():
-    enabled, _, _, region, ak, sk = _s3_cfg()
-    if not enabled:
-        return None
-    # Cache client in session to avoid re-creating on every rerun
-    if st.session_state.get("_s3_client_obj") is None:
-        st.session_state._s3_client_obj = boto3.client(
-            "s3",
-            region_name=region,
-            aws_access_key_id=ak,
-            aws_secret_access_key=sk,
-        )
-    return st.session_state.get("_s3_client_obj")
-
-
-def _s3_key_for(center_key: str, year: int, filename: str) -> str:
-    enabled, _, prefix, *_ = _s3_cfg()
-    base = f"{center_key}/{year}/{filename}"
-    return f"{prefix}/{base}" if prefix else base
-
-
-def s3_upload_file(local_path: Path, center_key: str, year: int, filename: str) -> bool:
-    enabled, bucket, *_ = _s3_cfg()
-    if not enabled:
-        return False
-    client = _s3_client()
-    if client is None:
-        return False
-    key = _s3_key_for(center_key, year, filename)
-    try:
-        client.upload_file(str(local_path), bucket, key)
-        return True
-    except Exception:
-        return False
-
-
-def s3_download_file(local_path: Path, center_key: str, year: int, filename: str) -> bool:
-    enabled, bucket, *_ = _s3_cfg()
-    if not enabled:
-        return False
-    client = _s3_client()
-    if client is None:
-        return False
-    key = _s3_key_for(center_key, year, filename)
-    local_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        client.download_file(bucket, key, str(local_path))
-        return True
-    except Exception:
-        return False
-
-
-@st.cache_data(show_spinner=False, ttl=60)
-def _s3_last_modified_cached(center_key: str, year: int, filename: str):
-    """
-    Cached (60s) HEAD to keep app fast.
-    Returns LastModified datetime (tz-aware) or None.
-    """
-    enabled, bucket, *_ = _s3_cfg()
-    if not enabled:
-        return None
-    client = _s3_client()
-    if client is None:
-        return None
-
-    key = _s3_key_for(center_key, year, filename)
-    try:
-        meta = client.head_object(Bucket=bucket, Key=key)
-        return meta.get("LastModified")
-    except Exception:
-        return None
-
-
-def ensure_local_report(center_key: str, year: int, out_path: Path) -> bool:
-    """
-    NEEDFUL ONLY (safe + fast):
-    - If local missing -> download from S3
-    - If local exists but S3 newer -> download from S3
-    - Else -> keep local
-    """
-    enabled, *_ = _s3_cfg()
-    if not enabled:
-        return out_path.exists()
-
-    if not out_path.exists():
-        return s3_download_file(out_path, center_key, year, out_path.name)
-
-    s3_dt = _s3_last_modified_cached(center_key, year, out_path.name)
-    if not s3_dt:
-        return True
-
-    local_ts = out_path.stat().st_mtime
-    local_dt = datetime.fromtimestamp(local_ts, tz=s3_dt.tzinfo)
-
-    if s3_dt > local_dt:
-        return s3_download_file(out_path, center_key, year, out_path.name)
-
-    return True
+# ====================== ✅ NEEDFUL S3 IMPORTS (NEW) ======================
+import boto3
+from botocore.exceptions import ClientError
 
 
 # ====================== VIEW PASSWORD (NEW) ======================
-VIEW_PASSWORD = "Emc@2026"
+# Keep default, but allow Streamlit Secrets to override (needful)
+VIEW_PASSWORD = st.secrets.get("VIEW_PASSWORD", "Emc@2026")
 
 
 def require_view_access() -> None:
@@ -470,6 +343,70 @@ CENTERS = {
 }
 
 
+# ====================== ✅ NEEDFUL S3 HELPERS (NEW) ======================
+def _get_s3_cfg():
+    access_key = st.secrets.get("AWS_ACCESS_KEY_ID", "")
+    secret_key = st.secrets.get("AWS_SECRET_ACCESS_KEY", "")
+
+    region = (
+        st.secrets.get("AWS_REGION")
+        or st.secrets.get("AWS_DEFAULT_REGION")
+        or "eu-north-1"
+    )
+
+    bucket = (
+        st.secrets.get("S3_BUCKET_NAME")
+        or st.secrets.get("S3_BUCKET")
+        or ""
+    )
+
+    prefix = st.secrets.get("S3_PREFIX", "").strip().strip("/")
+
+    if not (access_key and secret_key and bucket):
+        return None
+
+    return {
+        "access_key": access_key,
+        "secret_key": secret_key,
+        "region": region,
+        "bucket": bucket,
+        "prefix": prefix,
+    }
+
+
+def _s3_client(cfg):
+    return boto3.client(
+        "s3",
+        aws_access_key_id=cfg["access_key"],
+        aws_secret_access_key=cfg["secret_key"],
+        region_name=cfg["region"],
+    )
+
+
+def s3_key_for(center_key: str, year: int, filename: str) -> str:
+    cfg = _get_s3_cfg()
+    pre = (cfg["prefix"] + "/") if (cfg and cfg.get("prefix")) else ""
+    return f"{pre}{center_key}/{year}/{filename}"
+
+
+def upload_to_s3(local_path: Path, center_key: str, year: int) -> str:
+    cfg = _get_s3_cfg()
+    if cfg is None:
+        return ""
+
+    if not local_path.exists():
+        raise FileNotFoundError(f"Local file not found: {local_path}")
+
+    key = s3_key_for(center_key, year, local_path.name)
+    client = _s3_client(cfg)
+
+    try:
+        client.upload_file(str(local_path), cfg["bucket"], key)
+        return f"s3://{cfg['bucket']}/{key}"
+    except ClientError as e:
+        raise RuntimeError(f"S3 upload failed: {e}")
+
+
 # ====================== Small helpers ======================
 def mtime_token(p: Path) -> float:
     try:
@@ -518,16 +455,6 @@ def save_uploaded_source(folder: Path, upload) -> Path:
     dst = folder / f"source{ext}"
     folder.mkdir(parents=True, exist_ok=True)
     dst.write_bytes(upload.read())
-
-    # NEEDFUL: upload source to S3 too (so it doesn't disappear after sleep)
-    try:
-        ck = st.session_state.get("center_key")
-        yr = st.session_state.get("year")
-        if ck and yr:
-            s3_upload_file(dst, ck, int(yr), dst.name)
-    except Exception:
-        pass
-
     return dst
 
 
@@ -652,10 +579,6 @@ def load_center_kpis(center_key: str, year: int):
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
     outp = cfg0["folder_root"] / str(year) / cfg0["out_name"]
-
-    # NEEDFUL: ensure local report exists OR download from S3 if needed/newer
-    ensure_local_report(center_key, year, outp)
-
     if not outp.exists():
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
@@ -854,9 +777,6 @@ if (st.query_params.get("center") != st.session_state.get("center_key")) or \
     st.query_params["center"] = st.session_state.get("center_key")
     st.query_params["year"] = str(st.session_state.get("year"))
 
-# NEEDFUL: ensure report is present locally (download if missing OR S3 newer)
-ensure_local_report(cfg["key"], int(st.session_state.get("year")), out_path)
-
 mt = mtime_token(out_path)
 built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
 
@@ -906,7 +826,17 @@ if st.session_state.get("is_admin"):
         )
         if up:
             try:
-                st.success(f"Saved to {save_uploaded_source(folder, up).name}")
+                saved = save_uploaded_source(folder, up)
+                st.success(f"Saved to {saved.name}")
+
+                # ✅ NEEDFUL: upload source to S3 (optional but recommended)
+                try:
+                    s3_uri_src = upload_to_s3(saved, st.session_state.get("center_key"), st.session_state.get("year"))
+                    if s3_uri_src:
+                        st.info(f"Source uploaded to S3: {s3_uri_src}")
+                except Exception as e:
+                    st.warning(f"S3 source upload skipped/failed: {e}")
+
             except Exception as e:
                 st.error(str(e))
 
@@ -926,12 +856,13 @@ if st.session_state.get("is_admin"):
                 load_core_sheets.clear()
                 get_report_bytes.clear()
 
-                # NEEDFUL: upload rebuilt report to S3
+                # ✅ NEEDFUL: upload rebuilt report to S3
                 try:
-                    s3_upload_file(out_path, cfg["key"], int(st.session_state.get("year")), out_path.name)
-                    _s3_last_modified_cached.clear()
-                except Exception:
-                    pass
+                    s3_uri = upload_to_s3(out_path, st.session_state.get("center_key"), st.session_state.get("year"))
+                    if s3_uri:
+                        st.info(f"Report uploaded to S3: {s3_uri}")
+                except Exception as e:
+                    st.warning(f"S3 upload skipped/failed: {e}")
 
         except Exception as e:
             st.error(str(e))
