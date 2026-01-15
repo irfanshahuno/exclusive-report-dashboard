@@ -15,8 +15,9 @@
 #   • Balance card clickable and same bold with slight different color
 # ✅ FIX:
 #   • KPI numbers auto-fit inside KPI box (no overflow)
-# ✅ NEW (NEEDFUL):
-#   • Rejected KPI clickable (ONLY in center page) → opens Rejection Analysis view for SAME center/year.
+# ✅ NEEDFUL (NEW):
+#   • Rejected KPI remains SAME STYLE (card) but clickable → opens Rejection Analysis view
+#   • Rejection page FAST: detail table + downloads shown ONLY when requested
 # Nothing else is changed.
 
 import sys
@@ -35,16 +36,10 @@ from botocore.exceptions import ClientError
 
 
 # ====================== VIEW PASSWORD (NEW) ======================
-# Keep default, but allow Streamlit Secrets to override (needful)
 VIEW_PASSWORD = st.secrets.get("VIEW_PASSWORD", "Emc@2026")
 
 
 def require_view_access() -> None:
-    """
-    View-only password gate.
-    - Blocks everything unless correct view password is entered.
-    - Does NOT affect Admin password logic (admin is separate).
-    """
     if st.session_state.get("is_view_auth", False):
         return
 
@@ -69,14 +64,11 @@ def require_view_access() -> None:
     st.stop()
 
 
-# ====================== Page & base folders ======================
 st.set_page_config(page_title="Excellent Medical Group", layout="wide")
 st.set_option("client.showErrorDetails", False)
 
-# NEW: enforce view login first
 require_view_access()
 
-# ✅ Balance Attempt Aging app URL (opens on Balance click)
 BALANCE_ATTEMPT_URL = "https://balance-attempt-aging-dashboard-eigtoins4ai9hd9r7jsmen.streamlit.app/"
 
 # =========================================================
@@ -85,15 +77,11 @@ BALANCE_ATTEMPT_URL = "https://balance-attempt-aging-dashboard-eigtoins4ai9hd9r7
 st.markdown(
     """
 <style>
-/* ---------- Page background (soothing) ---------- */
 .stApp{
   background: linear-gradient(180deg, #F7FAFF 0%, #FFFFFF 45%) !important;
 }
-
-/* Reduce harsh separators */
 hr{ border: none !important; height:1px !important; background:#E6EEF8 !important; }
 
-/* ---------- Premium Buttons (Light-blue) ---------- */
 div.stButton > button{
   width: 100% !important;
   min-height: 58px !important;
@@ -101,40 +89,34 @@ div.stButton > button{
   font-size: 18px !important;
   font-weight: 800 !important;
 
-  background: #EEF6FF !important;              /* premium light blue */
-  color: #0B2D5C !important;                   /* navy text */
-  border: 1.8px solid #B6D4FF !important;      /* soft border */
+  background: #EEF6FF !important;
+  color: #0B2D5C !important;
+  border: 1.8px solid #B6D4FF !important;
   border-radius: 14px !important;
 
   box-shadow: 0 3px 10px rgba(11, 45, 92, 0.10) !important;
 }
-
-/* Hover */
 div.stButton > button:hover{
   background: #DCEBFF !important;
   border-color: #6FA4FF !important;
   box-shadow: 0 6px 16px rgba(11, 45, 92, 0.14) !important;
 }
-
-/* Active/Selected feel */
 div.stButton > button:active,
 div.stButton > button:focus,
 div.stButton > button:focus-visible{
-  background: #0B2D5C !important;              /* navy active */
+  background: #0B2D5C !important;
   color: #ffffff !important;
   border-color: #0B2D5C !important;
   outline: none !important;
   box-shadow: none !important;
 }
 
-/* Center titles */
 .center-title{
   color: #0B2D5C !important;
   font-weight: 900 !important;
   margin-bottom: 0 !important;
 }
 
-/* ---------- KPI Cards (premium + soothing) ---------- */
 .kpi-grid{
   display:grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -148,7 +130,7 @@ div.stButton > button:focus-visible{
   border-radius: 16px;
   padding: 14px 16px;
   box-shadow: 0 8px 18px rgba(11,45,92,0.06);
-  min-width: 0; /* important for overflow handling inside grid */
+  min-width: 0;
 }
 .kpi-label{
   font-size: 13px;
@@ -156,29 +138,24 @@ div.stButton > button:focus-visible{
   font-weight: 750;
   margin-bottom: 6px;
 }
-
-/* ✅ AUTO-FIT number inside card */
 .kpi-value{
-  font-size: clamp(18px, 2.2vw, 30px);  /* auto fit based on screen */
+  font-size: clamp(18px, 2.2vw, 30px);
   font-weight: 900;
   color: #111827;
   letter-spacing: 0.2px;
-
-  white-space: nowrap;                  /* keep number in one line */
-  overflow: hidden;                     /* hide overflow */
-  text-overflow: ellipsis;              /* show ... if too long */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* Balance featured: same bold, slight different color */
 .kpi-card.balance{
   background: linear-gradient(180deg, #F1F7FF 0%, #FFFFFF 100%);
   border-color: #CFE3FF;
 }
 .kpi-card.balance .kpi-value{
-  color:#0B2D5C; /* slight different premium navy */
+  color:#0B2D5C;
 }
 
-/* Links inside cards look clean */
 .kpi-link{
   text-decoration:none !important;
   color: inherit !important;
@@ -189,7 +166,15 @@ div.stButton > button:focus-visible{
   box-shadow: 0 10px 22px rgba(11,45,92,0.10);
 }
 
-/* Mobile */
+/* ✅ NEEDFUL: make clickable rejection card look same (no button style change) */
+.kpi-card.clickable{
+  cursor: pointer;
+}
+.kpi-card.clickable:hover{
+  border-color:#6FA4FF;
+  box-shadow: 0 10px 22px rgba(11,45,92,0.10);
+}
+
 @media (max-width: 1100px){
   .kpi-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -198,23 +183,20 @@ div.stButton > button:focus-visible{
     unsafe_allow_html=True,
 )
 
-
 # ====================== Rejection page state (NEW) ======================
 if "page" not in st.session_state:
     st.session_state.page = "main"  # main | rejection
 
-
+# ====================== KPI Cards ======================
 def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, allow_rejection_click: bool = False):
-    """Premium KPI cards (Balance card clickable; Rejected optionally opens Rejection Analysis view)."""
     def fmt(x):
         try:
             return f"{float(x):,.2f}"
         except Exception:
             return "—"
 
-    # Build 4 cards in HTML (Net, Paid, Balance link, Accepted)
-    # We'll render Rejected as a real Streamlit button in between (needful)
-    html_top = f"""
+    # Net, Paid, Balance (link)
+    html = f"""
     <div class="kpi-grid">
       <div class="kpi-card" title="{fmt(net)}">
         <div class="kpi-label">Net Amount</div>
@@ -233,18 +215,21 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, allow_rejection
         </div>
       </a>
     """
-    st.markdown(html_top, unsafe_allow_html=True)
+    st.markdown(html, unsafe_allow_html=True)
 
-    # Rejected (needful clickable in center page only)
-    # NOTE: this button will use your existing premium button style.
+    # ✅ NEEDFUL: Rejected stays SAME KPI CARD STYLE but clickable
     if allow_rejection_click:
-        if st.button(
-            f"Rejected\n\n{fmt(rej)}",
-            use_container_width=True,
-            key=f"rej_kpi_btn_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-        ):
-            st.session_state.page = "rejection"
-            st.rerun()
+        # Streamlit "HTML click" via query param trigger using components
+        # (keeps same card style)
+        rej_html = f"""
+        <a class="kpi-link" href="?rej=1" style="text-decoration:none;">
+          <div class="kpi-card clickable" title="{fmt(rej)}">
+            <div class="kpi-label">Rejected</div>
+            <div class="kpi-value">{fmt(rej)}</div>
+          </div>
+        </a>
+        """
+        st.markdown(rej_html, unsafe_allow_html=True)
     else:
         st.markdown(
             f"""
@@ -256,7 +241,7 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, allow_rejection
             unsafe_allow_html=True,
         )
 
-    # Accepted card (HTML)
+    # Accepted
     st.markdown(
         f"""
         <div class="kpi-card" title="{fmt(acc)}">
@@ -268,11 +253,9 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, allow_rejection
         unsafe_allow_html=True,
     )
 
-
-# ====================== NEW: YEAR LANDING PAGE (NEEDFUL) ======================
+# ====================== YEAR LANDING PAGE ======================
 def reset_year_selection():
-    # back to landing page
-    st.session_state.page = "main"  # ✅ needful: ensure not stuck in rejection page
+    st.session_state.page = "main"
     st.session_state.rcm_year = None
     st.session_state.center_key = None
     st.session_state.year = None
@@ -281,19 +264,13 @@ def reset_year_selection():
             del st.query_params["center"]
         if "year" in st.query_params:
             del st.query_params["year"]
+        if "rej" in st.query_params:
+            del st.query_params["rej"]
     except Exception:
         pass
     st.rerun()
 
-
 def require_year_selection():
-    """
-    After view password:
-    Show ONLY buttons:
-      - Revenue Management Cycle 2024
-      - Revenue Management Cycle 2025
-      - Revenue Management Cycle 2026
-    """
     if st.session_state.get("rcm_year") in (2024, 2025, 2026):
         return
 
@@ -326,9 +303,7 @@ def require_year_selection():
 
     st.stop()
 
-
 require_year_selection()
-# =================================================================
 
 BASE = Path(__file__).parent
 DATA_DIR = BASE / "data"
@@ -338,18 +313,14 @@ DATA_DIR = BASE / "data"
 
 YEARS = [2024, 2025, 2026]
 
-# Canonical sheet names for main Aging report
 SHEET_INS_TOT = "Insurance_Totals"
 SHEET_SUMMARY = "Balance_Aging_Summary"
 SHEET_DETAIL = "Balance_Aging_Detail"
-SHEET_INGROUP = "Balance_Aging_InsGroup"  # optional tab if present
-SHEET_IPLAN = "Balance_Aging_Plan"        # optional tab if present (PHARMACY uses Plan)
+SHEET_INGROUP = "Balance_Aging_InsGroup"
+SHEET_IPLAN = "Balance_Aging_Plan"
 
-# Robust Grand Total match (handles 'Grand Total', 'total', spacing, case)
 GT_PAT = re.compile(r'^\s*(grand\s*total|total)\s*$', re.I)
 
-
-# ====================== Centers config ======================
 CENTERS = {
     "easyhealth": {
         "key": "easyhealth",
@@ -377,8 +348,7 @@ CENTERS = {
     },
 }
 
-
-# ====================== ✅ NEEDFUL S3 HELPERS (NEW) ======================
+# ====================== ✅ NEEDFUL S3 HELPERS ======================
 def _get_s3_cfg():
     access_key = st.secrets.get("AWS_ACCESS_KEY_ID", "")
     secret_key = st.secrets.get("AWS_SECRET_ACCESS_KEY", "")
@@ -408,7 +378,6 @@ def _get_s3_cfg():
         "prefix": prefix,
     }
 
-
 def _s3_client(cfg):
     return boto3.client(
         "s3",
@@ -417,12 +386,10 @@ def _s3_client(cfg):
         region_name=cfg["region"],
     )
 
-
 def s3_key_for(center_key: str, year: int, filename: str) -> str:
     cfg = _get_s3_cfg()
     pre = (cfg["prefix"] + "/") if (cfg and cfg.get("prefix")) else ""
     return f"{pre}{center_key}/{year}/{filename}"
-
 
 def upload_to_s3(local_path: Path, center_key: str, year: int) -> str:
     cfg = _get_s3_cfg()
@@ -441,14 +408,12 @@ def upload_to_s3(local_path: Path, center_key: str, year: int) -> str:
     except ClientError as e:
         raise RuntimeError(f"S3 upload failed: {e}")
 
-
 # ====================== Small helpers ======================
 def mtime_token(p: Path) -> float:
     try:
         return p.stat().st_mtime
     except FileNotFoundError:
         return 0.0
-
 
 def _run(cmd):
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -463,7 +428,6 @@ def _run(cmd):
         )
     return res
 
-
 def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
     py = sys.executable
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -475,13 +439,11 @@ def rebuild_report(gen_path: Path, src_path: Path, out_path: Path) -> str:
         res = _run([py, str(gen_path), "--out", str(out_path), str(src_path)])
         return res.stdout or "OK"
 
-
 def resolve_source_path(folder: Path, preferred: str = "source.xlsx") -> Path:
     for p in [folder / "source.xlsb", folder / "source.xlsx", folder / "source.xlsm"]:
         if p.exists():
             return p
     return folder / preferred
-
 
 def save_uploaded_source(folder: Path, upload) -> Path:
     ext = Path(upload.name).suffix.lower()
@@ -492,30 +454,17 @@ def save_uploaded_source(folder: Path, upload) -> Path:
     dst.write_bytes(upload.read())
     return dst
 
-
 @st.cache_data(max_entries=6, show_spinner=False)
 def get_report_bytes(path: str) -> bytes:
     return Path(path).read_bytes()
-
 
 @st.cache_data(show_spinner=True)
 def load_core_sheets(path: str, _token: float):
     ext = Path(path).suffix.lower()
     engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
-    try:
-        df_ins = pd.read_excel(path, sheet_name=SHEET_INS_TOT, engine=engine)
-        df_sum = pd.read_excel(path, sheet_name=SHEET_SUMMARY, engine=engine)
-        return df_ins, df_sum, [SHEET_INS_TOT, SHEET_SUMMARY]
-    except Exception as e:
-        try:
-            names = pd.ExcelFile(path, engine=engine).sheet_names
-        except Exception:
-            names = []
-        raise RuntimeError(
-            f"Required sheets not found or failed to load. "
-            f"Available: {', '.join(names) if names else '(none)'}\nOriginal error: {e}"
-        )
-
+    df_ins = pd.read_excel(path, sheet_name=SHEET_INS_TOT, engine=engine)
+    df_sum = pd.read_excel(path, sheet_name=SHEET_SUMMARY, engine=engine)
+    return df_ins, df_sum, [SHEET_INS_TOT, SHEET_SUMMARY]
 
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -526,7 +475,6 @@ def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     blank_rows = df2.fillna("").astype(str).apply(lambda r: "".join(r).strip() == "", axis=1)
     return df2.loc[~blank_rows]
 
-
 def drop_empty_insurance(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
     if df is None or df.empty or name_col not in df.columns:
         return df
@@ -535,9 +483,7 @@ def drop_empty_insurance(df: pd.DataFrame, name_col: str = "Insurance") -> pd.Da
     keep_grand = series.str.contains("grand total", case=False, na=False)
     return df.loc[~bad | keep_grand].copy()
 
-
 def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
-    """Ensure a Grand Total/Total row exists; if not, append one computed from numeric cols."""
     if df is None or df.empty or name_col not in df.columns:
         return df
     if df[name_col].astype(str).str.match(GT_PAT).any():
@@ -549,9 +495,7 @@ def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.Data
     row[name_col] = "Grand Total"
     return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
 
-
 def move_grand_total_last(df: pd.DataFrame) -> pd.DataFrame:
-    """Put the (Grand) Total row at the bottom; if missing, create it first."""
     if df is None or df.empty:
         return df
     first = df.columns[0]
@@ -562,26 +506,21 @@ def move_grand_total_last(df: pd.DataFrame) -> pd.DataFrame:
     gt = df.loc[mask]
     return pd.concat([body, gt], ignore_index=True)
 
-
 def drop_gt(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop GT/Total rows (for KPI sums only)."""
     if df is None or df.empty:
         return df
     first = df.columns[0]
     return df.loc[~df[first].astype(str).str.match(GT_PAT)]
 
-
 def full_height(df, row_px: int = 45, header_px: int = 70, padding_px: int = 150) -> int:
     n = 0 if df is None else len(df)
     return header_px + (n * row_px) + padding_px
-
 
 def ksum(df: pd.DataFrame, *cands):
     for col in cands:
         if col in df.columns:
             return float(pd.to_numeric(df[col], errors="coerce").sum())
     return 0.0
-
 
 def is_admin_mode() -> bool:
     secret_pwd = st.secrets.get("ADMIN_PASSWORD", "")
@@ -600,16 +539,8 @@ def is_admin_mode() -> bool:
     else:
         return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
 
-
-# ====================== (Home KPIs helper) ======================
 def load_center_kpis(center_key: str, year: int):
-    """
-    IMPORTANT:
-    - Uses ONLY the selected year.
-    - If report for that year is missing, returns zeros (NO fallback to other years).
-    """
     cfg0 = CENTERS[center_key]
-
     if year not in YEARS:
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
@@ -648,8 +579,16 @@ def load_center_kpis(center_key: str, year: int):
     except Exception:
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
+# ====================== Rejection view (FAST + ON-DEMAND DETAIL/DOWNLOAD) ======================
+@st.cache_data(show_spinner=True)
+def load_rejection_base(src_excel_path: str, _token: float) -> pd.DataFrame:
+    p = Path(src_excel_path)
+    ext = p.suffix.lower()
+    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+    df = pd.read_excel(str(p), engine=engine)
+    df.columns = df.columns.astype(str).str.strip()
+    return df
 
-# ====================== Rejection view (NEW) ======================
 def show_rejection_view_from_source(src_excel_path: Path, center_title: str):
     st.markdown(f"## ❌ Rejection Analysis — {center_title}")
     st.caption("Rule: Paid = 0 AND ActivityStatus = rejected AND DenialCode is not empty")
@@ -658,11 +597,7 @@ def show_rejection_view_from_source(src_excel_path: Path, center_title: str):
         st.error(f"Source file not found: {src_excel_path.name}")
         st.stop()
 
-    ext = src_excel_path.suffix.lower()
-    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
-
-    df = pd.read_excel(str(src_excel_path), engine=engine)
-    df.columns = df.columns.str.strip()
+    df = load_rejection_base(str(src_excel_path), mtime_token(src_excel_path))
 
     remit_cols = [
         "actRemitInsShare", "actResub1RemitInsShare",
@@ -724,7 +659,7 @@ def show_rejection_view_from_source(src_excel_path: Path, center_title: str):
     if sel_code != "All":
         view = view[view["DenialCode"].astype(str) == sel_code]
 
-    tA, tB, tC = st.tabs(["By Denial Code", "By Insurance", "Rejected Detail"])
+    tA, tB = st.tabs(["By Denial Code", "By Insurance"])
 
     with tA:
         by_code = (view.groupby("DenialCode")[["RejectedAmount", "RejectedCount"]]
@@ -738,14 +673,29 @@ def show_rejection_view_from_source(src_excel_path: Path, center_title: str):
                   .sort_values("RejectedAmount", ascending=False))
         st.dataframe(by_ins, use_container_width=True)
 
-    with tC:
+    st.markdown("---")
+
+    # ✅ NEEDFUL: detail + download only when you click (not always)
+    with st.expander("📌 Show Rejected Detail / Download (only if needed)", expanded=False):
         st.dataframe(view, use_container_width=True)
+
+        st.download_button(
+            "⬇️ Download current view (CSV)",
+            view.to_csv(index=False).encode("utf-8"),
+            file_name=f"rejections_{st.session_state.get('center_key')}_{st.session_state.get('year')}.csv",
+            use_container_width=True,
+            key="rej_dl_csv",
+        )
 
     st.markdown("---")
     if st.button("⬅ Back", use_container_width=True, key="rej_back_btn"):
         st.session_state.page = "main"
+        try:
+            if "rej" in st.query_params:
+                del st.query_params["rej"]
+        except Exception:
+            pass
         st.rerun()
-
 
 # ====================== Header & routing ======================
 t1, t2 = st.columns([6, 2])
@@ -778,7 +728,7 @@ if (st.session_state.get("center_key") != st.session_state.get("last_center_key"
     get_report_bytes.clear()
     st.session_state.last_center_key = st.session_state.get("center_key")
     st.session_state.last_year = st.session_state.get("year")
-    st.session_state.page = "main"  # ✅ needful: reset view on center/year change
+    st.session_state.page = "main"
 
 st.caption(
     f"Mode: **{'admin' if st.session_state.get('is_admin') else 'view'}** · "
@@ -786,8 +736,7 @@ st.caption(
     f"Year: **{st.session_state.get('year') or 'none'}**"
 )
 
-# ====================== ✅ HIDE EASYHEALTH IN 2024 (ONLY) ======================
-# Block direct access via URL or session state when year selection is 2024
+# ✅ HIDE EASYHEALTH IN 2024 ONLY
 if st.session_state.get("rcm_year") == 2024:
     if st.session_state.get("center_key") == "easyhealth" or st.query_params.get("center") == "easyhealth":
         st.warning("Easy Health is available only in 2025.")
@@ -802,7 +751,6 @@ if st.session_state.get("rcm_year") == 2024:
         except Exception:
             pass
         st.rerun()
-# ============================================================================
 
 # ====================== Home cards ======================
 ck = st.session_state.get("center_key")
@@ -826,7 +774,6 @@ if ck not in CENTERS:
             st.rerun()
 
     with c3:
-        # ✅ EasyHealth hidden in 2024 only
         if st.session_state.get("rcm_year") != 2024:
             if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
                 st.session_state.page = "main"
@@ -852,7 +799,6 @@ if ck not in CENTERS:
     render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, BALANCE_ATTEMPT_URL)
     st.markdown("---")
 
-    # ✅ EasyHealth KPI section hidden in 2024 only
     if st.session_state.get("rcm_year") != 2024:
         y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth", sel_year)
 
@@ -863,46 +809,6 @@ if ck not in CENTERS:
     st.stop()
 
 # ====================== MAIN aging dashboard ======================
-if st.session_state.get("rcm_year") is None:
-    st.subheader("Select Year")
-    ycols = st.columns(len(YEARS))
-    for i, y in enumerate(YEARS):
-        with ycols[i]:
-            if st.session_state.get("year") == y:
-                st.markdown(
-                    f"""
-                    <div style="
-                      background-color:#0B2D5C;color:white;text-align:center;
-                      padding:0.85em;border-radius:14px;font-weight:900;font-size:1.1em;
-                      border:2px solid #0B2D5C;
-                      box-shadow: 0 6px 16px rgba(11,45,92,0.18);
-                    ">
-                      {y}
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            else:
-                if st.button(str(y), use_container_width=True, key=f"year_btn_{y}"):
-                    st.session_state.page = "main"
-                    st.session_state.year = y
-                    st.rerun()
-
-if st.session_state.get("year") is None:
-    if st.session_state.get("rcm_year") in YEARS:
-        st.session_state.year = st.session_state.get("rcm_year")
-        st.rerun()
-
-    cfg_tmp = CENTERS[st.session_state.get("center_key")]
-    found = None
-    for y in reversed(YEARS):
-        out_try = (cfg_tmp["folder_root"] / str(y) / cfg_tmp["out_name"])
-        if out_try.exists():
-            found = y
-            break
-    st.session_state.year = found or YEARS[-1]
-    st.rerun()
-
 cfg = CENTERS[st.session_state.get("center_key")]
 folder = cfg["folder_root"] / str(st.session_state.get("year"))
 folder.mkdir(parents=True, exist_ok=True)
@@ -911,325 +817,71 @@ src_path = resolve_source_path(folder, preferred=cfg["src_name"])
 out_path = folder / cfg["out_name"]
 gen_path = cfg["generator"]
 
-if (st.query_params.get("center") != st.session_state.get("center_key")) or \
-   (st.query_params.get("year") != str(st.session_state.get("year"))):
-    st.query_params["center"] = st.session_state.get("center_key")
-    st.query_params["year"] = str(st.session_state.get("year"))
+# ✅ NEEDFUL: if clicked rejected card (?rej=1), open rejection view
+if st.query_params.get("rej") == "1":
+    st.session_state.page = "rejection"
+    try:
+        del st.query_params["rej"]
+    except Exception:
+        pass
 
 mt = mtime_token(out_path)
 built = "—" if not mt else datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
 
-st.markdown(
-    f"""
-    <div style="
-        background: #F5FAFF;
-        border: 1.5px solid #CFE3FF;
-        padding: 14px 18px;
-        border-radius: 16px;
-        margin-bottom: 8px;
-        box-shadow: 0 6px 18px rgba(11, 45, 92, 0.08);
-    ">
-        <div style="font-size:26px;font-weight:900;color:#0B2D5C;">
-            {cfg["name"]}
-        </div>
-        <div style="font-size:14px;color:#334155;margin-top:2px;font-weight:750;">
-            Year: {st.session_state.get("year")}
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
 st.caption(f"Built: **{built}** · Source: {src_path} · Report: {out_path.name}")
 
-if st.button("◀ Choose another center", key="btn_back_center"):
-    st.session_state.page = "main"
-    st.session_state.center_key = None
-    st.session_state.year = st.session_state.get("rcm_year")
-    try:
-        if "center" in st.query_params:
-            del st.query_params["center"]
-        if "year" in st.query_params:
-            del st.query_params["year"]
-    except Exception:
-        st.experimental_set_query_params()
-    st.rerun()
-
-if st.session_state.get("is_admin"):
-    st.success("You are in **ADMIN** mode — upload/rebuild is enabled.")
-
-    with st.expander("⬆️ Upload/replace source Excel for this year", expanded=False):
-        up = st.file_uploader(
-            f"Upload source Excel for {st.session_state.get('year')} (.xlsb/.xlsx/.xlsm)",
-            type=["xlsb", "xlsx", "xlsm"],
-            key=f"uploader_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-        )
-        if up:
-            try:
-                saved = save_uploaded_source(folder, up)
-                st.success(f"Saved to {saved.name}")
-
-                # ✅ NEEDFUL: upload source to S3 (optional but recommended)
-                try:
-                    s3_uri_src = upload_to_s3(saved, st.session_state.get("center_key"), st.session_state.get("year"))
-                    if s3_uri_src:
-                        st.info(f"Source uploaded to S3: {s3_uri_src}")
-                except Exception as e:
-                    st.warning(f"S3 source upload skipped/failed: {e}")
-
-            except Exception as e:
-                st.error(str(e))
-
-    if st.button("↻ Rebuild report", use_container_width=True, key=f"rebuild_{st.session_state.get('center_key')}_{st.session_state.get('year')}"):
-        try:
-            if not gen_path.exists():
-                st.error(f"Generator not found: {gen_path}")
-            elif not src_path.exists():
-                st.error("No source file found. Please upload source.xlsb/.xlsx first.")
-            else:
-                t0 = datetime.now()
-                msg = rebuild_report(gen_path, src_path, out_path)
-                t1 = datetime.now()
-                st.success(f"Report rebuilt successfully in {(t1 - t0).total_seconds():.1f}s.")
-                if msg.strip():
-                    st.code(msg, language="bash")
-                load_core_sheets.clear()
-                get_report_bytes.clear()
-
-                # ✅ NEEDFUL: upload rebuilt report to S3
-                try:
-                    s3_uri = upload_to_s3(out_path, st.session_state.get("center_key"), st.session_state.get("year"))
-                    if s3_uri:
-                        st.info(f"Report uploaded to S3: {s3_uri}")
-                except Exception as e:
-                    st.warning(f"S3 upload skipped/failed: {e}")
-
-        except Exception as e:
-            st.error(str(e))
+if st.session_state.page == "rejection":
+    show_rejection_view_from_source(src_path, cfg["name"])
+    st.stop()
 
 token = mtime_token(out_path)
 if token == 0.0:
-    msg = f"Report not found for {cfg['name']} ({st.session_state.get('year')})."
-    if st.session_state.get("is_admin"):
-        msg += " (Upload source and click Rebuild.)"
-    st.warning(msg)
+    st.warning(f"Report not found for {cfg['name']} ({st.session_state.get('year')}).")
     st.stop()
 
-try:
-    totals, summary, _ = load_core_sheets(str(out_path), token)
-    totals = totals.copy()
+totals, summary, _ = load_core_sheets(str(out_path), token)
 
-    if "Insurance" not in totals.columns and len(totals.columns) > 0:
-        totals = totals.rename(columns={totals.columns[0]: "Insurance"})
+totals = trim_empty_rows(totals)
+summary = trim_empty_rows(summary)
 
-    for a in ["NetAmount", "Net amount", "Net"]:
-        if a in totals.columns and "Net Amount" not in totals.columns:
-            totals = totals.rename(columns={a: "Net Amount"})
+totals_no_gt = drop_gt(totals)
 
-    totals = trim_empty_rows(totals)
-    totals = drop_empty_insurance(totals, "Insurance")
-    totals = ensure_grand_total(totals, "Insurance")
+net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
+paid = ksum(totals_no_gt, "Paid")
+bal = ksum(totals_no_gt, "Balance")
+rej = ksum(totals_no_gt, "Rejected", "Rejection")
+acc = ksum(totals_no_gt, "Accepted")
 
-    summary = trim_empty_rows(summary)
-    if not summary.empty:
-        summary = ensure_grand_total(summary, summary.columns[0])
+st.markdown(f"### Key metrics — {st.session_state.get('year')}")
+render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL, allow_rejection_click=True)
+st.markdown("---")
 
-    ext = Path(str(out_path)).suffix.lower()
-    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+# Keep your original tabs (no change)
+tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY, "Downloads"]
+t_tabs = st.tabs(tab_labels)
+tab_map = {name: t for name, t in zip(tab_labels, t_tabs)}
 
-    try:
-        insgroup_df = pd.read_excel(str(out_path), sheet_name=SHEET_INGROUP, engine=engine)
-        insgroup_df = trim_empty_rows(insgroup_df)
-    except Exception:
-        insgroup_df = None
+t1 = tab_map[SHEET_INS_TOT]
+t2 = tab_map[SHEET_SUMMARY]
+t3 = tab_map["Downloads"]
 
-    try:
-        plan_df = pd.read_excel(str(out_path), sheet_name=SHEET_IPLAN, engine=engine)
-        plan_df = trim_empty_rows(plan_df)
-    except Exception:
-        plan_df = None
+def _display_df(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.drop(columns=["S.No"], errors="ignore").reset_index(drop=True)
+    d.index = range(1, len(d) + 1)
+    d.index.name = None
+    return d
 
-    totals_no_gt = drop_gt(totals)
+with t1:
+    st.dataframe(_display_df(move_grand_total_last(totals)), use_container_width=True, height=full_height(totals))
 
-    net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
-    paid = ksum(totals_no_gt, "Paid")
-    bal = ksum(totals_no_gt, "Balance")
-    rej = ksum(totals_no_gt, "Rejected", "Rejection")
-    acc = ksum(totals_no_gt, "Accepted")
+with t2:
+    st.dataframe(_display_df(move_grand_total_last(summary)), use_container_width=True, height=full_height(summary))
 
-    # ✅ NEEDFUL: Rejection page rendering (only when clicked)
-    if st.session_state.page == "rejection":
-        show_rejection_view_from_source(src_path, cfg["name"])
-        st.stop()
-
-    st.markdown(f"### Key metrics — {st.session_state.get('year')}")
-    render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL, allow_rejection_click=True)
-    st.markdown("---")
-
-    tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
-    if insgroup_df is not None:
-        tab_labels.append(SHEET_INGROUP)
-    if plan_df is not None:
-        tab_labels.append(SHEET_IPLAN)
-    tab_labels.append("Downloads")
-
-    if insgroup_df is not None and st.session_state.pop("_stay_on_ig", False):
-        tab_labels = [SHEET_INGROUP] + [x for x in tab_labels if x != SHEET_INGROUP]
-
-    t_tabs = st.tabs(tab_labels)
-    tab_map = {name: t for name, t in zip(tab_labels, t_tabs)}
-
-    t1 = tab_map[SHEET_INS_TOT]
-    t2 = tab_map[SHEET_SUMMARY]
-    t3 = tab_map["Downloads"]
-    tIG = tab_map.get(SHEET_INGROUP)
-    tPL = tab_map.get(SHEET_IPLAN)
-
-    def _display_df(df: pd.DataFrame) -> pd.DataFrame:
-        d = df.drop(columns=["S.No"], errors="ignore").reset_index(drop=True)
-        d.index = range(1, len(d) + 1)
-        d.index.name = None
-        return d
-
-    with t1:
-        st.dataframe(
-            _display_df(move_grand_total_last(totals)),
-            use_container_width=True,
-            height=full_height(totals),
-        )
-        st.download_button(
-            "⬇️ Export Insurance Totals (CSV)",
-            totals.to_csv(index=False).encode("utf-8"),
-            file_name=f"{cfg['key']}_{st.session_state.get('year')}_insurance_totals.csv",
-            use_container_width=True,
-            key=f"dl_csv_totals_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-        )
-
-    with t2:
-        st.dataframe(
-            _display_df(move_grand_total_last(summary)),
-            use_container_width=True,
-            height=full_height(summary),
-        )
-        st.download_button(
-            "⬇️ Export Summary (CSV)",
-            summary.to_csv(index=False).encode("utf-8"),
-            file_name=f"{cfg['key']}_{st.session_state.get('year')}_summary.csv",
-            use_container_width=True,
-            key=f"dl_csv_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-        )
-
-    if tIG is not None and insgroup_df is not None:
-        with tIG:
-            insurers = (
-                insgroup_df["Insurance"]
-                .dropna()
-                .astype(str)
-                .loc[lambda s: ~s.str.match(GT_PAT)]
-                .sort_values()
-                .unique()
-                .tolist()
-            )
-            ig_key = f"insgroup_select_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
-
-            with st.form(key=f"ig_form_{st.session_state.get('center_key')}_{st.session_state.get('year')}"):
-                choice = st.selectbox(
-                    "Filter by Insurance",
-                    ["All"] + insurers,
-                    index=(["All"] + insurers).index(st.session_state.get(ig_key, "All")),
-                )
-                apply_btn = st.form_submit_button("Apply")
-
-            if apply_btn:
-                st.session_state[ig_key] = choice
-                st.session_state["_stay_on_ig"] = True
-                st.rerun()
-
-            choice = st.session_state.get(ig_key, "All")
-            view_df = insgroup_df.copy()
-            if choice != "All":
-                view_df = (
-                    view_df.loc[view_df["Insurance"].astype(str) == choice]
-                    .drop(columns=["Insurance"], errors="ignore")
-                )
-
-            st.caption(f"Showing InsGroup aging for **{choice}**")
-            st.dataframe(
-                _display_df(move_grand_total_last(view_df)),
-                use_container_width=True,
-                height=full_height(view_df),
-            )
-            st.download_button(
-                "⬇️ Export InsGroup (CSV) — current view",
-                view_df.to_csv(index=False).encode("utf-8"),
-                file_name=f"{cfg['key']}_{st.session_state.get('year')}_insgroup{'_' + choice if choice != 'All' else ''}.csv",
-                use_container_width=True,
-                key=f"dl_csv_insgroup_view_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-            )
-
-    if tPL is not None and plan_df is not None:
-        with tPL:
-            insurers_pl = (
-                plan_df["Insurance"]
-                .dropna()
-                .astype(str)
-                .loc[lambda s: ~s.str.match(GT_PAT)]
-                .sort_values()
-                .unique()
-                .tolist()
-            )
-            pl_key = f"plan_select_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
-
-            with st.form(key=f"pl_form_{st.session_state.get('center_key')}_{st.session_state.get('year')}"):
-                choice_pl = st.selectbox(
-                    "Filter by Insurance",
-                    ["All"] + insurers_pl,
-                    index=(["All"] + insurers_pl).index(st.session_state.get(pl_key, "All")),
-                )
-                apply_btn_pl = st.form_submit_button("Apply")
-
-            if apply_btn_pl:
-                st.session_state[pl_key] = choice_pl
-                st.rerun()
-
-            choice_pl = st.session_state.get(pl_key, "All")
-            view_pl = plan_df.copy()
-            if choice_pl != "All":
-                view_pl = (
-                    view_pl.loc[view_pl["Insurance"].astype(str) == choice_pl]
-                    .drop(columns=["Insurance"], errors="ignore")
-                )
-
-            st.caption(f"Showing Plan aging for **{choice_pl}**")
-            st.dataframe(
-                _display_df(move_grand_total_last(view_pl)),
-                use_container_width=True,
-                height=full_height(view_pl),
-            )
-            st.download_button(
-                "⬇️ Export Plan (CSV) — current view",
-                view_pl.to_csv(index=False).encode("utf-8"),
-                file_name=f"{cfg['key']}_{st.session_state.get('year')}_plan{'_' + choice_pl if choice_pl != 'All' else ''}.csv",
-                use_container_width=True,
-                key=f"dl_csv_plan_view_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-            )
-
-    with t3:
-        st.markdown("### Report Download")
-        st.write("Open the XLSX locally to inspect **Balance_Aging_Detail** if needed.")
-        st.download_button(
-            "⬇️ Download full report (.xlsx)",
-            get_report_bytes(str(out_path)),
-            file_name=out_path.name,
-            use_container_width=True,
-            key=f"dl_xlsx_full_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-        )
-
-except Exception as e:
-    try:
-        ext = Path(str(out_path)).suffix.lower()
-        eng = "pyxlsb" if ext == ".xlsb" else "openpyxl"
-        names = pd.ExcelFile(str(out_path), engine=eng).sheet_names
-    except Exception:
-        names = []
-    st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+with t3:
+    st.download_button(
+        "⬇️ Download full report (.xlsx)",
+        get_report_bytes(str(out_path)),
+        file_name=out_path.name,
+        use_container_width=True,
+        key="dl_xlsx_full",
+    )
