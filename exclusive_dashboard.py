@@ -1,6 +1,5 @@
 # exclusive_dashboard.py — Main dashboard KPIs at TOP (Doc Performance unchanged)
 # NOTE: This is your original dashboard with ONLY the minimal addition
-s:
 #   • Optional Balance_Aging_InsGroup tab (already supported)
 #   • Optional Balance_Aging_Plan tab (new) with Insurance filter
 #   • S.No hidden and display index starts at 1
@@ -1136,4 +1135,5 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
 
