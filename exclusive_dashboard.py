@@ -15,25 +15,23 @@
 #   • Balance card clickable and same bold with slight different color
 # ✅ FIX:
 #   • KPI numbers auto-fit inside KPI box (no overflow)
-# ✅ NEEDFUL NEW:
-#   • Rejected KPI opens Rejection page (lazy loaded, keeps dashboard fast)
-#   • Rejection page does NOT run unless user clicks
-# Nothing else is changed.
+# ✅ NEEDFUL (NEW FOR REJECTION):
+#   • Rejection Analysis opens in same app via query param view=rejection
+#   • No HTML anchor for "Rejected" card (prevents HTML showing on screen)
+#   • Detail sheet is loaded ONLY inside rejection page (faster)
 
 import sys
 import subprocess
 import re
 from pathlib import Path
-from datetime import datetime, date
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components  # used only for the home-card link
 
 # ====================== ✅ NEEDFUL S3 IMPORTS (NEW) ======================
 import boto3
 from botocore.exceptions import ClientError
-
 
 # ====================== VIEW PASSWORD (NEW) ======================
 # Keep default, but allow Streamlit Secrets to override (needful)
@@ -200,30 +198,14 @@ div.stButton > button:focus-visible{
 )
 
 
-def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, rejected_href: str | None = None):
-    """Premium KPI cards (Balance card clickable). Rejected card optionally clickable (needful)."""
+def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str):
+    """Premium KPI cards (Balance card clickable). Rejected is NOT an HTML link (needful fix)."""
+
     def fmt(x):
         try:
             return f"{float(x):,.2f}"
         except Exception:
             return "—"
-
-    # ✅ NEEDFUL: make Rejected clickable ONLY when link provided, same style.
-    rejected_block = f"""
-      <div class="kpi-card" title="{fmt(rej)}">
-        <div class="kpi-label">Rejected</div>
-        <div class="kpi-value">{fmt(rej)}</div>
-      </div>
-    """
-    if rejected_href:
-        rejected_block = f"""
-        <a class="kpi-link" href="{rejected_href}">
-          <div class="kpi-card" title="{fmt(rej)}">
-            <div class="kpi-label">Rejected</div>
-            <div class="kpi-value">{fmt(rej)}</div>
-          </div>
-        </a>
-        """
 
     html = f"""
     <div class="kpi-grid">
@@ -244,7 +226,10 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, rejected_href: 
         </div>
       </a>
 
-      {rejected_block}
+      <div class="kpi-card" title="{fmt(rej)}">
+        <div class="kpi-label">Rejected</div>
+        <div class="kpi-value">{fmt(rej)}</div>
+      </div>
 
       <div class="kpi-card" title="{fmt(acc)}">
         <div class="kpi-label">Accepted</div>
@@ -280,19 +265,7 @@ def require_year_selection():
       - Revenue Management Cycle 2024
       - Revenue Management Cycle 2025
       - Revenue Management Cycle 2026
-    ✅ NEEDFUL: If URL has ?year=2024/2025/2026, auto-select to avoid landing page.
     """
-    # ✅ auto-select from query params if present
-    try:
-        yq = st.query_params.get("year")
-        if yq:
-            yq = int(yq)
-            if yq in (2024, 2025, 2026):
-                st.session_state.rcm_year = yq
-                st.session_state.year = yq
-    except Exception:
-        pass
-
     if st.session_state.get("rcm_year") in (2024, 2025, 2026):
         return
 
@@ -344,7 +317,6 @@ SHEET_IPLAN = "Balance_Aging_Plan"        # optional tab if present (PHARMACY us
 # Robust Grand Total match (handles 'Grand Total', 'total', spacing, case)
 GT_PAT = re.compile(r'^\s*(grand\s*total|total)\s*$', re.I)
 
-
 # ====================== Centers config ======================
 CENTERS = {
     "easyhealth": {
@@ -372,7 +344,6 @@ CENTERS = {
         "generator": BASE / "pharmacy_exclusive_report_with_aging.py",
     },
 }
-
 
 # ====================== ✅ NEEDFUL S3 HELPERS (NEW) ======================
 def _get_s3_cfg():
@@ -645,6 +616,14 @@ def load_center_kpis(center_key: str, year: int):
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
 
+# ====================== ✅ NEEDFUL: OPEN REJECTION VIEW ======================
+def open_rejection_view(center_key: str, year: int):
+    st.query_params["center"] = center_key
+    st.query_params["year"] = str(year)
+    st.query_params["view"] = "rejection"
+    st.rerun()
+
+
 # ====================== Header & routing ======================
 t1, t2 = st.columns([6, 2])
 with t1:
@@ -683,22 +662,7 @@ st.caption(
     f"Year: **{st.session_state.get('year') or 'none'}**"
 )
 
-# ====================== ✅ NEEDFUL: Rejection page routing (LAZY) ======================
-# If URL has ?view=rejection, render rejection page and stop.
-if qs.get("view") == "rejection":
-    ck = st.session_state.get("center_key")
-    yr = st.session_state.get("year")
-    if ck in CENTERS and yr in YEARS:
-        from rejection_view import render_rejection_page  # lazy import = faster dashboard
-        render_rejection_page(ck, yr, CENTERS)
-        st.stop()
-    else:
-        st.warning("Rejection view needs valid center and year in URL.")
-        st.stop()
-# ===============================================================================
-
 # ====================== ✅ HIDE EASYHEALTH IN 2024 (ONLY) ======================
-# Block direct access via URL or session state when year selection is 2024
 if st.session_state.get("rcm_year") == 2024:
     if st.session_state.get("center_key") == "easyhealth" or st.query_params.get("center") == "easyhealth":
         st.warning("Easy Health is available only in 2025.")
@@ -709,10 +673,11 @@ if st.session_state.get("rcm_year") == 2024:
                 del st.query_params["center"]
             if "year" in st.query_params:
                 del st.query_params["year"]
+            if "view" in st.query_params:
+                del st.query_params["view"]
         except Exception:
             pass
         st.rerun()
-# ============================================================================
 
 # ====================== Home cards ======================
 ck = st.session_state.get("center_key")
@@ -725,20 +690,34 @@ if ck not in CENTERS:
         if st.container(border=True).button(CENTERS["excellent"]["name"], use_container_width=True, key="home_exc"):
             st.session_state.center_key = "excellent"
             st.session_state.year = st.session_state.get("rcm_year")
+            try:
+                if "view" in st.query_params:
+                    del st.query_params["view"]
+            except Exception:
+                pass
             st.rerun()
 
     with c2:
         if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
             st.session_state.center_key = "pharmacy"
             st.session_state.year = st.session_state.get("rcm_year")
+            try:
+                if "view" in st.query_params:
+                    del st.query_params["view"]
+            except Exception:
+                pass
             st.rerun()
 
     with c3:
-        # ✅ EasyHealth hidden in 2024 only
         if st.session_state.get("rcm_year") != 2024:
             if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
                 st.session_state.center_key = "easyhealth"
                 st.session_state.year = st.session_state.get("rcm_year")
+                try:
+                    if "view" in st.query_params:
+                        del st.query_params["view"]
+                except Exception:
+                    pass
                 st.rerun()
 
     st.markdown("---")
@@ -749,28 +728,34 @@ if ck not in CENTERS:
     y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent", sel_year)
     y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy", sel_year)
 
-    # ✅ NEEDFUL: rejected link (same tab, no new session)
-    rej_link_exc = f"?center=excellent&year={sel_year}&view=rejection"
-    rej_link_ph = f"?center=pharmacy&year={sel_year}&view=rejection"
-
     st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
-    render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, BALANCE_ATTEMPT_URL, rejected_href=rej_link_exc)
+    render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, BALANCE_ATTEMPT_URL)
+
+    # ✅ NEEDFUL: Rejection Analysis button (no new tab, no HTML anchor)
+    if st.button("❌ Open Rejection Analysis", use_container_width=True, key=f"rej_home_exc_{sel_year}"):
+        open_rejection_view("excellent", sel_year)
+
     st.markdown("---")
 
     st.markdown('<h3 class="center-title">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
-    render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, BALANCE_ATTEMPT_URL, rejected_href=rej_link_ph)
+    render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, BALANCE_ATTEMPT_URL)
+
+    if st.button("❌ Open Rejection Analysis", use_container_width=True, key=f"rej_home_ph_{sel_year}"):
+        open_rejection_view("pharmacy", sel_year)
+
     st.markdown("---")
 
-    # ✅ EasyHealth KPI section hidden in 2024 only
     if st.session_state.get("rcm_year") != 2024:
         y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth", sel_year)
-        rej_link_eh = f"?center=easyhealth&year={sel_year}&view=rejection"
 
         st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
         st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
-        render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, BALANCE_ATTEMPT_URL, rejected_href=rej_link_eh)
+        render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, BALANCE_ATTEMPT_URL)
+
+        if st.button("❌ Open Rejection Analysis", use_container_width=True, key=f"rej_home_eh_{sel_year}"):
+            open_rejection_view("easyhealth", sel_year)
 
     st.stop()
 
@@ -822,6 +807,7 @@ src_path = resolve_source_path(folder, preferred=cfg["src_name"])
 out_path = folder / cfg["out_name"]
 gen_path = cfg["generator"]
 
+# keep query params in sync
 if (st.query_params.get("center") != st.session_state.get("center_key")) or \
    (st.query_params.get("year") != str(st.session_state.get("year"))):
     st.query_params["center"] = st.session_state.get("center_key")
@@ -864,7 +850,7 @@ if st.button("◀ Choose another center", key="btn_back_center"):
         if "view" in st.query_params:
             del st.query_params["view"]
     except Exception:
-        st.experimental_set_query_params()
+        pass
     st.rerun()
 
 if st.session_state.get("is_admin"):
@@ -927,6 +913,33 @@ if token == 0.0:
     st.warning(msg)
     st.stop()
 
+# ====================== ✅ NEEDFUL: REJECTION ROUTE ======================
+# If URL has ?view=rejection then show rejection page ONLY (fast)
+if st.query_params.get("view") == "rejection":
+    try:
+        from rejection_view import render_rejection_page
+        render_rejection_page(
+            center_key=st.session_state.get("center_key"),
+            year=int(st.session_state.get("year") or 0),
+            report_path=str(out_path),
+            center_name=cfg["name"],
+            built_text=built,
+            back_center=st.session_state.get("center_key"),
+        )
+        st.stop()
+    except Exception as e:
+        st.error(f"Rejection view failed: {e}")
+        # allow user to go back
+        if st.button("⬅ Back to Dashboard", use_container_width=True, key="rej_back_fail"):
+            try:
+                if "view" in st.query_params:
+                    del st.query_params["view"]
+            except Exception:
+                pass
+            st.rerun()
+        st.stop()
+# ======================================================================
+
 try:
     totals, summary, _ = load_core_sheets(str(out_path), token)
     totals = totals.copy()
@@ -969,11 +982,13 @@ try:
     rej = ksum(totals_no_gt, "Rejected", "Rejection")
     acc = ksum(totals_no_gt, "Accepted")
 
-    # ✅ NEEDFUL: rejected link for this center/year
-    rej_link = f"?center={st.session_state.get('center_key')}&year={st.session_state.get('year')}&view=rejection"
-
     st.markdown(f"### Key metrics — {st.session_state.get('year')}")
-    render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL, rejected_href=rej_link)
+    render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL)
+
+    # ✅ NEEDFUL: Rejection Analysis button (no HTML, same app)
+    if st.button("❌ Open Rejection Analysis", use_container_width=True, key=f"rej_open_{cfg['key']}_{st.session_state.get('year')}"):
+        open_rejection_view(st.session_state.get("center_key"), int(st.session_state.get("year")))
+
     st.markdown("---")
 
     tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
