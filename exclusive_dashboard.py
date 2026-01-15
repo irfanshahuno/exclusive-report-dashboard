@@ -15,6 +15,8 @@
 #   • Balance card clickable and same bold with slight different color
 # ✅ FIX:
 #   • KPI numbers auto-fit inside KPI box (no overflow)
+# ✅ NEW (NEEDFUL):
+#   • Rejected KPI clickable (ONLY in center page) → opens Rejection Analysis view for SAME center/year.
 # Nothing else is changed.
 
 import sys
@@ -197,15 +199,22 @@ div.stButton > button:focus-visible{
 )
 
 
-def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str):
-    """Premium KPI cards (Balance card clickable)."""
+# ====================== Rejection page state (NEW) ======================
+if "page" not in st.session_state:
+    st.session_state.page = "main"  # main | rejection
+
+
+def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, allow_rejection_click: bool = False):
+    """Premium KPI cards (Balance card clickable; Rejected optionally opens Rejection Analysis view)."""
     def fmt(x):
         try:
             return f"{float(x):,.2f}"
         except Exception:
             return "—"
 
-    html = f"""
+    # Build 4 cards in HTML (Net, Paid, Balance link, Accepted)
+    # We'll render Rejected as a real Streamlit button in between (needful)
+    html_top = f"""
     <div class="kpi-grid">
       <div class="kpi-card" title="{fmt(net)}">
         <div class="kpi-label">Net Amount</div>
@@ -223,24 +232,47 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str):
           <div class="kpi-value">{fmt(bal)}</div>
         </div>
       </a>
-
-      <div class="kpi-card" title="{fmt(rej)}">
-        <div class="kpi-label">Rejected</div>
-        <div class="kpi-value">{fmt(rej)}</div>
-      </div>
-
-      <div class="kpi-card" title="{fmt(acc)}">
-        <div class="kpi-label">Accepted</div>
-        <div class="kpi-value">{fmt(acc)}</div>
-      </div>
-    </div>
     """
-    st.markdown(html, unsafe_allow_html=True)
+    st.markdown(html_top, unsafe_allow_html=True)
+
+    # Rejected (needful clickable in center page only)
+    # NOTE: this button will use your existing premium button style.
+    if allow_rejection_click:
+        if st.button(
+            f"Rejected\n\n{fmt(rej)}",
+            use_container_width=True,
+            key=f"rej_kpi_btn_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+        ):
+            st.session_state.page = "rejection"
+            st.rerun()
+    else:
+        st.markdown(
+            f"""
+            <div class="kpi-card" title="{fmt(rej)}">
+              <div class="kpi-label">Rejected</div>
+              <div class="kpi-value">{fmt(rej)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # Accepted card (HTML)
+    st.markdown(
+        f"""
+        <div class="kpi-card" title="{fmt(acc)}">
+          <div class="kpi-label">Accepted</div>
+          <div class="kpi-value">{fmt(acc)}</div>
+        </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ====================== NEW: YEAR LANDING PAGE (NEEDFUL) ======================
 def reset_year_selection():
     # back to landing page
+    st.session_state.page = "main"  # ✅ needful: ensure not stuck in rejection page
     st.session_state.rcm_year = None
     st.session_state.center_key = None
     st.session_state.year = None
@@ -272,18 +304,21 @@ def require_year_selection():
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("Revenue Management Cycle 2024", use_container_width=True, key="rcm_btn_2024"):
+            st.session_state.page = "main"
             st.session_state.rcm_year = 2024
             st.session_state.center_key = None
             st.session_state.year = 2024
             st.rerun()
     with c2:
         if st.button("Revenue Management Cycle 2025", use_container_width=True, key="rcm_btn_2025"):
+            st.session_state.page = "main"
             st.session_state.rcm_year = 2025
             st.session_state.center_key = None
             st.session_state.year = 2025
             st.rerun()
     with c3:
         if st.button("Revenue Management Cycle 2026", use_container_width=True, key="rcm_btn_2026"):
+            st.session_state.page = "main"
             st.session_state.rcm_year = 2026
             st.session_state.center_key = None
             st.session_state.year = 2026
@@ -614,6 +649,104 @@ def load_center_kpis(center_key: str, year: int):
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
 
+# ====================== Rejection view (NEW) ======================
+def show_rejection_view_from_source(src_excel_path: Path, center_title: str):
+    st.markdown(f"## ❌ Rejection Analysis — {center_title}")
+    st.caption("Rule: Paid = 0 AND ActivityStatus = rejected AND DenialCode is not empty")
+
+    if not src_excel_path.exists():
+        st.error(f"Source file not found: {src_excel_path.name}")
+        st.stop()
+
+    ext = src_excel_path.suffix.lower()
+    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+
+    df = pd.read_excel(str(src_excel_path), engine=engine)
+    df.columns = df.columns.str.strip()
+
+    remit_cols = [
+        "actRemitInsShare", "actResub1RemitInsShare",
+        "actResub2RemitInsShare", "actResub3RemitInsShare",
+        "TKBKAmountAct",
+    ]
+
+    for c in ["ActivityIns"] + remit_cols:
+        if c not in df.columns:
+            df[c] = 0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    df["Paid"] = df[remit_cols].sum(axis=1)
+
+    if "DenialCode" not in df.columns:
+        df["DenialCode"] = ""
+    df["DenialCode"] = df["DenialCode"].astype(str).fillna("").str.strip()
+    df.loc[df["DenialCode"].str.lower().isin(["nan", "none", "null"]), "DenialCode"] = ""
+
+    if "Insurance" not in df.columns:
+        alt = next((c for c in ["PayerName", "Insurer", "Plan"] if c in df.columns), None)
+        df["Insurance"] = df[alt] if alt else "Not Available"
+
+    if "ActivityStatus" not in df.columns:
+        st.error("ActivityStatus column not found in source.")
+        st.stop()
+
+    status = df["ActivityStatus"].astype(str).fillna("").str.lower().str.strip()
+
+    rej = df[(df["Paid"] == 0) & (status == "rejected") & (df["DenialCode"] != "")].copy()
+    rej["RejectedAmount"] = rej["ActivityIns"]
+    rej["RejectedCount"] = 1
+
+    total_amt = float(rej["RejectedAmount"].sum()) if len(rej) else 0.0
+    total_cnt = int(rej["RejectedCount"].sum()) if len(rej) else 0
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Rejected Amount", f"{total_amt:,.2f}")
+    c2.metric("Rejected Count", total_cnt)
+
+    if len(rej):
+        top_code = rej.groupby("DenialCode")["RejectedAmount"].sum().sort_values(ascending=False).head(1)
+        c3.metric("Top Denial Code", top_code.index[0])
+    else:
+        c3.metric("Top Denial Code", "—")
+
+    st.markdown("---")
+
+    f1, f2 = st.columns(2)
+    ins_list = ["All"] + sorted(rej["Insurance"].dropna().astype(str).unique().tolist()) if len(rej) else ["All"]
+    code_list = ["All"] + sorted(rej["DenialCode"].dropna().astype(str).unique().tolist()) if len(rej) else ["All"]
+
+    sel_ins = f1.selectbox("Insurance", ins_list, key="rej_sel_ins")
+    sel_code = f2.selectbox("Denial Code", code_list, key="rej_sel_code")
+
+    view = rej.copy()
+    if sel_ins != "All":
+        view = view[view["Insurance"].astype(str) == sel_ins]
+    if sel_code != "All":
+        view = view[view["DenialCode"].astype(str) == sel_code]
+
+    tA, tB, tC = st.tabs(["By Denial Code", "By Insurance", "Rejected Detail"])
+
+    with tA:
+        by_code = (view.groupby("DenialCode")[["RejectedAmount", "RejectedCount"]]
+                   .sum().reset_index()
+                   .sort_values("RejectedAmount", ascending=False))
+        st.dataframe(by_code, use_container_width=True)
+
+    with tB:
+        by_ins = (view.groupby("Insurance")[["RejectedAmount", "RejectedCount"]]
+                  .sum().reset_index()
+                  .sort_values("RejectedAmount", ascending=False))
+        st.dataframe(by_ins, use_container_width=True)
+
+    with tC:
+        st.dataframe(view, use_container_width=True)
+
+    st.markdown("---")
+    if st.button("⬅ Back", use_container_width=True, key="rej_back_btn"):
+        st.session_state.page = "main"
+        st.rerun()
+
+
 # ====================== Header & routing ======================
 t1, t2 = st.columns([6, 2])
 with t1:
@@ -645,6 +778,7 @@ if (st.session_state.get("center_key") != st.session_state.get("last_center_key"
     get_report_bytes.clear()
     st.session_state.last_center_key = st.session_state.get("center_key")
     st.session_state.last_year = st.session_state.get("year")
+    st.session_state.page = "main"  # ✅ needful: reset view on center/year change
 
 st.caption(
     f"Mode: **{'admin' if st.session_state.get('is_admin') else 'view'}** · "
@@ -659,6 +793,7 @@ if st.session_state.get("rcm_year") == 2024:
         st.warning("Easy Health is available only in 2025.")
         st.session_state.center_key = None
         st.session_state.year = 2024
+        st.session_state.page = "main"
         try:
             if "center" in st.query_params:
                 del st.query_params["center"]
@@ -678,12 +813,14 @@ if ck not in CENTERS:
 
     with c1:
         if st.container(border=True).button(CENTERS["excellent"]["name"], use_container_width=True, key="home_exc"):
+            st.session_state.page = "main"
             st.session_state.center_key = "excellent"
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
 
     with c2:
         if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
+            st.session_state.page = "main"
             st.session_state.center_key = "pharmacy"
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
@@ -692,6 +829,7 @@ if ck not in CENTERS:
         # ✅ EasyHealth hidden in 2024 only
         if st.session_state.get("rcm_year") != 2024:
             if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
+                st.session_state.page = "main"
                 st.session_state.center_key = "easyhealth"
                 st.session_state.year = st.session_state.get("rcm_year")
                 st.rerun()
@@ -746,6 +884,7 @@ if st.session_state.get("rcm_year") is None:
                 )
             else:
                 if st.button(str(y), use_container_width=True, key=f"year_btn_{y}"):
+                    st.session_state.page = "main"
                     st.session_state.year = y
                     st.rerun()
 
@@ -804,6 +943,7 @@ st.markdown(
 st.caption(f"Built: **{built}** · Source: {src_path} · Report: {out_path.name}")
 
 if st.button("◀ Choose another center", key="btn_back_center"):
+    st.session_state.page = "main"
     st.session_state.center_key = None
     st.session_state.year = st.session_state.get("rcm_year")
     try:
@@ -917,8 +1057,13 @@ try:
     rej = ksum(totals_no_gt, "Rejected", "Rejection")
     acc = ksum(totals_no_gt, "Accepted")
 
+    # ✅ NEEDFUL: Rejection page rendering (only when clicked)
+    if st.session_state.page == "rejection":
+        show_rejection_view_from_source(src_path, cfg["name"])
+        st.stop()
+
     st.markdown(f"### Key metrics — {st.session_state.get('year')}")
-    render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL)
+    render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL, allow_rejection_click=True)
     st.markdown("---")
 
     tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
