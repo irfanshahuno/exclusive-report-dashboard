@@ -25,9 +25,9 @@ from datetime import datetime, date
 
 import pandas as pd
 import streamlit as st
-st.page_link(
-    "pages/2_Rejection_Analysis.py",
-    label="📌 Open Rejection Analysis"
+st.link_button(
+    "📌 Open Rejection Analysis",
+    "https://exclusive-report-dashboard-bipfnry6ei4jzfcb6oahnr.streamlit.app"
 )
 
 import streamlit.components.v1 as components  # used only for the home-card link
@@ -1093,6 +1093,7 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
 
 
 
