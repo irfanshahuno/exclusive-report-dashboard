@@ -15,30 +15,25 @@
 #   • Balance card clickable and same bold with slight different color
 # ✅ FIX:
 #   • KPI numbers auto-fit inside KPI box (no overflow)
-# ✅ NEW (NEEDFUL ONLY FOR REJECTION):
-#   • Click “Rejected” KPI card opens Rejection Analysis (NO extra button)
-#   • Rejection module loads only when needed (speed)
 # Nothing else is changed.
 
 import sys
 import subprocess
 import re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 
 import pandas as pd
 import streamlit as st
-
-# ---- quick navigation ----
-if st.button("📌 Open Rejection Analysis"):
-    st.switch_page("pages/2_Rejection_Analysis.py")
-
+import streamlit.components.v1 as components  # used only for the home-card link
 
 # ====================== ✅ NEEDFUL S3 IMPORTS (NEW) ======================
 import boto3
 from botocore.exceptions import ClientError
 
+
 # ====================== VIEW PASSWORD (NEW) ======================
+# Keep default, but allow Streamlit Secrets to override (needful)
 VIEW_PASSWORD = st.secrets.get("VIEW_PASSWORD", "Emc@2026")
 
 
@@ -47,10 +42,6 @@ def require_view_access() -> None:
     View-only password gate.
     - Blocks everything unless correct view password is entered.
     - Does NOT affect Admin password logic (admin is separate).
-
-    ✅ NEEDFUL:
-    - Once user is authenticated, clicking rejection should NOT ask password again.
-      (session_state keeps auth)
     """
     if st.session_state.get("is_view_auth", False):
         return
@@ -80,7 +71,7 @@ def require_view_access() -> None:
 st.set_page_config(page_title="Excellent Medical Group", layout="wide")
 st.set_option("client.showErrorDetails", False)
 
-# enforce view login first
+# NEW: enforce view login first
 require_view_access()
 
 # ✅ Balance Attempt Aging app URL (opens on Balance click)
@@ -185,9 +176,6 @@ div.stButton > button:focus-visible{
   color:#0B2D5C; /* slight different premium navy */
 }
 
-/* Rejected: keep same style; just make it clickable */
-.kpi-card.rejected{ cursor:pointer; }
-
 /* Links inside cards look clean */
 .kpi-link{
   text-decoration:none !important;
@@ -209,50 +197,41 @@ div.stButton > button:focus-visible{
 )
 
 
-def _fmt_money(x):
-    try:
-        return f"{float(x):,.2f}"
-    except Exception:
-        return "—"
-
-
-def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, center_key: str, year: int):
-    """
-    Premium KPI cards:
-    - Balance card clickable (external)
-    - Rejected card clickable (internal) ✅ NO JS (fixes errors)
-    """
-    rej_href = f"?view=rejection&center={center_key}&year={year}"
+def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str):
+    """Premium KPI cards (Balance card clickable)."""
+    def fmt(x):
+        try:
+            return f"{float(x):,.2f}"
+        except Exception:
+            return "—"
 
     html = f"""
     <div class="kpi-grid">
-      <div class="kpi-card" title="{_fmt_money(net)}">
+      <div class="kpi-card" title="{fmt(net)}">
         <div class="kpi-label">Net Amount</div>
-        <div class="kpi-value">{_fmt_money(net)}</div>
+        <div class="kpi-value">{fmt(net)}</div>
       </div>
 
-      <div class="kpi-card" title="{_fmt_money(paid)}">
+      <div class="kpi-card" title="{fmt(paid)}">
         <div class="kpi-label">Paid</div>
-        <div class="kpi-value">{_fmt_money(paid)}</div>
+        <div class="kpi-value">{fmt(paid)}</div>
       </div>
 
-      <a class="kpi-link" href="{balance_url}" target="_blank" title="{_fmt_money(bal)}">
+      <a class="kpi-link" href="{balance_url}" target="_blank" title="{fmt(bal)}">
         <div class="kpi-card balance">
           <div class="kpi-label">Balance</div>
-          <div class="kpi-value">{_fmt_money(bal)}</div>
+          <div class="kpi-value">{fmt(bal)}</div>
         </div>
       </a>
 
-      <a class="kpi-link" href="{rej_href}" title="{_fmt_money(rej)}">
-        <div class="kpi-card rejected">
-          <div class="kpi-label">Rejected</div>
-          <div class="kpi-value">{_fmt_money(rej)}</div>
-        </div>
-      </a>
+      <div class="kpi-card" title="{fmt(rej)}">
+        <div class="kpi-label">Rejected</div>
+        <div class="kpi-value">{fmt(rej)}</div>
+      </div>
 
-      <div class="kpi-card" title="{_fmt_money(acc)}">
+      <div class="kpi-card" title="{fmt(acc)}">
         <div class="kpi-label">Accepted</div>
-        <div class="kpi-value">{_fmt_money(acc)}</div>
+        <div class="kpi-value">{fmt(acc)}</div>
       </div>
     </div>
     """
@@ -261,6 +240,7 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, center_key: str
 
 # ====================== NEW: YEAR LANDING PAGE (NEEDFUL) ======================
 def reset_year_selection():
+    # back to landing page
     st.session_state.rcm_year = None
     st.session_state.center_key = None
     st.session_state.year = None
@@ -269,14 +249,19 @@ def reset_year_selection():
             del st.query_params["center"]
         if "year" in st.query_params:
             del st.query_params["year"]
-        if "view" in st.query_params:
-            del st.query_params["view"]
     except Exception:
         pass
     st.rerun()
 
 
 def require_year_selection():
+    """
+    After view password:
+    Show ONLY buttons:
+      - Revenue Management Cycle 2024
+      - Revenue Management Cycle 2025
+      - Revenue Management Cycle 2026
+    """
     if st.session_state.get("rcm_year") in (2024, 2025, 2026):
         return
 
@@ -318,14 +303,18 @@ DATA_DIR = BASE / "data"
 
 YEARS = [2024, 2025, 2026]
 
+# Canonical sheet names for main Aging report
 SHEET_INS_TOT = "Insurance_Totals"
 SHEET_SUMMARY = "Balance_Aging_Summary"
 SHEET_DETAIL = "Balance_Aging_Detail"
-SHEET_INGROUP = "Balance_Aging_InsGroup"
-SHEET_IPLAN = "Balance_Aging_Plan"
+SHEET_INGROUP = "Balance_Aging_InsGroup"  # optional tab if present
+SHEET_IPLAN = "Balance_Aging_Plan"        # optional tab if present (PHARMACY uses Plan)
 
+# Robust Grand Total match (handles 'Grand Total', 'total', spacing, case)
 GT_PAT = re.compile(r'^\s*(grand\s*total|total)\s*$', re.I)
 
+
+# ====================== Centers config ======================
 CENTERS = {
     "easyhealth": {
         "key": "easyhealth",
@@ -513,6 +502,7 @@ def drop_empty_insurance(df: pd.DataFrame, name_col: str = "Insurance") -> pd.Da
 
 
 def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.DataFrame:
+    """Ensure a Grand Total/Total row exists; if not, append one computed from numeric cols."""
     if df is None or df.empty or name_col not in df.columns:
         return df
     if df[name_col].astype(str).str.match(GT_PAT).any():
@@ -526,6 +516,7 @@ def ensure_grand_total(df: pd.DataFrame, name_col: str = "Insurance") -> pd.Data
 
 
 def move_grand_total_last(df: pd.DataFrame) -> pd.DataFrame:
+    """Put the (Grand) Total row at the bottom; if missing, create it first."""
     if df is None or df.empty:
         return df
     first = df.columns[0]
@@ -538,6 +529,7 @@ def move_grand_total_last(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def drop_gt(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop GT/Total rows (for KPI sums only)."""
     if df is None or df.empty:
         return df
     first = df.columns[0]
@@ -574,10 +566,12 @@ def is_admin_mode() -> bool:
         return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
 
 
+# ====================== (Home KPIs helper) ======================
 def load_center_kpis(center_key: str, year: int):
     """
-    Uses ONLY selected year.
-    If report missing -> zeros (NO fallback).
+    IMPORTANT:
+    - Uses ONLY the selected year.
+    - If report for that year is missing, returns zeros (NO fallback to other years).
     """
     cfg0 = CENTERS[center_key]
 
@@ -620,50 +614,6 @@ def load_center_kpis(center_key: str, year: int):
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
 
-# ====================== ✅ ROUTE: REJECTION VIEW (NEEDFUL) ======================
-def maybe_render_rejection_view() -> bool:
-    """
-    If URL has ?view=rejection, render rejection page and stop the rest of dashboard.
-    ✅ Loads rejection_view.py ONLY when needed (speed).
-    """
-    try:
-        if st.query_params.get("view") != "rejection":
-            return False
-    except Exception:
-        return False
-
-    ck = st.query_params.get("center") or st.session_state.get("center_key")
-    yy = st.query_params.get("year") or st.session_state.get("year") or st.session_state.get("rcm_year")
-
-    try:
-        yy = int(yy)
-    except Exception:
-        yy = st.session_state.get("rcm_year") or 2025
-
-    if ck not in CENTERS:
-        st.error("Invalid center for rejection view.")
-        st.stop()
-
-    if st.button("⬅ Back to Dashboard", use_container_width=False, key="back_from_rejection"):
-        try:
-            if "view" in st.query_params:
-                del st.query_params["view"]
-        except Exception:
-            pass
-        st.session_state.center_key = ck
-        st.session_state.year = yy
-        st.rerun()
-
-    # ✅ Lazy import only here
-    from rejection_view import render_rejection_page
-    render_rejection_page(center_key=ck, year=yy, centers=CENTERS)
-    st.stop()
-
-
-maybe_render_rejection_view()
-# ==============================================================================
-
-
 # ====================== Header & routing ======================
 t1, t2 = st.columns([6, 2])
 with t1:
@@ -703,6 +653,7 @@ st.caption(
 )
 
 # ====================== ✅ HIDE EASYHEALTH IN 2024 (ONLY) ======================
+# Block direct access via URL or session state when year selection is 2024
 if st.session_state.get("rcm_year") == 2024:
     if st.session_state.get("center_key") == "easyhealth" or st.query_params.get("center") == "easyhealth":
         st.warning("Easy Health is available only in 2025.")
@@ -716,6 +667,7 @@ if st.session_state.get("rcm_year") == 2024:
         except Exception:
             pass
         st.rerun()
+# ============================================================================
 
 # ====================== Home cards ======================
 ck = st.session_state.get("center_key")
@@ -737,6 +689,7 @@ if ck not in CENTERS:
             st.rerun()
 
     with c3:
+        # ✅ EasyHealth hidden in 2024 only
         if st.session_state.get("rcm_year") != 2024:
             if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="home_easy"):
                 st.session_state.center_key = "easyhealth"
@@ -753,23 +706,64 @@ if ck not in CENTERS:
 
     st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
-    render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, BALANCE_ATTEMPT_URL, "excellent", sel_year)
+    render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, BALANCE_ATTEMPT_URL)
     st.markdown("---")
 
     st.markdown('<h3 class="center-title">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
-    render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, BALANCE_ATTEMPT_URL, "pharmacy", sel_year)
+    render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, BALANCE_ATTEMPT_URL)
     st.markdown("---")
 
+    # ✅ EasyHealth KPI section hidden in 2024 only
     if st.session_state.get("rcm_year") != 2024:
         y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth", sel_year)
+
         st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
         st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
-        render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, BALANCE_ATTEMPT_URL, "easyhealth", sel_year)
+        render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, BALANCE_ATTEMPT_URL)
 
     st.stop()
 
 # ====================== MAIN aging dashboard ======================
+if st.session_state.get("rcm_year") is None:
+    st.subheader("Select Year")
+    ycols = st.columns(len(YEARS))
+    for i, y in enumerate(YEARS):
+        with ycols[i]:
+            if st.session_state.get("year") == y:
+                st.markdown(
+                    f"""
+                    <div style="
+                      background-color:#0B2D5C;color:white;text-align:center;
+                      padding:0.85em;border-radius:14px;font-weight:900;font-size:1.1em;
+                      border:2px solid #0B2D5C;
+                      box-shadow: 0 6px 16px rgba(11,45,92,0.18);
+                    ">
+                      {y}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                if st.button(str(y), use_container_width=True, key=f"year_btn_{y}"):
+                    st.session_state.year = y
+                    st.rerun()
+
+if st.session_state.get("year") is None:
+    if st.session_state.get("rcm_year") in YEARS:
+        st.session_state.year = st.session_state.get("rcm_year")
+        st.rerun()
+
+    cfg_tmp = CENTERS[st.session_state.get("center_key")]
+    found = None
+    for y in reversed(YEARS):
+        out_try = (cfg_tmp["folder_root"] / str(y) / cfg_tmp["out_name"])
+        if out_try.exists():
+            found = y
+            break
+    st.session_state.year = found or YEARS[-1]
+    st.rerun()
+
 cfg = CENTERS[st.session_state.get("center_key")]
 folder = cfg["folder_root"] / str(st.session_state.get("year"))
 folder.mkdir(parents=True, exist_ok=True)
@@ -817,10 +811,8 @@ if st.button("◀ Choose another center", key="btn_back_center"):
             del st.query_params["center"]
         if "year" in st.query_params:
             del st.query_params["year"]
-        if "view" in st.query_params:
-            del st.query_params["view"]
     except Exception:
-        pass
+        st.experimental_set_query_params()
     st.rerun()
 
 if st.session_state.get("is_admin"):
@@ -837,6 +829,7 @@ if st.session_state.get("is_admin"):
                 saved = save_uploaded_source(folder, up)
                 st.success(f"Saved to {saved.name}")
 
+                # ✅ NEEDFUL: upload source to S3 (optional but recommended)
                 try:
                     s3_uri_src = upload_to_s3(saved, st.session_state.get("center_key"), st.session_state.get("year"))
                     if s3_uri_src:
@@ -863,6 +856,7 @@ if st.session_state.get("is_admin"):
                 load_core_sheets.clear()
                 get_report_bytes.clear()
 
+                # ✅ NEEDFUL: upload rebuilt report to S3
                 try:
                     s3_uri = upload_to_s3(out_path, st.session_state.get("center_key"), st.session_state.get("year"))
                     if s3_uri:
@@ -924,7 +918,7 @@ try:
     acc = ksum(totals_no_gt, "Accepted")
 
     st.markdown(f"### Key metrics — {st.session_state.get('year')}")
-    render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL, st.session_state.get("center_key"), st.session_state.get("year"))
+    render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL)
     st.markdown("---")
 
     tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
