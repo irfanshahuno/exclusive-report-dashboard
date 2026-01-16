@@ -25,8 +25,10 @@ from datetime import datetime, date
 
 import pandas as pd
 import streamlit as st
-if st.button("📌 Open Rejection Analysis"):
-    st.switch_page("pages/2_Rejection_Analysis.py")
+st.page_link(
+    "pages/2_Rejection_Analysis.py",
+    label="📌 Open Rejection Analysis"
+)
 
 import streamlit.components.v1 as components  # used only for the home-card link
 
@@ -1091,5 +1093,6 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
 
 
