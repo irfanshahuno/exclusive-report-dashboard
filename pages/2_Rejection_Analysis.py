@@ -8,8 +8,8 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 
 # =========================================
-# Rejection Analysis (Streamlit Module)
-# Call run_rejection_app() from app.py
+# Rejection Analysis (Streamlit Page)
+# - Works as a standalone page inside /pages
 # =========================================
 
 def run_rejection_app():
@@ -318,3 +318,7 @@ def run_rejection_app():
             st.dataframe(preview["Detail"], use_container_width=True)
         with tabs[5]:
             st.dataframe(preview["Meta"], use_container_width=True)
+
+
+# ✅ IMPORTANT: run it when this file is opened as a Streamlit page
+run_rejection_app()
