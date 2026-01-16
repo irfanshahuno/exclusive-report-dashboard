@@ -17,8 +17,8 @@
 #   • KPI numbers auto-fit inside KPI box (no overflow)
 # ✅ NEW (NEEDFUL ONLY FOR REJECTION):
 #   • Click “Rejected” KPI card opens Rejection Analysis (NO extra button)
-#   • Rejection page does NOT re-trigger view password
 #   • Rejection module loads only when needed (speed)
+# Nothing else is changed.
 
 import sys
 import subprocess
@@ -43,16 +43,10 @@ def require_view_access() -> None:
     - Blocks everything unless correct view password is entered.
     - Does NOT affect Admin password logic (admin is separate).
 
-    ✅ NEEDFUL FIX:
-    - If user is opening Rejection Analysis view, do NOT ask password again.
+    ✅ NEEDFUL:
+    - Once user is authenticated, clicking rejection should NOT ask password again.
+      (session_state keeps auth)
     """
-    # ✅ If rejection view is requested, allow through (rejection page will still run inside same app)
-    try:
-        if st.query_params.get("view") == "rejection":
-            return
-    except Exception:
-        pass
-
     if st.session_state.get("is_view_auth", False):
         return
 
@@ -73,6 +67,7 @@ def require_view_access() -> None:
                 st.error("Incorrect password.")
     with c2:
         st.caption("")
+
     st.stop()
 
 
@@ -80,7 +75,7 @@ def require_view_access() -> None:
 st.set_page_config(page_title="Excellent Medical Group", layout="wide")
 st.set_option("client.showErrorDetails", False)
 
-# NEW: enforce view login first
+# enforce view login first
 require_view_access()
 
 # ✅ Balance Attempt Aging app URL (opens on Balance click)
@@ -108,9 +103,9 @@ div.stButton > button{
   font-size: 18px !important;
   font-weight: 800 !important;
 
-  background: #EEF6FF !important;
-  color: #0B2D5C !important;
-  border: 1.8px solid #B6D4FF !important;
+  background: #EEF6FF !important;              /* premium light blue */
+  color: #0B2D5C !important;                   /* navy text */
+  border: 1.8px solid #B6D4FF !important;      /* soft border */
   border-radius: 14px !important;
 
   box-shadow: 0 3px 10px rgba(11, 45, 92, 0.10) !important;
@@ -127,7 +122,7 @@ div.stButton > button:hover{
 div.stButton > button:active,
 div.stButton > button:focus,
 div.stButton > button:focus-visible{
-  background: #0B2D5C !important;
+  background: #0B2D5C !important;              /* navy active */
   color: #ffffff !important;
   border-color: #0B2D5C !important;
   outline: none !important;
@@ -155,7 +150,7 @@ div.stButton > button:focus-visible{
   border-radius: 16px;
   padding: 14px 16px;
   box-shadow: 0 8px 18px rgba(11,45,92,0.06);
-  min-width: 0;
+  min-width: 0; /* important for overflow handling inside grid */
 }
 .kpi-label{
   font-size: 13px;
@@ -163,15 +158,17 @@ div.stButton > button:focus-visible{
   font-weight: 750;
   margin-bottom: 6px;
 }
+
+/* ✅ AUTO-FIT number inside card */
 .kpi-value{
-  font-size: clamp(18px, 2.2vw, 30px);
+  font-size: clamp(18px, 2.2vw, 30px);  /* auto fit based on screen */
   font-weight: 900;
   color: #111827;
   letter-spacing: 0.2px;
 
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: nowrap;                  /* keep number in one line */
+  overflow: hidden;                     /* hide overflow */
+  text-overflow: ellipsis;              /* show ... if too long */
 }
 
 /* Balance featured: same bold, slight different color */
@@ -180,13 +177,11 @@ div.stButton > button:focus-visible{
   border-color: #CFE3FF;
 }
 .kpi-card.balance .kpi-value{
-  color:#0B2D5C;
+  color:#0B2D5C; /* slight different premium navy */
 }
 
-/* Rejected featured hover (no style change, only cursor) */
-.kpi-card.rejected{
-  cursor: pointer;
-}
+/* Rejected: keep same style; just make it clickable */
+.kpi-card.rejected{ cursor:pointer; }
 
 /* Links inside cards look clean */
 .kpi-link{
@@ -216,71 +211,47 @@ def _fmt_money(x):
         return "—"
 
 
-def _open_rejection_view(center_key: str, year: int):
-    """
-    ✅ NEEDFUL: Open rejection page in same app using query params.
-    This avoids new “button blocks” and keeps your UI clean.
-    """
-    try:
-        st.query_params["view"] = "rejection"
-        st.query_params["center"] = center_key
-        st.query_params["year"] = str(year)
-    except Exception:
-        pass
-    st.rerun()
-
-
 def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, center_key: str, year: int):
-    """Premium KPI cards (Balance clickable, Rejected clickable)."""
+    """
+    Premium KPI cards:
+    - Balance card clickable (external)
+    - Rejected card clickable (internal) ✅ NO JS (fixes errors)
+    """
+    rej_href = f"?view=rejection&center={center_key}&year={year}"
 
-    # ✅ Use Streamlit components for click (clean) instead of showing HTML text
-    # Balance: open external
-    # Rejected: open internal rejection view
-    st.markdown(
-        f"""
-<div class="kpi-grid">
-  <div class="kpi-card" title="{_fmt_money(net)}">
-    <div class="kpi-label">Net Amount</div>
-    <div class="kpi-value">{_fmt_money(net)}</div>
-  </div>
+    html = f"""
+    <div class="kpi-grid">
+      <div class="kpi-card" title="{_fmt_money(net)}">
+        <div class="kpi-label">Net Amount</div>
+        <div class="kpi-value">{_fmt_money(net)}</div>
+      </div>
 
-  <div class="kpi-card" title="{_fmt_money(paid)}">
-    <div class="kpi-label">Paid</div>
-    <div class="kpi-value">{_fmt_money(paid)}</div>
-  </div>
+      <div class="kpi-card" title="{_fmt_money(paid)}">
+        <div class="kpi-label">Paid</div>
+        <div class="kpi-value">{_fmt_money(paid)}</div>
+      </div>
 
-  <a class="kpi-link" href="{balance_url}" target="_blank" title="{_fmt_money(bal)}">
-    <div class="kpi-card balance">
-      <div class="kpi-label">Balance</div>
-      <div class="kpi-value">{_fmt_money(bal)}</div>
+      <a class="kpi-link" href="{balance_url}" target="_blank" title="{_fmt_money(bal)}">
+        <div class="kpi-card balance">
+          <div class="kpi-label">Balance</div>
+          <div class="kpi-value">{_fmt_money(bal)}</div>
+        </div>
+      </a>
+
+      <a class="kpi-link" href="{rej_href}" title="{_fmt_money(rej)}">
+        <div class="kpi-card rejected">
+          <div class="kpi-label">Rejected</div>
+          <div class="kpi-value">{_fmt_money(rej)}</div>
+        </div>
+      </a>
+
+      <div class="kpi-card" title="{_fmt_money(acc)}">
+        <div class="kpi-label">Accepted</div>
+        <div class="kpi-value">{_fmt_money(acc)}</div>
+      </div>
     </div>
-  </a>
-
-  <div class="kpi-card rejected" id="rej_card" title="{_fmt_money(rej)}">
-    <div class="kpi-label">Rejected</div>
-    <div class="kpi-value">{_fmt_money(rej)}</div>
-  </div>
-
-  <div class="kpi-card" title="{_fmt_money(acc)}">
-    <div class="kpi-label">Accepted</div>
-    <div class="kpi-value">{_fmt_money(acc)}</div>
-  </div>
-</div>
-<script>
-  const rej = window.parent.document.getElementById("rej_card");
-  if(rej){{
-    rej.onclick = () => {{
-      const url = new URL(window.parent.location.href);
-      url.searchParams.set("view","rejection");
-      url.searchParams.set("center","{center_key}");
-      url.searchParams.set("year","{year}");
-      window.parent.location.href = url.toString();
-    }};
-  }}
-</script>
-""",
-        unsafe_allow_html=True,
-    )
+    """
+    st.markdown(html, unsafe_allow_html=True)
 
 
 # ====================== NEW: YEAR LANDING PAGE (NEEDFUL) ======================
@@ -599,6 +570,10 @@ def is_admin_mode() -> bool:
 
 
 def load_center_kpis(center_key: str, year: int):
+    """
+    Uses ONLY selected year.
+    If report missing -> zeros (NO fallback).
+    """
     cfg0 = CENTERS[center_key]
 
     if year not in YEARS:
@@ -652,7 +627,6 @@ def maybe_render_rejection_view() -> bool:
     except Exception:
         return False
 
-    # ensure year & center are available
     ck = st.query_params.get("center") or st.session_state.get("center_key")
     yy = st.query_params.get("year") or st.session_state.get("year") or st.session_state.get("rcm_year")
 
@@ -665,7 +639,6 @@ def maybe_render_rejection_view() -> bool:
         st.error("Invalid center for rejection view.")
         st.stop()
 
-    # ✅ Back button removes view=rejection
     if st.button("⬅ Back to Dashboard", use_container_width=False, key="back_from_rejection"):
         try:
             if "view" in st.query_params:
@@ -676,11 +649,9 @@ def maybe_render_rejection_view() -> bool:
         st.session_state.year = yy
         st.rerun()
 
-    # ✅ Import only here (lazy)
+    # ✅ Lazy import only here
     from rejection_view import render_rejection_page
-
-    # Render rejection page
-    render_rejection_page(center_key=ck, year=yy, centers=CENTERS, base_dir=BASE, data_dir=DATA_DIR)
+    render_rejection_page(center_key=ck, year=yy, centers=CENTERS)
     st.stop()
 
 
