@@ -29,6 +29,11 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+# ---- quick navigation ----
+if st.button("📌 Open Rejection Analysis"):
+    st.switch_page("pages/2_Rejection_Analysis.py")
+
+
 # ====================== ✅ NEEDFUL S3 IMPORTS (NEW) ======================
 import boto3
 from botocore.exceptions import ClientError
@@ -1089,3 +1094,4 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
