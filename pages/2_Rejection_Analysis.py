@@ -97,6 +97,12 @@ SOURCE_FILENAME = "source.xlsx"
 DEFAULT_YEAR_OPTIONS = ["2024", "2025", "2026"]
 
 # =========================================
+# CACHE KEY (per center+year)
+# =========================================
+def _rej_cache_key(center: str, year: str) -> str:
+    return f"rej::{center}::{year}"
+
+# =========================================
 # CENTER NORMALIZATION
 # =========================================
 CENTER_ALIASES = {
@@ -417,6 +423,8 @@ def run_rejection_app():
 
     if "rej_result" not in st.session_state:
         st.session_state.rej_result = None
+    if "rej_cache" not in st.session_state:
+        st.session_state.rej_cache = {}
 
     detected_center = st.session_state.get("selected_center")
     detected_year = st.session_state.get("selected_year")
@@ -456,6 +464,11 @@ def run_rejection_app():
         year = str(year)
 
         s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
+        cache_key = _rej_cache_key(center, year)
+
+        # ✅ Auto-load cached result for this center/year if available
+        if cache_key in st.session_state.rej_cache and st.session_state.rej_result is None:
+            st.session_state.rej_result = st.session_state.rej_cache[cache_key]
 
         st.write("**Source**")
         st.code(f"s3://{S3_BUCKET}/{s3_key}", language="text")
@@ -467,6 +480,8 @@ def run_rejection_app():
             clear = st.button("Clear", use_container_width=True)
 
         if clear:
+            if cache_key in st.session_state.rej_cache:
+                del st.session_state.rej_cache[cache_key]
             st.session_state.rej_result = None
             st.rerun()
 
@@ -486,14 +501,14 @@ def run_rejection_app():
                 df_ins_x_code = pd.read_excel(xls, sheet_name="Rejected_Ins_x_DenialCode")
                 df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
 
-                # light preview for filters (prevents crash)
+                # light preview for filters
                 PREVIEW_ROWS = 2000
                 detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
                 wanted_cols = ["Insurance", "DenialCode", "ActivityStatus", "ActivityIns", "Paid", "AgingBucket", "DaysDiff", "RefDate", "RejectedAmount"]
                 usecols = [c for c in wanted_cols if c in detail_header]
                 df_preview = pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=PREVIEW_ROWS)
 
-                st.session_state.rej_result = {
+                result_obj = {
                     "center": center,
                     "year": year,
                     "s3_key": s3_key,
@@ -506,6 +521,9 @@ def run_rejection_app():
                     "df_preview": df_preview,
                     "preview_rows": PREVIEW_ROWS,
                 }
+
+                st.session_state.rej_result = result_obj
+                st.session_state.rej_cache[cache_key] = result_obj
 
             st.success("Done ✅")
 
@@ -524,7 +542,6 @@ def run_rejection_app():
     df_preview = R["df_preview"]
     PREVIEW_ROWS = R["preview_rows"]
 
-    # download
     st.download_button(
         "Download Rejection Analysis Excel",
         data=out_xlsx_bytes,
@@ -532,7 +549,6 @@ def run_rejection_app():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # ===== KPIs =====
     df_by_ins_nogt = df_by_ins[df_by_ins["Insurance"] != "Grand Total"].copy()
     total_amount = float(pd.to_numeric(df_by_ins_nogt["RejectedAmount"], errors="coerce").fillna(0).sum())
     total_claims = int(pd.to_numeric(df_by_ins_nogt["RejectedCount"], errors="coerce").fillna(0).sum())
@@ -545,66 +561,8 @@ def run_rejection_app():
     with c3:
         _card("Total Rejected Claims", f"{total_claims:,}", "Count of rejected activities")
 
-    # ===== Top 3 Insurance =====
-    st.markdown("### Top 3 Insurances by Rejected Amount")
-    top_ins = df_by_ins_nogt.sort_values("RejectedAmount", ascending=False).head(3)
-    cols = st.columns(3)
-    for i in range(3):
-        with cols[i]:
-            if i < len(top_ins):
-                _card(f"#{i+1} {top_ins.iloc[i]['Insurance']}", _fmt_aed(top_ins.iloc[i]['RejectedAmount']), "")
-            else:
-                _card(f"#{i+1}", "AED 0.00", "")
-
-    # ===== Top 3 Denial (FULL accurate) from pivot =====
-    st.markdown("### Top 3 Denial (Insurance + Code) by Amount")
-    top_den = pd.DataFrame(columns=["Insurance", "DenialCode", "Amount"])
-    try:
-        pv = df_ins_x_code.copy()
-        if "Insurance" in pv.columns:
-            pv = pv[pv["Insurance"] != "Grand Total"].copy()
-            if "Grand Total" in pv.columns:
-                pv = pv.drop(columns=["Grand Total"])
-            melted = pv.melt(id_vars=["Insurance"], var_name="DenialCode", value_name="Amount")
-            melted["Amount"] = pd.to_numeric(melted["Amount"], errors="coerce").fillna(0)
-            melted["DenialCode"] = melted["DenialCode"].astype(str).fillna("").str.strip()
-            melted = melted[(melted["DenialCode"] != "") & (melted["Amount"] > 0)]
-            top_den = melted.sort_values("Amount", ascending=False).head(3)
-    except Exception:
-        pass
-
-    cols = st.columns(3)
-    for i in range(3):
-        with cols[i]:
-            if i < len(top_den):
-                _card(
-                    str(top_den.iloc[i]["Insurance"]),
-                    str(top_den.iloc[i]["DenialCode"]),
-                    _fmt_aed(float(top_den.iloc[i]["Amount"]))
-                )
-            else:
-                _card("-", "-", "AED 0.00")
-
-    # ===== Denial code drilldown (top insurances for selected code) =====
-    st.markdown("### Denial Code Drilldown (Top Insurances by Amount)")
-    code_options = df_by_code[df_by_code["DenialCode"] != "Grand Total"]["DenialCode"].astype(str).tolist()
-    sel_focus_code = st.selectbox("Select Denial Code", [""] + code_options, key="focus_denial_code")
-
-    if sel_focus_code:
-        pv2 = df_ins_x_code.copy()
-        pv2 = pv2[pv2["Insurance"] != "Grand Total"].copy()
-        if sel_focus_code in pv2.columns:
-            tmp = pv2[["Insurance", sel_focus_code]].copy()
-            tmp[sel_focus_code] = pd.to_numeric(tmp[sel_focus_code], errors="coerce").fillna(0)
-            tmp = tmp[tmp[sel_focus_code] > 0].sort_values(sel_focus_code, ascending=False).head(10)
-            tmp = tmp.rename(columns={sel_focus_code: "Amount"})
-            st.dataframe(tmp, use_container_width=True)
-        else:
-            st.info("No amounts found for this denial code.")
-
     st.divider()
 
-    # ===== Tabs =====
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "By Insurance",
         "By Denial Code",
@@ -649,7 +607,6 @@ def run_rejection_app():
         if sel_code != "All" and "DenialCode" in filt.columns:
             filt = filt[filt["DenialCode"].astype(str) == str(sel_code)]
 
-        # ✅ Totals for selected filters (PREVIEW)
         amt_col_prev = _detect_amount_col(filt)
         total_count_preview = int(len(filt))
         total_amount_preview = float(pd.to_numeric(filt[amt_col_prev], errors="coerce").fillna(0).sum()) if amt_col_prev else 0.0
