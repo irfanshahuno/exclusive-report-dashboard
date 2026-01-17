@@ -459,8 +459,8 @@ def run_rejection_app():
 
         s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
 
-        # ✅ NEEDFUL: year/center change -> reset old result (so UI updates correctly)
-       current_sel = f"{center}|{year}"
+# ✅ Keep results until Generate again OR file changes
+current_sel = f"{center}|{year}"
 prev_sel = st.session_state.get("rej_prev_sel")
 
 if prev_sel != current_sel:
