@@ -406,6 +406,10 @@ def run_rejection_app():
     st.markdown("## Rejection Analysis")
     st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
 
+    # ✅ NEEDFUL: persistent cache for center/year so it stays when you come back
+    if "rej_cache" not in st.session_state:
+        st.session_state.rej_cache = {}  # key -> result dict
+
     if "rej_result" not in st.session_state:
         st.session_state.rej_result = None
 
@@ -451,6 +455,16 @@ def run_rejection_app():
         st.write("**Source**")
         st.code(f"s3://{S3_BUCKET}/{s3_key}", language="text")
 
+        # ✅ NEEDFUL: auto-load cached result if already processed (no need to click Generate again)
+        # We store cache by center+year+sha1. If we have a latest cached entry for this center/year, use it.
+        cy_prefix = f"{center}|{year}|"
+        cached_keys = [k for k in st.session_state.rej_cache.keys() if k.startswith(cy_prefix)]
+        if st.session_state.rej_result is None and cached_keys:
+            # pick latest added (dict preserves insertion order)
+            last_key = cached_keys[-1]
+            st.session_state.rej_result = st.session_state.rej_cache[last_key]
+            st.success("Loaded last processed result ✅ (no re-processing)")
+
         cA, cB = st.columns(2)
         with cA:
             generate = st.button("Generate", type="primary", use_container_width=True)
@@ -484,7 +498,7 @@ def run_rejection_app():
                 usecols = [c for c in wanted_cols if c in detail_header]
                 df_preview = pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=PREVIEW_ROWS)
 
-                st.session_state.rej_result = {
+                result_obj = {
                     "center": center,
                     "year": year,
                     "s3_key": s3_key,
@@ -497,6 +511,11 @@ def run_rejection_app():
                     "df_preview": df_preview,
                     "preview_rows": PREVIEW_ROWS,
                 }
+
+                # ✅ NEEDFUL: save in cache so when you come back it stays
+                cache_key = f"{center}|{year}|{stats['sha1']}"
+                st.session_state.rej_cache[cache_key] = result_obj
+                st.session_state.rej_result = result_obj
 
             st.success("Done ✅")
 
