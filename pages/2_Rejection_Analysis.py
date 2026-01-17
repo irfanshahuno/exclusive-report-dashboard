@@ -321,6 +321,69 @@ def run_rejection_app():
     )
 
     st.metric("Rejected Rows", stats["rejected_rows"])
+        # ---- Read all sheets from the generated workbook (in memory) ----
+    xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
+
+    df_by_ins = pd.read_excel(xls, sheet_name="Rejected_By_Insurance")
+    df_by_code = pd.read_excel(xls, sheet_name="Rejected_By_DenialCode")
+    df_ins_x_code = pd.read_excel(xls, sheet_name="Rejected_Ins_x_DenialCode")
+    df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
+    df_detail = pd.read_excel(xls, sheet_name="Rejected_Detail")
+
+    # ---- Tabs ----
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "By Insurance",
+        "By Denial Code",
+        "Insurance × Denial",
+        "Aging Summary",
+        "Rejected Detail (Filters)"
+    ])
+
+    with tab1:
+        st.subheader("Rejected by Insurance")
+        st.dataframe(df_by_ins, use_container_width=True)
+
+    with tab2:
+        st.subheader("Rejected by Denial Code")
+        st.dataframe(df_by_code, use_container_width=True)
+
+    with tab3:
+        st.subheader("Insurance × Denial Code (Amounts)")
+        st.dataframe(df_ins_x_code, use_container_width=True)
+
+    with tab4:
+        st.subheader("Rejected Aging Summary")
+        st.dataframe(df_aging, use_container_width=True)
+
+    with tab5:
+        st.subheader("Rejected Detail (Filter Insurance / Denial Code)")
+
+        # Build filter lists
+        ins_list = sorted([x for x in df_detail.get("Insurance", pd.Series()).dropna().unique().tolist() if str(x).strip() != ""])
+        code_list = sorted([x for x in df_detail.get("DenialCode", pd.Series()).dropna().unique().tolist() if str(x).strip() != ""])
+
+        c1, c2, c3 = st.columns([1, 1, 1])
+
+        with c1:
+            sel_ins = st.selectbox("Insurance", ["All"] + ins_list, index=0)
+
+        with c2:
+            sel_code = st.selectbox("Denial Code", ["All"] + code_list, index=0)
+
+        with c3:
+            show_top = st.number_input("Rows to show", min_value=50, max_value=5000, value=500, step=50)
+
+        filt = df_detail.copy()
+
+        if sel_ins != "All":
+            filt = filt[filt["Insurance"].astype(str) == str(sel_ins)]
+
+        if sel_code != "All":
+            filt = filt[filt["DenialCode"].astype(str) == str(sel_code)]
+
+        st.caption(f"Showing {min(len(filt), int(show_top))} of {len(filt)} rejected rows after filters.")
+        st.dataframe(filt.head(int(show_top)), use_container_width=True)
+
 
     # Optional: show detail table (can be heavy on big files)
     with st.expander("Preview Rejected Detail (may be large)", expanded=False):
