@@ -1,6 +1,7 @@
+# pages/2_Rejection_Analysis.py
+
 import boto3
 from botocore.exceptions import ClientError
-
 import io
 import hashlib
 from datetime import datetime
@@ -11,500 +12,125 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 
 # =========================================
-# Rejection Analysis (Streamlit Page)
-# - NO upload here
-# - Auto-detects Center + Year from st.session_state
-# - Reads correct source.xlsx from S3:
-#     streamlit/<center>/<year>/source.xlsx
-# - If not available in session, shows dropdowns
-# - ✅ NEW: Back to Dashboard button
+# CONFIG
 # =========================================
-
-# ✅ Your S3 bucket (keep as-is)
 S3_BUCKET = "emc-rcm-storage-2026"
-
-# ✅ Expected source filename (your dashboard saves like this)
 SOURCE_FILENAME = "source.xlsx"
-
-# Optional: if you want to force a fixed year list
 DEFAULT_YEAR_OPTIONS = ["2024", "2025", "2026"]
 
-
-# -------------------- S3 helpers --------------------
+# =========================================
+# S3 HELPERS
+# =========================================
 def s3_client():
     return boto3.client("s3")
 
-
-def s3_exists(bucket: str, key: str) -> bool:
-    s3 = s3_client()
+def s3_exists(bucket, key):
     try:
-        s3.head_object(Bucket=bucket, Key=key)
+        s3_client().head_object(Bucket=bucket, Key=key)
         return True
     except ClientError:
         return False
 
-
-def load_file_from_s3(bucket: str, key: str) -> bytes:
-    s3 = s3_client()
-    obj = s3.get_object(Bucket=bucket, Key=key)
+def load_file_from_s3(bucket, key):
+    obj = s3_client().get_object(Bucket=bucket, Key=key)
     return obj["Body"].read()
 
-
-def list_s3_prefixes(bucket: str, prefix: str) -> list[str]:
-    """
-    Lists immediate child prefixes under prefix using Delimiter='/'
-    Example:
-      prefix="streamlit/" -> returns ["streamlit/excellent/", "streamlit/pharmacy/"]
-    """
-    s3 = s3_client()
-    out = []
-    token = None
-
-    while True:
-        kwargs = {
-            "Bucket": bucket,
-            "Prefix": prefix,
-            "Delimiter": "/",
-            "MaxKeys": 1000,
-        }
-        if token:
-            kwargs["ContinuationToken"] = token
-
-        resp = s3.list_objects_v2(**kwargs)
-        for p in resp.get("CommonPrefixes", []):
-            out.append(p.get("Prefix", ""))
-
-        if resp.get("IsTruncated"):
-            token = resp.get("NextContinuationToken")
-        else:
-            break
-
-    return [x for x in out if x]
-
-
-def discover_centers_and_years(bucket: str) -> tuple[list[str], dict[str, list[str]]]:
-    """
-    Discovers centers + years from S3 structure:
-        streamlit/<center>/<year>/...
-    Returns:
-        centers = ["excellent", "pharmacy", ...]
-        years_by_center = {"excellent": ["2024","2025"], ...}
-    """
-    centers = []
-    years_by_center: dict[str, list[str]] = {}
-
-    base = "streamlit/"
-    try:
-        center_prefixes = list_s3_prefixes(bucket, base)
-    except ClientError:
-        return [], {}
-
-    for cp in center_prefixes:
-        # cp like "streamlit/excellent/"
-        parts = cp.strip("/").split("/")
-        if len(parts) != 2:
-            continue
-        center = parts[1].strip()
-        if not center:
-            continue
-
-        centers.append(center)
-
-        # list years under this center
-        try:
-            year_prefixes = list_s3_prefixes(bucket, f"{base}{center}/")
-        except ClientError:
-            year_prefixes = []
-
-        years = []
-        for yp in year_prefixes:
-            # yp like "streamlit/excellent/2024/"
-            yparts = yp.strip("/").split("/")
-            if len(yparts) != 3:
-                continue
-            year = yparts[2].strip()
-            if year:
-                years.append(year)
-
-        years_by_center[center] = sorted(list(set(years)))
-
-    centers = sorted(list(set(centers)))
-    return centers, years_by_center
-
-
-# -------------------- Rejection App --------------------
+# =========================================
+# APP
+# =========================================
 def run_rejection_app():
-    # -------------------- helpers --------------------
-    def sha1_short_bytes(b: bytes) -> str:
+    st.subheader("Rejection Analysis")
+    st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
+
+    # -------------------------------------
+    # Auto-detect from dashboard
+    # -------------------------------------
+    center = st.session_state.get("selected_center")
+    year = st.session_state.get("selected_year")
+
+    if center is None or year is None:
+        st.warning("Center/Year not detected from dashboard. Please select manually.")
+
+        center = st.selectbox(
+            "Center",
+            ["excellent", "pharmacy", "easyhealth"],
+        )
+        year = st.selectbox(
+            "Year",
+            DEFAULT_YEAR_OPTIONS,
+        )
+
+    center = center.lower()
+    year = str(year)
+
+    s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
+
+    st.write(f"**Center:** {center}")
+    st.write(f"**Year:** {year}")
+    st.write(f"**Source:** s3://{S3_BUCKET}/{s3_key}")
+
+    if not s3_exists(S3_BUCKET, s3_key):
+        st.error("Source file not found in S3. Upload from dashboard first.")
+        st.stop()
+
+    input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
+
+    def sha1_short(b):
         return hashlib.sha1(b).hexdigest()[:12]
 
-    def load_data_from_bytes(xlsx_bytes: bytes) -> pd.DataFrame:
-        df = pd.read_excel(io.BytesIO(xlsx_bytes), engine="openpyxl")
-        df.columns = df.columns.str.strip()
-        return df
+    run = st.button("Generate Rejection Analysis", type="primary")
 
-    # -------------------- ETL parts --------------------
-    def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
-        num_cols = [
+    if not run:
+        return
+
+    with st.spinner("Building rejection analysis..."):
+        df = pd.read_excel(io.BytesIO(input_bytes))
+        df.columns = df.columns.str.strip()
+
+        for col in [
             "ActivityIns",
             "actRemitInsShare", "actResub1RemitInsShare",
             "actResub2RemitInsShare", "actResub3RemitInsShare",
-            "TKBKAmountAct",
-        ]
-        for c in num_cols:
-            if c not in df.columns:
-                df[c] = 0
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-        return df
+            "TKBKAmountAct"
+        ]:
+            if col not in df.columns:
+                df[col] = 0
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    def compute_paid(df: pd.DataFrame) -> pd.DataFrame:
         df["Paid"] = df[
-            ["actRemitInsShare", "actResub1RemitInsShare",
-             "actResub2RemitInsShare", "actResub3RemitInsShare",
-             "TKBKAmountAct"]
+            [
+                "actRemitInsShare",
+                "actResub1RemitInsShare",
+                "actResub2RemitInsShare",
+                "actResub3RemitInsShare",
+                "TKBKAmountAct",
+            ]
         ].sum(axis=1)
-        return df
 
-    def ensure_insurance_column(df: pd.DataFrame) -> pd.DataFrame:
-        insurance_col = next(
-            (c for c in ["Insurance", "PayerName", "Insurer", "Plan"] if c in df.columns),
-            "Insurance"
-        )
-        if insurance_col not in df.columns:
-            df["Insurance"] = "Not Available"
-        elif insurance_col != "Insurance":
-            df["Insurance"] = df[insurance_col]
-        return df
-
-    def add_refdate_and_aging(df: pd.DataFrame) -> pd.DataFrame:
-        from datetime import datetime as dt
-        date_candidates = [c for c in ["SubmissionDate", "ClaimDate", "VisitDate"] if c in df.columns]
-        if date_candidates:
-            for c in date_candidates:
-                df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
-            df["RefDate"] = df[date_candidates].bfill(axis=1).iloc[:, 0]
-        else:
-            df["RefDate"] = pd.NaT
-
-        today = pd.Timestamp(dt.today().date())
-        df["DaysDiff"] = (today - df["RefDate"]).dt.days
-
-        bins = [-1, 30, 45, 60, 90, float("inf")]
-        labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
-        df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
-        return df
-
-    def normalize_denial_code(df: pd.DataFrame) -> pd.DataFrame:
         if "DenialCode" not in df.columns:
             df["DenialCode"] = ""
-        df["DenialCode"] = df["DenialCode"].astype(str).fillna("").str.strip()
-        df.loc[df["DenialCode"].str.lower().isin(["nan", "none", "null"]), "DenialCode"] = ""
-        return df
 
-    def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
-        if "ActivityStatus" not in df.columns:
-            return df.iloc[0:0].copy()
+        status = df["ActivityStatus"].astype(str).str.lower()
+        rej = df[(df["Paid"] == 0) & (status == "rejected") & (df["DenialCode"] != "")].copy()
 
-        status = df["ActivityStatus"].astype(str).fillna("").str.strip().str.lower()
-        mask_rejected = (df["Paid"] == 0) & (status == "rejected") & (df["DenialCode"] != "")
-        rejected_df = df.loc[mask_rejected].copy()
-
-        rejected_df["RejectedAmount"] = rejected_df["ActivityIns"]
-        rejected_df["RejectedCount"] = 1
-        return rejected_df
-
-    # -------------------- pivots --------------------
-    def pivot_by_insurance(rej: pd.DataFrame) -> pd.DataFrame:
-        out = (
-            rej.groupby("Insurance", dropna=False)[["RejectedAmount", "RejectedCount"]]
-              .sum()
-              .reset_index()
-        )
-        total_row = {
-            "Insurance": "Grand Total",
-            "RejectedAmount": out["RejectedAmount"].sum(),
-            "RejectedCount": int(out["RejectedCount"].sum()),
-        }
-        return pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
-
-    def pivot_by_denialcode(rej: pd.DataFrame) -> pd.DataFrame:
-        out = (
-            rej.groupby("DenialCode", dropna=False)[["RejectedAmount", "RejectedCount"]]
-              .sum()
-              .reset_index()
-              .sort_values("RejectedAmount", ascending=False)
-        )
-        total_row = {
-            "DenialCode": "Grand Total",
-            "RejectedAmount": out["RejectedAmount"].sum(),
-            "RejectedCount": int(out["RejectedCount"].sum()),
-        }
-        return pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
-
-    def pivot_insurance_x_denialcode(rej: pd.DataFrame) -> pd.DataFrame:
-        pv = pd.pivot_table(
-            rej,
-            index="Insurance",
-            columns="DenialCode",
-            values="RejectedAmount",
-            aggfunc="sum",
-            fill_value=0,
-            observed=False,
-        )
-        pv["Grand Total"] = pv.sum(axis=1)
-        pv.loc["Grand Total"] = pv.sum(axis=0)
-        pv.reset_index(inplace=True)
-        return pv
-
-    def pivot_rejection_aging(rej: pd.DataFrame) -> pd.DataFrame:
-        labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
-        pv = pd.pivot_table(
-            rej,
-            index="Insurance",
-            columns="AgingBucket",
-            values="RejectedAmount",
-            aggfunc="sum",
-            fill_value=0,
-            observed=False,
-        ).reindex(columns=labels)
-        pv["Grand Total"] = pv.sum(axis=1)
-        pv.loc["Grand Total"] = pv.sum(axis=0)
-        pv.reset_index(inplace=True)
-        return pv
-
-    # -------------------- styling --------------------
-    HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
-    TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
-
-    def style_headers(ws):
-        for c in range(1, ws.max_column + 1):
-            cell = ws.cell(row=1, column=c)
-            cell.fill = HEADER_FILL
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    def highlight_grand_total_rows(ws, label_col=1, label_value="Grand Total"):
-        for r in range(2, ws.max_row + 1):
-            if ws.cell(row=r, column=label_col).value == label_value:
-                for c in range(1, ws.max_column + 1):
-                    cell = ws.cell(row=r, column=c)
-                    cell.fill = TOTAL_FILL
-                    cell.font = Font(bold=True)
-
-    def highlight_last_col(ws):
-        last_col = ws.max_column
-        for r in range(1, ws.max_row + 1):
-            cell = ws.cell(row=r, column=last_col)
-            cell.fill = TOTAL_FILL
-            cell.font = Font(bold=True)
-
-    def apply_styling_in_memory(xlsx_bytes: bytes) -> bytes:
-        in_buf = io.BytesIO(xlsx_bytes)
-        wb = load_workbook(in_buf)
-
-        for ws in wb.worksheets:
-            style_headers(ws)
-            if ws.title in [
-                "Rejected_By_Insurance",
-                "Rejected_By_DenialCode",
-                "Rejected_Ins_x_DenialCode",
-                "Rejected_Aging_Summary",
-            ]:
-                highlight_grand_total_rows(ws, label_col=1, label_value="Grand Total")
-                if ws.title in ["Rejected_Ins_x_DenialCode", "Rejected_Aging_Summary"]:
-                    highlight_last_col(ws)
-
-        out_buf = io.BytesIO()
-        wb.save(out_buf)
-        return out_buf.getvalue()
-
-    def build_rejection_workbook_bytes(input_xlsx_bytes: bytes, input_filename: str):
-        df = load_data_from_bytes(input_xlsx_bytes)
-        df = ensure_numeric(df)
-        df = compute_paid(df)
-        df = normalize_denial_code(df)
-        df = ensure_insurance_column(df)
-        df = add_refdate_and_aging(df)
-
-        rejected_df = build_rejected_df(df)
-
-        by_ins = pivot_by_insurance(rejected_df) if len(rejected_df) else pd.DataFrame(
-            [{"Insurance": "Grand Total", "RejectedAmount": 0.0, "RejectedCount": 0}]
-        )
-        by_code = pivot_by_denialcode(rejected_df) if len(rejected_df) else pd.DataFrame(
-            [{"DenialCode": "Grand Total", "RejectedAmount": 0.0, "RejectedCount": 0}]
-        )
-        ins_x_code = pivot_insurance_x_denialcode(rejected_df) if len(rejected_df) else pd.DataFrame(
-            [{"Insurance": "Grand Total", "Grand Total": 0.0}]
-        )
-        aging_sum = pivot_rejection_aging(rejected_df) if len(rejected_df) else pd.DataFrame(
-            [{"Insurance": "Grand Total", "Grand Total": 0.0}]
-        )
-
-        rejected_detail = rejected_df.copy()
-
-        meta = pd.DataFrame([{
-            "InputFile": input_filename,
-            "InputSHA1": sha1_short_bytes(input_xlsx_bytes),
-            "GeneratedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "RejectedRule": "Paid==0 AND lower(ActivityStatus)=='rejected' AND DenialCode not empty",
-            "RejectedRows": int(len(rejected_df)),
-        }])
+        rej["RejectedAmount"] = rej["ActivityIns"]
+        rej["RejectedCount"] = 1
 
         out_buf = io.BytesIO()
         with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-            by_ins.to_excel(writer, sheet_name="Rejected_By_Insurance", index=False)
-            by_code.to_excel(writer, sheet_name="Rejected_By_DenialCode", index=False)
-            ins_x_code.to_excel(writer, sheet_name="Rejected_Ins_x_DenialCode", index=False)
-            aging_sum.to_excel(writer, sheet_name="Rejected_Aging_Summary", index=False)
-            rejected_detail.to_excel(writer, sheet_name="Rejected_Detail", index=False)
-            meta.to_excel(writer, sheet_name="Meta", index=False)
-
-        styled_bytes = apply_styling_in_memory(out_buf.getvalue())
-
-        preview = {
-            "RejectedRows": int(len(rejected_detail)),
-            "ByInsurance": by_ins,
-            "ByDenialCode": by_code,
-            "AgingSummary": aging_sum,
-            "InsXCode": ins_x_code,
-            "Detail": rejected_detail,
-            "Meta": meta,
-        }
-        return styled_bytes, preview
-
-    # -------------------- UI --------------------
-    st.subheader("Rejection Analysis (Auto-detect Center/Year → reads S3 source.xlsx)")
-    st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
-
-    # ✅ NEW: back button (works inside same Streamlit multipage app)
-    st.page_link("exclusive_dashboard.py", label="⬅ Back to Dashboard", icon="🏠")
-    st.divider()
-
-    # ✅ 1) Discover available centers/years from S3 (for dropdown fallback)
-    centers, years_by_center = discover_centers_and_years(S3_BUCKET)
-
-    # ✅ 2) Auto-detect center/year from session_state (dashboard should set these)
-    detected_center = (
-        st.session_state.get("selected_center")
-        or st.session_state.get("center_key")   # <— your dashboard uses center_key
-        or st.session_state.get("center")
-        or st.session_state.get("CENTER")
-        or st.session_state.get("facility")
-        or None
-    )
-
-    detected_year = (
-        st.session_state.get("selected_year")
-        or st.session_state.get("year")         # <— your dashboard uses year
-        or st.session_state.get("YEAR")
-        or None
-    )
-
-    # Normalize
-    if isinstance(detected_year, int):
-        detected_year = str(detected_year)
-
-    if isinstance(detected_center, str):
-        detected_center = detected_center.strip().lower()
-
-    # ✅ 3) Fallback dropdowns if missing / not valid
-    st.sidebar.header("Source Selector (auto if dashboard is set)")
-
-    # Center options
-    if not centers:
-        centers = ["excellent", "pharmacy", "easyhealth"]
-
-    if detected_center not in centers:
-        detected_center = centers[0] if centers else "excellent"
-
-    chosen_center = st.sidebar.selectbox(
-        "Center",
-        options=centers,
-        index=centers.index(detected_center) if detected_center in centers else 0,
-        key="rej_center_sel",
-    )
-
-    # Year options (from S3 if available for that center; else default list)
-    year_opts = years_by_center.get(chosen_center) or DEFAULT_YEAR_OPTIONS
-    if detected_year not in year_opts:
-        detected_year = year_opts[0] if year_opts else "2024"
-
-    chosen_year = st.sidebar.selectbox(
-        "Year",
-        options=year_opts,
-        index=year_opts.index(detected_year) if detected_year in year_opts else 0,
-        key="rej_year_sel",
-    )
-
-    # ✅ 4) Build S3 Key based on chosen center/year (AUTO path)
-    s3_key = f"streamlit/{chosen_center}/{chosen_year}/{SOURCE_FILENAME}"
-
-    st.write(f"**Selected:** Center=`{chosen_center}` | Year=`{chosen_year}`")
-    st.write(f"**S3 Source:** s3://{S3_BUCKET}/{s3_key}")
-
-    if not s3_exists(S3_BUCKET, s3_key):
-        st.warning("No uploaded source file found for this Center/Year in S3. Upload it from Dashboard first.")
-        st.stop()
-
-    # ✅ Load the S3 Excel bytes
-    input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
-    input_name = SOURCE_FILENAME
-
-    colA, colB = st.columns([1, 1])
-    with colA:
-        st.write("**File:**", input_name)
-    with colB:
-        st.write("**SHA1 (short):**", sha1_short_bytes(input_bytes))
-
-    run = st.button("Generate Rejection Analysis", type="primary", key="rej_run")
-
-    if run:
-        with st.spinner("Building rejection analysis…"):
-            out_bytes, preview = build_rejection_workbook_bytes(input_bytes, input_name)
+            rej.to_excel(writer, sheet_name="Rejected_Detail", index=False)
 
         st.success("Done ✅")
 
-        out_name = f"Rejection_Analysis_{chosen_center}_{chosen_year}_{sha1_short_bytes(input_bytes)}.xlsx"
         st.download_button(
-            label="Download Rejection Analysis Excel",
-            data=out_bytes,
-            file_name=out_name,
+            "Download Rejection Analysis Excel",
+            data=out_buf.getvalue(),
+            file_name=f"Rejection_Analysis_{center}_{year}_{sha1_short(input_bytes)}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="rej_download",
         )
 
-        st.divider()
-        st.subheader("Preview")
-
-        k1, k2 = st.columns(2)
-        with k1:
-            st.metric("Rejected rows", preview["RejectedRows"])
-        with k2:
-            st.metric("Generated at", preview["Meta"].loc[0, "GeneratedAt"])
-
-        tabs = st.tabs([
-            "Rejected_By_Insurance",
-            "Rejected_By_DenialCode",
-            "Rejected_Aging_Summary",
-            "Rejected_Ins_x_DenialCode",
-            "Rejected_Detail",
-            "Meta",
-        ])
-
-        with tabs[0]:
-            st.dataframe(preview["ByInsurance"], use_container_width=True)
-        with tabs[1]:
-            st.dataframe(preview["ByDenialCode"], use_container_width=True)
-        with tabs[2]:
-            st.dataframe(preview["AgingSummary"], use_container_width=True)
-        with tabs[3]:
-            st.dataframe(preview["InsXCode"], use_container_width=True)
-        with tabs[4]:
-            st.dataframe(preview["Detail"], use_container_width=True)
-        with tabs[5]:
-            st.dataframe(preview["Meta"], use_container_width=True)
+        st.metric("Rejected Rows", len(rej))
+        st.dataframe(rej, use_container_width=True)
 
 
-# Run as Streamlit page
 run_rejection_app()
