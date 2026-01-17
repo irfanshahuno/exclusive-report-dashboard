@@ -460,8 +460,10 @@ def run_rejection_app():
         s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
 
         # ✅ NEEDFUL: year/center change -> reset old result (so UI updates correctly)
-        current_sel = f"{center}|{year}"
-        if prev_sel != current_sel:
+       current_sel = f"{center}|{year}"
+prev_sel = st.session_state.get("rej_prev_sel")
+
+if prev_sel != current_sel:
     st.session_state.rej_prev_sel = current_sel
 
     # ✅ auto-load last cached result for this year/center
@@ -474,7 +476,7 @@ def run_rejection_app():
     else:
         st.session_state.rej_result = None
         st.info("No cached result for this year. Click Generate.")
-        
+
         st.write("**Source**")
         st.code(f"s3://{S3_BUCKET}/{s3_key}", language="text")
 
