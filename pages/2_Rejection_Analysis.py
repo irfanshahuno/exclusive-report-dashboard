@@ -1,3 +1,10 @@
+import boto3
+from botocore.exceptions import ClientError
+
+def load_file_from_s3(bucket, key) -> bytes:
+    s3 = boto3.client("s3")
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    return obj["Body"].read()
 import io
 import hashlib
 from datetime import datetime
