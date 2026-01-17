@@ -415,10 +415,10 @@ def run_rejection_app():
                 disabled=True
             )
 
-        center_raw = center
-center = normalize_center_for_s3(center_raw)
+       center_raw = center
+       center = normalize_center_for_s3(center_raw)
+       year = str(year)
 
-        year = str(year)
         s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
 
         st.write("**Source**")
