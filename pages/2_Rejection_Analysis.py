@@ -16,7 +16,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # =========================================
 st.set_page_config(page_title="Rejection Analysis", layout="wide")
 
-# ✅ ONLY NEEDFUL CHANGE: Light-Red + Smaller Buttons (CSS only)
+# ✅ Light-Red + Smaller Buttons (CSS only)
 st.markdown(
     """
     <style>
@@ -60,19 +60,6 @@ st.markdown(
         color:#0f172a;
       }
 
-      div.stDownloadButton > button{
-        background:#fb7185!important;
-        color:white!important;
-        border:none!important;
-        padding:9px 16px!important;
-        border-radius:999px!important;
-        font-weight:800!important;
-        font-size:14px!important;
-        box-shadow:0 6px 18px rgba(251,113,133,0.25);
-      }
-
-      div.stDownloadButton > button:hover{ background:#f43f5e!important; }
-
       div[data-testid="stDataFrame"] {border: 1px solid #edf2fa; border-radius: 14px; overflow:hidden;}
 
       div.stButton > button,
@@ -98,7 +85,9 @@ st.markdown(
       }
 
       div.stButton > button:active,
-      div.stDownloadButton > button:active{ transform: translateY(0px); }
+      div.stDownloadButton > button:active{
+        transform: translateY(0px);
+      }
     </style>
     """,
     unsafe_allow_html=True
@@ -110,6 +99,10 @@ st.markdown(
 S3_BUCKET = "emc-rcm-storage-2026"
 SOURCE_FILENAME = "source.xlsx"
 DEFAULT_YEAR_OPTIONS = ["2024", "2025", "2026"]
+
+# ✅ Persistent cache (so results stay even after refresh / clicking again)
+REJ_CACHE_PREFIX = "rejection_cache"
+REJ_CACHE_FILENAME = "rejection.xlsx"
 
 # =========================================
 # CENTER NORMALIZATION (MUST be BEFORE use)
@@ -136,16 +129,25 @@ def normalize_center_for_s3(center_value: str) -> str:
 def s3_client():
     return boto3.client("s3")
 
-def s3_exists(bucket, key):
+def s3_exists(bucket: str, key: str) -> bool:
     try:
         s3_client().head_object(Bucket=bucket, Key=key)
         return True
     except ClientError:
         return False
 
-def load_file_from_s3(bucket, key):
+def load_file_from_s3(bucket: str, key: str) -> bytes:
     obj = s3_client().get_object(Bucket=bucket, Key=key)
     return obj["Body"].read()
+
+def save_file_to_s3(bucket: str, key: str, data: bytes) -> None:
+    s3_client().put_object(Bucket=bucket, Key=key, Body=data)
+
+def delete_file_from_s3(bucket: str, key: str) -> None:
+    try:
+        s3_client().delete_object(Bucket=bucket, Key=key)
+    except Exception:
+        pass
 
 # =========================================
 # REJECTION ANALYSIS ENGINE
@@ -226,9 +228,9 @@ def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
 def pivot_by_insurance(rej: pd.DataFrame) -> pd.DataFrame:
     out = (
         rej.groupby("Insurance", dropna=False)[["RejectedAmount", "RejectedCount"]]
-        .sum()
-        .reset_index()
-        .sort_values("RejectedAmount", ascending=False)
+          .sum()
+          .reset_index()
+          .sort_values("RejectedAmount", ascending=False)
     )
     total_row = {
         "Insurance": "Grand Total",
@@ -240,9 +242,9 @@ def pivot_by_insurance(rej: pd.DataFrame) -> pd.DataFrame:
 def pivot_by_denialcode(rej: pd.DataFrame) -> pd.DataFrame:
     out = (
         rej.groupby("DenialCode", dropna=False)[["RejectedAmount", "RejectedCount"]]
-        .sum()
-        .reset_index()
-        .sort_values("RejectedAmount", ascending=False)
+          .sum()
+          .reset_index()
+          .sort_values("RejectedAmount", ascending=False)
     )
     total_row = {
         "DenialCode": "Grand Total",
@@ -350,9 +352,11 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         [{"Insurance": "Grand Total", "Grand Total": 0.0}]
     )
 
+    stats = {"rejected_rows": int(len(rejected_df)), "sha1": sha1_short_bytes(input_bytes)}
+
     meta = pd.DataFrame([{
         "InputFile": input_name,
-        "InputSHA1": sha1_short_bytes(input_bytes),
+        "InputSHA1": stats["sha1"],
         "GeneratedAt": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
         "RejectedRule": "Paid==0 AND lower(ActivityStatus)=='rejected' AND DenialCode not empty",
         "RejectedRows": int(len(rejected_df)),
@@ -368,7 +372,6 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         meta.to_excel(writer, sheet_name="Meta", index=False)
 
     styled = apply_styling_to_bytes(out_buf.getvalue())
-    stats = {"rejected_rows": int(len(rejected_df)), "sha1": sha1_short_bytes(input_bytes)}
     return styled, stats
 
 # =========================================
@@ -392,6 +395,44 @@ def _fmt_aed(x):
     except Exception:
         return f"AED {x}"
 
+def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s3_key: str) -> dict:
+    xls = pd.ExcelFile(io.BytesIO(xlsx_bytes), engine="openpyxl")
+
+    df_by_ins = pd.read_excel(xls, sheet_name="Rejected_By_Insurance")
+    df_by_code = pd.read_excel(xls, sheet_name="Rejected_By_DenialCode")
+    df_ins_x_code = pd.read_excel(xls, sheet_name="Rejected_Ins_x_DenialCode")
+    df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
+
+    PREVIEW_ROWS = 2000
+    detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
+    wanted_cols = ["Insurance", "DenialCode", "ActivityStatus", "ActivityIns", "Paid", "AgingBucket", "DaysDiff", "RefDate"]
+    usecols = [c for c in wanted_cols if c in detail_header]
+    df_preview = pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=PREVIEW_ROWS)
+
+    rejected_rows = 0
+    try:
+        df_meta = pd.read_excel(xls, sheet_name="Meta")
+        if "RejectedRows" in df_meta.columns and len(df_meta):
+            rejected_rows = int(pd.to_numeric(df_meta.loc[0, "RejectedRows"], errors="coerce") or 0)
+    except Exception:
+        rejected_rows = 0
+
+    stats = {"sha1": sha1_short_bytes(xlsx_bytes), "rejected_rows": rejected_rows}
+
+    return {
+        "center": center,
+        "year": year,
+        "s3_key": s3_key,
+        "out_bytes": xlsx_bytes,
+        "stats": stats,
+        "df_by_ins": df_by_ins,
+        "df_by_code": df_by_code,
+        "df_ins_x_code": df_ins_x_code,
+        "df_aging": df_aging,
+        "df_preview": df_preview,
+        "preview_rows": PREVIEW_ROWS,
+    }
+
 # =========================================
 # APP
 # =========================================
@@ -399,18 +440,18 @@ def run_rejection_app():
     st.markdown("## Rejection Analysis")
     st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
 
-    # ✅ detect from dashboard URL + session
+    # --- session init ---
+    if "rej_result" not in st.session_state:
+        st.session_state.rej_result = None
+    if "rej_prev_sel" not in st.session_state:
+        st.session_state.rej_prev_sel = None
+
+    # ✅ detect from URL (when clicking Rejected card)
     qp = st.query_params
     if qp.get("center"):
         st.session_state["selected_center"] = qp.get("center")
     if qp.get("year"):
         st.session_state["selected_year"] = qp.get("year")
-
-    # ✅ persistent cache (stays while session alive)
-    if "rej_cache" not in st.session_state:
-        st.session_state.rej_cache = {}  # cache_key -> result_obj
-    if "rej_result" not in st.session_state:
-        st.session_state.rej_result = None
 
     detected_center = st.session_state.get("selected_center")
     detected_year = st.session_state.get("selected_year")
@@ -421,54 +462,54 @@ def run_rejection_app():
 
         if detected_center is None or detected_year is None:
             st.warning("Center/Year not detected. Select manually.")
-            center_ui = st.selectbox(
+            center = st.selectbox(
                 "Center",
                 ["Excellent Medical Center", "Excellent Pharmacy", "Easyhealth Clinic"],
-                key="rej_center_manual"
+                key="rej_center_manual",
             )
-            year_ui = st.selectbox("Year", DEFAULT_YEAR_OPTIONS, key="rej_year_manual")
+            year = st.selectbox("Year", DEFAULT_YEAR_OPTIONS, key="rej_year_manual")
         else:
-            center_ui = str(detected_center).lower()
-            year_ui = str(detected_year)
+            center = str(detected_center).lower().strip()
+            year = str(detected_year).strip()
 
             st.success("Detected from dashboard ✅")
             st.selectbox(
                 "Center",
                 ["excellent", "pharmacy", "easyhealth"],
-                index=["excellent", "pharmacy", "easyhealth"].index(center_ui),
-                disabled=True
+                index=["excellent", "pharmacy", "easyhealth"].index(center),
+                disabled=True,
             )
             st.selectbox(
                 "Year",
                 DEFAULT_YEAR_OPTIONS,
-                index=DEFAULT_YEAR_OPTIONS.index(year_ui),
-                disabled=True
+                index=DEFAULT_YEAR_OPTIONS.index(year),
+                disabled=True,
             )
 
-        center = normalize_center_for_s3(center_ui)
-        year = str(year_ui)
+        center_raw = center
+        center = normalize_center_for_s3(center_raw)
+        year = str(year)
 
         s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
+        rej_cache_key = f"{REJ_CACHE_PREFIX}/{center}/{year}/{REJ_CACHE_FILENAME}"
 
-        # ✅ NEEDFUL: load cached result automatically for same center/year
+        # ✅ When year/center changes: drop current in-memory result (then auto-load saved if exists)
         current_sel = f"{center}|{year}"
-        prev_sel = st.session_state.get("rej_prev_sel")
-
-        if prev_sel != current_sel:
+        if st.session_state.rej_prev_sel != current_sel:
             st.session_state.rej_prev_sel = current_sel
-
-            cy_prefix = f"{center}|{year}|"
-            cached_keys = [k for k in st.session_state.rej_cache.keys() if k.startswith(cy_prefix)]
-            if cached_keys:
-                last_key = cached_keys[-1]
-                st.session_state.rej_result = st.session_state.rej_cache[last_key]
-                st.success("Loaded cached result ✅")
-            else:
-                st.session_state.rej_result = None
-                st.info("No cached result for this year. Click Generate.")
+            st.session_state.rej_result = None
 
         st.write("**Source**")
         st.code(f"s3://{S3_BUCKET}/{s3_key}", language="text")
+
+        # ✅ Auto-load saved result from S3 (so it stays until you upload new file or click Generate)
+        if st.session_state.rej_result is None and s3_exists(S3_BUCKET, rej_cache_key):
+            try:
+                cached_bytes = load_file_from_s3(S3_BUCKET, rej_cache_key)
+                st.session_state.rej_result = load_result_from_workbook_bytes(cached_bytes, center, year, s3_key)
+                st.success("Loaded saved result ✅")
+            except Exception:
+                st.warning("Saved result found but could not be loaded. Click Generate once.")
 
         cA, cB = st.columns(2)
         with cA:
@@ -477,10 +518,11 @@ def run_rejection_app():
             clear = st.button("Clear", use_container_width=True)
 
         if clear:
+            # ✅ Clear BOTH session + saved cache (so it won't reappear on refresh)
             st.session_state.rej_result = None
+            delete_file_from_s3(S3_BUCKET, rej_cache_key)
             st.rerun()
 
-        # ---- Generate ONLY on click ----
         if generate:
             if not s3_exists(S3_BUCKET, s3_key):
                 st.error("Source file not found in S3. Upload from dashboard first.")
@@ -488,42 +530,17 @@ def run_rejection_app():
 
             with st.spinner("Building rejection analysis..."):
                 input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
-                out_xlsx_bytes, stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
+                out_xlsx_bytes, _stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
 
-                xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
-                df_by_ins = pd.read_excel(xls, sheet_name="Rejected_By_Insurance")
-                df_by_code = pd.read_excel(xls, sheet_name="Rejected_By_DenialCode")
-                df_ins_x_code = pd.read_excel(xls, sheet_name="Rejected_Ins_x_DenialCode")
-                df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
+                # ✅ Save to S3 cache (PERSISTENT) so it doesn't ask to process again
+                save_file_to_s3(S3_BUCKET, rej_cache_key, out_xlsx_bytes)
 
-                PREVIEW_ROWS = 2000
-                detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
-                wanted_cols = ["Insurance", "DenialCode", "ActivityStatus", "ActivityIns", "Paid", "AgingBucket", "DaysDiff", "RefDate"]
-                usecols = [c for c in wanted_cols if c in detail_header]
-                df_preview = pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=PREVIEW_ROWS)
-
-                result_obj = {
-                    "center": center,
-                    "year": year,
-                    "s3_key": s3_key,
-                    "out_bytes": out_xlsx_bytes,
-                    "stats": stats,
-                    "df_by_ins": df_by_ins,
-                    "df_by_code": df_by_code,
-                    "df_ins_x_code": df_ins_x_code,
-                    "df_aging": df_aging,
-                    "df_preview": df_preview,
-                    "preview_rows": PREVIEW_ROWS,
-                }
-
-                # ✅ cache key includes sha1 => changes when file changes
-                cache_key = f"{center}|{year}|{stats['sha1']}"
-                st.session_state.rej_cache[cache_key] = result_obj
-                st.session_state.rej_result = result_obj
+                # ✅ Load into session
+                st.session_state.rej_result = load_result_from_workbook_bytes(out_xlsx_bytes, center, year, s3_key)
 
             st.success("Done ✅")
 
-    # ---- Main page rendering ----
+    # ---- Main UI ----
     if st.session_state.rej_result is None:
         st.info("No saved result for this year yet. Click Generate once.")
         return
@@ -546,28 +563,31 @@ def run_rejection_app():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
+    # ===== KPIs =====
     df_by_ins_nogt = df_by_ins[df_by_ins["Insurance"] != "Grand Total"].copy()
     total_amount = float(pd.to_numeric(df_by_ins_nogt["RejectedAmount"], errors="coerce").fillna(0).sum())
     total_claims = int(pd.to_numeric(df_by_ins_nogt["RejectedCount"], errors="coerce").fillna(0).sum())
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        _card("Rejected Rows", f"{int(stats['rejected_rows']):,}", "Paid=0 + Status=rejected + DenialCode not empty")
+        _card("Rejected Rows", f"{int(stats.get('rejected_rows', 0)):,}", "Paid=0 + Status=rejected + DenialCode not empty")
     with c2:
         _card("Total Rejected Amount", _fmt_aed(total_amount), "All insurers (excluding Grand Total row)")
     with c3:
         _card("Total Rejected Claims", f"{total_claims:,}", "Count of rejected activities")
 
+    # ===== Top 3 Insurance =====
     st.markdown("### Top 3 Insurances by Rejected Amount")
     top_ins = df_by_ins_nogt.sort_values("RejectedAmount", ascending=False).head(3)
     cols = st.columns(3)
     for i in range(3):
         with cols[i]:
             if i < len(top_ins):
-                _card(f"#{i+1} {top_ins.iloc[i]['Insurance']}", _fmt_aed(top_ins.iloc[i]['RejectedAmount']), "")
+                _card(f"#{i+1} {top_ins.iloc[i]['Insurance']}", _fmt_aed(top_ins.iloc[i]["RejectedAmount"]), "")
             else:
                 _card(f"#{i+1}", "AED 0.00", "")
 
+    # ===== Top 3 Denial (Insurance + Code) =====
     st.markdown("### Top 3 Denial (Insurance + Code) by Amount")
     top_den = pd.DataFrame(columns=["Insurance", "DenialCode", "Amount"])
     try:
@@ -591,11 +611,12 @@ def run_rejection_app():
                 _card(
                     str(top_den.iloc[i]["Insurance"]),
                     str(top_den.iloc[i]["DenialCode"]),
-                    _fmt_aed(float(top_den.iloc[i]["Amount"]))
+                    _fmt_aed(float(top_den.iloc[i]["Amount"])),
                 )
             else:
                 _card("-", "-", "AED 0.00")
 
+    # ===== Denial code drilldown =====
     st.markdown("### Denial Code Drilldown (Top Insurances by Amount)")
     code_options = df_by_code[df_by_code["DenialCode"] != "Grand Total"]["DenialCode"].astype(str).tolist()
     sel_focus_code = st.selectbox("Select Denial Code", [""] + code_options, key="focus_denial_code")
@@ -614,6 +635,7 @@ def run_rejection_app():
 
     st.divider()
 
+    # ===== Tabs =====
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "By Insurance",
         "By Denial Code",
@@ -663,7 +685,6 @@ def run_rejection_app():
 
         st.divider()
         st.write("### Download FULL filtered rejected detail")
-
         if st.button("Build & Download Filtered Detail Excel", type="primary", key="rej_dl_btn"):
             with st.spinner("Loading FULL detail and preparing filtered file..."):
                 xls_full = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
