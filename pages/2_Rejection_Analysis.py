@@ -1,10 +1,6 @@
 import boto3
 from botocore.exceptions import ClientError
 
-def load_file_from_s3(bucket, key) -> bytes:
-    s3 = boto3.client("s3")
-    obj = s3.get_object(Bucket=bucket, Key=key)
-    return obj["Body"].read()
 import io
 import hashlib
 from datetime import datetime
@@ -16,9 +12,126 @@ from openpyxl.styles import PatternFill, Font, Alignment
 
 # =========================================
 # Rejection Analysis (Streamlit Page)
-# - Works as a standalone page inside /pages
+# - NO upload here
+# - Auto-detects Center + Year from st.session_state
+# - Reads correct source.xlsx from S3:
+#     streamlit/<center>/<year>/source.xlsx
+# - If not available in session, shows dropdowns
 # =========================================
 
+# ✅ Your S3 bucket
+S3_BUCKET = "emc-rcm-storage-2026"
+
+# ✅ Expected source filename (your dashboard saves like this)
+SOURCE_FILENAME = "source.xlsx"
+
+# Optional: if you want to force a fixed year list
+DEFAULT_YEAR_OPTIONS = ["2024", "2025", "2026"]
+
+
+# -------------------- S3 helpers --------------------
+def s3_client():
+    return boto3.client("s3")
+
+
+def s3_exists(bucket: str, key: str) -> bool:
+    s3 = s3_client()
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError:
+        return False
+
+
+def load_file_from_s3(bucket: str, key: str) -> bytes:
+    s3 = s3_client()
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    return obj["Body"].read()
+
+
+def list_s3_prefixes(bucket: str, prefix: str) -> list[str]:
+    """
+    Lists immediate child prefixes under prefix using Delimiter='/'
+    Example:
+      prefix="streamlit/" -> returns ["streamlit/excellent/", "streamlit/pharmacy/"]
+    """
+    s3 = s3_client()
+    out = []
+    token = None
+
+    while True:
+        kwargs = {
+            "Bucket": bucket,
+            "Prefix": prefix,
+            "Delimiter": "/",
+            "MaxKeys": 1000,
+        }
+        if token:
+            kwargs["ContinuationToken"] = token
+
+        resp = s3.list_objects_v2(**kwargs)
+        for p in resp.get("CommonPrefixes", []):
+            out.append(p.get("Prefix", ""))
+
+        if resp.get("IsTruncated"):
+            token = resp.get("NextContinuationToken")
+        else:
+            break
+
+    return [x for x in out if x]
+
+
+def discover_centers_and_years(bucket: str) -> tuple[list[str], dict[str, list[str]]]:
+    """
+    Discovers centers + years from S3 structure:
+        streamlit/<center>/<year>/...
+    Returns:
+        centers = ["excellent", "pharmacy", ...]
+        years_by_center = {"excellent": ["2024","2025"], ...}
+    """
+    centers = []
+    years_by_center: dict[str, list[str]] = {}
+
+    base = "streamlit/"
+    try:
+        center_prefixes = list_s3_prefixes(bucket, base)
+    except ClientError:
+        return [], {}
+
+    for cp in center_prefixes:
+        # cp like "streamlit/excellent/"
+        parts = cp.strip("/").split("/")
+        if len(parts) != 2:
+            continue
+        center = parts[1].strip()
+        if not center:
+            continue
+
+        centers.append(center)
+
+        # list years under this center
+        try:
+            year_prefixes = list_s3_prefixes(bucket, f"{base}{center}/")
+        except ClientError:
+            year_prefixes = []
+
+        years = []
+        for yp in year_prefixes:
+            # yp like "streamlit/excellent/2024/"
+            yparts = yp.strip("/").split("/")
+            if len(yparts) != 3:
+                continue
+            year = yparts[2].strip()
+            if year:
+                years.append(year)
+
+        years_by_center[center] = sorted(list(set(years)))
+
+    centers = sorted(list(set(centers)))
+    return centers, years_by_center
+
+
+# -------------------- Rejection App --------------------
 def run_rejection_app():
     # -------------------- helpers --------------------
     def sha1_short_bytes(b: bytes) -> str:
@@ -260,17 +373,79 @@ def run_rejection_app():
         return styled_bytes, preview
 
     # -------------------- UI --------------------
-    st.subheader("Rejection Analysis (Excel Upload → Excel Output)")
+    st.subheader("Rejection Analysis (Auto-detect Center/Year → reads S3 source.xlsx)")
     st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
 
-    uploaded = st.file_uploader("Upload your source .xlsx file", type=["xlsx"], key="rej_uploader")
+    # ✅ 1) Discover available centers/years from S3 (for dropdown fallback)
+    centers, years_by_center = discover_centers_and_years(S3_BUCKET)
 
-    if uploaded is None:
-        st.info("Upload an Excel file to generate the Rejection Analysis workbook.")
-        return
+    # ✅ 2) Auto-detect center/year from session_state (dashboard should set these)
+    # We try multiple possible keys, so it works even if your dashboard uses different names.
+    detected_center = (
+        st.session_state.get("selected_center")
+        or st.session_state.get("center")
+        or st.session_state.get("CENTER")
+        or st.session_state.get("facility")
+        or None
+    )
 
-    input_bytes = uploaded.getvalue()
-    input_name = uploaded.name
+    detected_year = (
+        st.session_state.get("selected_year")
+        or st.session_state.get("year")
+        or st.session_state.get("YEAR")
+        or None
+    )
+
+    # Normalize
+    if isinstance(detected_year, int):
+        detected_year = str(detected_year)
+
+    if isinstance(detected_center, str):
+        detected_center = detected_center.strip().lower()
+
+    # ✅ 3) Fallback dropdowns if missing / not valid
+    st.sidebar.header("Source Selector (auto if dashboard is set)")
+
+    # Center options
+    if not centers:
+        # fallback if list fails (still allow manual input)
+        centers = ["excellent", "pharmacy", "easyhealth"]
+
+    if detected_center not in centers:
+        detected_center = centers[0] if centers else "excellent"
+
+    chosen_center = st.sidebar.selectbox(
+        "Center",
+        options=centers,
+        index=centers.index(detected_center) if detected_center in centers else 0,
+        key="rej_center_sel",
+    )
+
+    # Year options (from S3 if available for that center; else default list)
+    year_opts = years_by_center.get(chosen_center) or DEFAULT_YEAR_OPTIONS
+    if detected_year not in year_opts:
+        detected_year = year_opts[0] if year_opts else "2024"
+
+    chosen_year = st.sidebar.selectbox(
+        "Year",
+        options=year_opts,
+        index=year_opts.index(detected_year) if detected_year in year_opts else 0,
+        key="rej_year_sel",
+    )
+
+    # ✅ 4) Build S3 Key based on chosen center/year (AUTO path)
+    s3_key = f"streamlit/{chosen_center}/{chosen_year}/{SOURCE_FILENAME}"
+
+    st.write(f"**Selected:** Center=`{chosen_center}` | Year=`{chosen_year}`")
+    st.write(f"**S3 Source:** s3://{S3_BUCKET}/{s3_key}")
+
+    if not s3_exists(S3_BUCKET, s3_key):
+        st.warning("No uploaded source file found for this Center/Year in S3. Upload it from Dashboard first.")
+        st.stop()
+
+    # ✅ Load the S3 Excel bytes
+    input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
+    input_name = SOURCE_FILENAME
 
     colA, colB = st.columns([1, 1])
     with colA:
@@ -286,7 +461,7 @@ def run_rejection_app():
 
         st.success("Done ✅")
 
-        out_name = f"Rejection_Analysis_{sha1_short_bytes(input_bytes)}.xlsx"
+        out_name = f"Rejection_Analysis_{chosen_center}_{chosen_year}_{sha1_short_bytes(input_bytes)}.xlsx"
         st.download_button(
             label="Download Rejection Analysis Excel",
             data=out_bytes,
@@ -327,5 +502,5 @@ def run_rejection_app():
             st.dataframe(preview["Meta"], use_container_width=True)
 
 
-# ✅ IMPORTANT: run it when this file is opened as a Streamlit page
+# Run as Streamlit page
 run_rejection_app()
