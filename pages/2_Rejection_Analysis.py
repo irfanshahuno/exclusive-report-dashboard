@@ -22,65 +22,66 @@ st.markdown(
     <style>
       .block-container {max-width: 100% !important; padding-top: 1.0rem; padding-left: 1.2rem; padding-right: 1.2rem;}
 
-   .card{
-  background:#ffffff;
-  border:1px solid #fde2e2;
-  border-left:3px solid #fb7185;
-  border-radius:14px;
-  padding:12px 14px 10px 14px;
-  box-shadow:0 2px 14px rgba(0,0,0,0.04);
-}
-{
-.card-title{ color:#b42318; }   /* softer executive red */
+      .card{
+        background:#ffffff;
+        border:1px solid #fde2e2;
+        border-left:3px solid #fb7185;
+        border-radius:14px;
+        padding:12px 14px 10px 14px;
+        box-shadow:0 2px 14px rgba(0,0,0,0.04);
+      }
 
-  font-size:13px;
-  font-weight:800;
-  letter-spacing:0.2px;
-  margin-bottom:6px;
-}
+      .card-title{
+        color:#b42318;  /* softer executive red */
+        font-size:13px;
+        font-weight:800;
+        letter-spacing:0.2px;
+        margin-bottom:6px;
+      }
 
-.card-value{
-  color:#0f172a;
-  font-size:24px;
-  font-weight:900;
-  line-height:1.15;
-}
+      .card-value{
+        color:#0f172a;
+        font-size:24px;
+        font-weight:900;
+        line-height:1.15;
+      }
 
-.card-sub{
-  color:#64748b;
-  font-size:12px;
-  margin-top:6px;
-}
+      .card-sub{
+        color:#64748b;
+        font-size:12px;
+        margin-top:6px;
+      }
 
-/* Section titles */
-h3{
-  font-size:26px!important;
-  font-weight:800!important;
-  margin-top:22px!important;
-  margin-bottom:10px!important;
-  color:#0f172a;
-}
+      /* Section titles */
+      h3{
+        font-size:26px!important;
+        font-weight:800!important;
+        margin-top:22px!important;
+        margin-bottom:10px!important;
+        color:#0f172a;
+      }
 
-/* Download button – premium red pill */
-div.stDownloadButton > button{
-  background:#fb7185!important;
-  color:white!important;
-  border:none!important;
-  padding:9px 16px!important;
-  border-radius:999px!important;
-  font-weight:800!important;
-  font-size:14px!important;
-  box-shadow:0 6px 18px rgba(251,113,133,0.25);
-}
+      /* Download button – premium red pill */
+      div.stDownloadButton > button{
+        background:#fb7185!important;
+        color:white!important;
+        border:none!important;
+        padding:9px 16px!important;
+        border-radius:999px!important;
+        font-weight:800!important;
+        font-size:14px!important;
+        box-shadow:0 6px 18px rgba(251,113,133,0.25);
+      }
 
-div.stDownloadButton > button:hover{
-  background:#f43f5e!important;
-}
+      div.stDownloadButton > button:hover{
+        background:#f43f5e!important;
+      }
+
       div[data-testid="stDataFrame"] {border: 1px solid #edf2fa; border-radius: 14px; overflow:hidden;}
 
       /* ✅ Light Red + Smaller Buttons (All buttons) */
       div.stButton > button,
-      div.stDownloadButton > button {
+      div.stDownloadButton > button{
         background: #f87171 !important;       /* light red */
         color: #ffffff !important;
         border: 1px solid #fecaca !important; /* soft border */
@@ -93,14 +94,16 @@ div.stDownloadButton > button:hover{
 
         box-shadow: 0 6px 18px rgba(239,68,68,0.18) !important;
       }
+
       div.stButton > button:hover,
-      div.stDownloadButton > button:hover {
+      div.stDownloadButton > button:hover{
         background: #ef4444 !important;       /* a bit darker on hover */
         border-color: #fca5a5 !important;
         transform: translateY(-1px);
       }
+
       div.stButton > button:active,
-      div.stDownloadButton > button:active {
+      div.stDownloadButton > button:active{
         transform: translateY(0px);
       }
     </style>
@@ -114,6 +117,25 @@ div.stDownloadButton > button:hover{
 S3_BUCKET = "emc-rcm-storage-2026"
 SOURCE_FILENAME = "source.xlsx"
 DEFAULT_YEAR_OPTIONS = ["2024", "2025", "2026"]
+
+# =========================================
+# CENTER NORMALIZATION (MUST be BEFORE use)
+# =========================================
+CENTER_ALIASES = {
+    "excellent medical center": "excellent",
+    "excellent pharmacy": "pharmacy",
+    "easyhealth clinic": "easyhealth",
+    "easy health medical clinic": "easyhealth",
+    "easy health clinic": "easyhealth",
+    "easyhealth": "easyhealth",
+    "excellent": "excellent",
+    "pharmacy": "pharmacy",
+}
+
+def normalize_center_for_s3(center_value: str) -> str:
+    c = str(center_value).strip().lower()
+    c = " ".join(c.split())  # remove extra spaces
+    return CENTER_ALIASES.get(c, c)
 
 # =========================================
 # S3 HELPERS
@@ -390,93 +412,93 @@ def run_rejection_app():
     detected_center = st.session_state.get("selected_center")
     detected_year = st.session_state.get("selected_year")
 
-   # ---- Sidebar controls (TRUE LEFT) ----
-with st.sidebar:
-    st.subheader("Controls")
+    # ---- Sidebar controls (TRUE LEFT) ----
+    with st.sidebar:
+        st.subheader("Controls")
 
-    if detected_center is None or detected_year is None:
-        st.warning("Center/Year not detected. Select manually.")
-        center = st.selectbox(
-            "Center",
-            ["Excellent Medical Center", "Excellent Pharmacy", "Easyhealth Clinic"],
-            key="rej_center_manual"
-        )
-        year = st.selectbox("Year", DEFAULT_YEAR_OPTIONS, key="rej_year_manual")
-    else:
-        center = str(detected_center).lower()
-        year = str(detected_year)
+        if detected_center is None or detected_year is None:
+            st.warning("Center/Year not detected. Select manually.")
+            center = st.selectbox(
+                "Center",
+                ["Excellent Medical Center", "Excellent Pharmacy", "Easyhealth Clinic"],
+                key="rej_center_manual"
+            )
+            year = st.selectbox("Year", DEFAULT_YEAR_OPTIONS, key="rej_year_manual")
+        else:
+            center = str(detected_center).lower()
+            year = str(detected_year)
 
-        st.success("Detected from dashboard ✅")
-        st.selectbox(
-            "Center",
-            ["excellent", "pharmacy", "easyhealth"],
-            index=["excellent", "pharmacy", "easyhealth"].index(center),
-            disabled=True
-        )
-        st.selectbox(
-            "Year",
-            DEFAULT_YEAR_OPTIONS,
-            index=DEFAULT_YEAR_OPTIONS.index(year),
-            disabled=True
-        )
+            st.success("Detected from dashboard ✅")
+            st.selectbox(
+                "Center",
+                ["excellent", "pharmacy", "easyhealth"],
+                index=["excellent", "pharmacy", "easyhealth"].index(center),
+                disabled=True
+            )
+            st.selectbox(
+                "Year",
+                DEFAULT_YEAR_OPTIONS,
+                index=DEFAULT_YEAR_OPTIONS.index(year),
+                disabled=True
+            )
 
-    center_raw = center
-    center = normalize_center_for_s3(center_raw)
-    year = str(year)
+        center_raw = center
+        center = normalize_center_for_s3(center_raw)
+        year = str(year)
 
-    s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
+        s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
 
-    st.write("**Source**")
-    st.code(f"s3://{S3_BUCKET}/{s3_key}", language="text")
+        st.write("**Source**")
+        st.code(f"s3://{S3_BUCKET}/{s3_key}", language="text")
 
-    cA, cB = st.columns(2)
-    with cA:
-        generate = st.button("Generate", type="primary", use_container_width=True)
-    with cB:
-        clear = st.button("Clear", use_container_width=True)
+        cA, cB = st.columns(2)
+        with cA:
+            generate = st.button("Generate", type="primary", use_container_width=True)
+        with cB:
+            clear = st.button("Clear", use_container_width=True)
 
-    if clear:
-        st.session_state.rej_result = None
-        st.rerun()
-        
-    # ---- Generate only on click ----
-    if generate:
-        if not s3_exists(S3_BUCKET, s3_key):
-            st.error("Source file not found in S3. Upload from dashboard first.")
-            st.stop()
+        if clear:
+            st.session_state.rej_result = None
+            st.rerun()
 
-        with st.spinner("Building rejection analysis..."):
-            input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
-            out_xlsx_bytes, stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
+        # ---- Generate only on click ----
+        if generate:
+            if not s3_exists(S3_BUCKET, s3_key):
+                st.error("Source file not found in S3. Upload from dashboard first.")
+                st.stop()
 
-            xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
-            df_by_ins = pd.read_excel(xls, sheet_name="Rejected_By_Insurance")
-            df_by_code = pd.read_excel(xls, sheet_name="Rejected_By_DenialCode")
-            df_ins_x_code = pd.read_excel(xls, sheet_name="Rejected_Ins_x_DenialCode")
-            df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
+            with st.spinner("Building rejection analysis..."):
+                input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
+                out_xlsx_bytes, stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
 
-            # light preview for filters (prevents crash)
-            PREVIEW_ROWS = 2000
-            detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
-            wanted_cols = ["Insurance", "DenialCode", "ActivityStatus", "ActivityIns", "Paid", "AgingBucket", "DaysDiff", "RefDate"]
-            usecols = [c for c in wanted_cols if c in detail_header]
-            df_preview = pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=PREVIEW_ROWS)
+                xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
+                df_by_ins = pd.read_excel(xls, sheet_name="Rejected_By_Insurance")
+                df_by_code = pd.read_excel(xls, sheet_name="Rejected_By_DenialCode")
+                df_ins_x_code = pd.read_excel(xls, sheet_name="Rejected_Ins_x_DenialCode")
+                df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
 
-            st.session_state.rej_result = {
-                "center": center,
-                "year": year,
-                "s3_key": s3_key,
-                "out_bytes": out_xlsx_bytes,
-                "stats": stats,
-                "df_by_ins": df_by_ins,
-                "df_by_code": df_by_code,
-                "df_ins_x_code": df_ins_x_code,
-                "df_aging": df_aging,
-                "df_preview": df_preview,
-                "preview_rows": PREVIEW_ROWS,
-            }
+                # light preview for filters (prevents crash)
+                PREVIEW_ROWS = 2000
+                detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
+                wanted_cols = ["Insurance", "DenialCode", "ActivityStatus", "ActivityIns", "Paid", "AgingBucket", "DaysDiff", "RefDate"]
+                usecols = [c for c in wanted_cols if c in detail_header]
+                df_preview = pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=PREVIEW_ROWS)
 
-        st.success("Done ✅")
+                st.session_state.rej_result = {
+                    "center": center,
+                    "year": year,
+                    "s3_key": s3_key,
+                    "out_bytes": out_xlsx_bytes,
+                    "stats": stats,
+                    "df_by_ins": df_by_ins,
+                    "df_by_code": df_by_code,
+                    "df_ins_x_code": df_ins_x_code,
+                    "df_aging": df_aging,
+                    "df_preview": df_preview,
+                    "preview_rows": PREVIEW_ROWS,
+                }
+
+            st.success("Done ✅")
 
     if st.session_state.rej_result is None:
         st.info("Generate to view KPIs + tables.")
@@ -639,9 +661,9 @@ with st.sidebar:
 
                 safe_name = f"Rejected_Detail_{R['center']}_{R['year']}_{sel_ins}_{sel_code}_{stats['sha1']}.xlsx"
                 safe_name = (safe_name.replace(" ", "_")
-                                       .replace("/", "_")
-                                       .replace("\\", "_")
-                                       .replace(":", "_"))
+                                     .replace("/", "_")
+                                     .replace("\\", "_")
+                                     .replace(":", "_"))
 
                 st.download_button(
                     "Download Filtered Detail Excel",
@@ -650,21 +672,5 @@ with st.sidebar:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
                 st.success(f"Filtered rows: {len(df_full):,} ✅")
-CENTER_ALIASES = {
-    "excellent medical center": "excellent",
-    "excellent pharmacy": "pharmacy",
-    "easyhealth clinic": "easyhealth",
-    "easy health medical clinic": "easyhealth",
-    "easy health clinic": "easyhealth",
-    "easyhealth": "easyhealth",
-    "excellent": "excellent",
-    "pharmacy": "pharmacy",
-}
-
-def normalize_center_for_s3(center_value: str) -> str:
-    c = str(center_value).strip().lower()
-    c = " ".join(c.split())  # remove extra spaces
-    return CENTER_ALIASES.get(c, c)
-
 
 run_rejection_app()
