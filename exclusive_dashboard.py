@@ -25,10 +25,6 @@ from datetime import datetime, date
 
 import pandas as pd
 import streamlit as st
-st.link_button(
-    "📌 Open Rejection Analysis",
-    "https://exclusive-report-dashboard-bipfnry6ei4jzfcb6oahnr.streamlit.app"
-)
 
 import streamlit.components.v1 as components  # used only for the home-card link
 
@@ -656,6 +652,22 @@ st.caption(
     f"Center: **{st.session_state.get('center_key') or 'none'}** · "
     f"Year: **{st.session_state.get('year') or 'none'}**"
 )
+# ====================== ✅ Rejection Analysis navigation (NEW) ======================
+colR1, colR2 = st.columns([1.6, 6.4])
+with colR1:
+    if st.button("📌 Rejection Analysis", use_container_width=True, key="btn_open_rej"):
+        # must have a selected center & year first
+        if not st.session_state.get("center_key") or not st.session_state.get("year"):
+            st.warning("Please select Center and Year first.")
+        else:
+            # ✅ pass values to rejection page (auto-detect)
+            st.session_state["selected_center"] = st.session_state["center_key"]
+            st.session_state["selected_year"] = str(st.session_state["year"])
+
+            # ✅ open the multipage file inside same app
+            st.switch_page("pages/2_Rejection_Analysis.py")
+# ==============================================================================
+
 
 # ====================== ✅ HIDE EASYHEALTH IN 2024 (ONLY) ======================
 # Block direct access via URL or session state when year selection is 2024
@@ -1093,6 +1105,7 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
 
 
 
