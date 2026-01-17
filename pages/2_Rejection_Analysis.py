@@ -405,7 +405,12 @@ def _fmt_aed(x):
 def run_rejection_app():
     st.markdown("## Rejection Analysis")
     st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
-
+        # ✅ detect from URL (when clicking Rejected card)
+    qp = st.query_params
+    if qp.get("center"):
+        st.session_state["selected_center"] = qp.get("center")
+    if qp.get("year"):
+        st.session_state["selected_year"] = qp.get("year")
     # ✅ NEEDFUL: persistent cache for center/year so it stays when you come back
     if "rej_cache" not in st.session_state:
         st.session_state.rej_cache = {}  # key -> result dict
