@@ -459,21 +459,20 @@ def run_rejection_app():
 
         # ✅ NEEDFUL: year/center change -> reset old result (so UI updates correctly)
         current_sel = f"{center}|{year}"
-        prev_sel = st.session_state.get("rej_prev_sel")
         if prev_sel != current_sel:
-            st.session_state.rej_prev_sel = current_sel
-            st.session_state.rej_result = None  # drop old year result
+    st.session_state.rej_prev_sel = current_sel
 
-            # ✅ auto-load cached result for this year if exists
-            cy_prefix = f"{center}|{year}|"
-            cached_keys = [k for k in st.session_state.rej_cache.keys() if k.startswith(cy_prefix)]
-            if cached_keys:
-                last_key = cached_keys[-1]  # dict keeps insertion order
-                st.session_state.rej_result = st.session_state.rej_cache[last_key]
-                st.success("Loaded cached result ✅")
-            else:
-                st.info("No cached result for this year. Click Generate.")
-
+    # ✅ auto-load last cached result for this year/center
+    cy_prefix = f"{center}|{year}|"
+    cached_keys = [k for k in st.session_state.rej_cache.keys() if k.startswith(cy_prefix)]
+    if cached_keys:
+        last_key = cached_keys[-1]
+        st.session_state.rej_result = st.session_state.rej_cache[last_key]
+        st.success("Loaded cached result ✅")
+    else:
+        st.session_state.rej_result = None
+        st.info("No cached result for this year. Click Generate.")
+        
         st.write("**Source**")
         st.code(f"s3://{S3_BUCKET}/{s3_key}", language="text")
 
