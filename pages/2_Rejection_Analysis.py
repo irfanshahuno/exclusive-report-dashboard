@@ -414,7 +414,6 @@ def run_rejection_app():
                 index=DEFAULT_YEAR_OPTIONS.index(year),
                 disabled=True
             )
-
        center_raw = center
        center = normalize_center_for_s3(center_raw)
        year = str(year)
