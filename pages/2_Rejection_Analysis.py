@@ -415,7 +415,9 @@ def run_rejection_app():
                 disabled=True
             )
 
-        center = str(center).lower()
+        center_raw = center
+center = normalize_center_for_s3(center_raw)
+
         year = str(year)
         s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
 
@@ -643,5 +645,20 @@ def run_rejection_app():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
                 st.success(f"Filtered rows: {len(df_full):,} ✅")
+CENTER_ALIASES = {
+    "excellent medical center": "excellent",
+    "excellent pharmacy": "pharmacy",
+    "easyhealth clinic": "easyhealth",
+    "easy health medical clinic": "easyhealth",
+    "easy health clinic": "easyhealth",
+    "easyhealth": "easyhealth",
+    "excellent": "excellent",
+    "pharmacy": "pharmacy",
+}
+
+def normalize_center_for_s3(center_value: str) -> str:
+    c = str(center_value).strip().lower()
+    c = " ".join(c.split())  # remove extra spaces
+    return CENTER_ALIASES.get(c, c)
 
 run_rejection_app()
