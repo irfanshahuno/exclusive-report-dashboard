@@ -25,14 +25,14 @@ st.markdown(
    .card{
   background:#ffffff;
   border:1px solid #fde2e2;
-  border-left:5px solid #fb7185;
+  border-left:3px solid #fb7185;
   border-radius:14px;
-  padding:14px 16px 12px 16px;
+  padding:12px 14px 10px 14px;
   box-shadow:0 2px 14px rgba(0,0,0,0.04);
 }
+{
+.card-title{ color:#b42318; }   /* softer executive red */
 
-.card-title{
-  color:#9f1239;
   font-size:13px;
   font-weight:800;
   letter-spacing:0.2px;
@@ -41,7 +41,7 @@ st.markdown(
 
 .card-value{
   color:#0f172a;
-  font-size:26px;
+  font-size:24px;
   font-weight:900;
   line-height:1.15;
 }
