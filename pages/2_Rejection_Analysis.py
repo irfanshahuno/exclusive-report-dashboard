@@ -4,7 +4,7 @@ import boto3
 from botocore.exceptions import ClientError
 import io
 import hashlib
-from datetime import datetime
+from datetime import datetime as dt
 
 import pandas as pd
 import streamlit as st
@@ -36,31 +36,257 @@ def load_file_from_s3(bucket, key):
     return obj["Body"].read()
 
 # =========================================
+# REJECTION ANALYSIS ENGINE (from your script)
+# =========================================
+def sha1_short_bytes(b: bytes) -> str:
+    return hashlib.sha1(b).hexdigest()[:12]
+
+def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    num_cols = [
+        "ActivityIns",
+        "actRemitInsShare", "actResub1RemitInsShare",
+        "actResub2RemitInsShare", "actResub3RemitInsShare",
+        "TKBKAmountAct",
+    ]
+    for c in num_cols:
+        if c not in df.columns:
+            df[c] = 0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    return df
+
+def compute_paid(df: pd.DataFrame) -> pd.DataFrame:
+    df["Paid"] = df[
+        [
+            "actRemitInsShare", "actResub1RemitInsShare",
+            "actResub2RemitInsShare", "actResub3RemitInsShare",
+            "TKBKAmountAct",
+        ]
+    ].sum(axis=1)
+    return df
+
+def ensure_insurance_column(df: pd.DataFrame) -> pd.DataFrame:
+    insurance_col = next(
+        (c for c in ["Insurance", "PayerName", "Insurer", "Plan"] if c in df.columns),
+        "Insurance",
+    )
+    if insurance_col not in df.columns:
+        df["Insurance"] = "Not Available"
+    elif insurance_col != "Insurance":
+        df["Insurance"] = df[insurance_col]
+    return df
+
+def add_refdate_and_aging(df: pd.DataFrame) -> pd.DataFrame:
+    date_candidates = [c for c in ["SubmissionDate", "ClaimDate", "VisitDate"] if c in df.columns]
+    if date_candidates:
+        for c in date_candidates:
+            df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
+        df["RefDate"] = df[date_candidates].bfill(axis=1).iloc[:, 0]
+    else:
+        df["RefDate"] = pd.NaT
+
+    today = pd.Timestamp(dt.today().date())
+    df["DaysDiff"] = (today - df["RefDate"]).dt.days
+
+    bins = [-1, 30, 45, 60, 90, float("inf")]
+    labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
+    df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
+    return df
+
+def normalize_denial_code(df: pd.DataFrame) -> pd.DataFrame:
+    if "DenialCode" not in df.columns:
+        df["DenialCode"] = ""
+    df["DenialCode"] = df["DenialCode"].astype(str).fillna("").str.strip()
+    df.loc[df["DenialCode"].str.lower().isin(["nan", "none", "null"]), "DenialCode"] = ""
+    return df
+
+def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
+    # Rule:
+    # Paid == 0 AND ActivityStatus == 'rejected' AND DenialCode not empty
+    if "ActivityStatus" not in df.columns:
+        return df.iloc[0:0].copy()
+
+    status = df["ActivityStatus"].astype(str).fillna("").str.strip().str.lower()
+    mask = (df["Paid"] == 0) & (status == "rejected") & (df["DenialCode"] != "")
+    rej = df.loc[mask].copy()
+    rej["RejectedAmount"] = rej["ActivityIns"]
+    rej["RejectedCount"] = 1
+    return rej
+
+def pivot_by_insurance(rej: pd.DataFrame) -> pd.DataFrame:
+    out = (
+        rej.groupby("Insurance", dropna=False)[["RejectedAmount", "RejectedCount"]]
+          .sum()
+          .reset_index()
+    )
+    total_row = {
+        "Insurance": "Grand Total",
+        "RejectedAmount": out["RejectedAmount"].sum(),
+        "RejectedCount": int(out["RejectedCount"].sum()),
+    }
+    return pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
+
+def pivot_by_denialcode(rej: pd.DataFrame) -> pd.DataFrame:
+    out = (
+        rej.groupby("DenialCode", dropna=False)[["RejectedAmount", "RejectedCount"]]
+          .sum()
+          .reset_index()
+          .sort_values("RejectedAmount", ascending=False)
+    )
+    total_row = {
+        "DenialCode": "Grand Total",
+        "RejectedAmount": out["RejectedAmount"].sum(),
+        "RejectedCount": int(out["RejectedCount"].sum()),
+    }
+    return pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
+
+def pivot_insurance_x_denialcode(rej: pd.DataFrame) -> pd.DataFrame:
+    pv = pd.pivot_table(
+        rej,
+        index="Insurance",
+        columns="DenialCode",
+        values="RejectedAmount",
+        aggfunc="sum",
+        fill_value=0,
+        observed=False,
+    )
+    pv["Grand Total"] = pv.sum(axis=1)
+    pv.loc["Grand Total"] = pv.sum(axis=0)
+    pv.reset_index(inplace=True)
+    return pv
+
+def pivot_rejection_aging(rej: pd.DataFrame) -> pd.DataFrame:
+    labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
+    pv = pd.pivot_table(
+        rej,
+        index="Insurance",
+        columns="AgingBucket",
+        values="RejectedAmount",
+        aggfunc="sum",
+        fill_value=0,
+        observed=False,
+    ).reindex(columns=labels)
+    pv["Grand Total"] = pv.sum(axis=1)
+    pv.loc["Grand Total"] = pv.sum(axis=0)
+    pv.reset_index(inplace=True)
+    return pv
+
+# -------------------- styling --------------------
+HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
+TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+
+def style_headers(ws):
+    for c in range(1, ws.max_column + 1):
+        cell = ws.cell(row=1, column=c)
+        cell.fill = HEADER_FILL
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+def highlight_grand_total_rows(ws, label_col=1, label_value="Grand Total"):
+    for r in range(2, ws.max_row + 1):
+        if ws.cell(row=r, column=label_col).value == label_value:
+            for c in range(1, ws.max_column + 1):
+                cell = ws.cell(row=r, column=c)
+                cell.fill = TOTAL_FILL
+                cell.font = Font(bold=True)
+
+def highlight_last_col(ws):
+    last_col = ws.max_column
+    for r in range(1, ws.max_row + 1):
+        cell = ws.cell(row=r, column=last_col)
+        cell.fill = TOTAL_FILL
+        cell.font = Font(bold=True)
+
+def apply_styling_to_bytes(xlsx_bytes: bytes) -> bytes:
+    in_buf = io.BytesIO(xlsx_bytes)
+    wb = load_workbook(in_buf)
+
+    for ws in wb.worksheets:
+        style_headers(ws)
+
+        if ws.title in [
+            "Rejected_By_Insurance",
+            "Rejected_By_DenialCode",
+            "Rejected_Ins_x_DenialCode",
+            "Rejected_Aging_Summary",
+        ]:
+            highlight_grand_total_rows(ws, label_col=1, label_value="Grand Total")
+            if ws.title in ["Rejected_Ins_x_DenialCode", "Rejected_Aging_Summary"]:
+                highlight_last_col(ws)
+
+    out_buf = io.BytesIO()
+    wb.save(out_buf)
+    return out_buf.getvalue()
+
+def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source.xlsx") -> tuple[bytes, dict]:
+    df = pd.read_excel(io.BytesIO(input_bytes), engine="openpyxl")
+    df.columns = df.columns.str.strip()
+
+    df = ensure_numeric(df)
+    df = compute_paid(df)
+    df = normalize_denial_code(df)
+    df = ensure_insurance_column(df)
+    df = add_refdate_and_aging(df)
+
+    rejected_df = build_rejected_df(df)
+
+    # outputs even if empty
+    by_ins = pivot_by_insurance(rejected_df) if len(rejected_df) else pd.DataFrame(
+        [{"Insurance": "Grand Total", "RejectedAmount": 0.0, "RejectedCount": 0}]
+    )
+    by_code = pivot_by_denialcode(rejected_df) if len(rejected_df) else pd.DataFrame(
+        [{"DenialCode": "Grand Total", "RejectedAmount": 0.0, "RejectedCount": 0}]
+    )
+    ins_x_code = pivot_insurance_x_denialcode(rejected_df) if len(rejected_df) else pd.DataFrame(
+        [{"Insurance": "Grand Total", "Grand Total": 0.0}]
+    )
+    aging_sum = pivot_rejection_aging(rejected_df) if len(rejected_df) else pd.DataFrame(
+        [{"Insurance": "Grand Total", "Grand Total": 0.0}]
+    )
+
+    rejected_detail = rejected_df.copy()
+
+    meta = pd.DataFrame([{
+        "InputFile": input_name,
+        "InputSHA1": sha1_short_bytes(input_bytes),
+        "GeneratedAt": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "RejectedRule": "Paid==0 AND lower(ActivityStatus)=='rejected' AND DenialCode not empty",
+        "RejectedRows": int(len(rejected_df)),
+    }])
+
+    out_buf = io.BytesIO()
+    with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
+        by_ins.to_excel(writer, sheet_name="Rejected_By_Insurance", index=False)
+        by_code.to_excel(writer, sheet_name="Rejected_By_DenialCode", index=False)
+        ins_x_code.to_excel(writer, sheet_name="Rejected_Ins_x_DenialCode", index=False)
+        aging_sum.to_excel(writer, sheet_name="Rejected_Aging_Summary", index=False)
+        rejected_detail.to_excel(writer, sheet_name="Rejected_Detail", index=False)
+        meta.to_excel(writer, sheet_name="Meta", index=False)
+
+    styled_bytes = apply_styling_to_bytes(out_buf.getvalue())
+
+    stats = {
+        "rejected_rows": int(len(rejected_df)),
+        "sha1": sha1_short_bytes(input_bytes),
+    }
+    return styled_bytes, stats
+
+# =========================================
 # APP
 # =========================================
 def run_rejection_app():
     st.subheader("Rejection Analysis")
     st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
 
-    # -------------------------------------
     # Auto-detect from dashboard
-    # -------------------------------------
     center = st.session_state.get("selected_center")
     year = st.session_state.get("selected_year")
 
     if center is None or year is None:
         st.warning("Center/Year not detected from dashboard. Please select manually.")
+        center = st.selectbox("Center", ["excellent", "pharmacy", "easyhealth"])
+        year = st.selectbox("Year", DEFAULT_YEAR_OPTIONS)
 
-        center = st.selectbox(
-            "Center",
-            ["excellent", "pharmacy", "easyhealth"],
-        )
-        year = st.selectbox(
-            "Year",
-            DEFAULT_YEAR_OPTIONS,
-        )
-
-    center = center.lower()
+    center = str(center).lower()
     year = str(year)
 
     s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
@@ -75,62 +301,30 @@ def run_rejection_app():
 
     input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
 
-    def sha1_short(b):
-        return hashlib.sha1(b).hexdigest()[:12]
-
     run = st.button("Generate Rejection Analysis", type="primary")
-
     if not run:
         return
 
-    with st.spinner("Building rejection analysis..."):
-        df = pd.read_excel(io.BytesIO(input_bytes))
-        df.columns = df.columns.str.strip()
-
-        for col in [
-            "ActivityIns",
-            "actRemitInsShare", "actResub1RemitInsShare",
-            "actResub2RemitInsShare", "actResub3RemitInsShare",
-            "TKBKAmountAct"
-        ]:
-            if col not in df.columns:
-                df[col] = 0
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
-        df["Paid"] = df[
-            [
-                "actRemitInsShare",
-                "actResub1RemitInsShare",
-                "actResub2RemitInsShare",
-                "actResub3RemitInsShare",
-                "TKBKAmountAct",
-            ]
-        ].sum(axis=1)
-
-        if "DenialCode" not in df.columns:
-            df["DenialCode"] = ""
-
-        status = df["ActivityStatus"].astype(str).str.lower()
-        rej = df[(df["Paid"] == 0) & (status == "rejected") & (df["DenialCode"] != "")].copy()
-
-        rej["RejectedAmount"] = rej["ActivityIns"]
-        rej["RejectedCount"] = 1
-
-        out_buf = io.BytesIO()
-        with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-            rej.to_excel(writer, sheet_name="Rejected_Detail", index=False)
-
-        st.success("Done ✅")
-
-        st.download_button(
-            "Download Rejection Analysis Excel",
-            data=out_buf.getvalue(),
-            file_name=f"Rejection_Analysis_{center}_{year}_{sha1_short(input_bytes)}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    with st.spinner("Building rejection analysis (pivots + aging + formatting)..."):
+        out_xlsx_bytes, stats = build_rejection_workbook_bytes(
+            input_bytes=input_bytes,
+            input_name=SOURCE_FILENAME,
         )
 
-        st.metric("Rejected Rows", len(rej))
-        st.dataframe(rej, use_container_width=True)
+    st.success("Done ✅")
 
+    st.download_button(
+        "Download Rejection Analysis Excel",
+        data=out_xlsx_bytes,
+        file_name=f"Rejection_Analysis_{center}_{year}_{stats['sha1']}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    st.metric("Rejected Rows", stats["rejected_rows"])
+
+    # Optional: show detail table (can be heavy on big files)
+    with st.expander("Preview Rejected Detail (may be large)", expanded=False):
+        df_preview = pd.read_excel(io.BytesIO(out_xlsx_bytes), sheet_name="Rejected_Detail", engine="openpyxl")
+        st.dataframe(df_preview, use_container_width=True)
 
 run_rejection_app()
