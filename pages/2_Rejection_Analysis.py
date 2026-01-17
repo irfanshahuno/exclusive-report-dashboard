@@ -22,31 +22,34 @@ st.markdown(
     <style>
       .block-container {max-width: 100% !important; padding-top: 1.0rem; padding-left: 1.2rem; padding-right: 1.2rem;}
 
-      .card {
-  background: #fff5f5;                 /* very light red */
-  border: 1px solid #fecaca;           /* soft red border */
-  border-radius: 14px;
-  padding: 14px 16px 12px 16px;        /* smaller height */
-  box-shadow: 0 2px 10px rgba(239,68,68,0.08);
+     .card {
+  background: #fff5f5;                 /* very soft light red */
+  border: 1px solid #fecaca;           /* light red border */
+  border-radius: 12px;
+  padding: 12px 14px 10px 14px;        /* smaller height */
+  box-shadow: 0 1px 8px rgba(0,0,0,0.04);
 }
 
+/* KPI title */
 .card-title {
-  color:#9f1239;                       /* muted red */
-  font-size: 13px;
+  color: #9f1239;                      /* muted red */
+  font-size: 12.5px;
   font-weight: 700;
   margin-bottom: 4px;
 }
 
+/* KPI value (IMPORTANT — BLACK) */
 .card-value {
-  color:#7f1d1d;                       /* strong but elegant red */
-  font-size: 26px;                     /* 👈 smaller */
+  color: #0f172a;                      /* executive black */
+  font-size: 24px;                     /* smaller */
   font-weight: 800;
   line-height: 1.1;
 }
 
+/* description */
 .card-sub {
-  color:#991b1b;
-  font-size: 12px;
+  color: #475569;
+  font-size: 11.5px;
   margin-top: 6px;
 }
       div[data-testid="stDataFrame"] {border: 1px solid #edf2fa; border-radius: 14px; overflow:hidden;}
