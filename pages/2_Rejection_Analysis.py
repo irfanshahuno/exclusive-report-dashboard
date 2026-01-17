@@ -22,35 +22,59 @@ st.markdown(
     <style>
       .block-container {max-width: 100% !important; padding-top: 1.0rem; padding-left: 1.2rem; padding-right: 1.2rem;}
 
-     .card {
-  background: #fff5f5;                 /* very soft light red */
-  border: 1px solid #fecaca;           /* light red border */
-  border-radius: 12px;
-  padding: 12px 14px 10px 14px;        /* smaller height */
-  box-shadow: 0 1px 8px rgba(0,0,0,0.04);
+   .card{
+  background:#ffffff;
+  border:1px solid #fde2e2;
+  border-left:5px solid #fb7185;
+  border-radius:14px;
+  padding:14px 16px 12px 16px;
+  box-shadow:0 2px 14px rgba(0,0,0,0.04);
 }
 
-/* KPI title */
-.card-title {
-  color: #9f1239;                      /* muted red */
-  font-size: 12.5px;
-  font-weight: 700;
-  margin-bottom: 4px;
+.card-title{
+  color:#9f1239;
+  font-size:13px;
+  font-weight:800;
+  letter-spacing:0.2px;
+  margin-bottom:6px;
 }
 
-/* KPI value (IMPORTANT — BLACK) */
-.card-value {
-  color: #0f172a;                      /* executive black */
-  font-size: 24px;                     /* smaller */
-  font-weight: 800;
-  line-height: 1.1;
+.card-value{
+  color:#0f172a;
+  font-size:26px;
+  font-weight:900;
+  line-height:1.15;
 }
 
-/* description */
-.card-sub {
-  color: #475569;
-  font-size: 11.5px;
-  margin-top: 6px;
+.card-sub{
+  color:#64748b;
+  font-size:12px;
+  margin-top:6px;
+}
+
+/* Section titles */
+h3{
+  font-size:26px!important;
+  font-weight:800!important;
+  margin-top:22px!important;
+  margin-bottom:10px!important;
+  color:#0f172a;
+}
+
+/* Download button – premium red pill */
+div.stDownloadButton > button{
+  background:#fb7185!important;
+  color:white!important;
+  border:none!important;
+  padding:9px 16px!important;
+  border-radius:999px!important;
+  font-weight:800!important;
+  font-size:14px!important;
+  box-shadow:0 6px 18px rgba(251,113,133,0.25);
+}
+
+div.stDownloadButton > button:hover{
+  background:#f43f5e!important;
 }
       div[data-testid="stDataFrame"] {border: 1px solid #edf2fa; border-radius: 14px; overflow:hidden;}
 
