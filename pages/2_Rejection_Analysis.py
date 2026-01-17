@@ -289,13 +289,46 @@ def run_rejection_app():
 
     input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
 
-    if not st.button("Generate Rejection Analysis", type="primary"):
-        return
+    # ---------- Session state keys ----------
+    if "rej_out_xlsx_bytes" not in st.session_state:
+        st.session_state.rej_out_xlsx_bytes = None
+    if "rej_stats" not in st.session_state:
+        st.session_state.rej_stats = None
+    if "rej_source_sha1" not in st.session_state:
+        st.session_state.rej_source_sha1 = None
 
-    with st.spinner("Building rejection analysis (pivots + aging + formatting)..."):
-        out_xlsx_bytes, stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
+    current_sha1 = sha1_short_bytes(input_bytes)
 
-    st.success("Done ✅")
+    # If source changed (new upload/year/center), reset old output
+    if st.session_state.rej_source_sha1 != current_sha1:
+        st.session_state.rej_out_xlsx_bytes = None
+        st.session_state.rej_stats = None
+        st.session_state.rej_source_sha1 = current_sha1
+
+    gen_col1, gen_col2 = st.columns([1, 1])
+    with gen_col1:
+        generate = st.button("Generate Rejection Analysis", type="primary")
+    with gen_col2:
+        if st.session_state.rej_out_xlsx_bytes is not None:
+            if st.button("Clear Result"):
+                st.session_state.rej_out_xlsx_bytes = None
+                st.session_state.rej_stats = None
+
+    if generate:
+        with st.spinner("Building rejection analysis (pivots + aging + formatting)..."):
+            out_xlsx_bytes, stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
+
+        st.session_state.rej_out_xlsx_bytes = out_xlsx_bytes
+        st.session_state.rej_stats = stats
+        st.success("Done ✅")
+
+    if st.session_state.rej_out_xlsx_bytes is None:
+        st.info("Click **Generate Rejection Analysis** to view tables and filters.")
+        st.stop()
+
+    # Use stored output from session (survives filter changes)
+    out_xlsx_bytes = st.session_state.rej_out_xlsx_bytes
+    stats = st.session_state.rej_stats
 
     st.download_button(
         "Download Rejection Analysis Excel",
@@ -341,7 +374,13 @@ def run_rejection_app():
         st.subheader("Rejected Detail (Filter + Download)")
 
         # Preview only (safe)
-        detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0, engine="openpyxl").columns.tolist()
+        detail_header = pd.read_excel(
+            xls,
+            sheet_name="Rejected_Detail",
+            nrows=0,
+            engine="openpyxl"
+        ).columns.tolist()
+
         must_cols = ["Insurance", "DenialCode", "ActivityIns", "Paid", "AgingBucket"]
         usecols = [c for c in must_cols if c in detail_header]
         PREVIEW_ROWS = 2000
@@ -359,11 +398,11 @@ def run_rejection_app():
 
         c1, c2, c3 = st.columns([1, 1, 1])
         with c1:
-            sel_ins = st.selectbox("Insurance", ["All"] + ins_list)
+            sel_ins = st.selectbox("Insurance", ["All"] + ins_list, key="rej_sel_ins")
         with c2:
-            sel_code = st.selectbox("Denial Code", ["All"] + code_list)
+            sel_code = st.selectbox("Denial Code", ["All"] + code_list, key="rej_sel_code")
         with c3:
-            show_top = st.number_input("Preview rows", 50, 2000, 500, 50)
+            show_top = st.number_input("Preview rows", 50, 2000, 500, 50, key="rej_preview_rows")
 
         view = df_small.copy()
         if sel_ins != "All":
@@ -375,7 +414,8 @@ def run_rejection_app():
         st.dataframe(view.head(int(show_top)), use_container_width=True)
 
         st.divider()
-        if st.button("Build & Download Filtered Detail Excel", type="primary"):
+
+        if st.button("Build & Download Filtered Detail Excel", type="primary", key="rej_build_download"):
             with st.spinner("Preparing filtered detail..."):
                 df_full = pd.read_excel(
                     pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl"),
@@ -391,13 +431,19 @@ def run_rejection_app():
                 with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                     df_full.to_excel(writer, sheet_name="Rejected_Detail_Filtered", index=False)
 
+                safe_name = (
+                    f"Rejected_Detail_{center}_{year}_{sel_ins}_{sel_code}_{stats['sha1']}.xlsx"
+                    .replace(" ", "_").replace("/", "_").replace("\\", "_").replace(":", "_")
+                )
+
                 st.download_button(
                     "Download Filtered Detail Excel",
                     data=buf.getvalue(),
-                    file_name=f"Rejected_Detail_{center}_{year}_{sel_ins}_{sel_code}_{stats['sha1']}.xlsx"
-                        .replace(" ", "_").replace("/", "_").replace("\\", "_").replace(":", "_"),
+                    file_name=safe_name,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="rej_download_filtered",
                 )
+
                 st.success(f"Rows exported: {len(df_full)} ✅")
 
 run_rejection_app()
