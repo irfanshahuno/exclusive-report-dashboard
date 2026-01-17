@@ -17,9 +17,10 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # - Reads correct source.xlsx from S3:
 #     streamlit/<center>/<year>/source.xlsx
 # - If not available in session, shows dropdowns
+# - ✅ NEW: Back to Dashboard button
 # =========================================
 
-# ✅ Your S3 bucket
+# ✅ Your S3 bucket (keep as-is)
 S3_BUCKET = "emc-rcm-storage-2026"
 
 # ✅ Expected source filename (your dashboard saves like this)
@@ -376,13 +377,17 @@ def run_rejection_app():
     st.subheader("Rejection Analysis (Auto-detect Center/Year → reads S3 source.xlsx)")
     st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
 
+    # ✅ NEW: back button (works inside same Streamlit multipage app)
+    st.page_link("exclusive_dashboard.py", label="⬅ Back to Dashboard", icon="🏠")
+    st.divider()
+
     # ✅ 1) Discover available centers/years from S3 (for dropdown fallback)
     centers, years_by_center = discover_centers_and_years(S3_BUCKET)
 
     # ✅ 2) Auto-detect center/year from session_state (dashboard should set these)
-    # We try multiple possible keys, so it works even if your dashboard uses different names.
     detected_center = (
         st.session_state.get("selected_center")
+        or st.session_state.get("center_key")   # <— your dashboard uses center_key
         or st.session_state.get("center")
         or st.session_state.get("CENTER")
         or st.session_state.get("facility")
@@ -391,7 +396,7 @@ def run_rejection_app():
 
     detected_year = (
         st.session_state.get("selected_year")
-        or st.session_state.get("year")
+        or st.session_state.get("year")         # <— your dashboard uses year
         or st.session_state.get("YEAR")
         or None
     )
@@ -408,7 +413,6 @@ def run_rejection_app():
 
     # Center options
     if not centers:
-        # fallback if list fails (still allow manual input)
         centers = ["excellent", "pharmacy", "easyhealth"]
 
     if detected_center not in centers:
