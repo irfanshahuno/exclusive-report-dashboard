@@ -377,7 +377,7 @@ def _fmt_aed(x):
     except Exception:
         return f"AED {x}"
 
-def _detect_amount_col(df: pd.DataFrame) -> str | None:
+def _detect_amount_col(df: pd.DataFrame):
     for c in ["RejectedAmount", "ActivityIns"]:
         if c in df.columns:
             return c
@@ -461,7 +461,6 @@ def run_rejection_app():
                 df_ins_x_code = pd.read_excel(xls, sheet_name="Rejected_Ins_x_DenialCode")
                 df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
 
-                # light preview for filters (prevents crash)
                 PREVIEW_ROWS = 2000
                 detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
                 wanted_cols = ["Insurance", "DenialCode", "ActivityStatus", "ActivityIns", "Paid", "AgingBucket", "DaysDiff", "RefDate", "RejectedAmount"]
@@ -499,7 +498,6 @@ def run_rejection_app():
     df_preview = R["df_preview"]
     PREVIEW_ROWS = R["preview_rows"]
 
-    # download
     st.download_button(
         "Download Rejection Analysis Excel",
         data=out_xlsx_bytes,
@@ -531,55 +529,8 @@ def run_rejection_app():
             else:
                 _card(f"#{i+1}", "AED 0.00", "")
 
-    # ===== Top 3 Denial (FULL accurate) from pivot =====
-    st.markdown("### Top 3 Denial (Insurance + Code) by Amount")
-    top_den = pd.DataFrame(columns=["Insurance", "DenialCode", "Amount"])
-    try:
-        pv = df_ins_x_code.copy()
-        if "Insurance" in pv.columns:
-            pv = pv[pv["Insurance"] != "Grand Total"].copy()
-            if "Grand Total" in pv.columns:
-                pv = pv.drop(columns=["Grand Total"])
-            melted = pv.melt(id_vars=["Insurance"], var_name="DenialCode", value_name="Amount")
-            melted["Amount"] = pd.to_numeric(melted["Amount"], errors="coerce").fillna(0)
-            melted["DenialCode"] = melted["DenialCode"].astype(str).fillna("").str.strip()
-            melted = melted[(melted["DenialCode"] != "") & (melted["Amount"] > 0)]
-            top_den = melted.sort_values("Amount", ascending=False).head(3)
-    except Exception:
-        pass
-
-    cols = st.columns(3)
-    for i in range(3):
-        with cols[i]:
-            if i < len(top_den):
-                _card(
-                    str(top_den.iloc[i]["Insurance"]),
-                    str(top_den.iloc[i]["DenialCode"]),
-                    _fmt_aed(float(top_den.iloc[i]["Amount"]))
-                )
-            else:
-                _card("-", "-", "AED 0.00")
-
-    # ===== Denial code drilldown (top insurances for selected code) =====
-    st.markdown("### Denial Code Drilldown (Top Insurances by Amount)")
-    code_options = df_by_code[df_by_code["DenialCode"] != "Grand Total"]["DenialCode"].astype(str).tolist()
-    sel_focus_code = st.selectbox("Select Denial Code", [""] + code_options, key="focus_denial_code")
-
-    if sel_focus_code:
-        pv2 = df_ins_x_code.copy()
-        pv2 = pv2[pv2["Insurance"] != "Grand Total"].copy()
-        if sel_focus_code in pv2.columns:
-            tmp = pv2[["Insurance", sel_focus_code]].copy()
-            tmp[sel_focus_code] = pd.to_numeric(tmp[sel_focus_code], errors="coerce").fillna(0)
-            tmp = tmp[tmp[sel_focus_code] > 0].sort_values(sel_focus_code, ascending=False).head(10)
-            tmp = tmp.rename(columns={sel_focus_code: "Amount"})
-            st.dataframe(tmp, use_container_width=True)
-        else:
-            st.info("No amounts found for this denial code.")
-
     st.divider()
 
-    # ===== Tabs =====
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "By Insurance",
         "By Denial Code",
@@ -624,7 +575,7 @@ def run_rejection_app():
         if sel_code != "All" and "DenialCode" in filt.columns:
             filt = filt[filt["DenialCode"].astype(str) == str(sel_code)]
 
-        # ✅ NEW: totals for selected filters (PREVIEW)
+        # ✅ Preview totals (fast)
         amt_col_prev = _detect_amount_col(filt)
         total_count_preview = int(len(filt))
         total_amount_preview = float(pd.to_numeric(filt[amt_col_prev], errors="coerce").fillna(0).sum()) if amt_col_prev else 0.0
@@ -634,6 +585,28 @@ def run_rejection_app():
             st.metric("Selected (Preview) Count", f"{total_count_preview:,}")
         with m2:
             st.metric("Selected (Preview) Amount", _fmt_aed(total_amount_preview))
+
+        # ✅ NEW: Full totals button (accurate)
+        st.markdown("### Full Totals (Accurate)")
+        if st.button("Calculate FULL Totals", key="rej_full_totals_btn"):
+            with st.spinner("Calculating FULL totals from Rejected_Detail..."):
+                xls_full = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
+                df_full = pd.read_excel(xls_full, sheet_name="Rejected_Detail")
+
+                if sel_ins != "All" and "Insurance" in df_full.columns:
+                    df_full = df_full[df_full["Insurance"].astype(str) == str(sel_ins)]
+                if sel_code != "All" and "DenialCode" in df_full.columns:
+                    df_full = df_full[df_full["DenialCode"].astype(str) == str(sel_code)]
+
+                amt_col_full = _detect_amount_col(df_full)
+                total_count_full = int(len(df_full))
+                total_amount_full = float(pd.to_numeric(df_full[amt_col_full], errors="coerce").fillna(0).sum()) if amt_col_full else 0.0
+
+                f1, f2 = st.columns(2)
+                with f1:
+                    st.metric("Selected (FULL) Count", f"{total_count_full:,}")
+                with f2:
+                    st.metric("Selected (FULL) Amount", _fmt_aed(total_amount_full))
 
         st.caption(f"Preview (from first {PREVIEW_ROWS} rows only). Use Download for FULL filtered output.")
         st.dataframe(filt.head(int(show_top)), use_container_width=True)
@@ -650,7 +623,6 @@ def run_rejection_app():
                 if sel_code != "All" and "DenialCode" in df_full.columns:
                     df_full = df_full[df_full["DenialCode"].astype(str) == str(sel_code)]
 
-                # ✅ NEW: totals for selected filters (FULL)
                 amt_col_full = _detect_amount_col(df_full)
                 total_count_full = int(len(df_full))
                 total_amount_full = float(pd.to_numeric(df_full[amt_col_full], errors="coerce").fillna(0).sum()) if amt_col_full else 0.0
