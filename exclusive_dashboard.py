@@ -196,15 +196,30 @@ div.stButton > button:focus-visible{
 """,
     unsafe_allow_html=True,
 )
-
-
-def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str):
-    """Premium KPI cards (Balance card clickable)."""
+def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, rejection_url: str = ""):
+    """Premium KPI cards (Balance clickable, Rejected clickable)."""
     def fmt(x):
         try:
             return f"{float(x):,.2f}"
         except Exception:
             return "—"
+
+    rejected_block = f"""
+      <div class="kpi-card" title="{fmt(rej)}">
+        <div class="kpi-label">Rejected</div>
+        <div class="kpi-value">{fmt(rej)}</div>
+      </div>
+    """
+
+    if rejection_url:
+        rejected_block = f"""
+      <a class="kpi-link" href="{rejection_url}" title="{fmt(rej)}">
+        <div class="kpi-card" title="{fmt(rej)}">
+          <div class="kpi-label">Rejected</div>
+          <div class="kpi-value">{fmt(rej)}</div>
+        </div>
+      </a>
+        """
 
     html = f"""
     <div class="kpi-grid">
@@ -225,10 +240,7 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str):
         </div>
       </a>
 
-      <div class="kpi-card" title="{fmt(rej)}">
-        <div class="kpi-label">Rejected</div>
-        <div class="kpi-value">{fmt(rej)}</div>
-      </div>
+      {rejected_block}
 
       <div class="kpi-card" title="{fmt(acc)}">
         <div class="kpi-label">Accepted</div>
@@ -237,8 +249,7 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str):
     </div>
     """
     st.markdown(html, unsafe_allow_html=True)
-
-
+    
 # ====================== NEW: YEAR LANDING PAGE (NEEDFUL) ======================
 def reset_year_selection():
     # back to landing page
@@ -547,6 +558,9 @@ def ksum(df: pd.DataFrame, *cands):
         if col in df.columns:
             return float(pd.to_numeric(df[col], errors="coerce").sum())
     return 0.0
+    
+def build_rejection_url(center, year):
+    return f"/Rejection_Analysis?center={center}&year={year}"
 
 
 def is_admin_mode() -> bool:
@@ -652,23 +666,6 @@ st.caption(
     f"Center: **{st.session_state.get('center_key') or 'none'}** · "
     f"Year: **{st.session_state.get('year') or 'none'}**"
 )
-# ====================== ✅ Rejection Analysis navigation (NEW) ======================
-colR1, colR2 = st.columns([1.6, 6.4])
-with colR1:
-    if st.button("📌 Rejection Analysis", use_container_width=True, key="btn_open_rej"):
-        # must have a selected center & year first
-        if not st.session_state.get("center_key") or not st.session_state.get("year"):
-            st.warning("Please select Center and Year first.")
-        else:
-            # ✅ pass values to rejection page (auto-detect)
-            st.session_state["selected_center"] = st.session_state["center_key"]
-            st.session_state["selected_year"] = str(st.session_state["year"])
-
-            # ✅ open the multipage file inside same app
-            st.switch_page("pages/2_Rejection_Analysis.py")
-# ==============================================================================
-
-
 # ====================== ✅ HIDE EASYHEALTH IN 2024 (ONLY) ======================
 # Block direct access via URL or session state when year selection is 2024
 if st.session_state.get("rcm_year") == 2024:
@@ -723,12 +720,14 @@ if ck not in CENTERS:
 
     st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
-    render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, BALANCE_ATTEMPT_URL)
+    render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, BALANCE_ATTEMPT_URL,
+                 rejection_url=build_rejection_url("excellent", sel_year))
     st.markdown("---")
 
     st.markdown('<h3 class="center-title">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
-    render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, BALANCE_ATTEMPT_URL)
+    render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, BALANCE_ATTEMPT_URL,
+                 rejection_url=build_rejection_url("pharmacy", sel_year))
     st.markdown("---")
 
     # ✅ EasyHealth KPI section hidden in 2024 only
@@ -737,7 +736,8 @@ if ck not in CENTERS:
 
         st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
         st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
-        render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, BALANCE_ATTEMPT_URL)
+        render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, BALANCE_ATTEMPT_URL,
+                 rejection_url=build_rejection_url("easyhealth", sel_year))
 
     st.stop()
 
@@ -935,7 +935,8 @@ try:
     acc = ksum(totals_no_gt, "Accepted")
 
     st.markdown(f"### Key metrics — {st.session_state.get('year')}")
-    render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL)
+    render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL,
+                 rejection_url=build_rejection_url(st.session_state.get("center_key"), st.session_state.get("year")))
     st.markdown("---")
 
     tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
@@ -1105,6 +1106,7 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
 
 
 
