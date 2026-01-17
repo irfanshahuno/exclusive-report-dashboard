@@ -16,7 +16,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # =========================================
 st.set_page_config(page_title="Rejection Analysis", layout="wide")
 
-# ✅ ONLY NEEDFUL CHANGE: Light-Red + Smaller Buttons (CSS only)
+# ✅ Light-Red + Smaller Buttons (CSS only)
 st.markdown(
     """
     <style>
@@ -30,29 +30,25 @@ st.markdown(
         padding:12px 14px 10px 14px;
         box-shadow:0 2px 14px rgba(0,0,0,0.04);
       }
-
       .card-title{
-        color:#b42318;  /* softer executive red */
+        color:#b42318;
         font-size:13px;
         font-weight:800;
         letter-spacing:0.2px;
         margin-bottom:6px;
       }
-
       .card-value{
         color:#0f172a;
         font-size:24px;
         font-weight:900;
         line-height:1.15;
       }
-
       .card-sub{
         color:#64748b;
         font-size:12px;
         margin-top:6px;
       }
 
-      /* Section titles */
       h3{
         font-size:26px!important;
         font-weight:800!important;
@@ -61,47 +57,29 @@ st.markdown(
         color:#0f172a;
       }
 
-      /* Download button – premium red pill */
-      div.stDownloadButton > button{
-        background:#fb7185!important;
-        color:white!important;
-        border:none!important;
-        padding:9px 16px!important;
-        border-radius:999px!important;
-        font-weight:800!important;
-        font-size:14px!important;
-        box-shadow:0 6px 18px rgba(251,113,133,0.25);
-      }
-
-      div.stDownloadButton > button:hover{
-        background:#f43f5e!important;
-      }
-
       div[data-testid="stDataFrame"] {border: 1px solid #edf2fa; border-radius: 14px; overflow:hidden;}
 
-      /* ✅ Light Red + Smaller Buttons (All buttons) */
+      /* Buttons */
       div.stButton > button,
       div.stDownloadButton > button{
-        background: #f87171 !important;       /* light red */
+        background: #f87171 !important;
         color: #ffffff !important;
-        border: 1px solid #fecaca !important; /* soft border */
+        border: 1px solid #fecaca !important;
         border-radius: 12px !important;
 
-        padding: 0.35rem 0.80rem !important;  /* smaller */
-        font-size: 0.88rem !important;        /* smaller */
+        padding: 0.35rem 0.80rem !important;
+        font-size: 0.88rem !important;
         font-weight: 700 !important;
-        min-height: 2.25rem !important;       /* smaller height */
+        min-height: 2.25rem !important;
 
         box-shadow: 0 6px 18px rgba(239,68,68,0.18) !important;
       }
-
       div.stButton > button:hover,
       div.stDownloadButton > button:hover{
-        background: #ef4444 !important;       /* a bit darker on hover */
+        background: #ef4444 !important;
         border-color: #fca5a5 !important;
         transform: translateY(-1px);
       }
-
       div.stButton > button:active,
       div.stDownloadButton > button:active{
         transform: translateY(0px);
@@ -119,7 +97,7 @@ SOURCE_FILENAME = "source.xlsx"
 DEFAULT_YEAR_OPTIONS = ["2024", "2025", "2026"]
 
 # =========================================
-# CENTER NORMALIZATION (MUST be BEFORE use)
+# CENTER NORMALIZATION
 # =========================================
 CENTER_ALIASES = {
     "excellent medical center": "excellent",
@@ -134,7 +112,7 @@ CENTER_ALIASES = {
 
 def normalize_center_for_s3(center_value: str) -> str:
     c = str(center_value).strip().lower()
-    c = " ".join(c.split())  # remove extra spaces
+    c = " ".join(c.split())
     return CENTER_ALIASES.get(c, c)
 
 # =========================================
@@ -399,6 +377,12 @@ def _fmt_aed(x):
     except Exception:
         return f"AED {x}"
 
+def _detect_amount_col(df: pd.DataFrame) -> str | None:
+    for c in ["RejectedAmount", "ActivityIns"]:
+        if c in df.columns:
+            return c
+    return None
+
 # =========================================
 # APP
 # =========================================
@@ -480,7 +464,7 @@ def run_rejection_app():
                 # light preview for filters (prevents crash)
                 PREVIEW_ROWS = 2000
                 detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
-                wanted_cols = ["Insurance", "DenialCode", "ActivityStatus", "ActivityIns", "Paid", "AgingBucket", "DaysDiff", "RefDate"]
+                wanted_cols = ["Insurance", "DenialCode", "ActivityStatus", "ActivityIns", "Paid", "AgingBucket", "DaysDiff", "RefDate", "RejectedAmount"]
                 usecols = [c for c in wanted_cols if c in detail_header]
                 df_preview = pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=PREVIEW_ROWS)
 
@@ -640,6 +624,17 @@ def run_rejection_app():
         if sel_code != "All" and "DenialCode" in filt.columns:
             filt = filt[filt["DenialCode"].astype(str) == str(sel_code)]
 
+        # ✅ NEW: totals for selected filters (PREVIEW)
+        amt_col_prev = _detect_amount_col(filt)
+        total_count_preview = int(len(filt))
+        total_amount_preview = float(pd.to_numeric(filt[amt_col_prev], errors="coerce").fillna(0).sum()) if amt_col_prev else 0.0
+
+        m1, m2 = st.columns(2)
+        with m1:
+            st.metric("Selected (Preview) Count", f"{total_count_preview:,}")
+        with m2:
+            st.metric("Selected (Preview) Amount", _fmt_aed(total_amount_preview))
+
         st.caption(f"Preview (from first {PREVIEW_ROWS} rows only). Use Download for FULL filtered output.")
         st.dataframe(filt.head(int(show_top)), use_container_width=True)
 
@@ -654,6 +649,11 @@ def run_rejection_app():
                     df_full = df_full[df_full["Insurance"].astype(str) == str(sel_ins)]
                 if sel_code != "All" and "DenialCode" in df_full.columns:
                     df_full = df_full[df_full["DenialCode"].astype(str) == str(sel_code)]
+
+                # ✅ NEW: totals for selected filters (FULL)
+                amt_col_full = _detect_amount_col(df_full)
+                total_count_full = int(len(df_full))
+                total_amount_full = float(pd.to_numeric(df_full[amt_col_full], errors="coerce").fillna(0).sum()) if amt_col_full else 0.0
 
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -671,6 +671,7 @@ def run_rejection_app():
                     file_name=safe_name,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-                st.success(f"Filtered rows: {len(df_full):,} ✅")
+
+                st.success(f"FULL Filtered ✅ Count: {total_count_full:,} | Amount: {_fmt_aed(total_amount_full)}")
 
 run_rejection_app()
