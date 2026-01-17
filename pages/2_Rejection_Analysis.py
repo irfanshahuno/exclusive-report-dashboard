@@ -1,4 +1,8 @@
 # pages/2_Rejection_Analysis.py
+# ✅ Left panel = Center/Year/Source + Generate/Clear
+# ✅ Right panel = KPI cards (front main page) + Tabs
+# ✅ No re-processing unless you click Generate OR the S3 source file changes
+# ✅ Uses session_state + cache_data so result stays
 
 import boto3
 from botocore.exceptions import ClientError
@@ -36,6 +40,7 @@ def s3_exists(bucket, key):
 def load_file_from_s3(bucket, key):
     obj = s3_client().get_object(Bucket=bucket, Key=key)
     return obj["Body"].read()
+
 
 # =========================================
 # ENGINE
@@ -110,7 +115,6 @@ def normalize_denial_code(df: pd.DataFrame) -> pd.DataFrame:
 def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
     if "ActivityStatus" not in df.columns:
         return df.iloc[0:0].copy()
-
     status = df["ActivityStatus"].astype(str).fillna("").str.strip().str.lower()
     mask = (df["Paid"] == 0) & (status == "rejected") & (df["DenialCode"] != "")
     rej = df.loc[mask].copy()
@@ -180,7 +184,7 @@ def pivot_rejection_aging(rej: pd.DataFrame) -> pd.DataFrame:
     return pv
 
 
-# -------------------- styling --------------------
+# -------------------- styling excel --------------------
 HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
 TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
 
@@ -214,7 +218,6 @@ def apply_styling_to_bytes(xlsx_bytes: bytes) -> bytes:
     wb = load_workbook(io.BytesIO(xlsx_bytes))
     for ws in wb.worksheets:
         style_headers(ws)
-
         if ws.title in [
             "Rejected_By_Insurance",
             "Rejected_By_DenialCode",
@@ -276,8 +279,9 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
     stats = {"rejected_rows": int(len(rejected_df)), "sha1": sha1_short_bytes(input_bytes)}
     return styled, stats
 
+
 # =========================================
-# CACHED LOADERS
+# CACHED LOADERS (FAST)
 # =========================================
 @st.cache_data(show_spinner=False)
 def load_summary_sheets(out_xlsx_bytes: bytes):
@@ -300,10 +304,11 @@ def load_detail_preview(out_xlsx_bytes: bytes, usecols: list[str], nrows: int):
     xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
     return pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=nrows, engine="openpyxl")
 
+
 # =========================================
-# UI HELPERS
+# KPI UI (RIGHT SIDE TOP)
 # =========================================
-def _short(txt, n=24):
+def _short(txt, n=28):
     txt = "" if txt is None else str(txt)
     return txt if len(txt) <= n else txt[: n - 3] + "..."
 
@@ -312,36 +317,35 @@ def inject_kpi_css():
     st.markdown(
         """
         <style>
-          .kpi-panel { position: sticky; top: 70px; }
-          .kpi-grid { display:flex; flex-direction:column; gap:12px; }
+          .kpi-wrap{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;margin-bottom:12px;}
           .kpi-card{
+            flex: 1 1 250px;
             background:#ffffff;
             border:1px solid #e9eef5;
-            border-radius:16px;
+            border-radius:18px;
             padding:14px 16px;
-            box-shadow: 0 2px 10px rgba(15,23,42,0.06);
+            box-shadow: 0 2px 12px rgba(15,23,42,0.06);
           }
           .kpi-title{font-size:13px;color:#64748b;margin-bottom:6px;}
-          .kpi-value{font-size:26px;font-weight:900;color:#0f172a;line-height:1.15;}
+          .kpi-value{font-size:30px;font-weight:900;color:#0f172a;line-height:1.15;}
           .kpi-sub{font-size:12px;color:#94a3b8;margin-top:6px;}
           .kpi-chip{
-            display:inline-block;
-            margin-top:10px;
-            padding:5px 10px;
-            border-radius:999px;
-            background:#f1f5f9;
-            color:#334155;
-            font-size:12px;
-            font-weight:800;
+            display:inline-block;margin-top:10px;padding:6px 12px;border-radius:999px;
+            background:#f1f5f9;color:#334155;font-size:12px;font-weight:900;
           }
-          .kpi-mini{font-size:12px;color:#94a3b8;margin-top:4px;}
+          .mini-card{
+            border:1px solid #eef2f7;border-radius:16px;padding:10px 12px;margin-top:10px;background:#fff;
+          }
+          .mini-top{font-size:12px;color:#64748b;}
+          .mini-mid{font-size:18px;font-weight:900;color:#0f172a;margin-top:2px;}
+          .mini-bot{font-size:13px;font-weight:900;color:#334155;margin-top:4px;}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-def render_left_kpis(stats, df_by_ins: pd.DataFrame, df_full_detail: pd.DataFrame):
+def render_main_kpis(stats, df_by_ins: pd.DataFrame, df_full_detail: pd.DataFrame):
     inject_kpi_css()
 
     tmp = df_by_ins.copy()
@@ -364,7 +368,7 @@ def render_left_kpis(stats, df_by_ins: pd.DataFrame, df_full_detail: pd.DataFram
     ins2, amt2 = _top_ins(1)
     ins3, amt3 = _top_ins(2)
 
-    # --- Top 3 denial combos (Insurance + DenialCode) by amount ---
+    # --- Top 3 (Insurance + DenialCode) combos by amount ---
     combo_top3 = pd.DataFrame(columns=["Insurance", "DenialCode", "Amount"])
     if df_full_detail is not None and len(df_full_detail) > 0:
         dd = df_full_detail.copy()
@@ -384,75 +388,67 @@ def render_left_kpis(stats, df_by_ins: pd.DataFrame, df_full_detail: pd.DataFram
                 .head(3)
             )
 
-    st.markdown('<div class="kpi-panel"><div class="kpi-grid">', unsafe_allow_html=True)
-
     st.markdown(
         f"""
-        <div class="kpi-card">
-          <div class="kpi-title">Rejected Rows</div>
-          <div class="kpi-value">{int(stats["rejected_rows"]):,}</div>
-          <div class="kpi-sub">Paid=0 + Status=rejected + DenialCode not empty</div>
-        </div>
+        <div class="kpi-wrap">
+          <div class="kpi-card">
+            <div class="kpi-title">Rejected Rows</div>
+            <div class="kpi-value">{int(stats["rejected_rows"]):,}</div>
+            <div class="kpi-sub">Paid=0 + Status=rejected + DenialCode not empty</div>
+          </div>
 
-        <div class="kpi-card">
-          <div class="kpi-title">Total Rejected Amount</div>
-          <div class="kpi-value">AED {total_amt:,.2f}</div>
-          <div class="kpi-sub">All insurers (excluding Grand Total row)</div>
-        </div>
+          <div class="kpi-card">
+            <div class="kpi-title">Total Rejected Amount</div>
+            <div class="kpi-value">AED {total_amt:,.2f}</div>
+            <div class="kpi-sub">All insurers (excluding Grand Total row)</div>
+          </div>
 
-        <div class="kpi-card">
-          <div class="kpi-title">Total Rejected Claims</div>
-          <div class="kpi-value">{total_cnt:,}</div>
-          <div class="kpi-sub">Count of rejected activities</div>
-        </div>
+          <div class="kpi-card">
+            <div class="kpi-title">Total Rejected Claims</div>
+            <div class="kpi-value">{total_cnt:,}</div>
+            <div class="kpi-sub">Count of rejected activities</div>
+          </div>
 
-        <div class="kpi-card">
-          <div class="kpi-title">Top Insurance #1</div>
-          <div class="kpi-value">{_short(ins1, 26)}</div>
-          <div class="kpi-chip">AED {amt1:,.2f}</div>
-        </div>
+          <div class="kpi-card">
+            <div class="kpi-title">Top Insurance #1</div>
+            <div class="kpi-value">{_short(ins1, 28)}</div>
+            <div class="kpi-chip">AED {amt1:,.2f}</div>
+          </div>
 
-        <div class="kpi-card">
-          <div class="kpi-title">Top Insurance #2</div>
-          <div class="kpi-value">{_short(ins2, 26)}</div>
-          <div class="kpi-chip">AED {amt2:,.2f}</div>
-        </div>
+          <div class="kpi-card">
+            <div class="kpi-title">Top Insurance #2</div>
+            <div class="kpi-value">{_short(ins2, 28)}</div>
+            <div class="kpi-chip">AED {amt2:,.2f}</div>
+          </div>
 
-        <div class="kpi-card">
-          <div class="kpi-title">Top Insurance #3</div>
-          <div class="kpi-value">{_short(ins3, 26)}</div>
-          <div class="kpi-chip">AED {amt3:,.2f}</div>
+          <div class="kpi-card">
+            <div class="kpi-title">Top Insurance #3</div>
+            <div class="kpi-value">{_short(ins3, 28)}</div>
+            <div class="kpi-chip">AED {amt3:,.2f}</div>
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown(
-        """
-        <div class="kpi-card">
-          <div class="kpi-title">Top 3 Denial Codes (with Insurance)</div>
-          <div class="kpi-mini">Highest rejected amount combinations</div>
-        """,
-        unsafe_allow_html=True,
-    )
-
+    st.markdown("#### Top 3 Denial (Insurance + Code) by Amount")
     if combo_top3 is None or len(combo_top3) == 0:
-        st.markdown('<div class="kpi-mini" style="margin-top:10px;">No denial data found.</div></div>', unsafe_allow_html=True)
+        st.caption("No denial data found.")
     else:
-        for _, r in combo_top3.iterrows():
-            st.markdown(
-                f"""
-                <div style="margin-top:10px;padding:10px 12px;border:1px solid #eef2f7;border-radius:14px;">
-                  <div style="font-size:12px;color:#64748b;">{_short(r["Insurance"], 32)}</div>
-                  <div style="font-size:18px;font-weight:900;color:#0f172a;">{r["DenialCode"]}</div>
-                  <div style="margin-top:4px;font-size:13px;font-weight:800;color:#334155;">AED {float(r["Amount"]):,.2f}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        st.markdown("</div>", unsafe_allow_html=True)
+        cols = st.columns(3)
+        for i, (_, r) in enumerate(combo_top3.iterrows()):
+            with cols[i]:
+                st.markdown(
+                    f"""
+                    <div class="mini-card">
+                      <div class="mini-top">{_short(r["Insurance"], 34)}</div>
+                      <div class="mini-mid">{r["DenialCode"]}</div>
+                      <div class="mini-bot">AED {float(r["Amount"]):,.2f}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
-    st.markdown("</div></div>", unsafe_allow_html=True)
 
 # =========================================
 # APP
@@ -461,90 +457,125 @@ def run_rejection_app():
     st.title("Rejection Analysis")
     st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
 
-    # ✅ Manual select if dashboard not passed state
-    center = st.session_state.get("selected_center")
-    year = st.session_state.get("selected_year")
-    if center is None or year is None:
-        st.warning("Center/Year not detected from dashboard. Please select manually.")
-        center = st.selectbox("Center", ["excellent", "pharmacy", "easyhealth"])
-        year = st.selectbox("Year", DEFAULT_YEAR_OPTIONS)
+    # --- init session keys ---
+    st.session_state.setdefault("rej_out_xlsx_bytes", None)
+    st.session_state.setdefault("rej_stats", None)
+    st.session_state.setdefault("rej_source_sha1", None)
+    st.session_state.setdefault("rej_input_bytes", None)
+    st.session_state.setdefault("rej_input_sha1", None)
+    st.session_state.setdefault("rej_last_center", None)
+    st.session_state.setdefault("rej_last_year", None)
 
-    center = str(center).lower()
-    year = str(year)
+    # --- MAIN LAYOUT: LEFT (controls) / RIGHT (results) ---
+    left_panel, main_panel = st.columns([1, 2.2], gap="large")
 
-    s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
+    # =========================
+    # LEFT PANEL (controls)
+    # =========================
+    with left_panel:
+        st.markdown("### Controls")
 
-    st.write(f"**Center:** {center}")
-    st.write(f"**Year:** {year}")
-    st.write(f"**Source:** s3://{S3_BUCKET}/{s3_key}")
+        # Auto-detect from dashboard
+        center = st.session_state.get("selected_center")
+        year = st.session_state.get("selected_year")
 
-    if not s3_exists(S3_BUCKET, s3_key):
-        st.error("Source file not found in S3. Upload from dashboard first.")
-        st.stop()
+        if center is None or year is None:
+            st.warning("Center/Year not detected from dashboard. Please select manually.")
+            center = st.selectbox("Center", ["excellent", "pharmacy", "easyhealth"], key="rej_center_sel")
+            year = st.selectbox("Year", DEFAULT_YEAR_OPTIONS, key="rej_year_sel")
+        else:
+            # show locked selections (still stored)
+            center = str(center).lower()
+            year = str(year)
+            st.info("Center/Year detected from dashboard ✅")
+            st.selectbox("Center", ["excellent", "pharmacy", "easyhealth"],
+                         index=["excellent", "pharmacy", "easyhealth"].index(center),
+                         disabled=True, key="rej_center_locked")
+            st.selectbox("Year", DEFAULT_YEAR_OPTIONS,
+                         index=DEFAULT_YEAR_OPTIONS.index(year),
+                         disabled=True, key="rej_year_locked")
 
-    input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
+        center = str(center).lower()
+        year = str(year)
 
-    # ---------- Session state ----------
-    if "rej_out_xlsx_bytes" not in st.session_state:
-        st.session_state.rej_out_xlsx_bytes = None
-    if "rej_stats" not in st.session_state:
-        st.session_state.rej_stats = None
-    if "rej_source_sha1" not in st.session_state:
-        st.session_state.rej_source_sha1 = None
+        s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
+        st.write(f"**Center:** {center}")
+        st.write(f"**Year:** {year}")
+        st.write(f"**Source:** s3://{S3_BUCKET}/{s3_key}")
 
-    current_sha1 = sha1_short_bytes(input_bytes)
-    if st.session_state.rej_source_sha1 != current_sha1:
-        st.session_state.rej_out_xlsx_bytes = None
-        st.session_state.rej_stats = None
-        st.session_state.rej_source_sha1 = current_sha1
+        if not s3_exists(S3_BUCKET, s3_key):
+            st.error("Source file not found in S3. Upload from dashboard first.")
+            st.stop()
 
-    # ✅ Keep buttons on same row
-    b1, b2 = st.columns([1, 1])
-    with b1:
-        generate = st.button("Generate Rejection Analysis", type="primary")
-    with b2:
-        if st.session_state.rej_out_xlsx_bytes is not None:
-            if st.button("Clear Result"):
+        # ✅ Load input bytes only when center/year changed OR not loaded yet
+        if (st.session_state.rej_last_center != center) or (st.session_state.rej_last_year != year) or (st.session_state.rej_input_bytes is None):
+            inp = load_file_from_s3(S3_BUCKET, s3_key)
+            st.session_state.rej_input_bytes = inp
+            st.session_state.rej_input_sha1 = sha1_short_bytes(inp)
+            st.session_state.rej_last_center = center
+            st.session_state.rej_last_year = year
+
+        input_bytes = st.session_state.rej_input_bytes
+        current_sha1 = st.session_state.rej_input_sha1
+
+        # ✅ If the S3 file changed, clear old result (so you don't see wrong output)
+        if st.session_state.rej_source_sha1 != current_sha1:
+            st.session_state.rej_out_xlsx_bytes = None
+            st.session_state.rej_stats = None
+            st.session_state.rej_source_sha1 = current_sha1
+            st.cache_data.clear()
+
+        b1, b2 = st.columns([1, 1])
+        with b1:
+            generate = st.button("Generate Rejection Analysis", type="primary", key="rej_generate_btn")
+        with b2:
+            clear_disabled = st.session_state.rej_out_xlsx_bytes is None
+            if st.button("Clear Result", disabled=clear_disabled, key="rej_clear_btn"):
                 st.session_state.rej_out_xlsx_bytes = None
                 st.session_state.rej_stats = None
                 st.cache_data.clear()
-                st.experimental_rerun()
+                st.rerun()
 
-    if generate:
-        with st.spinner("Building rejection analysis (pivots + aging + formatting)..."):
-            out_xlsx_bytes, stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
-        st.session_state.rej_out_xlsx_bytes = out_xlsx_bytes
-        st.session_state.rej_stats = stats
-        st.cache_data.clear()
-        st.success("Done ✅")
+        if generate:
+            with st.spinner("Building rejection analysis..."):
+                out_xlsx_bytes, stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
+            st.session_state.rej_out_xlsx_bytes = out_xlsx_bytes
+            st.session_state.rej_stats = stats
+            st.cache_data.clear()
+            st.success("Done ✅")
 
-    # ✅ IMPORTANT: stop here until generated
-    if st.session_state.rej_out_xlsx_bytes is None:
-        st.info("Click **Generate Rejection Analysis** to view KPIs and tabs.")
-        st.stop()
+        # Small note (doesn't trigger processing)
+        if st.session_state.rej_out_xlsx_bytes is None:
+            st.caption("Result will stay after generate. It won’t re-process unless file changes or you click Generate.")
 
-    # ✅ From here, show LEFT KPIs + RIGHT tabs (this is what you want)
-    out_xlsx_bytes = st.session_state.rej_out_xlsx_bytes
-    stats = st.session_state.rej_stats
+    # =========================
+    # RIGHT PANEL (results)
+    # =========================
+    with main_panel:
+        if st.session_state.rej_out_xlsx_bytes is None:
+            st.info("Generate first to view KPIs + tabs.")
+            st.stop()
 
-    # Download
-    st.download_button(
-        "Download Rejection Analysis Excel",
-        data=out_xlsx_bytes,
-        file_name=f"Rejection_Analysis_{center}_{year}_{stats['sha1']}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+        out_xlsx_bytes = st.session_state.rej_out_xlsx_bytes
+        stats = st.session_state.rej_stats
 
-    # Load data
-    df_by_ins, df_by_code, df_ins_x_code, df_aging = load_summary_sheets(out_xlsx_bytes)
-    df_full_detail = load_full_detail(out_xlsx_bytes)
+        # Download (main page)
+        st.download_button(
+            "Download Rejection Analysis Excel",
+            data=out_xlsx_bytes,
+            file_name=f"Rejection_Analysis_{center}_{year}_{stats['sha1']}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="rej_download_main",
+        )
 
-    left, right = st.columns([1, 2.2], gap="large")
+        # Load summary + detail (cached)
+        df_by_ins, df_by_code, df_ins_x_code, df_aging = load_summary_sheets(out_xlsx_bytes)
+        df_full_detail = load_full_detail(out_xlsx_bytes)
 
-    with left:
-        render_left_kpis(stats, df_by_ins, df_full_detail)
+        # ✅ KPI cards FRONT main page (right side top)
+        render_main_kpis(stats, df_by_ins, df_full_detail)
 
-    with right:
+        # Tabs
         tab1, tab2, tab3, tab4, tab5 = st.tabs(
             ["By Insurance", "By Denial Code", "Insurance × Denial", "Aging Summary", "Rejected Detail (Filters)"]
         )
@@ -568,8 +599,8 @@ def run_rejection_app():
         with tab5:
             st.subheader("Rejected Detail (Filter + Download)")
 
-            must_cols = ["Insurance", "ActivityIns", "DenialCode", "Paid", "AgingBucket", "RejectedAmount"]
             PREVIEW_ROWS = 2000
+            must_cols = ["Insurance", "ActivityIns", "DenialCode", "Paid", "AgingBucket", "RejectedAmount"]
             df_small = load_detail_preview(out_xlsx_bytes, must_cols, PREVIEW_ROWS)
 
             ins_list = sorted(df_small["Insurance"].dropna().astype(str).unique().tolist())
@@ -577,11 +608,11 @@ def run_rejection_app():
 
             c1, c2, c3 = st.columns([1, 1, 1])
             with c1:
-                sel_ins = st.selectbox("Insurance", ["All"] + ins_list, key="rej_sel_ins")
+                sel_ins = st.selectbox("Insurance", ["All"] + ins_list, key="rej_filter_ins")
             with c2:
-                sel_code = st.selectbox("Denial Code", ["All"] + code_list, key="rej_sel_code")
+                sel_code = st.selectbox("Denial Code", ["All"] + code_list, key="rej_filter_code")
             with c3:
-                show_top = st.number_input("Preview rows", 50, 2000, 500, 50, key="rej_preview_rows")
+                show_top = st.number_input("Preview rows", 50, 2000, 500, 50, key="rej_filter_rows")
 
             view = df_small.copy()
             if sel_ins != "All":
@@ -594,7 +625,7 @@ def run_rejection_app():
 
             st.divider()
 
-            if st.button("Build & Download Filtered Detail Excel", type="primary", key="rej_build_download"):
+            if st.button("Build & Download Filtered Detail Excel", type="primary", key="rej_build_filtered"):
                 df_dl = df_full_detail.copy()
                 if sel_ins != "All":
                     df_dl = df_dl[df_dl["Insurance"].astype(str) == sel_ins]
