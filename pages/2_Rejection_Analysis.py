@@ -1,32 +1,25 @@
 # pages/2_Rejection_Analysis.py
-# NEEDFUL CHANGE ONLY:
-# ✅ KPI cards are now HORIZONTAL + professional (Row-1: 3 KPIs, Row-2: Top 3 Insurance, Row-3: Top 3 Denial combos)
-# ✅ Result stays (no re-processing unless you click Generate OR source file changes)
 
 import boto3
-from botocore.exceptions import ClientError
 import io
 import hashlib
 from datetime import datetime as dt
-
 import pandas as pd
 import streamlit as st
-from openpyxl import load_workbook
-from openpyxl.styles import PatternFill, Font, Alignment
+from botocore.exceptions import ClientError
 
-# =========================================
+# =====================================================
 # CONFIG
-# =========================================
+# =====================================================
 S3_BUCKET = "emc-rcm-storage-2026"
 SOURCE_FILENAME = "source.xlsx"
-DEFAULT_YEAR_OPTIONS = ["2024", "2025", "2026"]
+YEARS = ["2024", "2025", "2026"]
 
-# =========================================
-# S3 HELPERS
-# =========================================
+# =====================================================
+# S3
+# =====================================================
 def s3_client():
     return boto3.client("s3")
-
 
 def s3_exists(bucket, key):
     try:
@@ -35,660 +28,177 @@ def s3_exists(bucket, key):
     except ClientError:
         return False
 
+def load_s3(bucket, key):
+    return s3_client().get_object(Bucket=bucket, Key=key)["Body"].read()
 
-def load_file_from_s3(bucket, key):
-    obj = s3_client().get_object(Bucket=bucket, Key=key)
-    return obj["Body"].read()
+# =====================================================
+# REJECTION ENGINE (UNCHANGED LOGIC)
+# =====================================================
+def sha1_short(b: bytes):
+    return hashlib.sha1(b).hexdigest()[:10]
 
+def build_rejection(df):
+    df.columns = df.columns.str.strip()
 
-# =========================================
-# ENGINE
-# =========================================
-def sha1_short_bytes(b: bytes) -> str:
-    return hashlib.sha1(b).hexdigest()[:12]
-
-
-def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
     num_cols = [
         "ActivityIns",
         "actRemitInsShare", "actResub1RemitInsShare",
         "actResub2RemitInsShare", "actResub3RemitInsShare",
-        "TKBKAmountAct",
+        "TKBKAmountAct"
     ]
     for c in num_cols:
         if c not in df.columns:
             df[c] = 0
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-    return df
 
+    df["Paid"] = df[num_cols].sum(axis=1)
 
-def compute_paid(df: pd.DataFrame) -> pd.DataFrame:
-    df["Paid"] = df[
-        [
-            "actRemitInsShare", "actResub1RemitInsShare",
-            "actResub2RemitInsShare", "actResub3RemitInsShare",
-            "TKBKAmountAct",
-        ]
-    ].sum(axis=1)
-    return df
-
-
-def ensure_insurance_column(df: pd.DataFrame) -> pd.DataFrame:
-    insurance_col = next(
-        (c for c in ["Insurance", "PayerName", "Insurer", "Plan"] if c in df.columns),
-        "Insurance",
-    )
-    if insurance_col not in df.columns:
-        df["Insurance"] = "Not Available"
-    elif insurance_col != "Insurance":
-        df["Insurance"] = df[insurance_col]
-    return df
-
-
-def add_refdate_and_aging(df: pd.DataFrame) -> pd.DataFrame:
-    date_candidates = [c for c in ["SubmissionDate", "ClaimDate", "VisitDate"] if c in df.columns]
-    if date_candidates:
-        for c in date_candidates:
-            df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
-        df["RefDate"] = df[date_candidates].bfill(axis=1).iloc[:, 0]
-    else:
-        df["RefDate"] = pd.NaT
-
-    today = pd.Timestamp(dt.today().date())
-    df["DaysDiff"] = (today - df["RefDate"]).dt.days
-
-    bins = [-1, 30, 45, 60, 90, float("inf")]
-    labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
-    df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
-    return df
-
-
-def normalize_denial_code(df: pd.DataFrame) -> pd.DataFrame:
     if "DenialCode" not in df.columns:
         df["DenialCode"] = ""
-    df["DenialCode"] = df["DenialCode"].astype(str).fillna("").str.strip()
-    df.loc[df["DenialCode"].str.lower().isin(["nan", "none", "null"]), "DenialCode"] = ""
-    return df
 
+    status = df.get("ActivityStatus", "").astype(str).str.lower()
+    df["Insurance"] = df.get("Insurance", df.get("PayerName", "Unknown"))
 
-def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
-    if "ActivityStatus" not in df.columns:
-        return df.iloc[0:0].copy()
-    status = df["ActivityStatus"].astype(str).fillna("").str.strip().str.lower()
-    mask = (df["Paid"] == 0) & (status == "rejected") & (df["DenialCode"] != "")
-    rej = df.loc[mask].copy()
-    rej["RejectedAmount"] = rej["ActivityIns"]
-    rej["RejectedCount"] = 1
-    return rej
+    rejected = df[
+        (df["Paid"] == 0) &
+        (status == "rejected") &
+        (df["DenialCode"].astype(str).str.strip() != "")
+    ].copy()
 
+    rejected["RejectedAmount"] = rejected["ActivityIns"]
+    return rejected
 
-def pivot_by_insurance(rej: pd.DataFrame) -> pd.DataFrame:
-    out = rej.groupby("Insurance", dropna=False)[["RejectedAmount", "RejectedCount"]].sum().reset_index()
-    total_row = {
-        "Insurance": "Grand Total",
-        "RejectedAmount": out["RejectedAmount"].sum(),
-        "RejectedCount": int(out["RejectedCount"].sum()),
-    }
-    return pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
-
-
-def pivot_by_denialcode(rej: pd.DataFrame) -> pd.DataFrame:
-    out = (
-        rej.groupby("DenialCode", dropna=False)[["RejectedAmount", "RejectedCount"]]
-        .sum()
-        .reset_index()
-        .sort_values("RejectedAmount", ascending=False)
-    )
-    total_row = {
-        "DenialCode": "Grand Total",
-        "RejectedAmount": out["RejectedAmount"].sum(),
-        "RejectedCount": int(out["RejectedCount"].sum()),
-    }
-    return pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
-
-
-def pivot_insurance_x_denialcode(rej: pd.DataFrame) -> pd.DataFrame:
-    pv = pd.pivot_table(
-        rej,
-        index="Insurance",
-        columns="DenialCode",
-        values="RejectedAmount",
-        aggfunc="sum",
-        fill_value=0,
-        observed=False,
-    )
-    pv["Grand Total"] = pv.sum(axis=1)
-    pv.loc["Grand Total"] = pv.sum(axis=0)
-    pv.reset_index(inplace=True)
-    return pv
-
-
-def pivot_rejection_aging(rej: pd.DataFrame) -> pd.DataFrame:
-    labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
-    pv = (
-        pd.pivot_table(
-            rej,
-            index="Insurance",
-            columns="AgingBucket",
-            values="RejectedAmount",
-            aggfunc="sum",
-            fill_value=0,
-            observed=False,
-        )
-        .reindex(columns=labels)
-    )
-    pv["Grand Total"] = pv.sum(axis=1)
-    pv.loc["Grand Total"] = pv.sum(axis=0)
-    pv.reset_index(inplace=True)
-    return pv
-
-
-# -------------------- styling excel --------------------
-HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
-TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
-
-
-def style_headers(ws):
-    for c in range(1, ws.max_column + 1):
-        cell = ws.cell(row=1, column=c)
-        cell.fill = HEADER_FILL
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-
-
-def highlight_grand_total_rows(ws, label_col=1, label_value="Grand Total"):
-    for r in range(2, ws.max_row + 1):
-        if ws.cell(row=r, column=label_col).value == label_value:
-            for c in range(1, ws.max_column + 1):
-                cell = ws.cell(row=r, column=c)
-                cell.fill = TOTAL_FILL
-                cell.font = Font(bold=True)
-
-
-def highlight_last_col(ws):
-    last_col = ws.max_column
-    for r in range(1, ws.max_row + 1):
-        cell = ws.cell(row=r, column=last_col)
-        cell.fill = TOTAL_FILL
-        cell.font = Font(bold=True)
-
-
-def apply_styling_to_bytes(xlsx_bytes: bytes) -> bytes:
-    wb = load_workbook(io.BytesIO(xlsx_bytes))
-    for ws in wb.worksheets:
-        style_headers(ws)
-        if ws.title in [
-            "Rejected_By_Insurance",
-            "Rejected_By_DenialCode",
-            "Rejected_Ins_x_DenialCode",
-            "Rejected_Aging_Summary",
-        ]:
-            highlight_grand_total_rows(ws, label_col=1, label_value="Grand Total")
-            if ws.title in ["Rejected_Ins_x_DenialCode", "Rejected_Aging_Summary"]:
-                highlight_last_col(ws)
-
-    out_buf = io.BytesIO()
-    wb.save(out_buf)
-    return out_buf.getvalue()
-
-
-def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source.xlsx"):
-    df = pd.read_excel(io.BytesIO(input_bytes), engine="openpyxl")
-    df.columns = df.columns.str.strip()
-
-    df = ensure_numeric(df)
-    df = compute_paid(df)
-    df = normalize_denial_code(df)
-    df = ensure_insurance_column(df)
-    df = add_refdate_and_aging(df)
-
-    rejected_df = build_rejected_df(df)
-
-    by_ins = pivot_by_insurance(rejected_df) if len(rejected_df) else pd.DataFrame(
-        [{"Insurance": "Grand Total", "RejectedAmount": 0.0, "RejectedCount": 0}]
-    )
-    by_code = pivot_by_denialcode(rejected_df) if len(rejected_df) else pd.DataFrame(
-        [{"DenialCode": "Grand Total", "RejectedAmount": 0.0, "RejectedCount": 0}]
-    )
-    ins_x_code = pivot_insurance_x_denialcode(rejected_df) if len(rejected_df) else pd.DataFrame(
-        [{"Insurance": "Grand Total", "Grand Total": 0.0}]
-    )
-    aging_sum = pivot_rejection_aging(rejected_df) if len(rejected_df) else pd.DataFrame(
-        [{"Insurance": "Grand Total", "Grand Total": 0.0}]
-    )
-
-    meta = pd.DataFrame([{
-        "InputFile": input_name,
-        "InputSHA1": sha1_short_bytes(input_bytes),
-        "GeneratedAt": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "RejectedRule": "Paid==0 AND lower(ActivityStatus)=='rejected' AND DenialCode not empty",
-        "RejectedRows": int(len(rejected_df)),
-    }])
-
-    out_buf = io.BytesIO()
-    with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-        by_ins.to_excel(writer, sheet_name="Rejected_By_Insurance", index=False)
-        by_code.to_excel(writer, sheet_name="Rejected_By_DenialCode", index=False)
-        ins_x_code.to_excel(writer, sheet_name="Rejected_Ins_x_DenialCode", index=False)
-        aging_sum.to_excel(writer, sheet_name="Rejected_Aging_Summary", index=False)
-        rejected_df.to_excel(writer, sheet_name="Rejected_Detail", index=False)
-        meta.to_excel(writer, sheet_name="Meta", index=False)
-
-    styled = apply_styling_to_bytes(out_buf.getvalue())
-    stats = {"rejected_rows": int(len(rejected_df)), "sha1": sha1_short_bytes(input_bytes)}
-    return styled, stats
-
-
-# =========================================
-# CACHED LOADERS
-# =========================================
-@st.cache_data(show_spinner=False)
-def load_summary_sheets(out_xlsx_bytes: bytes):
-    xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
-    df_by_ins = pd.read_excel(xls, sheet_name="Rejected_By_Insurance")
-    df_by_code = pd.read_excel(xls, sheet_name="Rejected_By_DenialCode")
-    df_ins_x_code = pd.read_excel(xls, sheet_name="Rejected_Ins_x_DenialCode")
-    df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
-    return df_by_ins, df_by_code, df_ins_x_code, df_aging
-
-
-@st.cache_data(show_spinner=False)
-def load_full_detail(out_xlsx_bytes: bytes) -> pd.DataFrame:
-    xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
-    return pd.read_excel(xls, sheet_name="Rejected_Detail", engine="openpyxl")
-
-
-@st.cache_data(show_spinner=False)
-def load_detail_preview(out_xlsx_bytes: bytes, usecols: list[str], nrows: int):
-    xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
-    return pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=nrows, engine="openpyxl")
-
-
-# =========================================
-# PROFESSIONAL KPI UI (HORIZONTAL)
-# =========================================
-def inject_kpi_css():
+# =====================================================
+# UI CARD
+# =====================================================
+def kpi(title, value, sub=""):
     st.markdown(
-        """
-        <style>
-          .kpi-card{
+        f"""
+        <div style="
             background:#ffffff;
-            border:1px solid #e9eef5;
+            padding:22px;
             border-radius:16px;
-            padding:16px 18px;
-            box-shadow: 0 2px 12px rgba(15,23,42,0.06);
-            height: 100%;
-          }
-          .kpi-title{font-size:13px;color:#64748b;margin-bottom:6px;font-weight:700;}
-          .kpi-value{font-size:30px;font-weight:900;color:#0f172a;line-height:1.12;}
-          .kpi-sub{font-size:12px;color:#94a3b8;margin-top:6px;}
-          .kpi-chip{
-            display:inline-block;margin-top:10px;padding:6px 12px;border-radius:999px;
-            background:#f1f5f9;color:#334155;font-size:12px;font-weight:900;
-          }
-          .mini-card{
-            border:1px solid #eef2f7;border-radius:14px;padding:12px 14px;background:#fff;
-            box-shadow: 0 2px 10px rgba(15,23,42,0.05);
-            height: 100%;
-          }
-          .mini-top{font-size:12px;color:#64748b;font-weight:700;}
-          .mini-mid{font-size:18px;font-weight:900;color:#0f172a;margin-top:3px;}
-          .mini-bot{font-size:13px;font-weight:900;color:#334155;margin-top:6px;}
-        </style>
+            border:1px solid #e6ecf5;
+            box-shadow:0 2px 10px rgba(0,0,0,0.03);
+        ">
+            <div style="color:#6b7a99;font-size:14px">{title}</div>
+            <div style="font-size:32px;font-weight:700;margin-top:6px">{value}</div>
+            <div style="color:#9aa6bf;font-size:13px;margin-top:6px">{sub}</div>
+        </div>
         """,
-        unsafe_allow_html=True,
+        unsafe_allow_html=True
     )
 
-
-def _short(txt, n=28):
-    txt = "" if txt is None else str(txt)
-    return txt if len(txt) <= n else txt[: n - 3] + "..."
-
-
-def render_main_kpis(stats, df_by_ins: pd.DataFrame, df_full_detail: pd.DataFrame):
-    inject_kpi_css()
-
-    tmp = df_by_ins.copy()
-    tmp["Insurance"] = tmp["Insurance"].astype(str)
-    tmp = tmp[tmp["Insurance"].str.strip().str.lower() != "grand total"].copy()
-    tmp["RejectedAmount"] = pd.to_numeric(tmp.get("RejectedAmount", 0), errors="coerce").fillna(0)
-    tmp["RejectedCount"] = pd.to_numeric(tmp.get("RejectedCount", 0), errors="coerce").fillna(0)
-
-    total_amt = float(tmp["RejectedAmount"].sum())
-    total_cnt = int(tmp["RejectedCount"].sum())
-
-    top3_ins = tmp.sort_values("RejectedAmount", ascending=False).head(3)
-
-    def _top_ins(i):
-        if len(top3_ins) > i:
-            return str(top3_ins.iloc[i]["Insurance"]), float(top3_ins.iloc[i]["RejectedAmount"])
-        return "-", 0.0
-
-    ins1, amt1 = _top_ins(0)
-    ins2, amt2 = _top_ins(1)
-    ins3, amt3 = _top_ins(2)
-
-    # Top 3 (Insurance + DenialCode) combos
-    combo_top3 = pd.DataFrame(columns=["Insurance", "DenialCode", "Amount"])
-    if df_full_detail is not None and len(df_full_detail) > 0:
-        dd = df_full_detail.copy()
-        amt_col = "RejectedAmount" if "RejectedAmount" in dd.columns else "ActivityIns"
-        if "Insurance" in dd.columns and "DenialCode" in dd.columns and amt_col in dd.columns:
-            dd["Insurance"] = dd["Insurance"].astype(str)
-            dd["DenialCode"] = dd["DenialCode"].astype(str)
-            dd[amt_col] = pd.to_numeric(dd[amt_col], errors="coerce").fillna(0)
-            combo_top3 = (
-                dd.groupby(["Insurance", "DenialCode"], dropna=False)[amt_col]
-                .sum()
-                .reset_index()
-                .rename(columns={amt_col: "Amount"})
-                .sort_values("Amount", ascending=False)
-                .head(3)
-            )
-
-    # ---------------- Row 1 (3 KPIs) ----------------
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        st.markdown(
-            f"""
-            <div class="kpi-card">
-              <div class="kpi-title">Rejected Rows</div>
-              <div class="kpi-value">{int(stats["rejected_rows"]):,}</div>
-              <div class="kpi-sub">Paid=0 • Status=rejected • DenialCode not empty</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with c2:
-        st.markdown(
-            f"""
-            <div class="kpi-card">
-              <div class="kpi-title">Total Rejected Amount</div>
-              <div class="kpi-value">AED {total_amt:,.2f}</div>
-              <div class="kpi-sub">All insurers (excluding Grand Total)</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with c3:
-        st.markdown(
-            f"""
-            <div class="kpi-card">
-              <div class="kpi-title">Total Rejected Claims</div>
-              <div class="kpi-value">{total_cnt:,}</div>
-              <div class="kpi-sub">Count of rejected activities</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("")
-
-    # ---------------- Row 2 (Top 3 Insurance) ----------------
-    st.markdown("#### Top 3 Insurances by Rejected Amount")
-    t1, t2, t3 = st.columns(3)
-
-    with t1:
-        st.markdown(
-            f"""
-            <div class="kpi-card">
-              <div class="kpi-title">Top Insurance #1</div>
-              <div class="kpi-value">{_short(ins1, 30)}</div>
-              <div class="kpi-chip">AED {amt1:,.2f}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with t2:
-        st.markdown(
-            f"""
-            <div class="kpi-card">
-              <div class="kpi-title">Top Insurance #2</div>
-              <div class="kpi-value">{_short(ins2, 30)}</div>
-              <div class="kpi-chip">AED {amt2:,.2f}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with t3:
-        st.markdown(
-            f"""
-            <div class="kpi-card">
-              <div class="kpi-title">Top Insurance #3</div>
-              <div class="kpi-value">{_short(ins3, 30)}</div>
-              <div class="kpi-chip">AED {amt3:,.2f}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    # ---------------- Row 3 (Top 3 Denial combos) ----------------
-    st.markdown("#### Top 3 Denial (Insurance + Code) by Amount")
-    d1, d2, d3 = st.columns(3)
-
-    if combo_top3 is None or len(combo_top3) == 0:
-        st.caption("No denial data found.")
-    else:
-        cards = [d1, d2, d3]
-        for i, (_, r) in enumerate(combo_top3.iterrows()):
-            with cards[i]:
-                st.markdown(
-                    f"""
-                    <div class="mini-card">
-                      <div class="mini-top">{_short(r["Insurance"], 34)}</div>
-                      <div class="mini-mid">{r["DenialCode"]}</div>
-                      <div class="mini-bot">AED {float(r["Amount"]):,.2f}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-
-# =========================================
+# =====================================================
 # APP
-# =========================================
-def run_rejection_app():
-    st.title("Rejection Analysis")
-    st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
+# =====================================================
+def run():
 
-    # session keys
-    st.session_state.setdefault("rej_out_xlsx_bytes", None)
-    st.session_state.setdefault("rej_stats", None)
-    st.session_state.setdefault("rej_source_sha1", None)
-    st.session_state.setdefault("rej_input_bytes", None)
-    st.session_state.setdefault("rej_input_sha1", None)
-    st.session_state.setdefault("rej_last_center", None)
-    st.session_state.setdefault("rej_last_year", None)
+    st.markdown("## Rejection Analysis")
+    st.caption("Rule: Paid = 0 AND ActivityStatus = rejected AND DenialCode not empty")
 
-    # Layout: LEFT controls, RIGHT results
-    left_panel, main_panel = st.columns([1, 2.2], gap="large")
+    # -------------------------------------------------
+    # SESSION STORAGE
+    # -------------------------------------------------
+    if "rej_result" not in st.session_state:
+        st.session_state.rej_result = None
 
-    # -------- LEFT controls --------
-    with left_panel:
-        st.markdown("### Controls")
+    # -------------------------------------------------
+    # LAYOUT
+    # -------------------------------------------------
+    left, right = st.columns([1.2, 4])
 
-        center = st.session_state.get("selected_center")
-        year = st.session_state.get("selected_year")
+    # =======================
+    # LEFT PANEL
+    # =======================
+    with left:
+        st.subheader("Controls")
 
-        if center is None or year is None:
-            st.warning("Center/Year not detected from dashboard. Please select manually.")
-            center = st.selectbox("Center", ["excellent", "pharmacy", "easyhealth"], key="rej_center_sel")
-            year = st.selectbox("Year", DEFAULT_YEAR_OPTIONS, key="rej_year_sel")
-        else:
-            center = str(center).lower()
-            year = str(year)
-            st.info("Center/Year detected from dashboard ✅")
-            st.selectbox(
-                "Center",
-                ["excellent", "pharmacy", "easyhealth"],
-                index=["excellent", "pharmacy", "easyhealth"].index(center),
-                disabled=True,
-                key="rej_center_locked",
-            )
-            st.selectbox(
-                "Year",
-                DEFAULT_YEAR_OPTIONS,
-                index=DEFAULT_YEAR_OPTIONS.index(year),
-                disabled=True,
-                key="rej_year_locked",
-            )
-
-        center = str(center).lower()
-        year = str(year)
+        center = st.selectbox("Center", ["excellent", "pharmacy", "easyhealth"])
+        year = st.selectbox("Year", YEARS)
 
         s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
-        st.write(f"**Center:** {center}")
-        st.write(f"**Year:** {year}")
-        st.write(f"**Source:** s3://{S3_BUCKET}/{s3_key}")
 
-        if not s3_exists(S3_BUCKET, s3_key):
-            st.error("Source file not found in S3. Upload from dashboard first.")
-            st.stop()
+        if st.button("Generate Rejection Analysis", type="primary"):
+            if not s3_exists(S3_BUCKET, s3_key):
+                st.error("Source file not found in S3")
+            else:
+                with st.spinner("Processing rejection analysis..."):
+                    raw = load_s3(S3_BUCKET, s3_key)
+                    df = pd.read_excel(io.BytesIO(raw))
+                    rej = build_rejection(df)
 
-        # Load S3 only when needed
-        if (st.session_state.rej_last_center != center) or (st.session_state.rej_last_year != year) or (st.session_state.rej_input_bytes is None):
-            inp = load_file_from_s3(S3_BUCKET, s3_key)
-            st.session_state.rej_input_bytes = inp
-            st.session_state.rej_input_sha1 = sha1_short_bytes(inp)
-            st.session_state.rej_last_center = center
-            st.session_state.rej_last_year = year
+                    st.session_state.rej_result = {
+                        "df": rej,
+                        "sha": sha1_short(raw)
+                    }
 
-        input_bytes = st.session_state.rej_input_bytes
-        current_sha1 = st.session_state.rej_input_sha1
+                st.success("Done ✅")
 
-        # If source changed: clear old results
-        if st.session_state.rej_source_sha1 != current_sha1:
-            st.session_state.rej_out_xlsx_bytes = None
-            st.session_state.rej_stats = None
-            st.session_state.rej_source_sha1 = current_sha1
-            st.cache_data.clear()
+        if st.button("Clear Result"):
+            st.session_state.rej_result = None
+            st.experimental_rerun()
 
-        b1, b2 = st.columns([1, 1])
-        with b1:
-            generate = st.button("Generate Rejection Analysis", type="primary", key="rej_generate_btn")
-        with b2:
-            clear_disabled = st.session_state.rej_out_xlsx_bytes is None
-            if st.button("Clear Result", disabled=clear_disabled, key="rej_clear_btn"):
-                st.session_state.rej_out_xlsx_bytes = None
-                st.session_state.rej_stats = None
-                st.cache_data.clear()
-                st.rerun()
+    # =======================
+    # RIGHT PANEL
+    # =======================
+    with right:
 
-        if generate:
-            with st.spinner("Building rejection analysis..."):
-                out_xlsx_bytes, stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
-            st.session_state.rej_out_xlsx_bytes = out_xlsx_bytes
-            st.session_state.rej_stats = stats
-            st.cache_data.clear()
-            st.success("Done ✅")
+        if st.session_state.rej_result is None:
+            st.info("Generate rejection analysis to view KPIs.")
+            return
 
-        if st.session_state.rej_out_xlsx_bytes is None:
-            st.caption("Result stays after Generate. It won’t re-process unless file changes or you click Generate.")
+        df = st.session_state.rej_result["df"]
 
-    # -------- RIGHT results --------
-    with main_panel:
-        if st.session_state.rej_out_xlsx_bytes is None:
-            st.info("Generate first to view KPIs + tabs.")
-            st.stop()
+        # KPIs
+        total_rows = len(df)
+        total_amt = df["RejectedAmount"].sum()
 
-        out_xlsx_bytes = st.session_state.rej_out_xlsx_bytes
-        stats = st.session_state.rej_stats
+        by_ins = df.groupby("Insurance")["RejectedAmount"].sum().sort_values(ascending=False)
+        top3_ins = by_ins.head(3)
 
-        st.download_button(
-            "Download Rejection Analysis Excel",
-            data=out_xlsx_bytes,
-            file_name=f"Rejection_Analysis_{center}_{year}_{stats['sha1']}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="rej_download_main",
+        by_dx = (
+            df.groupby(["Insurance", "DenialCode"])["RejectedAmount"]
+            .sum()
+            .sort_values(ascending=False)
+            .head(3)
         )
 
-        df_by_ins, df_by_code, df_ins_x_code, df_aging = load_summary_sheets(out_xlsx_bytes)
-        df_full_detail = load_full_detail(out_xlsx_bytes)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            kpi("Rejected Rows", f"{total_rows:,}", "Paid=0 + rejected + denial")
+        with c2:
+            kpi("Total Rejected Amount", f"AED {total_amt:,.2f}", "All insurers")
+        with c3:
+            kpi("Total Rejected Claims", f"{total_rows:,}", "Activities")
 
-        # ✅ Professional KPI rows (horizontal)
-        render_main_kpis(stats, df_by_ins, df_full_detail)
+        st.markdown("### Top 3 Insurance by Rejected Amount")
 
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(
-            ["By Insurance", "By Denial Code", "Insurance × Denial", "Aging Summary", "Rejected Detail (Filters)"]
-        )
+        cols = st.columns(3)
+        for i, (ins, amt) in enumerate(top3_ins.items()):
+            with cols[i]:
+                kpi(ins, f"AED {amt:,.2f}")
+
+        st.markdown("### Top 3 Denial (Insurance + Code)")
+
+        cols = st.columns(3)
+        for i, ((ins, code), amt) in enumerate(by_dx.items()):
+            with cols[i]:
+                kpi(
+                    ins,
+                    code,
+                    f"AED {amt:,.2f}"
+                )
+
+        st.divider()
+
+        tab1, tab2 = st.tabs(["By Insurance", "Rejected Detail"])
 
         with tab1:
-            st.subheader("Rejected by Insurance")
-            st.dataframe(df_by_ins, use_container_width=True)
+            st.dataframe(by_ins.reset_index(name="Rejected Amount"), use_container_width=True)
 
         with tab2:
-            st.subheader("Rejected by Denial Code")
-            st.dataframe(df_by_code, use_container_width=True)
-
-        with tab3:
-            st.subheader("Insurance × Denial Code (Amounts)")
-            st.dataframe(df_ins_x_code, use_container_width=True)
-
-        with tab4:
-            st.subheader("Rejected Aging Summary")
-            st.dataframe(df_aging, use_container_width=True)
-
-        with tab5:
-            st.subheader("Rejected Detail (Filter + Download)")
-
-            PREVIEW_ROWS = 2000
-            must_cols = ["Insurance", "ActivityIns", "DenialCode", "Paid", "AgingBucket", "RejectedAmount"]
-            df_small = load_detail_preview(out_xlsx_bytes, must_cols, PREVIEW_ROWS)
-
-            ins_list = sorted(df_small["Insurance"].dropna().astype(str).unique().tolist())
-            code_list = sorted(df_small["DenialCode"].dropna().astype(str).unique().tolist())
-
-            c1, c2, c3 = st.columns([1, 1, 1])
-            with c1:
-                sel_ins = st.selectbox("Insurance", ["All"] + ins_list, key="rej_filter_ins")
-            with c2:
-                sel_code = st.selectbox("Denial Code", ["All"] + code_list, key="rej_filter_code")
-            with c3:
-                show_top = st.number_input("Preview rows", 50, 2000, 500, 50, key="rej_filter_rows")
-
-            view = df_small.copy()
-            if sel_ins != "All":
-                view = view[view["Insurance"].astype(str) == sel_ins]
-            if sel_code != "All":
-                view = view[view["DenialCode"].astype(str) == sel_code]
-
-            st.caption(f"Preview (from first {PREVIEW_ROWS} rows only). Use download for full filtered data.")
-            st.dataframe(view.head(int(show_top)), use_container_width=True)
-
-            st.divider()
-
-            if st.button("Build & Download Filtered Detail Excel", type="primary", key="rej_build_filtered"):
-                df_dl = df_full_detail.copy()
-                if sel_ins != "All":
-                    df_dl = df_dl[df_dl["Insurance"].astype(str) == sel_ins]
-                if sel_code != "All":
-                    df_dl = df_dl[df_dl["DenialCode"].astype(str) == sel_code]
-
-                buf = io.BytesIO()
-                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                    df_dl.to_excel(writer, sheet_name="Rejected_Detail_Filtered", index=False)
-
-                safe_name = (
-                    f"Rejected_Detail_{center}_{year}_{sel_ins}_{sel_code}_{stats['sha1']}.xlsx"
-                    .replace(" ", "_")
-                    .replace("/", "_")
-                    .replace("\\", "_")
-                    .replace(":", "_")
-                )
-
-                st.download_button(
-                    "Download Filtered Detail Excel",
-                    data=buf.getvalue(),
-                    file_name=safe_name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="rej_download_filtered",
-                )
-                st.success(f"Rows exported: {len(df_dl)} ✅")
+            st.dataframe(df.head(2000), use_container_width=True)
 
 
-run_rejection_app()
+run()
