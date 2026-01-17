@@ -366,6 +366,36 @@ def run_rejection_app():
     # Load summary sheets
     df_by_ins, df_by_code, df_ins_x_code, df_aging = load_summary_sheets(out_xlsx_bytes)
 
+    # ==============================
+    # GLOBAL KPIs (ABOVE TAB BAR)
+    # ==============================
+    try:
+        tmp = df_by_ins.copy()
+        tmp["Insurance"] = tmp["Insurance"].astype(str)
+
+        tmp2 = tmp[tmp["Insurance"].str.strip().str.lower() != "grand total"].copy()
+        tmp2["RejectedAmount"] = pd.to_numeric(tmp2["RejectedAmount"], errors="coerce").fillna(0)
+        tmp2["RejectedCount"] = pd.to_numeric(tmp2["RejectedCount"], errors="coerce").fillna(0)
+
+        total_amt = float(tmp2["RejectedAmount"].sum())
+        total_cnt = int(tmp2["RejectedCount"].sum())
+
+        top3_ins = tmp2.sort_values("RejectedAmount", ascending=False).head(3)
+
+        g1, g2, g3, g4 = st.columns([1, 1, 1, 1])
+        g1.metric("Total Rejected Amount", f"AED {total_amt:,.2f}")
+        g2.metric("Total Rejected Claims", f"{total_cnt:,}")
+        g3.metric("Top Insurance 1", str(top3_ins.iloc[0]["Insurance"]) if len(top3_ins) > 0 else "-")
+        g4.metric("Top Insurance 2", str(top3_ins.iloc[1]["Insurance"]) if len(top3_ins) > 1 else "-")
+
+        if len(top3_ins) > 0:
+            st.caption(
+                "Top 3 insurances by rejected amount: "
+                + " | ".join([f"{r['Insurance']} (AED {float(r['RejectedAmount']):,.2f})" for _, r in top3_ins.iterrows()])
+            )
+    except Exception:
+        pass
+
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "By Insurance",
         "By Denial Code",
@@ -393,8 +423,7 @@ def run_rejection_app():
     with tab5:
         st.subheader("Rejected Detail (Filter + Download)")
 
-        # Preview only (safe)
-        must_cols = ["Insurance", "ActivityIns", "DenialCode", "Paid", "AgingBucket"]
+        must_cols = ["Insurance", "ActivityIns", "DenialCode", "Paid", "AgingBucket", "RejectedAmount"]
         PREVIEW_ROWS = 2000
         df_small = load_detail_preview(out_xlsx_bytes, must_cols, PREVIEW_ROWS)
 
@@ -409,7 +438,6 @@ def run_rejection_app():
         with c3:
             show_top = st.number_input("Preview rows", 50, 2000, 500, 50, key="rej_preview_rows")
 
-        # FULL detail for accurate KPIs (cached)
         df_full = load_full_detail(out_xlsx_bytes)
 
         df_f = df_full.copy()
@@ -419,12 +447,12 @@ def run_rejection_app():
             df_f = df_f[df_f["DenialCode"].astype(str) == sel_code]
 
         rej_count = int(len(df_f))
-        rej_amount = float(pd.to_numeric(df_f.get("RejectedAmount", df_f.get("ActivityIns", 0)), errors="coerce").fillna(0).sum())
+        amt_col = "RejectedAmount" if "RejectedAmount" in df_f.columns else "ActivityIns"
+        rej_amount = float(pd.to_numeric(df_f[amt_col], errors="coerce").fillna(0).sum())
 
-        # Top 3 denial codes (within filtered)
         if "DenialCode" in df_f.columns and rej_count > 0:
             top3 = (
-                df_f.groupby("DenialCode")["ActivityIns"]
+                df_f.groupby("DenialCode")[amt_col]
                   .sum()
                   .sort_values(ascending=False)
                   .head(3)
@@ -463,7 +491,6 @@ def run_rejection_app():
                         unsafe_allow_html=True
                     )
 
-        # Apply filters to preview
         view = df_small.copy()
         if sel_ins != "All":
             view = view[view["Insurance"].astype(str) == sel_ins]
