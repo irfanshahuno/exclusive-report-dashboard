@@ -16,10 +16,12 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # =========================================
 st.set_page_config(page_title="Rejection Analysis", layout="wide")
 
+# ✅ ONLY NEEDFUL CHANGE: Light-Red + Smaller Buttons (CSS only)
 st.markdown(
     """
     <style>
-      .block-container {max-width: 100% !important; padding-top: 1.5rem; padding-left: 2rem; padding-right: 2rem;}
+      .block-container {max-width: 100% !important; padding-top: 1.0rem; padding-left: 1.2rem; padding-right: 1.2rem;}
+
       .card {
         background: #ffffff;
         border: 1px solid #e8eef7;
@@ -36,6 +38,32 @@ st.markdown(
         background:#f1f5f9; color:#334155; font-weight:700; font-size: 13px;
       }
       div[data-testid="stDataFrame"] {border: 1px solid #edf2fa; border-radius: 14px; overflow:hidden;}
+
+      /* ✅ Light Red + Smaller Buttons (All buttons) */
+      div.stButton > button,
+      div.stDownloadButton > button {
+        background: #f87171 !important;       /* light red */
+        color: #ffffff !important;
+        border: 1px solid #fecaca !important; /* soft border */
+        border-radius: 12px !important;
+
+        padding: 0.35rem 0.80rem !important;  /* smaller */
+        font-size: 0.88rem !important;        /* smaller */
+        font-weight: 700 !important;
+        min-height: 2.25rem !important;       /* smaller height */
+
+        box-shadow: 0 6px 18px rgba(239,68,68,0.18) !important;
+      }
+      div.stButton > button:hover,
+      div.stDownloadButton > button:hover {
+        background: #ef4444 !important;       /* a bit darker on hover */
+        border-color: #fca5a5 !important;
+        transform: translateY(-1px);
+      }
+      div.stButton > button:active,
+      div.stDownloadButton > button:active {
+        transform: translateY(0px);
+      }
     </style>
     """,
     unsafe_allow_html=True
@@ -335,12 +363,18 @@ def run_rejection_app():
             center = str(detected_center).lower()
             year = str(detected_year)
             st.success("Detected from dashboard ✅")
-            st.selectbox("Center", ["excellent", "pharmacy", "easyhealth"],
-                         index=["excellent", "pharmacy", "easyhealth"].index(center),
-                         disabled=True)
-            st.selectbox("Year", DEFAULT_YEAR_OPTIONS,
-                         index=DEFAULT_YEAR_OPTIONS.index(year),
-                         disabled=True)
+            st.selectbox(
+                "Center",
+                ["excellent", "pharmacy", "easyhealth"],
+                index=["excellent", "pharmacy", "easyhealth"].index(center),
+                disabled=True
+            )
+            st.selectbox(
+                "Year",
+                DEFAULT_YEAR_OPTIONS,
+                index=DEFAULT_YEAR_OPTIONS.index(year),
+                disabled=True
+            )
 
         center = str(center).lower()
         year = str(year)
@@ -466,7 +500,11 @@ def run_rejection_app():
     for i in range(3):
         with cols[i]:
             if i < len(top_den):
-                _card(str(top_den.iloc[i]["Insurance"]), str(top_den.iloc[i]["DenialCode"]), _fmt_aed(float(top_den.iloc[i]["Amount"])))
+                _card(
+                    str(top_den.iloc[i]["Insurance"]),
+                    str(top_den.iloc[i]["DenialCode"]),
+                    _fmt_aed(float(top_den.iloc[i]["Amount"]))
+                )
             else:
                 _card("-", "-", "AED 0.00")
 
