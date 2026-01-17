@@ -16,14 +16,10 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # =========================================
 st.set_page_config(page_title="Rejection Analysis", layout="wide")
 
-# Optional: reduce extra padding a bit (still, sidebar is the true "most left")
 st.markdown(
     """
     <style>
       .block-container {max-width: 100% !important; padding-top: 1.5rem; padding-left: 2rem; padding-right: 2rem;}
-      /* nice cards */
-      .kpi-grid {display:grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 14px; margin-top: 10px;}
-      .kpi-grid-3 {display:grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 14px; margin-top: 10px;}
       .card {
         background: #ffffff;
         border: 1px solid #e8eef7;
@@ -39,8 +35,6 @@ st.markdown(
         padding: 6px 10px; border-radius: 999px;
         background:#f1f5f9; color:#334155; font-weight:700; font-size: 13px;
       }
-      .section-h {margin-top: 18px; margin-bottom: 8px;}
-      /* make st.dataframe look clean */
       div[data-testid="stDataFrame"] {border: 1px solid #edf2fa; border-radius: 14px; overflow:hidden;}
     </style>
     """,
@@ -72,7 +66,7 @@ def load_file_from_s3(bucket, key):
     return obj["Body"].read()
 
 # =========================================
-# REJECTION ANALYSIS ENGINE (your full logic)
+# REJECTION ANALYSIS ENGINE
 # =========================================
 def sha1_short_bytes(b: bytes) -> str:
     return hashlib.sha1(b).hexdigest()[:12]
@@ -140,7 +134,6 @@ def normalize_denial_code(df: pd.DataFrame) -> pd.DataFrame:
 def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
     if "ActivityStatus" not in df.columns:
         return df.iloc[0:0].copy()
-
     status = df["ActivityStatus"].astype(str).fillna("").str.strip().str.lower()
     mask = (df["Paid"] == 0) & (status == "rejected") & (df["DenialCode"] != "")
     rej = df.loc[mask].copy()
@@ -207,7 +200,7 @@ def pivot_rejection_aging(rej: pd.DataFrame) -> pd.DataFrame:
     pv.reset_index(inplace=True)
     return pv
 
-# -------------------- styling --------------------
+# -------------------- excel styling --------------------
 HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
 TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
 
@@ -234,12 +227,9 @@ def highlight_last_col(ws):
         cell.font = Font(bold=True)
 
 def apply_styling_to_bytes(xlsx_bytes: bytes) -> bytes:
-    in_buf = io.BytesIO(xlsx_bytes)
-    wb = load_workbook(in_buf)
-
+    wb = load_workbook(io.BytesIO(xlsx_bytes))
     for ws in wb.worksheets:
         style_headers(ws)
-
         if ws.title in [
             "Rejected_By_Insurance",
             "Rejected_By_DenialCode",
@@ -249,7 +239,6 @@ def apply_styling_to_bytes(xlsx_bytes: bytes) -> bytes:
             highlight_grand_total_rows(ws, label_col=1, label_value="Grand Total")
             if ws.title in ["Rejected_Ins_x_DenialCode", "Rejected_Aging_Summary"]:
                 highlight_last_col(ws)
-
     out_buf = io.BytesIO()
     wb.save(out_buf)
     return out_buf.getvalue()
@@ -279,8 +268,6 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         [{"Insurance": "Grand Total", "Grand Total": 0.0}]
     )
 
-    rejected_detail = rejected_df.copy()
-
     meta = pd.DataFrame([{
         "InputFile": input_name,
         "InputSHA1": sha1_short_bytes(input_bytes),
@@ -295,19 +282,15 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         by_code.to_excel(writer, sheet_name="Rejected_By_DenialCode", index=False)
         ins_x_code.to_excel(writer, sheet_name="Rejected_Ins_x_DenialCode", index=False)
         aging_sum.to_excel(writer, sheet_name="Rejected_Aging_Summary", index=False)
-        rejected_detail.to_excel(writer, sheet_name="Rejected_Detail", index=False)
+        rejected_df.to_excel(writer, sheet_name="Rejected_Detail", index=False)
         meta.to_excel(writer, sheet_name="Meta", index=False)
 
-    styled_bytes = apply_styling_to_bytes(out_buf.getvalue())
-
-    stats = {
-        "rejected_rows": int(len(rejected_df)),
-        "sha1": sha1_short_bytes(input_bytes),
-    }
-    return styled_bytes, stats
+    styled = apply_styling_to_bytes(out_buf.getvalue())
+    stats = {"rejected_rows": int(len(rejected_df)), "sha1": sha1_short_bytes(input_bytes)}
+    return styled, stats
 
 # =========================================
-# KPI / CARDS (professional)
+# UI HELPERS
 # =========================================
 def _card(title: str, value: str, sub: str = ""):
     st.markdown(
@@ -321,9 +304,6 @@ def _card(title: str, value: str, sub: str = ""):
         unsafe_allow_html=True
     )
 
-def _pill(text: str):
-    st.markdown(f"""<div class="pill">{text}</div>""", unsafe_allow_html=True)
-
 def _fmt_aed(x):
     try:
         return f"AED {float(x):,.2f}"
@@ -331,39 +311,30 @@ def _fmt_aed(x):
         return f"AED {x}"
 
 # =========================================
-# MAIN APP
+# APP
 # =========================================
 def run_rejection_app():
     st.markdown("## Rejection Analysis")
     st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
 
-    # ----------------------------
-    # session state (result persists)
-    # ----------------------------
     if "rej_result" not in st.session_state:
-        st.session_state.rej_result = None  # dict: center/year/key/out_bytes/stats/summary/preview
+        st.session_state.rej_result = None
 
-    # ----------------------------
-    # AUTO detect from dashboard
-    # ----------------------------
     detected_center = st.session_state.get("selected_center")
     detected_year = st.session_state.get("selected_year")
 
-    # =========================================
-    # SIDEBAR = TRUE MOST-LEFT CONTROLS
-    # =========================================
+    # ---- Sidebar controls (TRUE LEFT) ----
     with st.sidebar:
         st.subheader("Controls")
 
         if detected_center is None or detected_year is None:
-            st.warning("Center/Year not detected from dashboard. Select manually.")
+            st.warning("Center/Year not detected. Select manually.")
             center = st.selectbox("Center", ["excellent", "pharmacy", "easyhealth"], key="rej_center_manual")
             year = st.selectbox("Year", DEFAULT_YEAR_OPTIONS, key="rej_year_manual")
         else:
-            st.success("Detected from dashboard ✅")
             center = str(detected_center).lower()
             year = str(detected_year)
-            # show as disabled (clean)
+            st.success("Detected from dashboard ✅")
             st.selectbox("Center", ["excellent", "pharmacy", "easyhealth"],
                          index=["excellent", "pharmacy", "easyhealth"].index(center),
                          disabled=True)
@@ -375,64 +346,41 @@ def run_rejection_app():
         year = str(year)
         s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
 
-        st.write(f"**Source**")
+        st.write("**Source**")
         st.code(f"s3://{S3_BUCKET}/{s3_key}", language="text")
 
-        colA, colB = st.columns(2)
-        with colA:
+        cA, cB = st.columns(2)
+        with cA:
             generate = st.button("Generate", type="primary", use_container_width=True)
-        with colB:
+        with cB:
             clear = st.button("Clear", use_container_width=True)
 
         if clear:
             st.session_state.rej_result = None
             st.rerun()
 
-        # If user changes center/year, keep old result (as you asked) but show note
-        if st.session_state.rej_result is not None:
-            old = st.session_state.rej_result
-            if old.get("center") != center or old.get("year") != year:
-                st.info(f"Showing saved result for **{old.get('center')} / {old.get('year')}**. Click **Generate** for {center}/{year}.")
-
-    # ----------------------------
-    # Generate (only when button pressed)
-    # ----------------------------
+    # ---- Generate only on click ----
     if generate:
         if not s3_exists(S3_BUCKET, s3_key):
             st.error("Source file not found in S3. Upload from dashboard first.")
             st.stop()
 
-        with st.spinner("Building rejection analysis (pivots + aging + formatting)..."):
+        with st.spinner("Building rejection analysis..."):
             input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
-            out_xlsx_bytes, stats = build_rejection_workbook_bytes(
-                input_bytes=input_bytes,
-                input_name=SOURCE_FILENAME,
-            )
+            out_xlsx_bytes, stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
 
-            # Read summary sheets once (so filters/tabs don't reprocess)
             xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
             df_by_ins = pd.read_excel(xls, sheet_name="Rejected_By_Insurance")
             df_by_code = pd.read_excel(xls, sheet_name="Rejected_By_DenialCode")
             df_ins_x_code = pd.read_excel(xls, sheet_name="Rejected_Ins_x_DenialCode")
             df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
 
-            # Preview detail (first N rows + needed columns only) to avoid crash
-            wanted_cols = [
-                "Insurance", "DenialCode", "ActivityStatus", "ActivityIns", "Paid",
-                "RefDate", "DaysDiff", "AgingBucket"
-            ]
-            header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
-            usecols = [c for c in wanted_cols if c in header]
-            if "Insurance" not in usecols and "Insurance" in header:
-                usecols.append("Insurance")
-            if "DenialCode" not in usecols and "DenialCode" in header:
-                usecols.append("DenialCode")
-
+            # light preview for filters (prevents crash)
             PREVIEW_ROWS = 2000
-            df_detail_preview = pd.read_excel(
-                xls, sheet_name="Rejected_Detail",
-                usecols=usecols, nrows=PREVIEW_ROWS
-            )
+            detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
+            wanted_cols = ["Insurance", "DenialCode", "ActivityStatus", "ActivityIns", "Paid", "AgingBucket", "DaysDiff", "RefDate"]
+            usecols = [c for c in wanted_cols if c in detail_header]
+            df_preview = pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=PREVIEW_ROWS)
 
             st.session_state.rej_result = {
                 "center": center,
@@ -444,15 +392,12 @@ def run_rejection_app():
                 "df_by_code": df_by_code,
                 "df_ins_x_code": df_ins_x_code,
                 "df_aging": df_aging,
-                "df_detail_preview": df_detail_preview,
+                "df_preview": df_preview,
                 "preview_rows": PREVIEW_ROWS,
             }
 
         st.success("Done ✅")
 
-    # ----------------------------
-    # If no result yet
-    # ----------------------------
     if st.session_state.rej_result is None:
         st.info("Generate to view KPIs + tables.")
         return
@@ -460,16 +405,15 @@ def run_rejection_app():
     R = st.session_state.rej_result
     out_xlsx_bytes = R["out_bytes"]
     stats = R["stats"]
+
     df_by_ins = R["df_by_ins"]
     df_by_code = R["df_by_code"]
     df_ins_x_code = R["df_ins_x_code"]
     df_aging = R["df_aging"]
-    df_detail_preview = R["df_detail_preview"]
+    df_preview = R["df_preview"]
     PREVIEW_ROWS = R["preview_rows"]
 
-    # ----------------------------
-    # Download button (top)
-    # ----------------------------
+    # download
     st.download_button(
         "Download Rejection Analysis Excel",
         data=out_xlsx_bytes,
@@ -477,15 +421,11 @@ def run_rejection_app():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # =========================================
-    # KPI row (HORIZONTAL, professional)
-    # =========================================
-    # Total rejected amount from df_by_ins excluding Grand Total row duplicates
+    # ===== KPIs =====
     df_by_ins_nogt = df_by_ins[df_by_ins["Insurance"] != "Grand Total"].copy()
-    total_amount = float(df_by_ins_nogt["RejectedAmount"].sum()) if "RejectedAmount" in df_by_ins_nogt.columns else 0.0
-    total_claims = int(df_by_ins_nogt["RejectedCount"].sum()) if "RejectedCount" in df_by_ins_nogt.columns else int(stats["rejected_rows"])
+    total_amount = float(pd.to_numeric(df_by_ins_nogt["RejectedAmount"], errors="coerce").fillna(0).sum())
+    total_claims = int(pd.to_numeric(df_by_ins_nogt["RejectedCount"], errors="coerce").fillna(0).sum())
 
-    st.markdown('<div class="kpi-grid">', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     with c1:
         _card("Rejected Rows", f"{int(stats['rejected_rows']):,}", "Paid=0 + Status=rejected + DenialCode not empty")
@@ -493,63 +433,63 @@ def run_rejection_app():
         _card("Total Rejected Amount", _fmt_aed(total_amount), "All insurers (excluding Grand Total row)")
     with c3:
         _card("Total Rejected Claims", f"{total_claims:,}", "Count of rejected activities")
-    st.markdown("</div>", unsafe_allow_html=True)
 
-    # =========================================
-    # Top 3 Insurance cards
-    # =========================================
+    # ===== Top 3 Insurance =====
+    st.markdown("### Top 3 Insurances by Rejected Amount")
     top_ins = df_by_ins_nogt.sort_values("RejectedAmount", ascending=False).head(3)
-    st.markdown("### Top 3 Insurances by Rejected Amount", help="Based on Rejected_By_Insurance")
     cols = st.columns(3)
     for i in range(3):
         with cols[i]:
             if i < len(top_ins):
-                name = str(top_ins.iloc[i]["Insurance"])
-                amt = top_ins.iloc[i]["RejectedAmount"]
-                _card(f"#{i+1} {name}", _fmt_aed(amt), "")
+                _card(f"#{i+1} {top_ins.iloc[i]['Insurance']}", _fmt_aed(top_ins.iloc[i]['RejectedAmount']), "")
             else:
                 _card(f"#{i+1}", "AED 0.00", "")
 
-    # =========================================
-    # Top 3 Denial (Insurance + Code) cards
-    # Use preview (fast) — accurate enough for top signals
-    # =========================================
-    st.markdown("### Top 3 Denial (Insurance + Code) by Amount", help="Based on rejected detail (fast top signal)")
-    if len(df_detail_preview) > 0 and "Insurance" in df_detail_preview.columns and "DenialCode" in df_detail_preview.columns:
-        dd = df_detail_preview.copy()
-        if "ActivityIns" in dd.columns:
-            dd["RejectedAmountTmp"] = pd.to_numeric(dd["ActivityIns"], errors="coerce").fillna(0)
-        elif "RejectedAmount" in dd.columns:
-            dd["RejectedAmountTmp"] = pd.to_numeric(dd["RejectedAmount"], errors="coerce").fillna(0)
-        else:
-            dd["RejectedAmountTmp"] = 0.0
-
-        top_den = (
-            dd.groupby(["Insurance", "DenialCode"], dropna=False)["RejectedAmountTmp"]
-              .sum()
-              .reset_index()
-              .sort_values("RejectedAmountTmp", ascending=False)
-              .head(3)
-        )
-    else:
-        top_den = pd.DataFrame(columns=["Insurance", "DenialCode", "RejectedAmountTmp"])
+    # ===== Top 3 Denial (FULL accurate) from pivot =====
+    st.markdown("### Top 3 Denial (Insurance + Code) by Amount")
+    top_den = pd.DataFrame(columns=["Insurance", "DenialCode", "Amount"])
+    try:
+        pv = df_ins_x_code.copy()
+        if "Insurance" in pv.columns:
+            pv = pv[pv["Insurance"] != "Grand Total"].copy()
+            if "Grand Total" in pv.columns:
+                pv = pv.drop(columns=["Grand Total"])
+            melted = pv.melt(id_vars=["Insurance"], var_name="DenialCode", value_name="Amount")
+            melted["Amount"] = pd.to_numeric(melted["Amount"], errors="coerce").fillna(0)
+            melted["DenialCode"] = melted["DenialCode"].astype(str).fillna("").str.strip()
+            melted = melted[(melted["DenialCode"] != "") & (melted["Amount"] > 0)]
+            top_den = melted.sort_values("Amount", ascending=False).head(3)
+    except Exception:
+        pass
 
     cols = st.columns(3)
     for i in range(3):
         with cols[i]:
             if i < len(top_den):
-                ins = str(top_den.iloc[i]["Insurance"])
-                code = str(top_den.iloc[i]["DenialCode"])
-                amt = float(top_den.iloc[i]["RejectedAmountTmp"])
-                _card(ins, code, _fmt_aed(amt))
+                _card(str(top_den.iloc[i]["Insurance"]), str(top_den.iloc[i]["DenialCode"]), _fmt_aed(float(top_den.iloc[i]["Amount"])))
             else:
                 _card("-", "-", "AED 0.00")
 
+    # ===== Denial code drilldown (top insurances for selected code) =====
+    st.markdown("### Denial Code Drilldown (Top Insurances by Amount)")
+    code_options = df_by_code[df_by_code["DenialCode"] != "Grand Total"]["DenialCode"].astype(str).tolist()
+    sel_focus_code = st.selectbox("Select Denial Code", [""] + code_options, key="focus_denial_code")
+
+    if sel_focus_code:
+        pv2 = df_ins_x_code.copy()
+        pv2 = pv2[pv2["Insurance"] != "Grand Total"].copy()
+        if sel_focus_code in pv2.columns:
+            tmp = pv2[["Insurance", sel_focus_code]].copy()
+            tmp[sel_focus_code] = pd.to_numeric(tmp[sel_focus_code], errors="coerce").fillna(0)
+            tmp = tmp[tmp[sel_focus_code] > 0].sort_values(sel_focus_code, ascending=False).head(10)
+            tmp = tmp.rename(columns={sel_focus_code: "Amount"})
+            st.dataframe(tmp, use_container_width=True)
+        else:
+            st.info("No amounts found for this denial code.")
+
     st.divider()
 
-    # =========================================
-    # Tabs
-    # =========================================
+    # ===== Tabs =====
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "By Insurance",
         "By Denial Code",
@@ -577,9 +517,8 @@ def run_rejection_app():
     with tab5:
         st.subheader("Rejected Detail (Filter + Download)")
 
-        # ----- Filters from preview -----
-        ins_list = sorted([x for x in df_detail_preview["Insurance"].dropna().unique().tolist() if str(x).strip() != ""]) if "Insurance" in df_detail_preview.columns else []
-        code_list = sorted([x for x in df_detail_preview["DenialCode"].dropna().unique().tolist() if str(x).strip() != ""]) if "DenialCode" in df_detail_preview.columns else []
+        ins_list = sorted([x for x in df_preview["Insurance"].dropna().unique().tolist() if str(x).strip() != ""]) if "Insurance" in df_preview.columns else []
+        code_list = sorted([x for x in df_preview["DenialCode"].dropna().unique().tolist() if str(x).strip() != ""]) if "DenialCode" in df_preview.columns else []
 
         c1, c2, c3 = st.columns([1, 1, 1])
         with c1:
@@ -589,8 +528,7 @@ def run_rejection_app():
         with c3:
             show_top = st.number_input("Preview rows", min_value=50, max_value=2000, value=500, step=50, key="rej_preview_rows")
 
-        # Apply filters to preview only (FAST)
-        filt = df_detail_preview.copy()
+        filt = df_preview.copy()
         if sel_ins != "All" and "Insurance" in filt.columns:
             filt = filt[filt["Insurance"].astype(str) == str(sel_ins)]
         if sel_code != "All" and "DenialCode" in filt.columns:
@@ -601,8 +539,6 @@ def run_rejection_app():
 
         st.divider()
         st.write("### Download FULL filtered rejected detail")
-
-        # Load full only on demand (prevents crash)
         if st.button("Build & Download Filtered Detail Excel", type="primary", key="rej_dl_btn"):
             with st.spinner("Loading FULL detail and preparing filtered file..."):
                 xls_full = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
