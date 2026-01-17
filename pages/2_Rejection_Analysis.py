@@ -661,4 +661,5 @@ def normalize_center_for_s3(center_value: str) -> str:
     c = " ".join(c.split())  # remove extra spaces
     return CENTER_ALIASES.get(c, c)
 
+
 run_rejection_app()
