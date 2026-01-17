@@ -24,12 +24,14 @@ DEFAULT_YEAR_OPTIONS = ["2024", "2025", "2026"]
 def s3_client():
     return boto3.client("s3")
 
+
 def s3_exists(bucket, key):
     try:
         s3_client().head_object(Bucket=bucket, Key=key)
         return True
     except ClientError:
         return False
+
 
 def load_file_from_s3(bucket, key):
     obj = s3_client().get_object(Bucket=bucket, Key=key)
@@ -41,11 +43,14 @@ def load_file_from_s3(bucket, key):
 def sha1_short_bytes(b: bytes) -> str:
     return hashlib.sha1(b).hexdigest()[:12]
 
+
 def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
     num_cols = [
         "ActivityIns",
-        "actRemitInsShare", "actResub1RemitInsShare",
-        "actResub2RemitInsShare", "actResub3RemitInsShare",
+        "actRemitInsShare",
+        "actResub1RemitInsShare",
+        "actResub2RemitInsShare",
+        "actResub3RemitInsShare",
         "TKBKAmountAct",
     ]
     for c in num_cols:
@@ -54,15 +59,19 @@ def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
     return df
 
+
 def compute_paid(df: pd.DataFrame) -> pd.DataFrame:
     df["Paid"] = df[
         [
-            "actRemitInsShare", "actResub1RemitInsShare",
-            "actResub2RemitInsShare", "actResub3RemitInsShare",
+            "actRemitInsShare",
+            "actResub1RemitInsShare",
+            "actResub2RemitInsShare",
+            "actResub3RemitInsShare",
             "TKBKAmountAct",
         ]
     ].sum(axis=1)
     return df
+
 
 def ensure_insurance_column(df: pd.DataFrame) -> pd.DataFrame:
     insurance_col = next(
@@ -74,6 +83,7 @@ def ensure_insurance_column(df: pd.DataFrame) -> pd.DataFrame:
     elif insurance_col != "Insurance":
         df["Insurance"] = df[insurance_col]
     return df
+
 
 def add_refdate_and_aging(df: pd.DataFrame) -> pd.DataFrame:
     date_candidates = [c for c in ["SubmissionDate", "ClaimDate", "VisitDate"] if c in df.columns]
@@ -92,12 +102,14 @@ def add_refdate_and_aging(df: pd.DataFrame) -> pd.DataFrame:
     df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
     return df
 
+
 def normalize_denial_code(df: pd.DataFrame) -> pd.DataFrame:
     if "DenialCode" not in df.columns:
         df["DenialCode"] = ""
     df["DenialCode"] = df["DenialCode"].astype(str).fillna("").str.strip()
     df.loc[df["DenialCode"].str.lower().isin(["nan", "none", "null"]), "DenialCode"] = ""
     return df
+
 
 def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
     if "ActivityStatus" not in df.columns:
@@ -110,12 +122,9 @@ def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
     rej["RejectedCount"] = 1
     return rej
 
+
 def pivot_by_insurance(rej: pd.DataFrame) -> pd.DataFrame:
-    out = (
-        rej.groupby("Insurance", dropna=False)[["RejectedAmount", "RejectedCount"]]
-          .sum()
-          .reset_index()
-    )
+    out = rej.groupby("Insurance", dropna=False)[["RejectedAmount", "RejectedCount"]].sum().reset_index()
     total_row = {
         "Insurance": "Grand Total",
         "RejectedAmount": out["RejectedAmount"].sum(),
@@ -123,12 +132,13 @@ def pivot_by_insurance(rej: pd.DataFrame) -> pd.DataFrame:
     }
     return pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
 
+
 def pivot_by_denialcode(rej: pd.DataFrame) -> pd.DataFrame:
     out = (
         rej.groupby("DenialCode", dropna=False)[["RejectedAmount", "RejectedCount"]]
-          .sum()
-          .reset_index()
-          .sort_values("RejectedAmount", ascending=False)
+        .sum()
+        .reset_index()
+        .sort_values("RejectedAmount", ascending=False)
     )
     total_row = {
         "DenialCode": "Grand Total",
@@ -136,6 +146,7 @@ def pivot_by_denialcode(rej: pd.DataFrame) -> pd.DataFrame:
         "RejectedCount": int(out["RejectedCount"].sum()),
     }
     return pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
+
 
 def pivot_insurance_x_denialcode(rej: pd.DataFrame) -> pd.DataFrame:
     pv = pd.pivot_table(
@@ -152,25 +163,31 @@ def pivot_insurance_x_denialcode(rej: pd.DataFrame) -> pd.DataFrame:
     pv.reset_index(inplace=True)
     return pv
 
+
 def pivot_rejection_aging(rej: pd.DataFrame) -> pd.DataFrame:
     labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
-    pv = pd.pivot_table(
-        rej,
-        index="Insurance",
-        columns="AgingBucket",
-        values="RejectedAmount",
-        aggfunc="sum",
-        fill_value=0,
-        observed=False,
-    ).reindex(columns=labels)
+    pv = (
+        pd.pivot_table(
+            rej,
+            index="Insurance",
+            columns="AgingBucket",
+            values="RejectedAmount",
+            aggfunc="sum",
+            fill_value=0,
+            observed=False,
+        )
+        .reindex(columns=labels)
+    )
     pv["Grand Total"] = pv.sum(axis=1)
     pv.loc["Grand Total"] = pv.sum(axis=0)
     pv.reset_index(inplace=True)
     return pv
 
+
 # -------------------- styling --------------------
 HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
-TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+TOTAL_FILL = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+
 
 def style_headers(ws):
     for c in range(1, ws.max_column + 1):
@@ -178,6 +195,7 @@ def style_headers(ws):
         cell.fill = HEADER_FILL
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center", vertical="center")
+
 
 def highlight_grand_total_rows(ws, label_col=1, label_value="Grand Total"):
     for r in range(2, ws.max_row + 1):
@@ -187,12 +205,14 @@ def highlight_grand_total_rows(ws, label_col=1, label_value="Grand Total"):
                 cell.fill = TOTAL_FILL
                 cell.font = Font(bold=True)
 
+
 def highlight_last_col(ws):
     last_col = ws.max_column
     for r in range(1, ws.max_row + 1):
         cell = ws.cell(row=r, column=last_col)
         cell.fill = TOTAL_FILL
         cell.font = Font(bold=True)
+
 
 def apply_styling_to_bytes(xlsx_bytes: bytes) -> bytes:
     wb = load_workbook(io.BytesIO(xlsx_bytes))
@@ -211,6 +231,7 @@ def apply_styling_to_bytes(xlsx_bytes: bytes) -> bytes:
     out_buf = io.BytesIO()
     wb.save(out_buf)
     return out_buf.getvalue()
+
 
 def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source.xlsx"):
     df = pd.read_excel(io.BytesIO(input_bytes), engine="openpyxl")
@@ -237,13 +258,17 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         [{"Insurance": "Grand Total", "Grand Total": 0.0}]
     )
 
-    meta = pd.DataFrame([{
-        "InputFile": input_name,
-        "InputSHA1": sha1_short_bytes(input_bytes),
-        "GeneratedAt": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "RejectedRule": "Paid==0 AND lower(ActivityStatus)=='rejected' AND DenialCode not empty",
-        "RejectedRows": int(len(rejected_df)),
-    }])
+    meta = pd.DataFrame(
+        [
+            {
+                "InputFile": input_name,
+                "InputSHA1": sha1_short_bytes(input_bytes),
+                "GeneratedAt": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "RejectedRule": "Paid==0 AND lower(ActivityStatus)=='rejected' AND DenialCode not empty",
+                "RejectedRows": int(len(rejected_df)),
+            }
+        ]
+    )
 
     out_buf = io.BytesIO()
     with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
@@ -255,12 +280,12 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         meta.to_excel(writer, sheet_name="Meta", index=False)
 
     styled = apply_styling_to_bytes(out_buf.getvalue())
-
     stats = {"rejected_rows": int(len(rejected_df)), "sha1": sha1_short_bytes(input_bytes)}
     return styled, stats
 
+
 # =========================================
-# CACHED LOADERS (speed + no crashes)
+# CACHED LOADERS
 # =========================================
 @st.cache_data(show_spinner=False)
 def load_summary_sheets(out_xlsx_bytes: bytes):
@@ -271,15 +296,18 @@ def load_summary_sheets(out_xlsx_bytes: bytes):
     df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
     return df_by_ins, df_by_code, df_ins_x_code, df_aging
 
+
 @st.cache_data(show_spinner=False)
 def load_detail_preview(out_xlsx_bytes: bytes, usecols: list[str], nrows: int):
     xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
     return pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=nrows, engine="openpyxl")
 
+
 @st.cache_data(show_spinner=False)
 def load_full_detail(out_xlsx_bytes: bytes) -> pd.DataFrame:
     xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
     return pd.read_excel(xls, sheet_name="Rejected_Detail", engine="openpyxl")
+
 
 # =========================================
 # APP
@@ -321,7 +349,6 @@ def run_rejection_app():
 
     current_sha1 = sha1_short_bytes(input_bytes)
 
-    # If source changed, reset old output
     if st.session_state.rej_source_sha1 != current_sha1:
         st.session_state.rej_out_xlsx_bytes = None
         st.session_state.rej_stats = None
@@ -361,32 +388,112 @@ def run_rejection_app():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    st.metric("Rejected Rows", stats["rejected_rows"])
+    # ======= Pretty KPI bar (replaces ugly st.metric) =======
+    # We'll still show Rejected Rows, but styled.
+    st.markdown(
+        """
+        <style>
+          .kpi-wrap{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;margin-bottom:10px;}
+          .kpi-card{
+            flex: 1 1 220px;
+            background:#ffffff;
+            border:1px solid #e9eef5;
+            border-radius:16px;
+            padding:14px 16px;
+            box-shadow: 0 2px 10px rgba(15,23,42,0.06);
+          }
+          .kpi-title{font-size:13px;color:#64748b;margin-bottom:6px;}
+          .kpi-value{font-size:28px;font-weight:900;color:#0f172a;line-height:1.1;}
+          .kpi-sub{font-size:12px;color:#94a3b8;margin-top:6px;}
+          .kpi-chip{
+            display:inline-block;
+            margin-top:8px;
+            padding:4px 10px;
+            border-radius:999px;
+            background:#f1f5f9;
+            color:#334155;
+            font-size:12px;
+            font-weight:700;
+          }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     # Load summary sheets
     df_by_ins, df_by_code, df_ins_x_code, df_aging = load_summary_sheets(out_xlsx_bytes)
 
+    def _short(txt, n=22):
+        txt = "" if txt is None else str(txt)
+        return txt if len(txt) <= n else txt[: n - 3] + "..."
+
     # ==============================
-    # GLOBAL KPIs (ABOVE TAB BAR)
+    # GLOBAL KPIs (ABOVE TAB BAR) - NICE CARDS
     # ==============================
     try:
         tmp = df_by_ins.copy()
         tmp["Insurance"] = tmp["Insurance"].astype(str)
 
         tmp2 = tmp[tmp["Insurance"].str.strip().str.lower() != "grand total"].copy()
-        tmp2["RejectedAmount"] = pd.to_numeric(tmp2["RejectedAmount"], errors="coerce").fillna(0)
-        tmp2["RejectedCount"] = pd.to_numeric(tmp2["RejectedCount"], errors="coerce").fillna(0)
+        tmp2["RejectedAmount"] = pd.to_numeric(tmp2.get("RejectedAmount", 0), errors="coerce").fillna(0)
+        tmp2["RejectedCount"] = pd.to_numeric(tmp2.get("RejectedCount", 0), errors="coerce").fillna(0)
 
         total_amt = float(tmp2["RejectedAmount"].sum())
         total_cnt = int(tmp2["RejectedCount"].sum())
 
         top3_ins = tmp2.sort_values("RejectedAmount", ascending=False).head(3)
 
-        g1, g2, g3, g4 = st.columns([1, 1, 1, 1])
-        g1.metric("Total Rejected Amount", f"AED {total_amt:,.2f}")
-        g2.metric("Total Rejected Claims", f"{total_cnt:,}")
-        g3.metric("Top Insurance 1", str(top3_ins.iloc[0]["Insurance"]) if len(top3_ins) > 0 else "-")
-        g4.metric("Top Insurance 2", str(top3_ins.iloc[1]["Insurance"]) if len(top3_ins) > 1 else "-")
+        top1_name = str(top3_ins.iloc[0]["Insurance"]) if len(top3_ins) > 0 else "-"
+        top1_amt = float(top3_ins.iloc[0]["RejectedAmount"]) if len(top3_ins) > 0 else 0.0
+
+        top2_name = str(top3_ins.iloc[1]["Insurance"]) if len(top3_ins) > 1 else "-"
+        top2_amt = float(top3_ins.iloc[1]["RejectedAmount"]) if len(top3_ins) > 1 else 0.0
+
+        top3_name = str(top3_ins.iloc[2]["Insurance"]) if len(top3_ins) > 2 else "-"
+        top3_amt = float(top3_ins.iloc[2]["RejectedAmount"]) if len(top3_ins) > 2 else 0.0
+
+        st.markdown(
+            f"""
+            <div class="kpi-wrap">
+              <div class="kpi-card">
+                <div class="kpi-title">Rejected Rows</div>
+                <div class="kpi-value">{int(stats["rejected_rows"]):,}</div>
+                <div class="kpi-sub">Paid=0 + Status=rejected + DenialCode not empty</div>
+              </div>
+
+              <div class="kpi-card">
+                <div class="kpi-title">Total Rejected Amount</div>
+                <div class="kpi-value">AED {total_amt:,.2f}</div>
+                <div class="kpi-sub">All insurers (excluding Grand Total row)</div>
+              </div>
+
+              <div class="kpi-card">
+                <div class="kpi-title">Total Rejected Claims</div>
+                <div class="kpi-value">{total_cnt:,}</div>
+                <div class="kpi-sub">Count of rejected activities</div>
+              </div>
+
+              <div class="kpi-card">
+                <div class="kpi-title">Top Insurance #1</div>
+                <div class="kpi-value">{_short(top1_name, 26)}</div>
+                <div class="kpi-chip">AED {top1_amt:,.2f}</div>
+              </div>
+
+              <div class="kpi-card">
+                <div class="kpi-title">Top Insurance #2</div>
+                <div class="kpi-value">{_short(top2_name, 26)}</div>
+                <div class="kpi-chip">AED {top2_amt:,.2f}</div>
+              </div>
+
+              <div class="kpi-card">
+                <div class="kpi-title">Top Insurance #3</div>
+                <div class="kpi-value">{_short(top3_name, 26)}</div>
+                <div class="kpi-chip">AED {top3_amt:,.2f}</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         if len(top3_ins) > 0:
             st.caption(
@@ -394,15 +501,26 @@ def run_rejection_app():
                 + " | ".join([f"{r['Insurance']} (AED {float(r['RejectedAmount']):,.2f})" for _, r in top3_ins.iterrows()])
             )
     except Exception:
-        pass
+        # fallback if any column missing
+        st.markdown(
+            f"""
+            <div class="kpi-wrap">
+              <div class="kpi-card">
+                <div class="kpi-title">Rejected Rows</div>
+                <div class="kpi-value">{int(stats["rejected_rows"]):,}</div>
+                <div class="kpi-sub">Paid=0 + Status=rejected + DenialCode not empty</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "By Insurance",
-        "By Denial Code",
-        "Insurance × Denial",
-        "Aging Summary",
-        "Rejected Detail (Filters)"
-    ])
+    # ==============================
+    # TABS
+    # ==============================
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["By Insurance", "By Denial Code", "Insurance × Denial", "Aging Summary", "Rejected Detail (Filters)"]
+    )
 
     with tab1:
         st.subheader("Rejected by Insurance")
@@ -451,12 +569,7 @@ def run_rejection_app():
         rej_amount = float(pd.to_numeric(df_f[amt_col], errors="coerce").fillna(0).sum())
 
         if "DenialCode" in df_f.columns and rej_count > 0:
-            top3 = (
-                df_f.groupby("DenialCode")[amt_col]
-                  .sum()
-                  .sort_values(ascending=False)
-                  .head(3)
-            )
+            top3 = df_f.groupby("DenialCode")[amt_col].sum().sort_values(ascending=False).head(3)
         else:
             top3 = pd.Series(dtype=float)
 
@@ -478,17 +591,17 @@ def run_rejection_app():
                         f"""
                         <div style="
                             border:1px solid #e6e6e6;
-                            border-radius:14px;
-                            padding:14px;
+                            border-radius:16px;
+                            padding:14px 16px;
                             background:#ffffff;
-                            box-shadow:0 1px 6px rgba(0,0,0,0.05);
+                            box-shadow:0 2px 10px rgba(15,23,42,0.06);
                         ">
-                            <div style="font-size:14px;color:#666;">Denial Code</div>
-                            <div style="font-size:22px;font-weight:700;color:#0f172a;">{code}</div>
-                            <div style="margin-top:6px;font-size:16px;font-weight:600;">AED {float(amt):,.2f}</div>
+                            <div style="font-size:13px;color:#64748b;">Denial Code</div>
+                            <div style="font-size:22px;font-weight:800;color:#0f172a;">{code}</div>
+                            <div style="margin-top:6px;font-size:14px;font-weight:700;color:#334155;">AED {float(amt):,.2f}</div>
                         </div>
                         """,
-                        unsafe_allow_html=True
+                        unsafe_allow_html=True,
                     )
 
         view = df_small.copy()
@@ -515,7 +628,10 @@ def run_rejection_app():
 
             safe_name = (
                 f"Rejected_Detail_{center}_{year}_{sel_ins}_{sel_code}_{stats['sha1']}.xlsx"
-                .replace(" ", "_").replace("/", "_").replace("\\", "_").replace(":", "_")
+                .replace(" ", "_")
+                .replace("/", "_")
+                .replace("\\", "_")
+                .replace(":", "_")
             )
 
             st.download_button(
@@ -527,5 +643,6 @@ def run_rejection_app():
             )
 
             st.success(f"Rows exported: {len(df_dl)} ✅")
+
 
 run_rejection_app()
