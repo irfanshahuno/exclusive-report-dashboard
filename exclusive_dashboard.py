@@ -29,6 +29,8 @@ st.link_button(
     "📌 Open Rejection Analysis",
     "https://exclusive-report-dashboard-bipfnry6ei4jzfcb6oahnr.streamlit.app"
 )
+if st.button("📌 Open Rejection Analysis"):
+    st.switch_page("pages/2_Rejection_Analysis.py")
 
 import streamlit.components.v1 as components  # used only for the home-card link
 
@@ -1093,6 +1095,7 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
 
 
 
