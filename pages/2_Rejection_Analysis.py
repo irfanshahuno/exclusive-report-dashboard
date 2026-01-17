@@ -32,7 +32,7 @@ st.markdown(
       }
 
       .card-title{
-        color:#b42318;  /* softer executive red */
+        color:#b42318;
         font-size:13px;
         font-weight:800;
         letter-spacing:0.2px;
@@ -52,7 +52,6 @@ st.markdown(
         margin-top:6px;
       }
 
-      /* Section titles */
       h3{
         font-size:26px!important;
         font-weight:800!important;
@@ -61,7 +60,6 @@ st.markdown(
         color:#0f172a;
       }
 
-      /* Download button – premium red pill */
       div.stDownloadButton > button{
         background:#fb7185!important;
         color:white!important;
@@ -73,39 +71,34 @@ st.markdown(
         box-shadow:0 6px 18px rgba(251,113,133,0.25);
       }
 
-      div.stDownloadButton > button:hover{
-        background:#f43f5e!important;
-      }
+      div.stDownloadButton > button:hover{ background:#f43f5e!important; }
 
       div[data-testid="stDataFrame"] {border: 1px solid #edf2fa; border-radius: 14px; overflow:hidden;}
 
-      /* ✅ Light Red + Smaller Buttons (All buttons) */
       div.stButton > button,
       div.stDownloadButton > button{
-        background: #f87171 !important;       /* light red */
+        background: #f87171 !important;
         color: #ffffff !important;
-        border: 1px solid #fecaca !important; /* soft border */
+        border: 1px solid #fecaca !important;
         border-radius: 12px !important;
 
-        padding: 0.35rem 0.80rem !important;  /* smaller */
-        font-size: 0.88rem !important;        /* smaller */
+        padding: 0.35rem 0.80rem !important;
+        font-size: 0.88rem !important;
         font-weight: 700 !important;
-        min-height: 2.25rem !important;       /* smaller height */
+        min-height: 2.25rem !important;
 
         box-shadow: 0 6px 18px rgba(239,68,68,0.18) !important;
       }
 
       div.stButton > button:hover,
       div.stDownloadButton > button:hover{
-        background: #ef4444 !important;       /* a bit darker on hover */
+        background: #ef4444 !important;
         border-color: #fca5a5 !important;
         transform: translateY(-1px);
       }
 
       div.stButton > button:active,
-      div.stDownloadButton > button:active{
-        transform: translateY(0px);
-      }
+      div.stDownloadButton > button:active{ transform: translateY(0px); }
     </style>
     """,
     unsafe_allow_html=True
@@ -134,7 +127,7 @@ CENTER_ALIASES = {
 
 def normalize_center_for_s3(center_value: str) -> str:
     c = str(center_value).strip().lower()
-    c = " ".join(c.split())  # remove extra spaces
+    c = " ".join(c.split())
     return CENTER_ALIASES.get(c, c)
 
 # =========================================
@@ -233,9 +226,9 @@ def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
 def pivot_by_insurance(rej: pd.DataFrame) -> pd.DataFrame:
     out = (
         rej.groupby("Insurance", dropna=False)[["RejectedAmount", "RejectedCount"]]
-          .sum()
-          .reset_index()
-          .sort_values("RejectedAmount", ascending=False)
+        .sum()
+        .reset_index()
+        .sort_values("RejectedAmount", ascending=False)
     )
     total_row = {
         "Insurance": "Grand Total",
@@ -247,9 +240,9 @@ def pivot_by_insurance(rej: pd.DataFrame) -> pd.DataFrame:
 def pivot_by_denialcode(rej: pd.DataFrame) -> pd.DataFrame:
     out = (
         rej.groupby("DenialCode", dropna=False)[["RejectedAmount", "RejectedCount"]]
-          .sum()
-          .reset_index()
-          .sort_values("RejectedAmount", ascending=False)
+        .sum()
+        .reset_index()
+        .sort_values("RejectedAmount", ascending=False)
     )
     total_row = {
         "DenialCode": "Grand Total",
@@ -406,76 +399,73 @@ def run_rejection_app():
     st.markdown("## Rejection Analysis")
     st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
 
-    # ✅ detect from URL (when clicking Rejected card)
+    # ✅ detect from dashboard URL + session
     qp = st.query_params
-    
     if qp.get("center"):
         st.session_state["selected_center"] = qp.get("center")
     if qp.get("year"):
         st.session_state["selected_year"] = qp.get("year")
-    # ✅ NEEDFUL: persistent cache for center/year so it stays when you come back
-    if "rej_cache" not in st.session_state:
-        st.session_state.rej_cache = {}  # key -> result dict
 
+    # ✅ persistent cache (stays while session alive)
+    if "rej_cache" not in st.session_state:
+        st.session_state.rej_cache = {}  # cache_key -> result_obj
     if "rej_result" not in st.session_state:
         st.session_state.rej_result = None
 
     detected_center = st.session_state.get("selected_center")
     detected_year = st.session_state.get("selected_year")
 
-    # ---- Sidebar controls (TRUE LEFT) ----
+    # ---- Sidebar controls ----
     with st.sidebar:
         st.subheader("Controls")
 
         if detected_center is None or detected_year is None:
             st.warning("Center/Year not detected. Select manually.")
-            center = st.selectbox(
+            center_ui = st.selectbox(
                 "Center",
                 ["Excellent Medical Center", "Excellent Pharmacy", "Easyhealth Clinic"],
                 key="rej_center_manual"
             )
-            year = st.selectbox("Year", DEFAULT_YEAR_OPTIONS, key="rej_year_manual")
+            year_ui = st.selectbox("Year", DEFAULT_YEAR_OPTIONS, key="rej_year_manual")
         else:
-            center = str(detected_center).lower()
-            year = str(detected_year)
+            center_ui = str(detected_center).lower()
+            year_ui = str(detected_year)
 
             st.success("Detected from dashboard ✅")
             st.selectbox(
                 "Center",
                 ["excellent", "pharmacy", "easyhealth"],
-                index=["excellent", "pharmacy", "easyhealth"].index(center),
+                index=["excellent", "pharmacy", "easyhealth"].index(center_ui),
                 disabled=True
             )
             st.selectbox(
                 "Year",
                 DEFAULT_YEAR_OPTIONS,
-                index=DEFAULT_YEAR_OPTIONS.index(year),
+                index=DEFAULT_YEAR_OPTIONS.index(year_ui),
                 disabled=True
             )
 
-        center_raw = center
-        center = normalize_center_for_s3(center_raw)
-        year = str(year)
+        center = normalize_center_for_s3(center_ui)
+        year = str(year_ui)
 
         s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
 
-# ✅ Keep results until Generate again OR file changes
-current_sel = f"{center}|{year}"
-prev_sel = st.session_state.get("rej_prev_sel")
+        # ✅ NEEDFUL: load cached result automatically for same center/year
+        current_sel = f"{center}|{year}"
+        prev_sel = st.session_state.get("rej_prev_sel")
 
-if prev_sel != current_sel:
-    st.session_state.rej_prev_sel = current_sel
+        if prev_sel != current_sel:
+            st.session_state.rej_prev_sel = current_sel
 
-    # ✅ auto-load last cached result for this year/center
-    cy_prefix = f"{center}|{year}|"
-    cached_keys = [k for k in st.session_state.rej_cache.keys() if k.startswith(cy_prefix)]
-    if cached_keys:
-        last_key = cached_keys[-1]
-        st.session_state.rej_result = st.session_state.rej_cache[last_key]
-        st.success("Loaded cached result ✅")
-    else:
-        st.session_state.rej_result = None
-        st.info("No cached result for this year. Click Generate.")
+            cy_prefix = f"{center}|{year}|"
+            cached_keys = [k for k in st.session_state.rej_cache.keys() if k.startswith(cy_prefix)]
+            if cached_keys:
+                last_key = cached_keys[-1]
+                st.session_state.rej_result = st.session_state.rej_cache[last_key]
+                st.success("Loaded cached result ✅")
+            else:
+                st.session_state.rej_result = None
+                st.info("No cached result for this year. Click Generate.")
 
         st.write("**Source**")
         st.code(f"s3://{S3_BUCKET}/{s3_key}", language="text")
@@ -490,7 +480,7 @@ if prev_sel != current_sel:
             st.session_state.rej_result = None
             st.rerun()
 
-        # ---- Generate only on click ----
+        # ---- Generate ONLY on click ----
         if generate:
             if not s3_exists(S3_BUCKET, s3_key):
                 st.error("Source file not found in S3. Upload from dashboard first.")
@@ -506,7 +496,6 @@ if prev_sel != current_sel:
                 df_ins_x_code = pd.read_excel(xls, sheet_name="Rejected_Ins_x_DenialCode")
                 df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
 
-                # light preview for filters (prevents crash)
                 PREVIEW_ROWS = 2000
                 detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
                 wanted_cols = ["Insurance", "DenialCode", "ActivityStatus", "ActivityIns", "Paid", "AgingBucket", "DaysDiff", "RefDate"]
@@ -527,15 +516,16 @@ if prev_sel != current_sel:
                     "preview_rows": PREVIEW_ROWS,
                 }
 
-                # ✅ NEEDFUL: save in cache so when you come back it stays
+                # ✅ cache key includes sha1 => changes when file changes
                 cache_key = f"{center}|{year}|{stats['sha1']}"
                 st.session_state.rej_cache[cache_key] = result_obj
                 st.session_state.rej_result = result_obj
 
             st.success("Done ✅")
 
+    # ---- Main page rendering ----
     if st.session_state.rej_result is None:
-        st.info("Generate to view KPIs + tables.")
+        st.info("No saved result for this year yet. Click Generate once.")
         return
 
     R = st.session_state.rej_result
@@ -549,7 +539,6 @@ if prev_sel != current_sel:
     df_preview = R["df_preview"]
     PREVIEW_ROWS = R["preview_rows"]
 
-    # download
     st.download_button(
         "Download Rejection Analysis Excel",
         data=out_xlsx_bytes,
@@ -557,7 +546,6 @@ if prev_sel != current_sel:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # ===== KPIs =====
     df_by_ins_nogt = df_by_ins[df_by_ins["Insurance"] != "Grand Total"].copy()
     total_amount = float(pd.to_numeric(df_by_ins_nogt["RejectedAmount"], errors="coerce").fillna(0).sum())
     total_claims = int(pd.to_numeric(df_by_ins_nogt["RejectedCount"], errors="coerce").fillna(0).sum())
@@ -570,7 +558,6 @@ if prev_sel != current_sel:
     with c3:
         _card("Total Rejected Claims", f"{total_claims:,}", "Count of rejected activities")
 
-    # ===== Top 3 Insurance =====
     st.markdown("### Top 3 Insurances by Rejected Amount")
     top_ins = df_by_ins_nogt.sort_values("RejectedAmount", ascending=False).head(3)
     cols = st.columns(3)
@@ -581,7 +568,6 @@ if prev_sel != current_sel:
             else:
                 _card(f"#{i+1}", "AED 0.00", "")
 
-    # ===== Top 3 Denial (FULL accurate) from pivot =====
     st.markdown("### Top 3 Denial (Insurance + Code) by Amount")
     top_den = pd.DataFrame(columns=["Insurance", "DenialCode", "Amount"])
     try:
@@ -610,7 +596,6 @@ if prev_sel != current_sel:
             else:
                 _card("-", "-", "AED 0.00")
 
-    # ===== Denial code drilldown (top insurances for selected code) =====
     st.markdown("### Denial Code Drilldown (Top Insurances by Amount)")
     code_options = df_by_code[df_by_code["DenialCode"] != "Grand Total"]["DenialCode"].astype(str).tolist()
     sel_focus_code = st.selectbox("Select Denial Code", [""] + code_options, key="focus_denial_code")
@@ -629,7 +614,6 @@ if prev_sel != current_sel:
 
     st.divider()
 
-    # ===== Tabs =====
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "By Insurance",
         "By Denial Code",
@@ -679,6 +663,7 @@ if prev_sel != current_sel:
 
         st.divider()
         st.write("### Download FULL filtered rejected detail")
+
         if st.button("Build & Download Filtered Detail Excel", type="primary", key="rej_dl_btn"):
             with st.spinner("Loading FULL detail and preparing filtered file..."):
                 xls_full = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
