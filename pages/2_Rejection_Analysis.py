@@ -36,7 +36,7 @@ def load_file_from_s3(bucket, key):
     return obj["Body"].read()
 
 # =========================================
-# REJECTION ANALYSIS ENGINE (from your script)
+# REJECTION ANALYSIS ENGINE
 # =========================================
 def sha1_short_bytes(b: bytes) -> str:
     return hashlib.sha1(b).hexdigest()[:12]
@@ -100,8 +100,6 @@ def normalize_denial_code(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
-    # Rule:
-    # Paid == 0 AND ActivityStatus == 'rejected' AND DenialCode not empty
     if "ActivityStatus" not in df.columns:
         return df.iloc[0:0].copy()
 
@@ -197,12 +195,9 @@ def highlight_last_col(ws):
         cell.font = Font(bold=True)
 
 def apply_styling_to_bytes(xlsx_bytes: bytes) -> bytes:
-    in_buf = io.BytesIO(xlsx_bytes)
-    wb = load_workbook(in_buf)
-
+    wb = load_workbook(io.BytesIO(xlsx_bytes))
     for ws in wb.worksheets:
         style_headers(ws)
-
         if ws.title in [
             "Rejected_By_Insurance",
             "Rejected_By_DenialCode",
@@ -217,7 +212,7 @@ def apply_styling_to_bytes(xlsx_bytes: bytes) -> bytes:
     wb.save(out_buf)
     return out_buf.getvalue()
 
-def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source.xlsx") -> tuple[bytes, dict]:
+def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source.xlsx"):
     df = pd.read_excel(io.BytesIO(input_bytes), engine="openpyxl")
     df.columns = df.columns.str.strip()
 
@@ -229,7 +224,6 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
 
     rejected_df = build_rejected_df(df)
 
-    # outputs even if empty
     by_ins = pivot_by_insurance(rejected_df) if len(rejected_df) else pd.DataFrame(
         [{"Insurance": "Grand Total", "RejectedAmount": 0.0, "RejectedCount": 0}]
     )
@@ -242,8 +236,6 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
     aging_sum = pivot_rejection_aging(rejected_df) if len(rejected_df) else pd.DataFrame(
         [{"Insurance": "Grand Total", "Grand Total": 0.0}]
     )
-
-    rejected_detail = rejected_df.copy()
 
     meta = pd.DataFrame([{
         "InputFile": input_name,
@@ -259,16 +251,13 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         by_code.to_excel(writer, sheet_name="Rejected_By_DenialCode", index=False)
         ins_x_code.to_excel(writer, sheet_name="Rejected_Ins_x_DenialCode", index=False)
         aging_sum.to_excel(writer, sheet_name="Rejected_Aging_Summary", index=False)
-        rejected_detail.to_excel(writer, sheet_name="Rejected_Detail", index=False)
+        rejected_df.to_excel(writer, sheet_name="Rejected_Detail", index=False)
         meta.to_excel(writer, sheet_name="Meta", index=False)
 
-    styled_bytes = apply_styling_to_bytes(out_buf.getvalue())
+    styled = apply_styling_to_bytes(out_buf.getvalue())
 
-    stats = {
-        "rejected_rows": int(len(rejected_df)),
-        "sha1": sha1_short_bytes(input_bytes),
-    }
-    return styled_bytes, stats
+    stats = {"rejected_rows": int(len(rejected_df)), "sha1": sha1_short_bytes(input_bytes)}
+    return styled, stats
 
 # =========================================
 # APP
@@ -277,7 +266,6 @@ def run_rejection_app():
     st.subheader("Rejection Analysis")
     st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
 
-    # Auto-detect from dashboard
     center = st.session_state.get("selected_center")
     year = st.session_state.get("selected_year")
 
@@ -301,15 +289,11 @@ def run_rejection_app():
 
     input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
 
-    run = st.button("Generate Rejection Analysis", type="primary")
-    if not run:
+    if not st.button("Generate Rejection Analysis", type="primary"):
         return
 
     with st.spinner("Building rejection analysis (pivots + aging + formatting)..."):
-        out_xlsx_bytes, stats = build_rejection_workbook_bytes(
-            input_bytes=input_bytes,
-            input_name=SOURCE_FILENAME,
-        )
+        out_xlsx_bytes, stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
 
     st.success("Done ✅")
 
@@ -321,16 +305,14 @@ def run_rejection_app():
     )
 
     st.metric("Rejected Rows", stats["rejected_rows"])
-        # ---- Read all sheets from the generated workbook (in memory) ----
-    xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
 
+    # Read summary sheets (LIGHT)
+    xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
     df_by_ins = pd.read_excel(xls, sheet_name="Rejected_By_Insurance")
     df_by_code = pd.read_excel(xls, sheet_name="Rejected_By_DenialCode")
     df_ins_x_code = pd.read_excel(xls, sheet_name="Rejected_Ins_x_DenialCode")
     df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
-    df_detail = pd.read_excel(xls, sheet_name="Rejected_Detail")
 
-    # ---- Tabs ----
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "By Insurance",
         "By Denial Code",
@@ -355,209 +337,67 @@ def run_rejection_app():
         st.subheader("Rejected Aging Summary")
         st.dataframe(df_aging, use_container_width=True)
 
-        with tab5:
-    st.subheader("Rejected Detail (Filter + Download)")
+    with tab5:
+        st.subheader("Rejected Detail (Filter + Download)")
 
-    # ----- Load ONLY required columns (prevents crash) -----
-    wanted_cols = [
-        "Insurance",
-        "DenialCode",
-        "ActivityStatus",
-        "ActivityIns",
-        "Paid",
-        "RefDate",
-        "DaysDiff",
-        "AgingBucket",
-    ]
+        # Preview only (safe)
+        detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0, engine="openpyxl").columns.tolist()
+        must_cols = ["Insurance", "DenialCode", "ActivityIns", "Paid", "AgingBucket"]
+        usecols = [c for c in must_cols if c in detail_header]
+        PREVIEW_ROWS = 2000
 
-    # read header only
-    detail_header = pd.read_excel(
-        xls,
-        sheet_name="Rejected_Detail",
-        nrows=0,
-        engine="openpyxl",
-    ).columns.tolist()
-
-    usecols = [c for c in wanted_cols if c in detail_header]
-    if "Insurance" not in usecols:
-        usecols.append("Insurance")
-    if "DenialCode" not in usecols:
-        usecols.append("DenialCode")
-
-    PREVIEW_ROWS = 2000
-
-    df_detail_small = pd.read_excel(
-        xls,
-        sheet_name="Rejected_Detail",
-        usecols=usecols,
-        nrows=PREVIEW_ROWS,
-        engine="openpyxl",
-    )
-
-    # ----- Filters -----
-    ins_list = sorted(
-        [x for x in df_detail_small["Insurance"].dropna().unique().tolist() if str(x).strip() != ""]
-    )
-    code_list = sorted(
-        [x for x in df_detail_small["DenialCode"].dropna().unique().tolist() if str(x).strip() != ""]
-    )
-
-    c1, c2, c3 = st.columns([1, 1, 1])
-
-    with c1:
-        sel_ins = st.selectbox("Insurance", ["All"] + ins_list)
-
-    with c2:
-        sel_code = st.selectbox("Denial Code", ["All"] + code_list)
-
-    with c3:
-        show_top = st.number_input(
-            "Preview rows",
-            min_value=50,
-            max_value=2000,
-            value=500,
-            step=50,
+        df_small = pd.read_excel(
+            xls,
+            sheet_name="Rejected_Detail",
+            usecols=usecols,
+            nrows=PREVIEW_ROWS,
+            engine="openpyxl"
         )
 
-    # ----- Apply filters to preview -----
-    filt = df_detail_small.copy()
+        ins_list = sorted(df_small["Insurance"].dropna().astype(str).unique().tolist())
+        code_list = sorted(df_small["DenialCode"].dropna().astype(str).unique().tolist())
 
-    if sel_ins != "All":
-        filt = filt[filt["Insurance"].astype(str) == str(sel_ins)]
-
-    if sel_code != "All":
-        filt = filt[filt["DenialCode"].astype(str) == str(sel_code)]
-
-    st.caption(
-        f"Previewing {min(len(filt), int(show_top))} rows "
-        f"(from first {PREVIEW_ROWS} only)."
-    )
-
-    st.dataframe(filt.head(int(show_top)), use_container_width=True)
-
-    st.divider()
-    st.write("### Download filtered rejected detail")
-
-    if st.button("Build & Download Filtered Excel", type="primary"):
-        with st.spinner("Preparing filtered file..."):
-
-            df_full = pd.read_excel(
-                pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl"),
-                sheet_name="Rejected_Detail",
-                engine="openpyxl",
-            )
-
-            if sel_ins != "All":
-                df_full = df_full[df_full["Insurance"].astype(str) == str(sel_ins)]
-
-            if sel_code != "All":
-                df_full = df_full[df_full["DenialCode"].astype(str) == str(sel_code)]
-
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                df_full.to_excel(
-                    writer,
-                    sheet_name="Rejected_Detail_Filtered",
-                    index=False,
-                )
-
-            st.download_button(
-                "Download Filtered Excel",
-                data=buf.getvalue(),
-                file_name=f"Rejected_Detail_{center}_{year}_{sel_ins}_{sel_code}.xlsx"
-                .replace(" ", "_")
-                .replace("/", "_"),
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-
-            st.success(f"Rows exported: {len(df_full)}")
-
-
+        c1, c2, c3 = st.columns([1, 1, 1])
         with c1:
-            sel_ins = st.selectbox("Insurance", ["All"] + ins_list, index=0)
-
+            sel_ins = st.selectbox("Insurance", ["All"] + ins_list)
         with c2:
-            sel_code = st.selectbox("Denial Code", ["All"] + code_list, index=0)
-
+            sel_code = st.selectbox("Denial Code", ["All"] + code_list)
         with c3:
-            show_top = st.number_input("Preview rows", min_value=50, max_value=2000, value=500, step=50)
+            show_top = st.number_input("Preview rows", 50, 2000, 500, 50)
 
-        # Apply filter to preview sample
-        filt = df_detail_small.copy()
+        view = df_small.copy()
         if sel_ins != "All":
-            filt = filt[filt["Insurance"].astype(str) == str(sel_ins)]
+            view = view[view["Insurance"].astype(str) == sel_ins]
         if sel_code != "All":
-            filt = filt[filt["DenialCode"].astype(str) == str(sel_code)]
+            view = view[view["DenialCode"].astype(str) == sel_code]
 
-        st.caption(
-            f"Previewing up to {int(show_top)} rows (from first {PREVIEW_ROWS} rows only). "
-            f"Use download for full filtered output."
-        )
-        st.dataframe(filt.head(int(show_top)), use_container_width=True)
+        st.caption(f"Preview (from first {PREVIEW_ROWS} rows only). Use download for full filtered data.")
+        st.dataframe(view.head(int(show_top)), use_container_width=True)
 
-        # ----- FULL filtered download (reads full detail but NOT displayed) -----
         st.divider()
-        st.write("### Download filtered detail")
-
-        # Button to build filtered excel on-demand (so it doesn't crash UI)
         if st.button("Build & Download Filtered Detail Excel", type="primary"):
-            with st.spinner("Preparing filtered detail Excel..."):
-                # Read FULL detail sheet (but don't render it)
-                df_full_detail = pd.read_excel(
+            with st.spinner("Preparing filtered detail..."):
+                df_full = pd.read_excel(
                     pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl"),
                     sheet_name="Rejected_Detail",
                     engine="openpyxl",
                 )
-
                 if sel_ins != "All":
-                    df_full_detail = df_full_detail[df_full_detail["Insurance"].astype(str) == str(sel_ins)]
-
+                    df_full = df_full[df_full["Insurance"].astype(str) == sel_ins]
                 if sel_code != "All":
-                    df_full_detail = df_full_detail[df_full_detail["DenialCode"].astype(str) == str(sel_code)]
+                    df_full = df_full[df_full["DenialCode"].astype(str) == sel_code]
 
-                # Write only filtered detail into a small workbook
-                dl_buf = io.BytesIO()
-                with pd.ExcelWriter(dl_buf, engine="openpyxl") as writer:
-                    df_full_detail.to_excel(writer, sheet_name="Rejected_Detail_Filtered", index=False)
+                buf = io.BytesIO()
+                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                    df_full.to_excel(writer, sheet_name="Rejected_Detail_Filtered", index=False)
 
                 st.download_button(
                     "Download Filtered Detail Excel",
-                    data=dl_buf.getvalue(),
+                    data=buf.getvalue(),
                     file_name=f"Rejected_Detail_{center}_{year}_{sel_ins}_{sel_code}_{stats['sha1']}.xlsx"
-                        .replace(" ", "_")
-                        .replace("/", "_")
-                        .replace("\\", "_")
-                        .replace(":", "_"),
+                        .replace(" ", "_").replace("/", "_").replace("\\", "_").replace(":", "_"),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-
-                st.success(f"Filtered rows: {len(df_full_detail)} ✅")
-
-
-        with c1:
-            sel_ins = st.selectbox("Insurance", ["All"] + ins_list, index=0)
-
-        with c2:
-            sel_code = st.selectbox("Denial Code", ["All"] + code_list, index=0)
-
-        with c3:
-            show_top = st.number_input("Rows to show", min_value=50, max_value=5000, value=500, step=50)
-
-        filt = df_detail.copy()
-
-        if sel_ins != "All":
-            filt = filt[filt["Insurance"].astype(str) == str(sel_ins)]
-
-        if sel_code != "All":
-            filt = filt[filt["DenialCode"].astype(str) == str(sel_code)]
-
-        st.caption(f"Showing {min(len(filt), int(show_top))} of {len(filt)} rejected rows after filters.")
-        st.dataframe(filt.head(int(show_top)), use_container_width=True)
-
-
-    # Optional: show detail table (can be heavy on big files)
-    with st.expander("Preview Rejected Detail (may be large)", expanded=False):
-        df_preview = pd.read_excel(io.BytesIO(out_xlsx_bytes), sheet_name="Rejected_Detail", engine="openpyxl")
-        st.dataframe(df_preview, use_container_width=True)
+                st.success(f"Rows exported: {len(df_full)} ✅")
 
 run_rejection_app()
