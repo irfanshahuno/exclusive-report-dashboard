@@ -390,49 +390,55 @@ def run_rejection_app():
     detected_center = st.session_state.get("selected_center")
     detected_year = st.session_state.get("selected_year")
 
-    # ---- Sidebar controls (TRUE LEFT) ----
-    with st.sidebar:
-        st.subheader("Controls")
+   # ---- Sidebar controls (TRUE LEFT) ----
+with st.sidebar:
+    st.subheader("Controls")
 
-        if detected_center is None or detected_year is None:
-            st.warning("Center/Year not detected. Select manually.")
-            center = st.selectbox("Center", ["Excellent Medical Center", "Excellent Pharmacy", "Easyhealth Clinic"], key="rej_center_manual")
-            year = st.selectbox("Year", DEFAULT_YEAR_OPTIONS, key="rej_year_manual")
-        else:
-            center = str(detected_center).lower()
-            year = str(detected_year)
-            st.success("Detected from dashboard ✅")
-            st.selectbox(
-                "Center",
-                ["excellent", "pharmacy", "easyhealth"],
-                index=["excellent", "pharmacy", "easyhealth"].index(center),
-                disabled=True
-            )
-            st.selectbox(
-                "Year",
-                DEFAULT_YEAR_OPTIONS,
-                index=DEFAULT_YEAR_OPTIONS.index(year),
-                disabled=True
-            )
-       center_raw = center
-       center = normalize_center_for_s3(center_raw)
-       year = str(year)
+    if detected_center is None or detected_year is None:
+        st.warning("Center/Year not detected. Select manually.")
+        center = st.selectbox(
+            "Center",
+            ["Excellent Medical Center", "Excellent Pharmacy", "Easyhealth Clinic"],
+            key="rej_center_manual"
+        )
+        year = st.selectbox("Year", DEFAULT_YEAR_OPTIONS, key="rej_year_manual")
+    else:
+        center = str(detected_center).lower()
+        year = str(detected_year)
 
-        s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
+        st.success("Detected from dashboard ✅")
+        st.selectbox(
+            "Center",
+            ["excellent", "pharmacy", "easyhealth"],
+            index=["excellent", "pharmacy", "easyhealth"].index(center),
+            disabled=True
+        )
+        st.selectbox(
+            "Year",
+            DEFAULT_YEAR_OPTIONS,
+            index=DEFAULT_YEAR_OPTIONS.index(year),
+            disabled=True
+        )
 
-        st.write("**Source**")
-        st.code(f"s3://{S3_BUCKET}/{s3_key}", language="text")
+    center_raw = center
+    center = normalize_center_for_s3(center_raw)
+    year = str(year)
 
-        cA, cB = st.columns(2)
-        with cA:
-            generate = st.button("Generate", type="primary", use_container_width=True)
-        with cB:
-            clear = st.button("Clear", use_container_width=True)
+    s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
 
-        if clear:
-            st.session_state.rej_result = None
-            st.rerun()
+    st.write("**Source**")
+    st.code(f"s3://{S3_BUCKET}/{s3_key}", language="text")
 
+    cA, cB = st.columns(2)
+    with cA:
+        generate = st.button("Generate", type="primary", use_container_width=True)
+    with cB:
+        clear = st.button("Clear", use_container_width=True)
+
+    if clear:
+        st.session_state.rej_result = None
+        st.rerun()
+        
     # ---- Generate only on click ----
     if generate:
         if not s3_exists(S3_BUCKET, s3_key):
