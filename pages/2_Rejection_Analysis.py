@@ -1,8 +1,4 @@
-# ✅ ONLY NEEDFUL UI UPDATE (no logic change):
-# 1) Move KPI cards to LEFT using columns (left = KPI panel, right = tabs)
-# 2) Add "Top 3 Denial Codes" cards showing: Insurance + DenialCode + Amount (overall)
-#
-# 👉 Copy this FULL script and replace your pages/2_Rejection_Analysis.py
+# pages/2_Rejection_Analysis.py
 
 import boto3
 from botocore.exceptions import ClientError
@@ -42,7 +38,7 @@ def load_file_from_s3(bucket, key):
     return obj["Body"].read()
 
 # =========================================
-# REJECTION ANALYSIS ENGINE
+# ENGINE
 # =========================================
 def sha1_short_bytes(b: bytes) -> str:
     return hashlib.sha1(b).hexdigest()[:12]
@@ -51,10 +47,8 @@ def sha1_short_bytes(b: bytes) -> str:
 def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
     num_cols = [
         "ActivityIns",
-        "actRemitInsShare",
-        "actResub1RemitInsShare",
-        "actResub2RemitInsShare",
-        "actResub3RemitInsShare",
+        "actRemitInsShare", "actResub1RemitInsShare",
+        "actResub2RemitInsShare", "actResub3RemitInsShare",
         "TKBKAmountAct",
     ]
     for c in num_cols:
@@ -67,10 +61,8 @@ def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
 def compute_paid(df: pd.DataFrame) -> pd.DataFrame:
     df["Paid"] = df[
         [
-            "actRemitInsShare",
-            "actResub1RemitInsShare",
-            "actResub2RemitInsShare",
-            "actResub3RemitInsShare",
+            "actRemitInsShare", "actResub1RemitInsShare",
+            "actResub2RemitInsShare", "actResub3RemitInsShare",
             "TKBKAmountAct",
         ]
     ].sum(axis=1)
@@ -190,7 +182,7 @@ def pivot_rejection_aging(rej: pd.DataFrame) -> pd.DataFrame:
 
 # -------------------- styling --------------------
 HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
-TOTAL_FILL = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
 
 
 def style_headers(ws):
@@ -222,6 +214,7 @@ def apply_styling_to_bytes(xlsx_bytes: bytes) -> bytes:
     wb = load_workbook(io.BytesIO(xlsx_bytes))
     for ws in wb.worksheets:
         style_headers(ws)
+
         if ws.title in [
             "Rejected_By_Insurance",
             "Rejected_By_DenialCode",
@@ -262,17 +255,13 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         [{"Insurance": "Grand Total", "Grand Total": 0.0}]
     )
 
-    meta = pd.DataFrame(
-        [
-            {
-                "InputFile": input_name,
-                "InputSHA1": sha1_short_bytes(input_bytes),
-                "GeneratedAt": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "RejectedRule": "Paid==0 AND lower(ActivityStatus)=='rejected' AND DenialCode not empty",
-                "RejectedRows": int(len(rejected_df)),
-            }
-        ]
-    )
+    meta = pd.DataFrame([{
+        "InputFile": input_name,
+        "InputSHA1": sha1_short_bytes(input_bytes),
+        "GeneratedAt": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "RejectedRule": "Paid==0 AND lower(ActivityStatus)=='rejected' AND DenialCode not empty",
+        "RejectedRows": int(len(rejected_df)),
+    }])
 
     out_buf = io.BytesIO()
     with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
@@ -286,7 +275,6 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
     styled = apply_styling_to_bytes(out_buf.getvalue())
     stats = {"rejected_rows": int(len(rejected_df)), "sha1": sha1_short_bytes(input_bytes)}
     return styled, stats
-
 
 # =========================================
 # CACHED LOADERS
@@ -302,16 +290,15 @@ def load_summary_sheets(out_xlsx_bytes: bytes):
 
 
 @st.cache_data(show_spinner=False)
-def load_detail_preview(out_xlsx_bytes: bytes, usecols: list[str], nrows: int):
-    xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
-    return pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=nrows, engine="openpyxl")
-
-
-@st.cache_data(show_spinner=False)
 def load_full_detail(out_xlsx_bytes: bytes) -> pd.DataFrame:
     xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
     return pd.read_excel(xls, sheet_name="Rejected_Detail", engine="openpyxl")
 
+
+@st.cache_data(show_spinner=False)
+def load_detail_preview(out_xlsx_bytes: bytes, usecols: list[str], nrows: int):
+    xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
+    return pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=nrows, engine="openpyxl")
 
 # =========================================
 # UI HELPERS
@@ -325,7 +312,7 @@ def inject_kpi_css():
     st.markdown(
         """
         <style>
-          .kpi-panel { position: sticky; top: 80px; }
+          .kpi-panel { position: sticky; top: 70px; }
           .kpi-grid { display:flex; flex-direction:column; gap:12px; }
           .kpi-card{
             background:#ffffff;
@@ -355,17 +342,8 @@ def inject_kpi_css():
 
 
 def render_left_kpis(stats, df_by_ins: pd.DataFrame, df_full_detail: pd.DataFrame):
-    """
-    LEFT KPI PANEL:
-      - Rejected Rows
-      - Total Rejected Amount
-      - Total Rejected Claims
-      - Top Insurance 1/2/3
-      - Top 3 Denial combos (Insurance + Code + Amount)
-    """
     inject_kpi_css()
 
-    # --- compute from df_by_ins ---
     tmp = df_by_ins.copy()
     tmp["Insurance"] = tmp["Insurance"].astype(str)
     tmp2 = tmp[tmp["Insurance"].str.strip().str.lower() != "grand total"].copy()
@@ -390,12 +368,8 @@ def render_left_kpis(stats, df_by_ins: pd.DataFrame, df_full_detail: pd.DataFram
     combo_top3 = pd.DataFrame(columns=["Insurance", "DenialCode", "Amount"])
     if df_full_detail is not None and len(df_full_detail) > 0:
         dd = df_full_detail.copy()
-        if "RejectedAmount" in dd.columns:
-            amt_col = "RejectedAmount"
-        else:
-            amt_col = "ActivityIns"
+        amt_col = "RejectedAmount" if "RejectedAmount" in dd.columns else "ActivityIns"
 
-        # Ensure cols exist
         if "Insurance" in dd.columns and "DenialCode" in dd.columns and amt_col in dd.columns:
             dd["Insurance"] = dd["Insurance"].astype(str)
             dd["DenialCode"] = dd["DenialCode"].astype(str)
@@ -412,7 +386,6 @@ def render_left_kpis(stats, df_by_ins: pd.DataFrame, df_full_detail: pd.DataFram
 
     st.markdown('<div class="kpi-panel"><div class="kpi-grid">', unsafe_allow_html=True)
 
-    # Cards
     st.markdown(
         f"""
         <div class="kpi-card">
@@ -454,7 +427,6 @@ def render_left_kpis(stats, df_by_ins: pd.DataFrame, df_full_detail: pd.DataFram
         unsafe_allow_html=True,
     )
 
-    # Top 3 denial combos cards
     st.markdown(
         """
         <div class="kpi-card">
@@ -467,11 +439,11 @@ def render_left_kpis(stats, df_by_ins: pd.DataFrame, df_full_detail: pd.DataFram
     if combo_top3 is None or len(combo_top3) == 0:
         st.markdown('<div class="kpi-mini" style="margin-top:10px;">No denial data found.</div></div>', unsafe_allow_html=True)
     else:
-        for i, r in combo_top3.iterrows():
+        for _, r in combo_top3.iterrows():
             st.markdown(
                 f"""
                 <div style="margin-top:10px;padding:10px 12px;border:1px solid #eef2f7;border-radius:14px;">
-                  <div style="font-size:12px;color:#64748b;">{_short(r["Insurance"], 30)}</div>
+                  <div style="font-size:12px;color:#64748b;">{_short(r["Insurance"], 32)}</div>
                   <div style="font-size:18px;font-weight:900;color:#0f172a;">{r["DenialCode"]}</div>
                   <div style="margin-top:4px;font-size:13px;font-weight:800;color:#334155;">AED {float(r["Amount"]):,.2f}</div>
                 </div>
@@ -482,7 +454,6 @@ def render_left_kpis(stats, df_by_ins: pd.DataFrame, df_full_detail: pd.DataFram
 
     st.markdown("</div></div>", unsafe_allow_html=True)
 
-
 # =========================================
 # APP
 # =========================================
@@ -490,9 +461,9 @@ def run_rejection_app():
     st.title("Rejection Analysis")
     st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
 
+    # ✅ Manual select if dashboard not passed state
     center = st.session_state.get("selected_center")
     year = st.session_state.get("selected_year")
-
     if center is None or year is None:
         st.warning("Center/Year not detected from dashboard. Please select manually.")
         center = st.selectbox("Center", ["excellent", "pharmacy", "easyhealth"])
@@ -513,7 +484,7 @@ def run_rejection_app():
 
     input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
 
-    # ---------- Session state keys ----------
+    # ---------- Session state ----------
     if "rej_out_xlsx_bytes" not in st.session_state:
         st.session_state.rej_out_xlsx_bytes = None
     if "rej_stats" not in st.session_state:
@@ -522,16 +493,16 @@ def run_rejection_app():
         st.session_state.rej_source_sha1 = None
 
     current_sha1 = sha1_short_bytes(input_bytes)
-
     if st.session_state.rej_source_sha1 != current_sha1:
         st.session_state.rej_out_xlsx_bytes = None
         st.session_state.rej_stats = None
         st.session_state.rej_source_sha1 = current_sha1
 
-    gen_col1, gen_col2 = st.columns([1, 1])
-    with gen_col1:
+    # ✅ Keep buttons on same row
+    b1, b2 = st.columns([1, 1])
+    with b1:
         generate = st.button("Generate Rejection Analysis", type="primary")
-    with gen_col2:
+    with b2:
         if st.session_state.rej_out_xlsx_bytes is not None:
             if st.button("Clear Result"):
                 st.session_state.rej_out_xlsx_bytes = None
@@ -542,19 +513,21 @@ def run_rejection_app():
     if generate:
         with st.spinner("Building rejection analysis (pivots + aging + formatting)..."):
             out_xlsx_bytes, stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
-
         st.session_state.rej_out_xlsx_bytes = out_xlsx_bytes
         st.session_state.rej_stats = stats
         st.cache_data.clear()
         st.success("Done ✅")
 
+    # ✅ IMPORTANT: stop here until generated
     if st.session_state.rej_out_xlsx_bytes is None:
-        st.info("Click **Generate Rejection Analysis** to view tables and filters.")
+        st.info("Click **Generate Rejection Analysis** to view KPIs and tabs.")
         st.stop()
 
+    # ✅ From here, show LEFT KPIs + RIGHT tabs (this is what you want)
     out_xlsx_bytes = st.session_state.rej_out_xlsx_bytes
     stats = st.session_state.rej_stats
 
+    # Download
     st.download_button(
         "Download Rejection Analysis Excel",
         data=out_xlsx_bytes,
@@ -562,16 +535,11 @@ def run_rejection_app():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # Load summaries
+    # Load data
     df_by_ins, df_by_code, df_ins_x_code, df_aging = load_summary_sheets(out_xlsx_bytes)
-
-    # Load full detail ONCE (cached) for left KPIs + tab5 calculations
     df_full_detail = load_full_detail(out_xlsx_bytes)
 
-    # ==============================
-    # LAYOUT: LEFT KPI PANEL + RIGHT MAIN (TABS)
-    # ==============================
-    left, right = st.columns([1, 2.3], gap="large")
+    left, right = st.columns([1, 2.2], gap="large")
 
     with left:
         render_left_kpis(stats, df_by_ins, df_full_detail)
@@ -614,14 +582,6 @@ def run_rejection_app():
                 sel_code = st.selectbox("Denial Code", ["All"] + code_list, key="rej_sel_code")
             with c3:
                 show_top = st.number_input("Preview rows", 50, 2000, 500, 50, key="rej_preview_rows")
-
-            df_f = df_full_detail.copy()
-            if sel_ins != "All":
-                df_f = df_f[df_f["Insurance"].astype(str) == sel_ins]
-            if sel_code != "All":
-                df_f = df_f[df_f["DenialCode"].astype(str) == sel_code]
-
-            amt_col = "RejectedAmount" if "RejectedAmount" in df_f.columns else "ActivityIns"
 
             view = df_small.copy()
             if sel_ins != "All":
