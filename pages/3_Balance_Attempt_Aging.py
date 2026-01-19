@@ -390,14 +390,11 @@ def load_kpis_only(path_str: str, token: float, center_key: str):
         df = add_aging(df)
         keywords = SOLD_TO_KLAIM_KEYWORDS_DEFAULT
 
-    # ---- Pharmacy: use same logic as your earlier working script
-    else:
-        # If pharmacy sheet is already detail-like, reuse same measures too:
-        df = ensure_insurance(df)
-        df, net_col, paid_cols = ensure_numeric(df)
-        df = compute_measures(df, net_col, paid_cols)
-        df = add_aging(df)
-        keywords = SOLD_TO_KLAIM_KEYWORDS_PHARMACY
+    # ---- Pharmacy: MUST use pharmacy logic (claim amount - remit amount)
+else:
+    df = compute_pharmacy_balance(df)
+    df = add_aging(df)
+    keywords = SOLD_TO_KLAIM_KEYWORDS_PHARMACY
 
     balance_df = df[df["Balance"] > 0].copy()
     balance_df = balance_df[balance_df["AgingBucket"] != "Unknown"].copy()
