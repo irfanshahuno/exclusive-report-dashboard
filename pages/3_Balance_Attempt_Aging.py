@@ -510,8 +510,21 @@ def compute_pharmacy_balance(df: pd.DataFrame) -> pd.DataFrame:
 @st.cache_data(show_spinner=True)
 def load_kpis_only(path_str: str, token: float, center_key: str):
     xls = pd.ExcelFile(path_str, engine="openpyxl")
+
+# ✅ NEEDFUL: pick the correct detail sheet first
+preferred = ["Balance_Aging_Detail", "Balance_Aging_Summary", "Insurance_Totals"]
+base_sheet = None
+for s in preferred:
+    if s in xls.sheet_names:
+        base_sheet = s
+        break
+
+# fallback: first sheet if none matched
+if base_sheet is None:
     base_sheet = xls.sheet_names[0]
-    df = pd.read_excel(xls, sheet_name=base_sheet)
+
+df = pd.read_excel(xls, sheet_name=base_sheet)
+
     df.columns = [str(c).strip() for c in df.columns]
 
     if center_key == "pharmacy":
