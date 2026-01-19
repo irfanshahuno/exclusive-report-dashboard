@@ -596,7 +596,7 @@ def build_rejection_url(center, year):
     return f"/Rejection_Analysis?center={center}&year={year}"
     
 def build_balance_url(center, year):
-    return f"/3_Balance_Attempt_Aging?center={center}&year={year}"
+    return f"/Balance_Attempt_Aging?center={center}&year={year}"
    
 def is_admin_mode() -> bool:
     secret_pwd = st.secrets.get("ADMIN_PASSWORD", "")
@@ -1142,6 +1142,7 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
 
 
 
