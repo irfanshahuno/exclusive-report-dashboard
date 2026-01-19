@@ -6,13 +6,21 @@ from datetime import datetime as dt
 import pandas as pd
 import streamlit as st
 
+# ✅ NEEDFUL (S3 fallback)
+import boto3
+from botocore.exceptions import ClientError
+
 # =========================================================
 # Settings
 # =========================================================
 st.set_page_config(page_title="Balance — Initial / Resub with Aging", layout="wide")
 st.title("Balance — Initial / Resub with Aging (Summary)")
 
-BASE = Path(__file__).parent
+# ✅ NEEDFUL CHANGE ONLY:
+# If this file is inside /pages, store data at repo root /data (not /pages/data)
+THIS_FILE = Path(__file__).resolve()
+BASE = THIS_FILE.parents[1] if THIS_FILE.parent.name == "pages" else THIS_FILE.parent
+
 DATA_DIR = BASE / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -347,8 +355,82 @@ def is_admin_mode() -> bool:
         return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
 
 
+# ====================== ✅ S3 FALLBACK HELPERS (NEEDFUL) ======================
+def _get_s3_cfg():
+    access_key = st.secrets.get("AWS_ACCESS_KEY_ID", "")
+    secret_key = st.secrets.get("AWS_SECRET_ACCESS_KEY", "")
+
+    region = (
+        st.secrets.get("AWS_REGION")
+        or st.secrets.get("AWS_DEFAULT_REGION")
+        or "eu-north-1"
+    )
+
+    bucket = (
+        st.secrets.get("S3_BUCKET_NAME")
+        or st.secrets.get("S3_BUCKET")
+        or ""
+    )
+
+    prefix = st.secrets.get("S3_PREFIX", "").strip().strip("/")
+
+    if not (access_key and secret_key and bucket):
+        return None
+
+    return {
+        "access_key": access_key,
+        "secret_key": secret_key,
+        "region": region,
+        "bucket": bucket,
+        "prefix": prefix,
+    }
+
+
+def _s3_client(cfg):
+    return boto3.client(
+        "s3",
+        aws_access_key_id=cfg["access_key"],
+        aws_secret_access_key=cfg["secret_key"],
+        region_name=cfg["region"],
+    )
+
+
+def s3_key_for(center_key: str, year: int, filename: str) -> str:
+    cfg = _get_s3_cfg()
+    pre = (cfg["prefix"] + "/") if (cfg and cfg.get("prefix")) else ""
+    return f"{pre}{center_key}/{year}/{filename}"
+
+
+def ensure_local_from_s3(local_path: Path, center_key: str, year: int) -> bool:
+    """
+    If local report is missing, download from S3 into local_path.
+    Returns True if local_path exists after this function (downloaded or already present).
+    """
+    if local_path.exists():
+        return True
+
+    cfg = _get_s3_cfg()
+    if cfg is None:
+        return False
+
+    key = s3_key_for(center_key, year, local_path.name)
+    client = _s3_client(cfg)
+
+    try:
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        client.download_file(cfg["bucket"], key, str(local_path))
+        return local_path.exists()
+    except ClientError:
+        return False
+# =====================================================================
+
+
+# ✅ NEEDFUL: match main dashboard output paths/names
 def report_path(center_key: str, year: int) -> Path:
-    return DATA_DIR / center_key / str(year) / "report.xlsx"
+    if center_key == "pharmacy":
+        return DATA_DIR / "excellent_pharmacy" / str(year) / "Pharmacy_Exclusive_Report_with_Aging.xlsx"
+    else:
+        return DATA_DIR / center_key / str(year) / "report.xlsx"
 
 
 def save_uploaded_report(center_key: str, year: int, upload) -> Path:
@@ -465,19 +547,27 @@ def load_kpis_only(path_str: str, token: float, center_key: str):
 # =========================================================
 st.session_state.is_admin = is_admin_mode()
 
+# ✅ NEEDFUL: query param helper
 def _qs_first(key: str):
     v = st.query_params.get(key)
     if isinstance(v, (list, tuple)):
         return v[0] if v else None
     return v
 
+# ✅ NEEDFUL: detect year + center from dashboard URL
 qs_year = _qs_first("year")
+qs_center = _qs_first("center")  # excellent/pharmacy/easyhealth
 
 if qs_year and st.session_state.get("year") is None:
     try:
         st.session_state.year = int(qs_year)
     except Exception:
         pass
+
+if qs_center and st.session_state.get("center_key") is None:
+    qs_center = str(qs_center).strip().lower()
+    if qs_center in CENTERS:
+        st.session_state.center_key = qs_center
 
 st.caption(
     f"Mode: **{'admin' if st.session_state.get('is_admin') else 'view'}** · "
@@ -526,6 +616,11 @@ if year == 2024:
 else:
     centers_to_show = ["excellent", "pharmacy", "easyhealth"]
 
+# ✅ NEEDFUL: if dashboard passed a center, show ONLY that center
+forced_center = st.session_state.get("center_key")
+if forced_center in centers_to_show:
+    centers_to_show = [forced_center]
+
 # =========================================================
 # Render KPIs ONLY per center (premium cards)
 # =========================================================
@@ -534,6 +629,10 @@ def render_center_kpis_only(center_key: str, year: int):
     st.caption(f"Year: **{year}**")
 
     rp = report_path(center_key, year)
+
+    # ✅ NEEDFUL: S3 fallback (download if local missing)
+    ensure_local_from_s3(rp, center_key, year)
+
     token = rp.stat().st_mtime if rp.exists() else 0.0
     built = "—" if not token else dt.fromtimestamp(token).strftime("%Y-%m-%d %H:%M")
     st.caption(f"Saved report: `{rp}` · Built: **{built}**")
@@ -554,7 +653,7 @@ def render_center_kpis_only(center_key: str, year: int):
     if not rp.exists():
         st.warning(
             "No saved report found for this center/year.\n\n"
-            "✅ Admin must upload **report.xlsx** once, then management can view anytime."
+            "✅ Admin must upload/rebuild once (or ensure report exists in S3), then management can view anytime."
         )
         st.markdown("---")
         return
