@@ -509,6 +509,7 @@ def compute_pharmacy_balance(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=True)
 def load_kpis_only(path_str: str, token: float, center_key: str):
+    
     xls = pd.ExcelFile(path_str, engine="openpyxl")
 
 # ✅ NEEDFUL: pick the correct detail sheet first
@@ -518,7 +519,7 @@ for s in preferred:
     if s in xls.sheet_names:
         base_sheet = s
         break
-
+        
 # fallback: first sheet if none matched
 if base_sheet is None:
     base_sheet = xls.sheet_names[0]
