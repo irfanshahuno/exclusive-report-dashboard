@@ -16,7 +16,7 @@ from botocore.exceptions import ClientError
 st.set_page_config(page_title="Balance — Initial / Resub with Aging", layout="wide")
 st.title("Balance — Initial / Resub with Aging (Summary)")
 
-# ✅ NEEDFUL CHANGE ONLY:
+# ✅ NEEDFUL:
 # If this file is inside /pages, store data at repo root /data (not /pages/data)
 THIS_FILE = Path(__file__).resolve()
 BASE = THIS_FILE.parents[1] if THIS_FILE.parent.name == "pages" else THIS_FILE.parent
@@ -24,7 +24,7 @@ BASE = THIS_FILE.parents[1] if THIS_FILE.parent.name == "pages" else THIS_FILE.p
 DATA_DIR = BASE / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-YEARS = [2024, 2025]
+YEARS = [2024, 2025, 2026]
 
 CENTERS = {
     "easyhealth": "Easy Health Medical Clinic (MF8031)",
@@ -32,16 +32,13 @@ CENTERS = {
     "pharmacy": "Excellent Pharmacy (PF3205)",
 }
 
-# Your required order: start from 0–30
-AGING_ORDER = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", "91–120 Days", ">120 Days"]
+GT_PAT = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
 
 # Default sold-to-klaim keywords (for medical centers)
 SOLD_TO_KLAIM_KEYWORDS_DEFAULT = ["NextCare", "Sukoon", "Almadallah", "Daman", "FMC"]
 
-# Pharmacy sold insurers (as per your instruction)
+# Pharmacy sold insurers
 SOLD_TO_KLAIM_KEYWORDS_PHARMACY = ["ALMADALLAH-AD", "Daman"]
-
-GT_PAT = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
 
 # =========================================================
 # PREMIUM + SOOTHING UI (ONLY STYLES) + KPI AUTO-FIT
@@ -49,13 +46,11 @@ GT_PAT = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
 st.markdown(
     """
 <style>
-/* ---------- Page background (soothing) ---------- */
 .stApp{
   background: linear-gradient(180deg, #F7FAFF 0%, #FFFFFF 45%) !important;
 }
 hr{ border: none !important; height:1px !important; background:#E6EEF8 !important; }
 
-/* ---------- Premium Buttons (Light-blue) ---------- */
 div.stButton > button{
   width: 100% !important;
   min-height: 58px !important;
@@ -85,14 +80,12 @@ div.stButton > button:focus-visible{
   box-shadow: none !important;
 }
 
-/* ---------- Center title (dark navy) ---------- */
 .center-title{
   color:#0B2D5C !important;
   font-weight: 900 !important;
   margin-bottom: 0.15rem !important;
 }
 
-/* ---------- Premium KPI Cards (5 columns) ---------- */
 .kpi-grid{
   display:grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -106,7 +99,7 @@ div.stButton > button:focus-visible{
   border-radius: 16px;
   padding: 14px 16px;
   box-shadow: 0 8px 18px rgba(11,45,92,0.06);
-  min-width: 0; /* important */
+  min-width: 0;
 }
 .kpi-label{
   font-size: 13px;
@@ -114,7 +107,6 @@ div.stButton > button:focus-visible{
   font-weight: 750;
   margin-bottom: 6px;
 }
-/* ✅ AUTO-FIT number inside card + keep in box */
 .kpi-value{
   font-size: clamp(16px, 2.0vw, 28px);
   font-weight: 900;
@@ -125,8 +117,6 @@ div.stButton > button:focus-visible{
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
-/* Slight highlight for Current Balance card (same bold, different color) */
 .kpi-card.current{
   background: linear-gradient(180deg, #F1F7FF 0%, #FFFFFF 100%);
   border-color: #CFE3FF;
@@ -134,8 +124,6 @@ div.stButton > button:focus-visible{
 .kpi-card.current .kpi-value{
   color:#0B2D5C;
 }
-
-/* Mobile */
 @media (max-width: 1100px){
   .kpi-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -143,7 +131,6 @@ div.stButton > button:focus-visible{
 """,
     unsafe_allow_html=True,
 )
-
 
 def render_balance_kpi_cards(total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60):
     def fmt(x):
@@ -182,9 +169,8 @@ def render_balance_kpi_cards(total_balance, sold_to_klaim_balance, current_balan
     """
     st.markdown(html, unsafe_allow_html=True)
 
-
 # =========================================================
-# Helpers (same logic as your working script)
+# Column helpers (same logic style)
 # =========================================================
 INSURANCE_COLS = ["Insurance", "PayerName", "Insurer", "Plan"]
 NET_COLS = ["ActivityIns", "Net Amount", "NetAmount"]
@@ -200,13 +186,11 @@ ACTIVITY_STATUS_COLS = ["ActivityStatus"]
 DENIAL_COLS = ["DenialCode", "Denial Code"]
 DATE_COLS = ["SubmissionDate", "ClaimDate", "VisitDate", "ServiceDate", "InvoiceDate", "EncounterDate"]
 
-
 def pick(df, candidates):
     for c in candidates:
         if c in df.columns:
             return c
     return None
-
 
 def ensure_insurance(df):
     c = pick(df, INSURANCE_COLS)
@@ -216,7 +200,6 @@ def ensure_insurance(df):
         df["Insurance"] = df[c]
     df["Insurance"] = df["Insurance"].fillna("Not Available").astype(str)
     return df
-
 
 def ensure_numeric(df):
     net = pick(df, NET_COLS) or "ActivityIns"
@@ -229,7 +212,6 @@ def ensure_numeric(df):
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
     return df, net, present_paid
-
 
 def compute_measures(df, net_col, paid_cols):
     df["Paid"] = df[paid_cols].sum(axis=1) if paid_cols else 0.0
@@ -258,7 +240,6 @@ def compute_measures(df, net_col, paid_cols):
 
     return df
 
-
 def add_aging(df):
     existing = [c for c in DATE_COLS if c in df.columns]
     for c in existing:
@@ -275,48 +256,8 @@ def add_aging(df):
     bins = [-1, 30, 45, 60, 90, 120, float("inf")]
     labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", "91–120 Days", ">120 Days"]
     df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
-
     df["AgingBucket"] = df["AgingBucket"].astype(str).replace("nan", "Unknown")
     return df
-
-
-def derive_attempt_stage(balance_df):
-    status_col = pick(balance_df, STATUS_COLS)
-    act_status_col = pick(balance_df, ACTIVITY_STATUS_COLS)
-
-    status = (
-        balance_df[status_col].astype(str).fillna("").str.strip()
-        if status_col
-        else pd.Series([""] * len(balance_df), index=balance_df.index)
-    )
-    act = (
-        balance_df[act_status_col].astype(str).fillna("").str.strip()
-        if act_status_col
-        else pd.Series([""] * len(balance_df), index=balance_df.index)
-    )
-
-    src = status.where(status != "", act)
-    s = src.astype(str).str.lower().str.replace(r"\s+", " ", regex=True).str.strip()
-
-    def attempt_num(txt: str) -> int:
-        t = (txt or "").lower().strip()
-        m = re.search(r"resub(?:mission)?\s*[-]?\s*([123])", t)
-        if m:
-            return int(m.group(1)) + 1
-        if "submitted" in t or "not submitted" in t:
-            return 1
-        return 1
-
-    balance_df["AttemptNum"] = s.apply(attempt_num).astype(int)
-    stage_map = {
-        1: "Initial Submission",
-        2: "Resub-1 (2nd Submission)",
-        3: "Resub-2 (3rd Submission)",
-        4: "Resub-3 (4th Submission)",
-    }
-    balance_df["AttemptStage"] = balance_df["AttemptNum"].map(stage_map).fillna("Initial Submission")
-    return balance_df
-
 
 def sold_to_klaim_mask(series: pd.Series, keywords) -> pd.Series:
     s = series.fillna("").astype(str).str.lower()
@@ -326,18 +267,14 @@ def sold_to_klaim_mask(series: pd.Series, keywords) -> pd.Series:
     pat = "|".join(re.escape(k) for k in kws)
     return s.str.contains(pat, regex=True)
 
-
 def is_over_60_bucket(bucket_series: pd.Series) -> pd.Series:
     b = bucket_series.fillna("").astype(str)
     return b.isin(["61–90 Days", "91–120 Days", ">120 Days"])
 
-
+# =========================================================
+# Admin mode (same as dashboard)
+# =========================================================
 def is_admin_mode() -> bool:
-    """
-    Admin login like your main dashboard:
-    - If ADMIN_PASSWORD is in st.secrets → require it.
-    - If not → show toggle (for local/testing).
-    """
     secret_pwd = st.secrets.get("ADMIN_PASSWORD", "")
     if secret_pwd:
         if st.session_state.get("is_admin", False):
@@ -351,27 +288,19 @@ def is_admin_mode() -> bool:
                 else:
                     st.error("Wrong password")
         return False
-    else:
-        return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
+    return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
 
+st.session_state.is_admin = is_admin_mode()
 
-# ====================== ✅ S3 FALLBACK HELPERS (NEEDFUL) ======================
+# =========================================================
+# ✅ S3 FALLBACK HELPERS (NEEDFUL)
+# =========================================================
 def _get_s3_cfg():
     access_key = st.secrets.get("AWS_ACCESS_KEY_ID", "")
     secret_key = st.secrets.get("AWS_SECRET_ACCESS_KEY", "")
 
-    region = (
-        st.secrets.get("AWS_REGION")
-        or st.secrets.get("AWS_DEFAULT_REGION")
-        or "eu-north-1"
-    )
-
-    bucket = (
-        st.secrets.get("S3_BUCKET_NAME")
-        or st.secrets.get("S3_BUCKET")
-        or ""
-    )
-
+    region = st.secrets.get("AWS_REGION") or st.secrets.get("AWS_DEFAULT_REGION") or "eu-north-1"
+    bucket = st.secrets.get("S3_BUCKET_NAME") or st.secrets.get("S3_BUCKET") or ""
     prefix = st.secrets.get("S3_PREFIX", "").strip().strip("/")
 
     if not (access_key and secret_key and bucket):
@@ -385,7 +314,6 @@ def _get_s3_cfg():
         "prefix": prefix,
     }
 
-
 def _s3_client(cfg):
     return boto3.client(
         "s3",
@@ -394,21 +322,14 @@ def _s3_client(cfg):
         region_name=cfg["region"],
     )
 
-
 def s3_key_for(center_key: str, year: int, filename: str) -> str:
     cfg = _get_s3_cfg()
     pre = (cfg["prefix"] + "/") if (cfg and cfg.get("prefix")) else ""
     return f"{pre}{center_key}/{year}/{filename}"
 
-
 def ensure_local_from_s3(local_path: Path, center_key: str, year: int) -> bool:
-    """
-    If local report is missing, download from S3 into local_path.
-    Returns True if local_path exists after this function (downloaded or already present).
-    """
     if local_path.exists():
         return True
-
     cfg = _get_s3_cfg()
     if cfg is None:
         return False
@@ -422,125 +343,63 @@ def ensure_local_from_s3(local_path: Path, center_key: str, year: int) -> bool:
         return local_path.exists()
     except ClientError:
         return False
-# =====================================================================
 
-
-# ✅ NEEDFUL: match main dashboard output paths/names
+# =========================================================
+# Paths (match main dashboard)
+# =========================================================
 def report_path(center_key: str, year: int) -> Path:
     if center_key == "pharmacy":
         return DATA_DIR / "excellent_pharmacy" / str(year) / "Pharmacy_Exclusive_Report_with_Aging.xlsx"
-    else:
-        return DATA_DIR / center_key / str(year) / "report.xlsx"
-
+    if center_key == "excellent":
+        return DATA_DIR / "excellent" / str(year) / "report.xlsx"
+    if center_key == "easyhealth":
+        return DATA_DIR / "easyhealth" / str(year) / "report.xlsx"
+    return DATA_DIR / center_key / str(year) / "report.xlsx"
 
 def save_uploaded_report(center_key: str, year: int, upload) -> Path:
-    folder = DATA_DIR / center_key / str(year)
-    folder.mkdir(parents=True, exist_ok=True)
-    dst = folder / "report.xlsx"
-    dst.write_bytes(upload.read())
-    return dst
+    rp = report_path(center_key, year)
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    rp.write_bytes(upload.read())
+    return rp
 
-
-def ci_get(df, names):
-    lower_map = {str(c).strip().lower(): c for c in df.columns}
-    for n in names:
-        k = str(n).strip().lower()
-        if k in lower_map:
-            return lower_map[k]
-    return None
-
-
-def compute_pharmacy_balance(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-
-    col_net = ci_get(df, ["Claim Amount", "Claim Amount (Net)", "NetAmount", "Net Amount", "TotalAmount", "Total Amount", "Net"])
-    col_paid = ci_get(df, ["Remitted Amount", "Remitted Amount (Paid)", "Paid", "Remit Amount", "RemitAmount"])
-    col_stat = ci_get(df, ["ClaimStatus", "Status", "ResponseType"])
-    col_payer = ci_get(df, ["Insurance", "PayerName", "Insurer", "Plan", "InsurancePlan"])
-    col_date = ci_get(df, ["ClaimDate", "RxDate", "DispenseDate", "SubmissionDate", "VisitDate", "DOS", "DateOfService"])
-
-    if not col_net or not col_paid or not col_stat:
-        df = ensure_insurance(df)
-        df, net_col, paid_cols = ensure_numeric(df)
-        df = compute_measures(df, net_col, paid_cols)
-        return df
-
-    if not col_payer:
-        col_payer = "Insurance"
-        df[col_payer] = "Not Available"
-    if not col_date:
-        col_date = "ClaimDate"
-        df[col_date] = pd.NaT
-
-    df[col_net] = pd.to_numeric(df[col_net], errors="coerce").fillna(0.0).clip(lower=0)
-    df[col_paid] = pd.to_numeric(df[col_paid], errors="coerce").fillna(0.0).clip(lower=0)
-    df[col_date] = pd.to_datetime(df[col_date], errors="coerce", dayfirst=True)
-
-    lower_status = df[col_stat].astype(str).str.lower().str.strip()
-    net = df[col_net]
-    paid = df[col_paid]
-    diff = (net - paid).clip(lower=0)
-
-    df["Insurance"] = df[col_payer].fillna("Not Available").astype(str)
-
-    df["Rejected"] = 0.0
-    df["Accepted"] = 0.0
-    df["Balance"] = 0.0
-    df["Paid"] = paid
-
-    mask_denied = lower_status.isin(["denied", "rejected"])
-    df.loc[mask_denied, "Rejected"] = net
-    df.loc[mask_denied, ["Accepted", "Balance"]] = 0.0
-
-    tiny_threshold = 4.0
-    mask_paid = paid > 0
-    mask_tiny = diff <= tiny_threshold
-    mask_acc = (~mask_denied) & mask_paid & mask_tiny
-    df.loc[mask_acc, "Accepted"] = diff
-    df.loc[mask_acc, "Balance"] = 0.0
-
-    mask_bal = (~mask_denied) & (diff > tiny_threshold)
-    df.loc[mask_bal, "Balance"] = diff
-
-    df["RefDate"] = df[col_date]
-    return df
-
-
+# =========================================================
+# ✅ MAIN FIX: Always read correct sheet (NOT first sheet)
+# =========================================================
 @st.cache_data(show_spinner=True)
 def load_kpis_only(path_str: str, token: float, center_key: str):
-    
     xls = pd.ExcelFile(path_str, engine="openpyxl")
 
-# ✅ NEEDFUL: pick the correct detail sheet first
-preferred = ["Balance_Aging_Detail", "Balance_Aging_Summary", "Insurance_Totals"]
-base_sheet = None
-for s in preferred:
-    if s in xls.sheet_names:
-        base_sheet = s
-        break
-        
-# fallback: first sheet if none matched
-if base_sheet is None:
-    base_sheet = xls.sheet_names[0]
+    # ✅ NEEDFUL: pick correct sheet (detail first)
+    preferred = ["Balance_Aging_Detail", "Balance_Aging_Summary", "Insurance_Totals"]
+    base_sheet = None
+    for s in preferred:
+        if s in xls.sheet_names:
+            base_sheet = s
+            break
+    if base_sheet is None:
+        base_sheet = xls.sheet_names[0]
 
-df = pd.read_excel(xls, sheet_name=base_sheet)
-
+    df = pd.read_excel(xls, sheet_name=base_sheet)
     df.columns = [str(c).strip() for c in df.columns]
 
-    if center_key == "pharmacy":
-        df = compute_pharmacy_balance(df)
-        df = add_aging(df) if "AgingBucket" not in df.columns else df
-        keywords = SOLD_TO_KLAIM_KEYWORDS_PHARMACY
-    else:
+    # ---- Medical centers: same measure logic
+    if center_key in ("excellent", "easyhealth"):
         df = ensure_insurance(df)
         df, net_col, paid_cols = ensure_numeric(df)
         df = compute_measures(df, net_col, paid_cols)
         df = add_aging(df)
         keywords = SOLD_TO_KLAIM_KEYWORDS_DEFAULT
 
+    # ---- Pharmacy: use same logic as your earlier working script
+    else:
+        # If pharmacy sheet is already detail-like, reuse same measures too:
+        df = ensure_insurance(df)
+        df, net_col, paid_cols = ensure_numeric(df)
+        df = compute_measures(df, net_col, paid_cols)
+        df = add_aging(df)
+        keywords = SOLD_TO_KLAIM_KEYWORDS_PHARMACY
+
     balance_df = df[df["Balance"] > 0].copy()
-    balance_df = derive_attempt_stage(balance_df)
     balance_df = balance_df[balance_df["AgingBucket"] != "Unknown"].copy()
 
     total_balance = float(pd.to_numeric(balance_df["Balance"], errors="coerce").fillna(0).sum())
@@ -553,24 +412,19 @@ df = pd.read_excel(xls, sheet_name=base_sheet)
     sold_over60 = float(pd.to_numeric(balance_df.loc[sold_mask & over60_mask, "Balance"], errors="coerce").fillna(0).sum())
     current_over60 = float(pd.to_numeric(balance_df.loc[(~sold_mask) & over60_mask, "Balance"], errors="coerce").fillna(0).sum())
 
-    return total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60, keywords
-
+    return total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60, keywords, base_sheet
 
 # =========================================================
-# UI: Year-first landing like main dashboard
+# URL Params: receive from dashboard ?center=excellent&year=2025
 # =========================================================
-st.session_state.is_admin = is_admin_mode()
-
-# ✅ NEEDFUL: query param helper
 def _qs_first(key: str):
     v = st.query_params.get(key)
     if isinstance(v, (list, tuple)):
         return v[0] if v else None
     return v
 
-# ✅ NEEDFUL: detect year + center from dashboard URL
 qs_year = _qs_first("year")
-qs_center = _qs_first("center")  # excellent/pharmacy/easyhealth
+qs_center = _qs_first("center")
 
 if qs_year and st.session_state.get("year") is None:
     try:
@@ -579,64 +433,62 @@ if qs_year and st.session_state.get("year") is None:
         pass
 
 if qs_center and st.session_state.get("center_key") is None:
-    qs_center = str(qs_center).strip().lower()
-    if qs_center in CENTERS:
-        st.session_state.center_key = qs_center
+    c = str(qs_center).strip().lower()
+    if c in CENTERS:
+        st.session_state.center_key = c
 
 st.caption(
     f"Mode: **{'admin' if st.session_state.get('is_admin') else 'view'}** · "
-    f"Year: **{st.session_state.get('year') or 'none'}**"
+    f"Year: **{st.session_state.get('year') or 'none'}** · "
+    f"Center: **{st.session_state.get('center_key') or 'all'}**"
 )
 
-# ---- Landing: only year buttons ----
+# =========================================================
+# Year landing
+# =========================================================
 if st.session_state.get("year") is None:
     st.subheader("Select Year")
-    y1, y2 = st.columns(2)
-
-    with y1:
-        if st.button("Pending Balance 2024", use_container_width=True, key="pb_2024"):
-            st.session_state.year = 2024
-            st.query_params["year"] = "2024"
-            st.rerun()
-
-    with y2:
-        if st.button("Pending Balance 2025", use_container_width=True, key="pb_2025"):
-            st.session_state.year = 2025
-            st.query_params["year"] = "2025"
-            st.rerun()
-
+    cols = st.columns(3)
+    for i, y in enumerate([2024, 2025, 2026]):
+        with cols[i]:
+            if st.button(f"Pending Balance {y}", use_container_width=True, key=f"pb_{y}"):
+                st.session_state.year = y
+                st.query_params["year"] = str(y)
+                st.rerun()
     st.stop()
 
 year = int(st.session_state.year)
 
-# Back to year selection
+# Back
 if st.button("◀ Back to Year Selection"):
     st.session_state.year = None
+    st.session_state.center_key = None
     try:
         if "year" in st.query_params:
             del st.query_params["year"]
+        if "center" in st.query_params:
+            del st.query_params["center"]
     except Exception:
         pass
     st.rerun()
 
-if st.query_params.get("year") != str(year):
-    st.query_params["year"] = str(year)
+# Keep query param synced
+st.query_params["year"] = str(year)
 
 # =========================================================
-# NEEDFUL: Order + 2024 rule (no EasyHealth)
+# Centers list
 # =========================================================
 if year == 2024:
     centers_to_show = ["excellent", "pharmacy"]
 else:
     centers_to_show = ["excellent", "pharmacy", "easyhealth"]
 
-# ✅ NEEDFUL: if dashboard passed a center, show ONLY that center
 forced_center = st.session_state.get("center_key")
 if forced_center in centers_to_show:
     centers_to_show = [forced_center]
 
 # =========================================================
-# Render KPIs ONLY per center (premium cards)
+# Render per center
 # =========================================================
 def render_center_kpis_only(center_key: str, year: int):
     st.markdown(f"<h2 class='center-title'>{CENTERS[center_key]}</h2>", unsafe_allow_html=True)
@@ -644,7 +496,7 @@ def render_center_kpis_only(center_key: str, year: int):
 
     rp = report_path(center_key, year)
 
-    # ✅ NEEDFUL: S3 fallback (download if local missing)
+    # ✅ S3 fallback
     ensure_local_from_s3(rp, center_key, year)
 
     token = rp.stat().st_mtime if rp.exists() else 0.0
@@ -652,12 +504,8 @@ def render_center_kpis_only(center_key: str, year: int):
     st.caption(f"Saved report: `{rp}` · Built: **{built}**")
 
     if st.session_state.get("is_admin"):
-        with st.expander("⬆️ Admin: Upload/replace report.xlsx for this center & year", expanded=False):
-            up = st.file_uploader(
-                "Upload report (.xlsx)",
-                type=["xlsx"],
-                key=f"u_{center_key}_{year}",
-            )
+        with st.expander("⬆️ Admin: Upload/replace report file for this center & year", expanded=False):
+            up = st.file_uploader("Upload report (.xlsx)", type=["xlsx"], key=f"u_{center_key}_{year}")
             if up:
                 dst = save_uploaded_report(center_key, year, up)
                 st.success(f"Saved ✅ {dst}")
@@ -672,14 +520,12 @@ def render_center_kpis_only(center_key: str, year: int):
         st.markdown("---")
         return
 
-    (
-        total_balance,
-        sold_to_klaim_balance,
-        current_balance,
-        sold_over60,
-        current_over60,
-        keywords_used,
-    ) = load_kpis_only(str(rp), token, center_key)
+    total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60, keywords_used, used_sheet = load_kpis_only(
+        str(rp), token, center_key
+    )
+
+    # Small debug caption (helpful, safe)
+    st.caption(f"Using sheet: **{used_sheet}**")
 
     render_balance_kpi_cards(
         total_balance,
@@ -692,11 +538,6 @@ def render_center_kpis_only(center_key: str, year: int):
     st.caption(f"Sold-to-Klaim keywords: {', '.join(keywords_used)}")
     st.markdown("---")
 
-
-# =========================================================
-# Show centers KPIs for selected year
-# =========================================================
 st.markdown(f"## Pending Balance — {year}")
-
 for ckey in centers_to_show:
     render_center_kpis_only(ckey, year)
