@@ -75,8 +75,13 @@ st.set_option("client.showErrorDetails", False)
 # NEW: enforce view login first
 require_view_access()
 
-# ✅ Balance Attempt Aging app URL (opens on Balance click)
-BALANCE_ATTEMPT_URL = "https://balance-attempt-aging-dashboard-eigtoins4ai9hd9r7jsmen.streamlit.app/"
+# ====================== ✅ NEEDFUL: BALANCE PAGE INSIDE SAME APP ======================
+BALANCE_PAGE_PATH = "pages/3_Balance_Attempt_Aging.py"
+
+def build_balance_url(center: str, year: int) -> str:
+    return f"?nav=balance&center={center}&year={year}"
+# ================================================================================
+
 
 # =========================================================
 # ✅ PREMIUM + SOOTHING UI (ONLY STYLES) + ✅ AUTO-FIT KPI
@@ -196,6 +201,7 @@ div.stButton > button:focus-visible{
 """,
     unsafe_allow_html=True,
 )
+
 def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, rejection_url: str = ""):
     """Premium KPI cards (Balance clickable, Rejected clickable)."""
     def fmt(x):
@@ -233,7 +239,8 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, rejection_url: 
         <div class="kpi-value">{fmt(paid)}</div>
       </div>
 
-      <a class="kpi-link" href="{balance_url}" target="_blank" title="{fmt(bal)}">
+      <!-- ✅ NEEDFUL: remove target=_blank so it opens in same app -->
+      <a class="kpi-link" href="{balance_url}" title="{fmt(bal)}">
         <div class="kpi-card balance">
           <div class="kpi-label">Balance</div>
           <div class="kpi-value">{fmt(bal)}</div>
@@ -249,7 +256,8 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, rejection_url: 
     </div>
     """
     st.markdown(html, unsafe_allow_html=True)
-    
+
+
 # ====================== NEW: YEAR LANDING PAGE (NEEDFUL) ======================
 def reset_year_selection():
     # back to landing page
@@ -354,6 +362,30 @@ CENTERS = {
     },
 }
 
+# ====================== ✅ NEEDFUL: NAV HANDLER for Balance ======================
+nav = st.query_params.get("nav")
+if nav == "balance":
+    c = st.query_params.get("center")
+    y = st.query_params.get("year")
+
+    if c in CENTERS:
+        st.session_state.center_key = c
+    try:
+        if y:
+            y_int = int(y)
+            st.session_state.year = y_int
+            st.session_state.rcm_year = y_int
+    except Exception:
+        pass
+
+    try:
+        del st.query_params["nav"]
+    except Exception:
+        pass
+
+    st.switch_page(BALANCE_PAGE_PATH)
+# ================================================================================
+
 
 # ====================== ✅ NEEDFUL S3 HELPERS (NEW) ======================
 def _get_s3_cfg():
@@ -426,6 +458,7 @@ def mtime_token(p: Path) -> float:
     except FileNotFoundError:
         return 0.0
 
+# --------- (rest of your script unchanged below) ---------
 
 def _run(cmd):
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -561,8 +594,10 @@ def ksum(df: pd.DataFrame, *cands):
     
 def build_rejection_url(center, year):
     return f"/Rejection_Analysis?center={center}&year={year}"
-
-
+    
+def build_balance_url(center, year):
+    return f"/3_Balance_Attempt_Aging?center={center}&year={year}"
+   
 def is_admin_mode() -> bool:
     secret_pwd = st.secrets.get("ADMIN_PASSWORD", "")
     if secret_pwd:
@@ -720,13 +755,13 @@ if ck not in CENTERS:
 
     st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
-    render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, BALANCE_ATTEMPT_URL,
+    render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, build_balance_url("excellent", sel_year),
                  rejection_url=build_rejection_url("excellent", sel_year))
     st.markdown("---")
 
     st.markdown('<h3 class="center-title">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
-    render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, BALANCE_ATTEMPT_URL,
+    render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, build_balance_url("pharmacy", sel_year),
                  rejection_url=build_rejection_url("pharmacy", sel_year))
     st.markdown("---")
 
@@ -736,7 +771,7 @@ if ck not in CENTERS:
 
         st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
         st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
-        render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, BALANCE_ATTEMPT_URL,
+        render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, build_balance_url("easyhealth", sel_year),
                  rejection_url=build_rejection_url("easyhealth", sel_year))
 
     st.stop()
@@ -935,7 +970,8 @@ try:
     acc = ksum(totals_no_gt, "Accepted")
 
     st.markdown(f"### Key metrics — {st.session_state.get('year')}")
-    render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL,
+    render_kpi_cards(net, paid, bal, rej, acc,
+                 build_balance_url(st.session_state.get("center_key"), st.session_state.get("year")),
                  rejection_url=build_rejection_url(st.session_state.get("center_key"), st.session_state.get("year")))
     st.markdown("---")
 
@@ -1106,6 +1142,7 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
 
 
 
