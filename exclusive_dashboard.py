@@ -483,6 +483,49 @@ def download_from_s3(dest_path: Path, center_key: str, year: int, filename: str)
         return False
 
 
+
+def resolve_existing_report(folder: Path, preferred_name: str) -> Path:
+    """Return the best local report path (preferred -> report.xlsx -> newest excel)."""
+    candidates = [preferred_name]
+    if preferred_name.lower() != "report.xlsx":
+        candidates.append("report.xlsx")
+    # common variants
+    candidates += ["Report.xlsx", "report.xlsb", "report.xlsm"]
+    for name in candidates:
+        p = folder / name
+        if p.exists():
+            return p
+    # fallback: newest excel-like file
+    for pattern in ("*.xlsx", "*.xlsb", "*.xlsm"):
+        files = sorted(folder.glob(pattern), key=lambda x: x.stat().st_mtime, reverse=True)
+        if files:
+            return files[0]
+    return folder / preferred_name
+
+
+def ensure_report_available(folder: Path, center_key: str, year: int, preferred_name: str) -> Path:
+    """Ensure report exists locally; if missing, try to download from S3."""
+    folder.mkdir(parents=True, exist_ok=True)
+
+    # 1) local
+    local_best = resolve_existing_report(folder, preferred_name)
+    if local_best.exists():
+        return local_best
+
+    # 2) try S3 download (preferred, then report.xlsx)
+    candidates = [preferred_name]
+    if preferred_name.lower() != "report.xlsx":
+        candidates.append("report.xlsx")
+
+    for fn in candidates:
+        dest = folder / fn
+        if download_from_s3(dest, center_key, year, fn):
+            return dest
+
+    # nothing found
+    return folder / preferred_name
+
+
 # ====================== Small helpers ======================
 def mtime_token(p: Path) -> float:
     try:
@@ -662,7 +705,8 @@ def load_center_kpis(center_key: str, year: int):
     if year not in YEARS:
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
-    outp = cfg0["folder_root"] / str(year) / cfg0["out_name"]
+    folder_y = cfg0["folder_root"] / str(year)
+    outp = ensure_report_available(folder_y, center_key, year, cfg0["out_name"])
     if not outp.exists():
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
@@ -855,7 +899,7 @@ folder = cfg["folder_root"] / str(st.session_state.get("year"))
 folder.mkdir(parents=True, exist_ok=True)
 
 src_path = resolve_source_path(folder, preferred=cfg["src_name"])
-out_path = folder / cfg["out_name"]
+out_path = ensure_report_available(folder, st.session_state.get("center_key"), st.session_state.get("year"), cfg["out_name"])
 gen_path = cfg["generator"]
 
 if (st.query_params.get("center") != st.session_state.get("center_key")) or \
