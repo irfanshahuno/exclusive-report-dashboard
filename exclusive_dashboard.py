@@ -450,6 +450,27 @@ def upload_to_s3(local_path: Path, center_key: str, year: int) -> str:
     except ClientError as e:
         raise RuntimeError(f"S3 upload failed: {e}")
 
+def download_from_s3_if_missing(local_path: Path, center_key: str, year: int) -> bool:
+    """
+    Download file from S3 if local file is missing (Streamlit restart / redeploy).
+    Returns True if downloaded successfully.
+    """
+    cfg = _get_s3_cfg()
+    if cfg is None:
+        return False
+
+    if local_path.exists():
+        return False
+
+    key = s3_key_for(center_key, year, local_path.name)
+    client = _s3_client(cfg)
+
+    try:
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        client.download_file(cfg["bucket"], key, str(local_path))
+        return True
+    except ClientError:
+        return False
 
 # ====================== Small helpers ======================
 def mtime_token(p: Path) -> float:
@@ -628,9 +649,17 @@ def load_center_kpis(center_key: str, year: int):
     if year not in YEARS:
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
-    outp = cfg0["folder_root"] / str(year) / cfg0["out_name"]
-    if not outp.exists():
-        return year, 0.0, 0.0, 0.0, 0.0, 0.0
+  outp = cfg0["folder_root"] / str(year) / cfg0["out_name"]
+
+# ✅ NEEDFUL: restore report from S3 if local missing
+downloaded = download_from_s3_if_missing(outp, center_key, year)
+if downloaded:
+    load_core_sheets.clear()
+    get_report_bytes.clear()
+
+if not outp.exists():
+    return year, 0.0, 0.0, 0.0, 0.0, 0.0
+
 
     tok = mtime_token(outp)
     if tok == 0.0:
@@ -919,6 +948,16 @@ if st.session_state.get("is_admin"):
         except Exception as e:
             st.error(str(e))
 
+# ✅ NEEDFUL: restore report from S3 if local missing (Streamlit restart)
+downloaded = download_from_s3_if_missing(
+    out_path,
+    st.session_state.get("center_key"),
+    st.session_state.get("year"),
+)
+if downloaded:
+    load_core_sheets.clear()
+    get_report_bytes.clear()
+
 token = mtime_token(out_path)
 if token == 0.0:
     msg = f"Report not found for {cfg['name']} ({st.session_state.get('year')})."
@@ -1142,13 +1181,5 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
-
-
-
-
-
-
-
 
 
