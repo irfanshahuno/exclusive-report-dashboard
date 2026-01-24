@@ -428,9 +428,21 @@ def _s3_client(cfg):
 
 
 def s3_key_for(center_key: str, year: int, filename: str) -> str:
+    """Build the S3 object key.
+
+    We keep ONE consistent structure in S3:
+      s3://<bucket>/streamlit/<center>/<year>/<filename>
+
+    If you set secrets S3_PREFIX="streamlit", it will become:
+      <prefix>/<center>/<year>/<filename>
+    """
     cfg = _get_s3_cfg()
-    pre = (cfg["prefix"] + "/") if (cfg and cfg.get("prefix")) else ""
-    return f"{pre}{center_key}/{year}/{filename}"
+    if not cfg:
+        return ""
+
+    # If prefix is empty, default to "streamlit" to match your existing uploads
+    prefix = (cfg.get("prefix") or "streamlit").strip().strip("/")
+    return f"{prefix}/{center_key}/{year}/{filename}"
 
 
 def upload_to_s3(local_path: Path, center_key: str, year: int) -> str:
@@ -450,27 +462,26 @@ def upload_to_s3(local_path: Path, center_key: str, year: int) -> str:
     except ClientError as e:
         raise RuntimeError(f"S3 upload failed: {e}")
 
-def download_from_s3_if_missing(local_path: Path, center_key: str, year: int) -> bool:
-    """
-    Download file from S3 if local file is missing (Streamlit restart / redeploy).
-    Returns True if downloaded successfully.
-    """
+
+def download_from_s3(dest_path: Path, center_key: str, year: int, filename: str) -> bool:
+    """Download a file from S3 to local disk (returns True if downloaded)."""
     cfg = _get_s3_cfg()
     if cfg is None:
         return False
 
-    if local_path.exists():
+    key = s3_key_for(center_key, year, filename)
+    if not key:
         return False
 
-    key = s3_key_for(center_key, year, local_path.name)
     client = _s3_client(cfg)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        client.download_file(cfg["bucket"], key, str(local_path))
-        return True
+        client.download_file(cfg["bucket"], key, str(dest_path))
+        return dest_path.exists() and dest_path.stat().st_size > 0
     except ClientError:
         return False
+
 
 # ====================== Small helpers ======================
 def mtime_token(p: Path) -> float:
@@ -615,8 +626,10 @@ def ksum(df: pd.DataFrame, *cands):
     
 def build_rejection_url(center, year):
     return f"/Rejection_Analysis?center={center}&year={year}"
-    
-def build_balance_url(center, year):
+
+# IMPORTANT: keep build_balance_url (nav=balance) defined earlier.
+# This helper is only for display/debug if you need a plain page URL.
+def build_balance_page_url(center, year):
     return f"/Balance_Attempt_Aging?center={center}&year={year}"
    
 def is_admin_mode() -> bool:
@@ -649,17 +662,9 @@ def load_center_kpis(center_key: str, year: int):
     if year not in YEARS:
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
-  outp = cfg0["folder_root"] / str(year) / cfg0["out_name"]
-
-# ✅ NEEDFUL: restore report from S3 if local missing
-downloaded = download_from_s3_if_missing(outp, center_key, year)
-if downloaded:
-    load_core_sheets.clear()
-    get_report_bytes.clear()
-
-if not outp.exists():
-    return year, 0.0, 0.0, 0.0, 0.0, 0.0
-
+    outp = cfg0["folder_root"] / str(year) / cfg0["out_name"]
+    if not outp.exists():
+        return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
     tok = mtime_token(outp)
     if tok == 0.0:
@@ -948,21 +953,26 @@ if st.session_state.get("is_admin"):
         except Exception as e:
             st.error(str(e))
 
-# ✅ NEEDFUL: restore report from S3 if local missing (Streamlit restart)
-downloaded = download_from_s3_if_missing(
-    out_path,
-    st.session_state.get("center_key"),
-    st.session_state.get("year"),
-)
-if downloaded:
-    load_core_sheets.clear()
-    get_report_bytes.clear()
-
 token = mtime_token(out_path)
+if token == 0.0:
+    # ✅ NEEDFUL: If local report is missing (Streamlit Cloud redeploy/restart),
+    # try to pull it back from S3 (because you already uploaded it).
+    downloaded = download_from_s3(
+        out_path,
+        st.session_state.get("center_key"),
+        st.session_state.get("year"),
+        out_path.name,
+    )
+    if downloaded:
+        load_core_sheets.clear()
+        get_report_bytes.clear()
+        token = mtime_token(out_path)
+
 if token == 0.0:
     msg = f"Report not found for {cfg['name']} ({st.session_state.get('year')})."
     if st.session_state.get("is_admin"):
         msg += " (Upload source and click Rebuild.)"
+    msg += " (If you uploaded to S3, check your S3 secrets: bucket/prefix/region.)"
     st.warning(msg)
     st.stop()
 
@@ -1181,5 +1191,12 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
+
+
+
+
+
+
 
 
