@@ -11,6 +11,37 @@ import boto3
 from botocore.exceptions import ClientError
 
 # =========================================================
+# ✅ NEEDFUL: View password gate that respects main dashboard session
+# - If user already authenticated in main dashboard (is_view_auth=True), skip.
+# - If balance page opened directly, ask password.
+# =========================================================
+VIEW_PASSWORD = st.secrets.get("VIEW_PASSWORD", "Emc@2026")
+
+
+def require_view_access_balance():
+    if st.session_state.get("is_view_auth", False):
+        return
+
+    st.set_page_config(page_title="Balance — Access", layout="wide")
+    st.set_option("client.showErrorDetails", False)
+
+    st.title("🔒 Dashboard Access")
+    st.info("Enter the view password to open the balance page.")
+
+    pwd = st.text_input("View Password", type="password", key="balance_view_pwd")
+    if st.button("Enter", use_container_width=True, key="balance_view_btn"):
+        if pwd == VIEW_PASSWORD:
+            st.session_state.is_view_auth = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+
+    st.stop()
+
+
+require_view_access_balance()
+
+# =========================================================
 # Settings
 # =========================================================
 st.set_page_config(page_title="Balance — Initial / Resub with Aging", layout="wide")
@@ -137,6 +168,7 @@ div.stButton > button:focus-visible{
     unsafe_allow_html=True,
 )
 
+
 def render_balance_kpi_cards(total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60):
     def fmt(x):
         try:
@@ -174,6 +206,7 @@ def render_balance_kpi_cards(total_balance, sold_to_klaim_balance, current_balan
     """
     st.markdown(html, unsafe_allow_html=True)
 
+
 # =========================================================
 # Helpers (generic medical-center logic)
 # =========================================================
@@ -186,16 +219,17 @@ PAID_COLS = [
     "actResub3RemitInsShare",
     "TKBKAmountAct",
 ]
-STATUS_COLS = ["Status"]
 ACTIVITY_STATUS_COLS = ["ActivityStatus"]
 DENIAL_COLS = ["DenialCode", "Denial Code"]
 DATE_COLS = ["SubmissionDate", "ClaimDate", "VisitDate", "ServiceDate", "InvoiceDate", "EncounterDate"]
+
 
 def pick(df, candidates):
     for c in candidates:
         if c in df.columns:
             return c
     return None
+
 
 def ensure_insurance(df):
     c = pick(df, INSURANCE_COLS)
@@ -205,6 +239,7 @@ def ensure_insurance(df):
         df["Insurance"] = df[c]
     df["Insurance"] = df["Insurance"].fillna("Not Available").astype(str)
     return df
+
 
 def ensure_numeric(df):
     net = pick(df, NET_COLS) or "ActivityIns"
@@ -217,6 +252,7 @@ def ensure_numeric(df):
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
     return df, net, present_paid
+
 
 def compute_measures(df, net_col, paid_cols):
     df["Paid"] = df[paid_cols].sum(axis=1) if paid_cols else 0.0
@@ -245,6 +281,7 @@ def compute_measures(df, net_col, paid_cols):
 
     return df
 
+
 def add_aging(df):
     existing = [c for c in DATE_COLS if c in df.columns]
     for c in existing:
@@ -265,6 +302,7 @@ def add_aging(df):
     df["AgingBucket"] = df["AgingBucket"].astype(str).replace("nan", "Unknown")
     return df
 
+
 def sold_to_klaim_mask(series: pd.Series, keywords) -> pd.Series:
     s = series.fillna("").astype(str).str.lower()
     kws = [k.lower() for k in keywords if str(k).strip()]
@@ -273,9 +311,11 @@ def sold_to_klaim_mask(series: pd.Series, keywords) -> pd.Series:
     pat = "|".join(re.escape(k) for k in kws)
     return s.str.contains(pat, regex=True)
 
+
 def is_over_60_bucket(bucket_series: pd.Series) -> pd.Series:
     b = bucket_series.fillna("").astype(str)
     return b.isin(["61–90 Days", "91–120 Days", ">120 Days"])
+
 
 # =========================================================
 # Pharmacy logic (NEEDFUL)
@@ -287,6 +327,7 @@ def ci_get(df, names):
         if k in lower_map:
             return lower_map[k]
     return None
+
 
 def compute_pharmacy_balance(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -345,6 +386,7 @@ def compute_pharmacy_balance(df: pd.DataFrame) -> pd.DataFrame:
     df["RefDate"] = df[col_date]
     return df
 
+
 # =========================================================
 # Admin mode (optional)
 # =========================================================
@@ -364,6 +406,7 @@ def is_admin_mode() -> bool:
         return False
     else:
         return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
+
 
 st.session_state.is_admin = is_admin_mode()
 
@@ -399,6 +442,7 @@ def _get_s3_cfg():
         "prefix": prefix,
     }
 
+
 def _s3_client(cfg):
     return boto3.client(
         "s3",
@@ -407,10 +451,14 @@ def _s3_client(cfg):
         region_name=cfg["region"],
     )
 
+
 def s3_key_for(center_key: str, year: int, filename: str) -> str:
     cfg = _get_s3_cfg()
     pre = (cfg["prefix"] + "/") if (cfg and cfg.get("prefix")) else ""
+    # IMPORTANT: matches your uploaded structure: streamlit/<center>/<year>/...
+    # If you used S3_PREFIX="streamlit", then prefix handles that.
     return f"{pre}{center_key}/{year}/{filename}"
+
 
 def ensure_local_from_s3(local_path: Path, center_key: str, year: int) -> bool:
     if local_path.exists():
@@ -430,6 +478,7 @@ def ensure_local_from_s3(local_path: Path, center_key: str, year: int) -> bool:
     except ClientError:
         return False
 
+
 # =========================================================
 # Paths (match main dashboard)
 # =========================================================
@@ -443,14 +492,18 @@ def report_path(center_key: str, year: int) -> Path:
     else:
         return DATA_DIR / center_key / str(year) / "report.xlsx"
 
+
 def save_uploaded_report(center_key: str, year: int, upload) -> Path:
     rp = report_path(center_key, year)
     rp.parent.mkdir(parents=True, exist_ok=True)
     rp.write_bytes(upload.read())
     return rp
 
+
 # =========================================================
-# Query params detection (from dashboard click)
+# ✅ NEEDFUL: Read query params from dashboard click
+# - If center/year given → do NOT show password again (handled above) and do NOT show year selection.
+# - If opened directly (no center/year), show the old year landing.
 # =========================================================
 def _qs_first(key: str):
     v = st.query_params.get(key)
@@ -458,27 +511,35 @@ def _qs_first(key: str):
         return v[0] if v else None
     return v
 
+
 qs_year = _qs_first("year")
 qs_center = _qs_first("center")
 
-if qs_year and st.session_state.get("year") is None:
+# set year from query OR from main dashboard selection
+if qs_year:
     try:
         st.session_state.year = int(qs_year)
     except Exception:
         pass
+elif st.session_state.get("year") is None:
+    # main dashboard uses rcm_year
+    if st.session_state.get("rcm_year") in YEARS:
+        st.session_state.year = int(st.session_state.get("rcm_year"))
 
-if qs_center and st.session_state.get("center_key") is None:
+# set center from query params (only when coming from dashboard click)
+if qs_center:
     qs_center = str(qs_center).strip().lower()
     if qs_center in CENTERS:
         st.session_state.center_key = qs_center
 
 st.caption(
     f"Mode: **{'admin' if st.session_state.get('is_admin') else 'view'}** · "
-    f"Year: **{st.session_state.get('year') or 'none'}**"
+    f"Year: **{st.session_state.get('year') or 'none'}** · "
+    f"Center: **{st.session_state.get('center_key') or 'all'}**"
 )
 
 # =========================================================
-# Year landing
+# Year landing (ONLY if opened directly, no year provided anywhere)
 # =========================================================
 if st.session_state.get("year") is None:
     st.subheader("Select Year")
@@ -493,18 +554,7 @@ if st.session_state.get("year") is None:
 
 year = int(st.session_state.year)
 
-if st.button("◀ Back to Year Selection"):
-    st.session_state.year = None
-    st.session_state.center_key = None
-    try:
-        if "year" in st.query_params:
-            del st.query_params["year"]
-        if "center" in st.query_params:
-            del st.query_params["center"]
-    except Exception:
-        pass
-    st.rerun()
-
+# Keep query params consistent
 if st.query_params.get("year") != str(year):
     st.query_params["year"] = str(year)
 
@@ -519,6 +569,7 @@ else:
 forced_center = st.session_state.get("center_key")
 if forced_center in centers_to_show:
     centers_to_show = [forced_center]
+
 
 # =========================================================
 # ✅ LOAD KPI (detail sheet first) — FIXED
@@ -567,6 +618,7 @@ def load_kpis_only(path_str: str, token: float, center_key: str):
 
     return total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60, keywords
 
+
 # =========================================================
 # Render per center
 # =========================================================
@@ -607,6 +659,7 @@ def render_center_kpis_only(center_key: str, year: int):
     render_balance_kpi_cards(total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60)
     st.caption(f"Sold-to-Klaim keywords: {', '.join(keywords_used)}")
     st.markdown("---")
+
 
 # =========================================================
 # Page output
