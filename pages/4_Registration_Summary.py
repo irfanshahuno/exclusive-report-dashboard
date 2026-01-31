@@ -560,7 +560,10 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     st.dataframe(dfs["Employer Wise"], use_container_width=True, hide_index=True)
 
     st.subheader("Employer × Insurance")
-    st.dataframe(dfs["Employer × Insurance"], use_container_width=True, hide_index=True)
+    if "Employer × Insurance" in dfs:
+        st.dataframe(dfs["Employer × Insurance"], use_container_width=True, hide_index=True)
+    else:
+        st.info("Employer × Insurance breakdown will appear after you re-process once with the updated script.")
     dfs["Employer × Insurance"] = employer_insurance_table(reg_df, emp_col, ins_col)
 
     st.subheader("Doctor Wise Visits")
