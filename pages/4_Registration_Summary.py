@@ -367,7 +367,7 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
 
     doctor_col = _find_col(reg_df, ["Doctor", "DoctorName", "Physician", "Provider"])
     ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
-    emp_col = _find_col(reg_df, ["Employer", "Company", "EmployerName"])
+    emp_col = _find_col(reg_df, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name", "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
     bill_col = _find_col(reg_df, ["BillType", "Bill Type", "Insurance/Cash", "Cash/Insurance"])
     visit_type_col = _find_col(reg_df, ["VisitType", "Visit Type", "VisitCategory"])
     status_col = _find_col(reg_df, ["Status", "VisitStatus"])
