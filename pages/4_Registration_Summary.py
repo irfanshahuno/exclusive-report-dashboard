@@ -181,19 +181,23 @@ def get_day_from_registration(reg_df: pd.DataFrame) -> Optional[pd.Timestamp]:
 def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15) -> pd.DataFrame:
     """Return top-N counts for a column and append a TOTAL row.
 
-    - Normalizes blanks -> 'Blank'
+    - Normalizes blanks -> 'Blank' (or 'CASH' for insurance-like columns)
     - Returns columns: Value, Count
     - Appends TOTAL (sum of shown rows) at the end
     """
     if not col or col not in df.columns:
         return pd.DataFrame(columns=["Value", "Count"])
 
+    col_l = str(col).lower()
+    blank_label = "CASH" if any(k in col_l for k in ["insur", "payer", "tpa"]) else "Blank"
+
     out = (
         df[col]
-        .fillna("Blank")
+        .fillna(blank_label)
         .astype(str)
         .str.strip()
-        .replace("", "Blank")
+        .replace("", blank_label)
+        .replace("Blank", blank_label)
         .value_counts(dropna=False)
         .head(n)
         .reset_index()
@@ -207,13 +211,26 @@ def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15) -> pd.DataFram
 
 
 def employer_insurance_table(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 200) -> pd.DataFrame:
-    """Employer x Insurance breakdown (top rows) with TOTAL row at end."""
+    """Employer x Insurance breakdown (top rows) with TOTAL row at end.
+    Insurance blanks are shown as 'CASH'.
+    """
     if not emp_col or emp_col not in df.columns or not ins_col or ins_col not in df.columns:
         return pd.DataFrame(columns=["Employer", "Insurance", "Count"])
 
     tmp = df[[emp_col, ins_col]].copy()
+
+    # Employer: keep as Blank
     tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
-    tmp[ins_col] = tmp[ins_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
+
+    # Insurance: blanks => CASH
+    tmp[ins_col] = (
+        tmp[ins_col]
+        .fillna("CASH")
+        .astype(str)
+        .str.strip()
+        .replace("", "CASH")
+        .replace("Blank", "CASH")
+    )
 
     out = (
         tmp.groupby([emp_col, ins_col])
