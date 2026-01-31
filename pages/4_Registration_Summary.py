@@ -354,7 +354,7 @@ if admin_mode:
     if up1 is not None:
         try:
             reg_df = read_excel_any(up1, required_hint=["EMRNo", "VisitNo"])
-    SS["reg_df_cached"] = reg_df.copy()
+            SS["reg_df_cached"] = reg_df.copy()
             ensure_required(reg_df, ["EMRNo", "VisitNo"], "Step 1 (Registration)")
             SS["reg_file"] = {"name": up1.name, "bytes": up1.getvalue()}
             SS["reg_df"] = reg_df
