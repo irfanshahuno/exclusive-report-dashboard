@@ -100,6 +100,36 @@ st.markdown(
 hr{ border: none !important; height:1px !important; background:#E6EEF8 !important; }
 
 /* ---------- Premium Buttons (Light-blue) ---------- */
+/* ---------- Link buttons (open new tab) ---------- */
+a.navlink{
+  display: inline-block;
+  width: 100%;
+  text-align: center;
+  min-height: 58px;
+  padding: 14px 22px;
+  font-size: 18px;
+  font-weight: 800;
+  background: #EEF6FF;
+  color: #0B2D5C;
+  border: 1.8px solid #B6D4FF;
+  border-radius: 14px;
+  box-shadow: 0 3px 10px rgba(11, 45, 92, 0.10);
+  text-decoration: none !important;
+  line-height: 28px;
+}
+a.navlink:hover{
+  background: #DCEBFF;
+  border-color: #6FA4FF;
+  box-shadow: 0 6px 16px rgba(11, 45, 92, 0.14);
+}
+a.navlink:active, a.navlink:focus, a.navlink:focus-visible{
+  background: #0B2D5C;
+  color: #ffffff;
+  border-color: #0B2D5C;
+  outline: none;
+  box-shadow: none;
+}
+
 div.stButton > button{
   width: 100% !important;
   min-height: 58px !important;
@@ -768,10 +798,9 @@ t1, t2, t3 = st.columns([6, 2, 2])
 with t1:
     st.title("📊 Excellent Medical Group")
 with t2:
-    if st.button("📅 Daily Report", use_container_width=True, key="btn_daily_report"):
-        st.query_params["nav"] = "daily"
-        st.query_params["year"] = str(st.session_state.get("rcm_year") or st.session_state.get("year") or 2026)
-        st.rerun()
+    # ✅ Open Daily Report in a NEW browser tab
+    yr = int(st.session_state.get("rcm_year") or st.session_state.get("year") or 2026)
+    st.markdown(f'<a class="navlink" href="?nav=daily&year={yr}" target="_blank">📅 Daily Report</a>', unsafe_allow_html=True)
 with t3:
     if st.button("⬅ Change Year", use_container_width=True, key="btn_change_year"):
         reset_year_selection()
