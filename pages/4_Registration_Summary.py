@@ -1,11 +1,9 @@
 import io
-import os
 import uuid
-import tempfile
 import pandas as pd
 import streamlit as st
 
-# Optional S3
+# Optional S3 (do not block UI if not installed)
 try:
     import boto3
 except Exception:
@@ -20,7 +18,6 @@ st.title("Registration Summary (Registration + CashOut + Pending)")
 # Helpers
 # =========================================================
 def get_secret(key: str, default=None):
-    # Works in Streamlit Cloud + local secrets.toml
     try:
         return st.secrets.get(key, default)
     except Exception:
@@ -28,6 +25,7 @@ def get_secret(key: str, default=None):
 
 
 def s3_is_configured():
+    # Only enable S3 if everything exists AND boto3 installed
     bucket = get_secret("S3_BUCKET_NAME", "")
     ak = get_secret("AWS_ACCESS_KEY_ID", "")
     sk = get_secret("AWS_SECRET_ACCESS_KEY", "")
@@ -53,86 +51,87 @@ def normalize_cols(df: pd.DataFrame):
     return df
 
 
-def has_col(df: pd.DataFrame, col: str):
-    return col in df.columns
+def read_excel_find_header(file_bytes: bytes, required_col="EMRNo", max_header_rows=10):
+    """
+    Many .xls exports have a title row (e.g., 'EXCELLENT MEDICAL CENTER') above actual headers.
+    This function tries header rows 0..max_header_rows until it finds required_col.
+    """
+    last_cols = None
+    for h in range(max_header_rows + 1):
+        df = pd.read_excel(io.BytesIO(file_bytes), header=h)
+        df = normalize_cols(df)
+        last_cols = list(df.columns)
+        if required_col in df.columns:
+            return df, h
+
+    return None, last_cols
 
 
 def validate_registration_excel(file_bytes: bytes):
     """
-    Registration file: must contain EMR No (your registration file uses 'EMR No').
-    We'll accept 'EMR No' or 'EMRNo'.
+    Registration file should contain 'EMR No' OR 'EMRNo'
     """
     df = pd.read_excel(io.BytesIO(file_bytes))
     df = normalize_cols(df)
-    if not (has_col(df, "EMR No") or has_col(df, "EMRNo")):
+    if ("EMR No" not in df.columns) and ("EMRNo" not in df.columns):
         return False, f"Registration file must contain 'EMR No' or 'EMRNo'. Found: {list(df.columns)}"
     return True, ""
 
 
 def validate_cashout_excel(file_bytes: bytes):
     """
-    CashOut files: must contain EMRNo (you confirmed).
+    CashOut/Pending file: ONLY required column is EMRNo
+    But header row can be not the first row → auto-detect.
     """
-    df = pd.read_excel(io.BytesIO(file_bytes))
-    df = normalize_cols(df)
-    if not has_col(df, "EMRNo"):
-        return False, f"CashOut file must contain 'EMRNo'. Found: {list(df.columns)}"
+    df, last_cols = read_excel_find_header(file_bytes, required_col="EMRNo", max_header_rows=10)
+    if df is None:
+        return False, f"CashOut file must contain 'EMRNo'. Header row not found. Columns seen: {last_cols}"
     return True, ""
 
 
 def count_patients_registration(file_bytes: bytes) -> int:
     df = pd.read_excel(io.BytesIO(file_bytes))
     df = normalize_cols(df)
-    col = "EMR No" if has_col(df, "EMR No") else "EMRNo"
+    col = "EMR No" if "EMR No" in df.columns else "EMRNo"
+    if df.empty:
+        return 0
     return int(df[col].nunique())
 
 
 def count_patients_cashout(file_bytes: bytes) -> int:
-    df = pd.read_excel(io.BytesIO(file_bytes))
-    df = normalize_cols(df)
-    if df.empty:
+    df, _ = read_excel_find_header(file_bytes, required_col="EMRNo", max_header_rows=10)
+    if df is None or df.empty:
         return 0
     return int(df["EMRNo"].nunique())
 
 
 # =========================================================
-# State (for “delete uploaded file”)
+# State (delete/reset support)
 # =========================================================
-if "reg_bytes" not in st.session_state:
-    st.session_state.reg_bytes = None
-if "cash_bytes" not in st.session_state:
-    st.session_state.cash_bytes = None
-if "pend_bytes" not in st.session_state:
-    st.session_state.pend_bytes = None
-
-if "reg_name" not in st.session_state:
-    st.session_state.reg_name = ""
-if "cash_name" not in st.session_state:
-    st.session_state.cash_name = ""
-if "pend_name" not in st.session_state:
-    st.session_state.pend_name = ""
-
-if "last_result" not in st.session_state:
-    st.session_state.last_result = None
+for k in ["reg_bytes", "cash_bytes", "pend_bytes", "reg_name", "cash_name", "pend_name", "last_result"]:
+    if k not in st.session_state:
+        st.session_state[k] = None if k.endswith("_bytes") or k == "last_result" else ""
 
 
 def reset_reg():
     st.session_state.reg_bytes = None
     st.session_state.reg_name = ""
-    # also reset downstream (sequence)
     reset_cash()
     reset_pending()
+    st.session_state.last_result = None
 
 
 def reset_cash():
     st.session_state.cash_bytes = None
     st.session_state.cash_name = ""
     reset_pending()
+    st.session_state.last_result = None
 
 
 def reset_pending():
     st.session_state.pend_bytes = None
     st.session_state.pend_name = ""
+    st.session_state.last_result = None
 
 
 # =========================================================
@@ -146,19 +145,17 @@ with st.expander("Storage Status (S3)", expanded=False):
         st.write("Region:", get_secret("AWS_REGION"))
     else:
         st.warning(
-            "S3 is NOT configured. Uploaders will work and KPIs will display, "
+            "S3 is NOT configured. Uploaders will still work and summary will display, "
             "but files will NOT be saved to S3.\n\n"
             "To enable S3, add these in Streamlit Secrets:\n"
             "S3_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION"
         )
 
-
-# =========================================================
-# Step-by-step upload UI
-# =========================================================
 st.subheader("Step 1 → Step 2 → Step 3 Upload")
 
-# STEP 1
+# =========================================================
+# STEP 1 — Registration
+# =========================================================
 left1, right1 = st.columns([6, 2])
 with left1:
     st.markdown("### 1) RegistrationList.xlsx")
@@ -167,7 +164,6 @@ with left1:
         type=["xlsx"],
         key="upl_reg",
         help="Must contain 'EMR No' (or EMRNo).",
-        disabled=False,
     )
 with right1:
     st.markdown("### ")
@@ -187,7 +183,9 @@ if reg_upl is not None:
 
 st.divider()
 
-# STEP 2 (only enabled if step 1 is valid)
+# =========================================================
+# STEP 2 — CashOut (locked until Step 1 is valid)
+# =========================================================
 step2_enabled = st.session_state.reg_bytes is not None
 
 left2, right2 = st.columns([6, 2])
@@ -197,7 +195,7 @@ with left2:
         "Upload CashOut file",
         type=["xls", "xlsx"],
         key="upl_cash",
-        help="Must contain 'EMRNo'.",
+        help="Only required column: 'EMRNo' (header row will be auto-detected).",
         disabled=not step2_enabled,
     )
 with right2:
@@ -224,8 +222,10 @@ if cash_upl is not None:
 
 st.divider()
 
-# STEP 3 (only enabled if step 1 & 2 valid)
-step3_enabled = st.session_state.reg_bytes is not None and st.session_state.cash_bytes is not None
+# =========================================================
+# STEP 3 — Pending (locked until Step 1 + 2 valid)
+# =========================================================
+step3_enabled = (st.session_state.reg_bytes is not None) and (st.session_state.cash_bytes is not None)
 
 left3, right3 = st.columns([6, 2])
 with left3:
@@ -234,7 +234,7 @@ with left3:
         "Upload Pending file",
         type=["xls", "xlsx"],
         key="upl_pend",
-        help="Must contain 'EMRNo'. Can be empty (0 pending).",
+        help="Only required column: 'EMRNo'. Can be empty (0 pending).",
         disabled=not step3_enabled,
     )
 with right3:
@@ -262,7 +262,7 @@ if pend_upl is not None:
 st.divider()
 
 # =========================================================
-# Process button (enabled only if all 3 are uploaded valid)
+# PROCESS (enabled only if all 3 ready)
 # =========================================================
 all_ready = (
     st.session_state.reg_bytes is not None
@@ -270,17 +270,17 @@ all_ready = (
     and st.session_state.pend_bytes is not None
 )
 
-colp1, colp2 = st.columns([2, 6])
-with colp1:
+p1, p2 = st.columns([2, 6])
+with p1:
     process = st.button("✅ Process", type="primary", use_container_width=True, disabled=not all_ready)
-with colp2:
+with p2:
     if not all_ready:
         st.warning("Complete Step 1 → Step 2 → Step 3 to enable Process.")
     else:
         st.success("All files ready. Click Process.")
 
 # =========================================================
-# When Process is clicked: compute + upload to S3 (optional)
+# Process logic
 # =========================================================
 if process:
     run_id = str(uuid.uuid4())[:8]
@@ -289,7 +289,7 @@ if process:
     cash_patients = count_patients_cashout(st.session_state.cash_bytes)
     pending_patients = count_patients_cashout(st.session_state.pend_bytes)
 
-    # Save to S3 (optional)
+    # Optional S3 upload
     s3_keys = None
     if s3_is_configured():
         s3 = make_s3_client()
@@ -306,7 +306,6 @@ if process:
 
         s3_keys = [reg_key, cash_key, pend_key]
 
-    # Store result in session
     st.session_state.last_result = {
         "reg_patients": reg_patients,
         "cash_patients": cash_patients,
@@ -316,9 +315,8 @@ if process:
 
     st.success("Processed successfully ✅")
 
-
 # =========================================================
-# Display summary (KPIs + optional details)
+# Display results
 # =========================================================
 if st.session_state.last_result:
     res = st.session_state.last_result
@@ -334,23 +332,20 @@ if st.session_state.last_result:
         st.caption("Saved to S3:")
         st.code("\n".join(res["s3_keys"]))
 
-    # Optional: show small previews
     with st.expander("Preview (first 10 rows)", expanded=False):
         reg_df = pd.read_excel(io.BytesIO(st.session_state.reg_bytes))
-        cash_df = pd.read_excel(io.BytesIO(st.session_state.cash_bytes))
-        pend_df = pd.read_excel(io.BytesIO(st.session_state.pend_bytes))
+        cash_df, _ = read_excel_find_header(st.session_state.cash_bytes, required_col="EMRNo", max_header_rows=10)
+        pend_df, _ = read_excel_find_header(st.session_state.pend_bytes, required_col="EMRNo", max_header_rows=10)
 
         st.write("Registration preview")
         st.dataframe(reg_df.head(10), use_container_width=True)
 
         st.write("CashOut preview")
-        st.dataframe(cash_df.head(10), use_container_width=True)
+        st.dataframe(cash_df.head(10) if cash_df is not None else pd.DataFrame(), use_container_width=True)
 
         st.write("Pending preview")
-        st.dataframe(pend_df.head(10), use_container_width=True)
+        st.dataframe(pend_df.head(10) if pend_df is not None else pd.DataFrame(), use_container_width=True)
 
-    # One-click reset
     if st.button("🔄 Reset All", use_container_width=True):
         reset_reg()
-        st.session_state.last_result = None
         st.rerun()
