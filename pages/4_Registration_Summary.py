@@ -10,6 +10,7 @@ except Exception:
     boto3 = None
 
 
+# ---------------- Page ----------------
 st.set_page_config(page_title="Registration Summary", layout="wide")
 st.title("Registration Summary (Registration + CashOut + Pending)")
 
@@ -25,7 +26,6 @@ def get_secret(key: str, default=None):
 
 
 def s3_is_configured():
-    # Only enable S3 if everything exists AND boto3 installed
     bucket = get_secret("S3_BUCKET_NAME", "")
     ak = get_secret("AWS_ACCESS_KEY_ID", "")
     sk = get_secret("AWS_SECRET_ACCESS_KEY", "")
@@ -46,59 +46,86 @@ def upload_bytes_to_s3(s3, bucket: str, key: str, data: bytes):
     s3.upload_fileobj(io.BytesIO(data), bucket, key)
 
 
-def normalize_cols(df: pd.DataFrame):
+def norm_cols(df: pd.DataFrame):
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
 
 def read_excel_find_header(file_bytes: bytes, required_col="EMRNo", max_header_rows=10):
     """
-    Many .xls exports have a title row (e.g., 'EXCELLENT MEDICAL CENTER') above actual headers.
-    This function tries header rows 0..max_header_rows until it finds required_col.
+    Many .xls exports have a title row above actual headers.
+    Try header rows 0..max_header_rows until required_col exists.
     """
     last_cols = None
     for h in range(max_header_rows + 1):
         df = pd.read_excel(io.BytesIO(file_bytes), header=h)
-        df = normalize_cols(df)
+        df = norm_cols(df)
         last_cols = list(df.columns)
         if required_col in df.columns:
             return df, h
-
     return None, last_cols
 
 
+def pick_col(df: pd.DataFrame, candidates):
+    """
+    Return first matching column from candidates (case-insensitive + trimmed)
+    """
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    for cand in candidates:
+        key = str(cand).strip().lower()
+        if key in cols:
+            return cols[key]
+    return None
+
+
+def safe_value_counts(df: pd.DataFrame, col: str, drop_blank=False):
+    if col is None or col not in df.columns:
+        return pd.DataFrame(columns=["Value", "Count"])
+    s = df[col].astype(str).fillna("")
+    if drop_blank:
+        s = s[s.str.strip() != ""]
+    out = s.value_counts(dropna=False).reset_index()
+    out.columns = ["Value", "Count"]
+    return out
+
+
+def style_block_title(text: str):
+    st.markdown(
+        f"""
+        <div style="
+            background:#f6e9bf;
+            padding:10px 12px;
+            border-radius:10px;
+            font-weight:700;
+            margin-bottom:6px;">
+            {text}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def validate_registration_excel(file_bytes: bytes):
-    """
-    Registration file should contain 'EMR No' OR 'EMRNo'
-    """
     df = pd.read_excel(io.BytesIO(file_bytes))
-    df = normalize_cols(df)
-    if ("EMR No" not in df.columns) and ("EMRNo" not in df.columns):
+    df = norm_cols(df)
+    emr_col = pick_col(df, ["EMR No", "EMRNo"])
+    visit_col = pick_col(df, ["Visit No", "VisitNo", "Visit Number", "VisitNumber"])
+    if not emr_col:
         return False, f"Registration file must contain 'EMR No' or 'EMRNo'. Found: {list(df.columns)}"
+    if not visit_col:
+        # visit no not mandatory, but your top KPI uses it; warn only
+        return True, ""
     return True, ""
 
 
 def validate_cashout_excel(file_bytes: bytes):
-    """
-    CashOut/Pending file: ONLY required column is EMRNo
-    But header row can be not the first row → auto-detect.
-    """
     df, last_cols = read_excel_find_header(file_bytes, required_col="EMRNo", max_header_rows=10)
     if df is None:
         return False, f"CashOut file must contain 'EMRNo'. Header row not found. Columns seen: {last_cols}"
     return True, ""
 
 
-def count_patients_registration(file_bytes: bytes) -> int:
-    df = pd.read_excel(io.BytesIO(file_bytes))
-    df = normalize_cols(df)
-    col = "EMR No" if "EMR No" in df.columns else "EMRNo"
-    if df.empty:
-        return 0
-    return int(df[col].nunique())
-
-
-def count_patients_cashout(file_bytes: bytes) -> int:
+def count_cashout_patients(file_bytes: bytes) -> int:
     df, _ = read_excel_find_header(file_bytes, required_col="EMRNo", max_header_rows=10)
     if df is None or df.empty:
         return 0
@@ -106,36 +133,49 @@ def count_patients_cashout(file_bytes: bytes) -> int:
 
 
 # =========================================================
-# State (delete/reset support)
+# State
 # =========================================================
-for k in ["reg_bytes", "cash_bytes", "pend_bytes", "reg_name", "cash_name", "pend_name", "last_result"]:
+for k in ["reg_bytes", "cash_bytes", "pend_bytes", "reg_name", "cash_name", "pend_name", "result"]:
     if k not in st.session_state:
-        st.session_state[k] = None if k.endswith("_bytes") or k == "last_result" else ""
+        st.session_state[k] = None if k.endswith("_bytes") or k == "result" else ""
+
+
+def reset_all():
+    st.session_state.reg_bytes = None
+    st.session_state.cash_bytes = None
+    st.session_state.pend_bytes = None
+    st.session_state.reg_name = ""
+    st.session_state.cash_name = ""
+    st.session_state.pend_name = ""
+    st.session_state.result = None
 
 
 def reset_reg():
     st.session_state.reg_bytes = None
     st.session_state.reg_name = ""
-    reset_cash()
-    reset_pending()
-    st.session_state.last_result = None
+    st.session_state.cash_bytes = None
+    st.session_state.cash_name = ""
+    st.session_state.pend_bytes = None
+    st.session_state.pend_name = ""
+    st.session_state.result = None
 
 
 def reset_cash():
     st.session_state.cash_bytes = None
     st.session_state.cash_name = ""
-    reset_pending()
-    st.session_state.last_result = None
+    st.session_state.pend_bytes = None
+    st.session_state.pend_name = ""
+    st.session_state.result = None
 
 
 def reset_pending():
     st.session_state.pend_bytes = None
     st.session_state.pend_name = ""
-    st.session_state.last_result = None
+    st.session_state.result = None
 
 
 # =========================================================
-# S3 status (do NOT block UI)
+# S3 status (do not block UI)
 # =========================================================
 with st.expander("Storage Status (S3)", expanded=False):
     if s3_is_configured():
@@ -145,60 +185,51 @@ with st.expander("Storage Status (S3)", expanded=False):
         st.write("Region:", get_secret("AWS_REGION"))
     else:
         st.warning(
-            "S3 is NOT configured. Uploaders will still work and summary will display, "
-            "but files will NOT be saved to S3.\n\n"
-            "To enable S3, add these in Streamlit Secrets:\n"
-            "S3_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION"
+            "S3 is NOT configured. Uploaders will work and summary will display, "
+            "but files will NOT be saved to S3."
         )
 
 st.subheader("Step 1 → Step 2 → Step 3 Upload")
 
+
 # =========================================================
-# STEP 1 — Registration
+# Step 1
 # =========================================================
-left1, right1 = st.columns([6, 2])
-with left1:
+c1, c2 = st.columns([6, 2])
+with c1:
     st.markdown("### 1) RegistrationList.xlsx")
-    reg_upl = st.file_uploader(
-        "Upload Registration file",
-        type=["xlsx"],
-        key="upl_reg",
-        help="Must contain 'EMR No' (or EMRNo).",
-    )
-with right1:
+    reg_upl = st.file_uploader("Upload Registration file", type=["xlsx"], key="upl_reg")
+with c2:
     st.markdown("### ")
     st.button("🗑️ Delete Step 1", use_container_width=True, on_click=reset_reg)
 
 if reg_upl is not None:
-    reg_bytes = reg_upl.getvalue()
-    ok, msg = validate_registration_excel(reg_bytes)
+    b = reg_upl.getvalue()
+    ok, msg = validate_registration_excel(b)
     if not ok:
         st.error(f"Step 1 error: {msg}")
         st.session_state.reg_bytes = None
         st.session_state.reg_name = ""
     else:
-        st.session_state.reg_bytes = reg_bytes
+        st.session_state.reg_bytes = b
         st.session_state.reg_name = reg_upl.name
         st.success(f"Step 1 uploaded ✅ ({reg_upl.name})")
 
 st.divider()
 
+
 # =========================================================
-# STEP 2 — CashOut (locked until Step 1 is valid)
+# Step 2
 # =========================================================
 step2_enabled = st.session_state.reg_bytes is not None
 
-left2, right2 = st.columns([6, 2])
-with left2:
+c1, c2 = st.columns([6, 2])
+with c1:
     st.markdown("### 2) PatientCashOutList (.xls / .xlsx)")
     cash_upl = st.file_uploader(
-        "Upload CashOut file",
-        type=["xls", "xlsx"],
-        key="upl_cash",
-        help="Only required column: 'EMRNo' (header row will be auto-detected).",
-        disabled=not step2_enabled,
+        "Upload CashOut file", type=["xls", "xlsx"], key="upl_cash", disabled=not step2_enabled
     )
-with right2:
+with c2:
     st.markdown("### ")
     st.button("🗑️ Delete Step 2", use_container_width=True, on_click=reset_cash, disabled=not step2_enabled)
 
@@ -209,35 +240,32 @@ if cash_upl is not None:
     if not step2_enabled:
         st.error("Step 2 is locked. Upload Step 1 first.")
     else:
-        cash_bytes = cash_upl.getvalue()
-        ok, msg = validate_cashout_excel(cash_bytes)
+        b = cash_upl.getvalue()
+        ok, msg = validate_cashout_excel(b)
         if not ok:
             st.error(f"Step 2 error: {msg}")
             st.session_state.cash_bytes = None
             st.session_state.cash_name = ""
         else:
-            st.session_state.cash_bytes = cash_bytes
+            st.session_state.cash_bytes = b
             st.session_state.cash_name = cash_upl.name
             st.success(f"Step 2 uploaded ✅ ({cash_upl.name})")
 
 st.divider()
 
-# =========================================================
-# STEP 3 — Pending (locked until Step 1 + 2 valid)
-# =========================================================
-step3_enabled = (st.session_state.reg_bytes is not None) and (st.session_state.cash_bytes is not None)
 
-left3, right3 = st.columns([6, 2])
-with left3:
+# =========================================================
+# Step 3
+# =========================================================
+step3_enabled = st.session_state.reg_bytes is not None and st.session_state.cash_bytes is not None
+
+c1, c2 = st.columns([6, 2])
+with c1:
     st.markdown("### 3) Pending file (PatientCashOutList (1).xls)")
     pend_upl = st.file_uploader(
-        "Upload Pending file",
-        type=["xls", "xlsx"],
-        key="upl_pend",
-        help="Only required column: 'EMRNo'. Can be empty (0 pending).",
-        disabled=not step3_enabled,
+        "Upload Pending file", type=["xls", "xlsx"], key="upl_pend", disabled=not step3_enabled
     )
-with right3:
+with c2:
     st.markdown("### ")
     st.button("🗑️ Delete Step 3", use_container_width=True, on_click=reset_pending, disabled=not step3_enabled)
 
@@ -248,21 +276,22 @@ if pend_upl is not None:
     if not step3_enabled:
         st.error("Step 3 is locked. Upload Step 1 and Step 2 first.")
     else:
-        pend_bytes = pend_upl.getvalue()
-        ok, msg = validate_cashout_excel(pend_bytes)
+        b = pend_upl.getvalue()
+        ok, msg = validate_cashout_excel(b)
         if not ok:
             st.error(f"Step 3 error: {msg}")
             st.session_state.pend_bytes = None
             st.session_state.pend_name = ""
         else:
-            st.session_state.pend_bytes = pend_bytes
+            st.session_state.pend_bytes = b
             st.session_state.pend_name = pend_upl.name
             st.success(f"Step 3 uploaded ✅ ({pend_upl.name})")
 
 st.divider()
 
+
 # =========================================================
-# PROCESS (enabled only if all 3 ready)
+# Process
 # =========================================================
 all_ready = (
     st.session_state.reg_bytes is not None
@@ -279,17 +308,51 @@ with p2:
     else:
         st.success("All files ready. Click Process.")
 
-# =========================================================
-# Process logic
-# =========================================================
 if process:
     run_id = str(uuid.uuid4())[:8]
 
-    reg_patients = count_patients_registration(st.session_state.reg_bytes)
-    cash_patients = count_patients_cashout(st.session_state.cash_bytes)
-    pending_patients = count_patients_cashout(st.session_state.pend_bytes)
+    # --- read registration
+    reg_df = pd.read_excel(io.BytesIO(st.session_state.reg_bytes))
+    reg_df = norm_cols(reg_df)
 
-    # Optional S3 upload
+    # Column mapping (auto)
+    col_emr = pick_col(reg_df, ["EMR No", "EMRNo"])
+    col_visitno = pick_col(reg_df, ["Visit No", "VisitNo", "Visit Number", "VisitNumber"])
+    col_doctor = pick_col(reg_df, ["Doctor", "Doctor Name", "Physician", "Provider"])
+    col_ins = pick_col(reg_df, ["Insurance", "Payer", "TPA", "Insurance Company"])
+    col_billtype = pick_col(reg_df, ["Bill Type", "BillType"])
+    col_visittype = pick_col(reg_df, ["Visit Type", "VisitType", "Purpose"])
+    col_status = pick_col(reg_df, ["Status", "Visit Status"])
+    col_reguser = pick_col(reg_df, ["Reg:User", "Reg User", "Registered By", "Registration User"])
+    col_regdate = pick_col(reg_df, ["Reg Date", "Registration Date", "Visit Date", "Date"])
+
+    # KPIs
+    total_visits = int(len(reg_df))
+    unique_emr = int(reg_df[col_emr].nunique()) if col_emr else 0
+    unique_visitno = int(reg_df[col_visitno].nunique()) if col_visitno else total_visits
+
+    # CashOut / Pending
+    cash_patients = count_cashout_patients(st.session_state.cash_bytes)
+    pending_patients = count_cashout_patients(st.session_state.pend_bytes)
+
+    # Blocks
+    doctor_tbl = safe_value_counts(reg_df, col_doctor)
+    ins_tbl = safe_value_counts(reg_df, col_ins)
+    bill_tbl = safe_value_counts(reg_df, col_billtype)
+    visit_type_tbl = safe_value_counts(reg_df, col_visittype)
+    status_tbl = safe_value_counts(reg_df, col_status)
+    reg_user_tbl = safe_value_counts(reg_df, col_reguser)
+
+    # Reg Date wise
+    if col_regdate and col_regdate in reg_df.columns:
+        tmp = reg_df.copy()
+        tmp[col_regdate] = pd.to_datetime(tmp[col_regdate], errors="coerce").dt.date
+        reg_date_tbl = tmp[col_regdate].value_counts().sort_index().reset_index()
+        reg_date_tbl.columns = ["Reg Date", "Count"]
+    else:
+        reg_date_tbl = pd.DataFrame(columns=["Reg Date", "Count"])
+
+    # optional S3 upload of 3 originals
     s3_keys = None
     if s3_is_configured():
         s3 = make_s3_client()
@@ -306,46 +369,99 @@ if process:
 
         s3_keys = [reg_key, cash_key, pend_key]
 
-    st.session_state.last_result = {
-        "reg_patients": reg_patients,
-        "cash_patients": cash_patients,
-        "pending_patients": pending_patients,
+    st.session_state.result = {
+        "kpis": {
+            "total_visits": total_visits,
+            "unique_emr": unique_emr,
+            "unique_visitno": unique_visitno,
+            "cash_patients": cash_patients,
+            "pending_patients": pending_patients,
+        },
+        "doctor_tbl": doctor_tbl,
+        "ins_tbl": ins_tbl,
+        "bill_tbl": bill_tbl,
+        "visit_type_tbl": visit_type_tbl,
+        "status_tbl": status_tbl,
+        "reg_user_tbl": reg_user_tbl,
+        "reg_date_tbl": reg_date_tbl,
         "s3_keys": s3_keys,
     }
 
     st.success("Processed successfully ✅")
 
+
 # =========================================================
-# Display results
+# Display like Excel layout
 # =========================================================
-if st.session_state.last_result:
-    res = st.session_state.last_result
+if st.session_state.result:
+    res = st.session_state.result
+    k = res["kpis"]
 
-    st.subheader("Summary")
+    st.markdown("## Registration Summary")
 
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Registered Patients", res["reg_patients"])
-    k2.metric("CashOut Patients", res["cash_patients"])
-    k3.metric("Pending Patients", res["pending_patients"])
+    # --- Top KPI row like Excel (3 blocks)
+    a, b, c = st.columns(3)
+    with a:
+        st.metric("Total Visits", k["total_visits"])
+    with b:
+        st.metric("Unique EMR (Patients)", k["unique_emr"])
+    with c:
+        st.metric("Unique Visit No", k["unique_visitno"])
 
+    st.write("")
+
+    # --- CashOut + Pending (center like your sheet)
+    x1, x2, x3, x4 = st.columns([1, 2, 2, 1])
+    with x2:
+        st.metric("CashOut Patients", k["cash_patients"])
+    with x3:
+        st.metric("Pending Patients", k["pending_patients"])
+
+    st.write("")
+
+    # --- Doctor Wise + Insurance Wise
+    l, r = st.columns(2)
+    with l:
+        style_block_title("Doctor Wise Visits")
+        st.dataframe(res["doctor_tbl"], use_container_width=True, height=320)
+    with r:
+        style_block_title("Insurance Wise Visits")
+        st.dataframe(res["ins_tbl"], use_container_width=True, height=320)
+
+    st.write("")
+
+    # --- Bill Type + Visit Type
+    l, r = st.columns(2)
+    with l:
+        style_block_title("Bill Type (Insurance/Cash)")
+        st.dataframe(res["bill_tbl"], use_container_width=True, height=260)
+    with r:
+        style_block_title("Visit Type (Consult/Follow-up)")
+        st.dataframe(res["visit_type_tbl"], use_container_width=True, height=260)
+
+    st.write("")
+
+    # --- Status Wise + Registration User Wise
+    l, r = st.columns(2)
+    with l:
+        style_block_title("Status Wise")
+        st.dataframe(res["status_tbl"], use_container_width=True, height=260)
+    with r:
+        style_block_title("Registration User Wise")
+        st.dataframe(res["reg_user_tbl"], use_container_width=True, height=260)
+
+    st.write("")
+
+    # --- Reg Date Wise (Daily)
+    style_block_title("Reg Date Wise (Daily)")
+    st.dataframe(res["reg_date_tbl"], use_container_width=True, height=220)
+
+    # --- S3 paths
     if res.get("s3_keys"):
         st.caption("Saved to S3:")
         st.code("\n".join(res["s3_keys"]))
 
-    with st.expander("Preview (first 10 rows)", expanded=False):
-        reg_df = pd.read_excel(io.BytesIO(st.session_state.reg_bytes))
-        cash_df, _ = read_excel_find_header(st.session_state.cash_bytes, required_col="EMRNo", max_header_rows=10)
-        pend_df, _ = read_excel_find_header(st.session_state.pend_bytes, required_col="EMRNo", max_header_rows=10)
-
-        st.write("Registration preview")
-        st.dataframe(reg_df.head(10), use_container_width=True)
-
-        st.write("CashOut preview")
-        st.dataframe(cash_df.head(10) if cash_df is not None else pd.DataFrame(), use_container_width=True)
-
-        st.write("Pending preview")
-        st.dataframe(pend_df.head(10) if pend_df is not None else pd.DataFrame(), use_container_width=True)
-
+    st.write("")
     if st.button("🔄 Reset All", use_container_width=True):
-        reset_reg()
+        reset_all()
         st.rerun()
