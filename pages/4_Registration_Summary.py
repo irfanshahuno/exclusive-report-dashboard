@@ -39,6 +39,15 @@ import streamlit as st
 
 SS = st.session_state
 is_admin = SS.get("is_admin", False)
+
+# --- init session defaults to avoid KeyError ---
+SS.setdefault("reg_df", None)
+SS.setdefault("cash_df", None)
+SS.setdefault("pending_df", None)
+SS.setdefault("last_summary", None)
+SS.setdefault("last_day_ts", None)
+SS.setdefault("reg_df_cached", None)
+
 # Optional S3
 try:
     import boto3
@@ -371,7 +380,7 @@ if is_admin:
             up1 = st.file_uploader("Upload Registration file", type=["xls", "xlsx"], key="uploader_reg")
         with c2:
             if st.button("🗑️ Delete Step 1", use_container_width=True):
-                SS["reg_file"], SS["reg_df"] = None, None
+                SS["reg_file"], SS.get("reg_df") = None, None
                 st.rerun()
 
         if up1 is not None:
@@ -380,20 +389,20 @@ if is_admin:
                 SS["reg_df_cached"] = reg_df.copy()
                 ensure_required(reg_df, ["EMRNo", "VisitNo"], "Step 1 (Registration)")
                 SS["reg_file"] = {"name": up1.name, "bytes": up1.getvalue()}
-                SS["reg_df"] = reg_df
+                SS.get("reg_df") = reg_df
                 st.success(f"Step 1 OK ✅  ({up1.name})")
             except Exception as e:
-                SS["reg_file"], SS["reg_df"] = None, None
+                SS["reg_file"], SS.get("reg_df") = None, None
                 st.error(str(e))
 
         # Step 2
         st.markdown("### 2) PatientCashOutList (.xls / .xlsx)")
         c1, c2 = st.columns([3, 1])
         with c1:
-            up2 = st.file_uploader("Upload CashOut file", type=["xls", "xlsx"], key="uploader_cash", disabled=(SS["reg_df"] is None))
+            up2 = st.file_uploader("Upload CashOut file", type=["xls", "xlsx"], key="uploader_cash", disabled=(SS.get("reg_df") is None))
         with c2:
             if st.button("🗑️ Delete Step 2", use_container_width=True):
-                SS["cash_file"], SS["cash_df"] = None, None
+                SS["cash_file"], SS.get("cash_df") = None, None
                 st.rerun()
 
         if up2 is not None:
@@ -401,17 +410,17 @@ if is_admin:
                 cash_df = read_excel_any(up2, required_hint=["EMRNo"])
                 ensure_required(cash_df, ["EMRNo"], "Step 2 (CashOut)")
                 SS["cash_file"] = {"name": up2.name, "bytes": up2.getvalue()}
-                SS["cash_df"] = cash_df
+                SS.get("cash_df") = cash_df
                 st.success(f"Step 2 OK ✅  ({up2.name})")
             except Exception as e:
-                SS["cash_file"], SS["cash_df"] = None, None
+                SS["cash_file"], SS.get("cash_df") = None, None
                 st.error(str(e))
 
         # Step 3
         st.markdown("### 3) Pending file (.xls / .xlsx)")
         c1, c2 = st.columns([3, 1])
         with c1:
-            up3 = st.file_uploader("Upload Pending file", type=["xls", "xlsx"], key="uploader_pend", disabled=(SS["cash_df"] is None))
+            up3 = st.file_uploader("Upload Pending file", type=["xls", "xlsx"], key="uploader_pend", disabled=(SS.get("cash_df") is None))
         with c2:
             if st.button("🗑️ Delete Step 3", use_container_width=True):
                 SS["pend_file"], SS["pend_df"] = None, None
@@ -658,7 +667,7 @@ if is_admin:
     # Process & display
     # ---------------------------
 
-    can_process = SS["reg_df"] is not None and SS["cash_df"] is not None and SS["pend_df"] is not None
+    can_process = SS.get("reg_df") is not None and SS.get("cash_df") is not None and SS["pend_df"] is not None
 
     # Persist last result in-session (so it doesn't disappear on rerun)
     SS.setdefault("last_summary", None)
@@ -679,8 +688,8 @@ if is_admin:
             if st.button("📥 Load Saved Summary", use_container_width=True):
                 loaded = load_summary_from_s3(pd.to_datetime(picked))
                 if loaded:
-                    SS["last_summary"] = loaded
-                    SS["last_day_ts"] = pd.to_datetime(picked)
+                    SS.get("last_summary") = loaded
+                    SS.get("last_day_ts") = pd.to_datetime(picked)
                     st.success(f"Loaded saved summary for {pd.to_datetime(picked).date().isoformat()} ✅")
                 else:
                     st.warning("No saved summary.pkl found for that day.")
@@ -689,7 +698,7 @@ if is_admin:
 
 
     if admin_mode and can_process:
-        detected = get_day_from_registration(SS["reg_df"])
+        detected = get_day_from_registration(SS.get("reg_df"))
         day_ts = detected if detected is not None else pd.to_datetime(manual_day)
         if detected is None:
             st.warning("Registration file has no readable date column. Using Manual Day.")
@@ -697,7 +706,7 @@ if is_admin:
             st.success(f"Detected Day from Registration file: {day_ts.date().isoformat()}")
 
         if st.button("✅ Process & Save to S3" if s3_ok else "✅ Process (S3 not configured)", type="primary"):
-            dfs = compute_summary(SS["reg_df"], SS["cash_df"], SS["pend_df"], day_ts)
+            dfs = compute_summary(SS.get("reg_df"), SS.get("cash_df"), SS["pend_df"], day_ts)
 
             if s3_ok:
                 try:
@@ -707,14 +716,14 @@ if is_admin:
                     st.error(f"Failed to save to S3: {e}")
 
             # ✅ keep result in session so it stays visible after any rerun
-            SS["last_summary"] = dfs
-            SS["last_day_ts"] = day_ts
+            SS.get("last_summary") = dfs
+            SS.get("last_day_ts") = day_ts
 
     # Show last result (either processed now, or loaded from S3)else:
     pass
 
 
 if SS.get("last_summary") is not None and SS.get("last_day_ts") is not None:
-    render_summary(SS["last_summary"], pd.to_datetime(SS["last_day_ts"]))
-elif SS["reg_df"] is not None:
+    render_summary(SS.get("last_summary"), pd.to_datetime(SS.get("last_day_ts")))
+elif SS.get("reg_df") is not None:
     st.info("Please upload Step 2 and Step 3 in sequence to enable processing, or load a saved day from S3.")
