@@ -206,6 +206,29 @@ def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15) -> pd.DataFram
     return out
 
 
+def employer_insurance_table(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 200) -> pd.DataFrame:
+    """Employer x Insurance breakdown (top rows) with TOTAL row at end."""
+    if not emp_col or emp_col not in df.columns or not ins_col or ins_col not in df.columns:
+        return pd.DataFrame(columns=["Employer", "Insurance", "Count"])
+
+    tmp = df[[emp_col, ins_col]].copy()
+    tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
+    tmp[ins_col] = tmp[ins_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
+
+    out = (
+        tmp.groupby([emp_col, ins_col])
+        .size()
+        .reset_index(name="Count")
+        .sort_values("Count", ascending=False)
+        .head(n)
+    )
+    out.columns = ["Employer", "Insurance", "Count"]
+
+    total = int(out["Count"].sum()) if not out.empty else 0
+    out.loc[len(out)] = ["TOTAL", "", total]
+    return out
+
+
 def excel_bytes_from_dfs(dfs: Dict[str, pd.DataFrame]) -> bytes:
     bio = io.BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
@@ -535,6 +558,10 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
 
     st.subheader("Employer Wise")
     st.dataframe(dfs["Employer Wise"], use_container_width=True, hide_index=True)
+
+    st.subheader("Employer × Insurance")
+    st.dataframe(dfs["Employer × Insurance"], use_container_width=True, hide_index=True)
+    dfs["Employer × Insurance"] = employer_insurance_table(reg_df, emp_col, ins_col)
 
     st.subheader("Doctor Wise Visits")
     st.dataframe(dfs["Doctor Wise Visits"], use_container_width=True, hide_index=True)
