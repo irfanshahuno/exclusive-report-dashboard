@@ -133,7 +133,20 @@ def read_excel_any(uploaded_file, required_hint: Optional[List[str]] = None) -> 
 
     bio.seek(0)
     df = pd.read_excel(bio, header=header_idx)
-    df = df.loc[:, ~df.columns.astype(str).str.match(r"^Unnamed", na=False)]
+    # Drop 'Unnamed' columns ONLY if they are truly empty (some EMR exports store real data under Unnamed headers)
+    unnamed_cols = [c for c in df.columns if str(c).startswith("Unnamed")]
+    if unnamed_cols:
+        keep = []
+        for c in df.columns:
+            if str(c).startswith("Unnamed"):
+                s = df[c]
+                # keep if it has any non-empty value
+                has_value = s.notna().any() and (s.astype(str).str.strip() != "").any()
+                if has_value:
+                    keep.append(c)
+            else:
+                keep.append(c)
+        df = df[keep]
     return df
 
 
