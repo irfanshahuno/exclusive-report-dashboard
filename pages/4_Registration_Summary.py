@@ -179,8 +179,15 @@ def get_day_from_registration(reg_df: pd.DataFrame) -> Optional[pd.Timestamp]:
 
 
 def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15) -> pd.DataFrame:
+    """Return top-N counts for a column and append a TOTAL row.
+
+    - Normalizes blanks -> 'Blank'
+    - Returns columns: Value, Count
+    - Appends TOTAL (sum of shown rows) at the end
+    """
     if not col or col not in df.columns:
         return pd.DataFrame(columns=["Value", "Count"])
+
     out = (
         df[col]
         .fillna("Blank")
@@ -192,6 +199,10 @@ def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15) -> pd.DataFram
         .reset_index()
     )
     out.columns = ["Value", "Count"]
+
+    # ✅ TOTAL row (sum of displayed rows)
+    total = int(out["Count"].sum()) if not out.empty else 0
+    out.loc[len(out)] = ["TOTAL", total]
     return out
 
 
