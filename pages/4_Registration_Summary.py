@@ -69,20 +69,55 @@ def _find_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     return None
 
 
-def read_excel_any(uploaded_file) -> pd.DataFrame:
+def read_excel_any(uploaded_file, required_hint: Optional[List[str]] = None) -> pd.DataFrame:
+    """Read an Excel report even when the real header is not on the first row.
+
+    If `required_hint` is provided (e.g., ["EMRNo"]), we first try normal read.
+    If the required columns can't be found, we fall back to scanning the first
+    ~60 rows to detect the true header row (common in hospital report exports
+    that include big titles like 'EXCELLENT MEDICAL CENTER' before the table).
+    """
     data = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
     bio = io.BytesIO(data)
 
+    def has_required(df: pd.DataFrame) -> bool:
+        if not required_hint:
+            return False
+        for r in required_hint:
+            if r == "EMRNo":
+                if _find_col(df, ["EMRNo", "EMR NO", "EMR", "MRN", "PatientID", "Patient Id", "FileNo"]):
+                    return True
+            elif r == "VisitNo":
+                if _find_col(df, ["VisitNo", "Visit No", "Visit#", "Visit Number", "VisitID", "EncounterNo", "Encounter No"]):
+                    return True
+            else:
+                if _find_col(df, [r]):
+                    return True
+        return False
+
+    # 1) First attempt (normal)
+    bio.seek(0)
     try:
-        return pd.read_excel(bio)
+        df1 = pd.read_excel(bio)
+        # If required column NOT found, do header scan fallback
+        if required_hint and not has_required(df1):
+            raise ValueError("Header likely not on first row; retrying header scan.")
+        return df1
     except Exception:
         pass
 
+    # 2) Header scan fallback
     bio.seek(0)
     raw = pd.read_excel(bio, header=None)
-    likely = {"emrno", "emr", "visitno", "visit", "registrationdate", "regdate", "insurance"}
+
+    likely = {
+        "emrno", "emr", "mrn", "patientid", "fileno",
+        "visitno", "visit", "visitdate",
+        "billno", "doctor", "insurance"
+    }
+
     header_idx = 0
-    for i in range(min(30, len(raw))):
+    for i in range(min(60, len(raw))):
         row = raw.iloc[i].astype(str).str.lower().tolist()
         row_keys = {_norm_col(x) for x in row}
         if row_keys & likely:
@@ -264,7 +299,7 @@ with c2:
 
 if up1 is not None:
     try:
-        reg_df = read_excel_any(up1)
+        reg_df = read_excel_any(up1, required_hint=["EMRNo", "VisitNo"])
         ensure_required(reg_df, ["EMRNo", "VisitNo"], "Step 1 (Registration)")
         SS["reg_file"] = {"name": up1.name, "bytes": up1.getvalue()}
         SS["reg_df"] = reg_df
@@ -285,7 +320,7 @@ with c2:
 
 if up2 is not None:
     try:
-        cash_df = read_excel_any(up2)
+        cash_df = read_excel_any(up2, required_hint=["EMRNo"])
         ensure_required(cash_df, ["EMRNo"], "Step 2 (CashOut)")
         SS["cash_file"] = {"name": up2.name, "bytes": up2.getvalue()}
         SS["cash_df"] = cash_df
@@ -306,7 +341,7 @@ with c2:
 
 if up3 is not None:
     try:
-        pend_df = read_excel_any(up3)
+        pend_df = read_excel_any(up3, required_hint=["EMRNo"])
         ensure_required(pend_df, ["EMRNo"], "Step 3 (Pending)")
         SS["pend_file"] = {"name": up3.name, "bytes": up3.getvalue()}
         SS["pend_df"] = pend_df
