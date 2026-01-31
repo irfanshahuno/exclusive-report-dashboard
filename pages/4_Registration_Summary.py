@@ -37,6 +37,7 @@ from typing import Dict, Tuple, Optional, List
 import pandas as pd
 import streamlit as st
 
+is_admin = st.session_state.get("is_admin", False)
 # Optional S3
 try:
     import boto3
