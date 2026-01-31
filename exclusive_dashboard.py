@@ -38,6 +38,68 @@ from botocore.exceptions import ClientError
 VIEW_PASSWORD = st.secrets.get("VIEW_PASSWORD", "Emc@2026")
 
 
+# ====================== ✅ URL TOKEN (NEW) ======================
+# Opening the dashboard in a NEW TAB creates a NEW Streamlit session, so it will ask password again.
+# To avoid that, we generate a short-lived signed token in the URL and auto-auth the new session.
+TOKEN_SECRET = st.secrets.get("TOKEN_SECRET", None)  # set in Streamlit Secrets for security
+TOKEN_TTL_SECONDS = int(st.secrets.get("TOKEN_TTL_SECONDS", 600))  # 10 minutes default
+
+def _b64url_encode(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode("utf-8").rstrip("=")
+
+def _b64url_decode(s: str) -> bytes:
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+def make_url_token(payload: dict) -> str:
+    if not TOKEN_SECRET:
+        return ""  # token disabled if no secret configured
+    data = dict(payload)
+    data["iat"] = int(time.time())
+    body = json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    sig = hmac.new(TOKEN_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
+    return _b64url_encode(body) + "." + _b64url_encode(sig)
+
+def verify_url_token(token: str) -> dict | None:
+    if not TOKEN_SECRET:
+        return None
+    try:
+        body_b64, sig_b64 = token.split(".", 1)
+        body = _b64url_decode(body_b64)
+        sig = _b64url_decode(sig_b64)
+        expected = hmac.new(TOKEN_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        data = json.loads(body.decode("utf-8"))
+        iat = int(data.get("iat", 0))
+        if int(time.time()) - iat > TOKEN_TTL_SECONDS:
+            return None
+        return data
+    except Exception:
+        return None
+
+def auto_auth_from_token():
+    # If token is valid, auto-enable view access for this new session
+    tok = st.query_params.get("token")
+    if not tok:
+        return
+    data = verify_url_token(tok)
+    if not data:
+        return
+    st.session_state.is_view_auth = True
+    # optional defaults
+    if data.get("year") and not st.session_state.get("year"):
+        try:
+            st.session_state.year = int(data["year"])
+        except Exception:
+            pass
+    if data.get("center") and not st.session_state.get("center_key"):
+        st.session_state.center_key = data["center"]
+
+# ✅ attempt auto-auth BEFORE showing password screen
+auto_auth_from_token()
+
+
 def require_view_access() -> None:
     """
     View-only password gate.
@@ -396,6 +458,18 @@ CENTERS = {
 
 # ====================== ✅ NEEDFUL: NAV HANDLER for Balance ======================
 nav = st.query_params.get("nav")
+if nav == "daily":
+    # ✅ Direct-open the Daily Report page (skip center selection on home)
+    # New tab => new session, so token is used to auto-auth above.
+    y = st.query_params.get("year")
+    if y:
+        try:
+            st.session_state.year = int(y)
+            st.session_state.rcm_year = int(y)
+        except Exception:
+            pass
+    st.switch_page(DAILY_REPORT_PAGE_PATH)
+
 if nav == "balance":
     c = st.query_params.get("center")
     y = st.query_params.get("year")
@@ -800,7 +874,9 @@ with t1:
 with t2:
     # ✅ Open Daily Report in a NEW browser tab
     yr = int(st.session_state.get("rcm_year") or st.session_state.get("year") or 2026)
-    st.markdown(f'<a class="navlink" href="?nav=daily&year={yr}" target="_blank">📅 Daily Report</a>', unsafe_allow_html=True)
+    token = make_url_token({'year': yr})
+    href = f"?nav=daily&year={yr}" + (f"&token={token}" if token else "")
+    st.markdown(f'<a class="navlink" href="{href}" target="_blank">📅 Daily Report</a>', unsafe_allow_html=True)
 with t3:
     if st.button("⬅ Change Year", use_container_width=True, key="btn_change_year"):
         reset_year_selection()
