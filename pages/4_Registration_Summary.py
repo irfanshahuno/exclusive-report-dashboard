@@ -1,527 +1,506 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Streamlit Page: Registration Summary (Registration + CashOut + Pending)
+
+Key features:
+- Step-by-step upload (1 Registration, 2 CashOut, 3 Pending) with delete buttons.
+- Minimal requirements:
+  * Registration: must contain EMRNo and VisitNo (case-insensitive).
+  * CashOut: only EMRNo required.
+  * Pending: only EMRNo required.
+- Day detection:
+  * Prefers a date column in Registration (RegDate / RegistrationDate / Date).
+  * Falls back to a manual date picker.
+- Process & Save:
+  * Saves raw uploads + processed summary (pickle) + history.csv to S3 if configured.
+  * Supports old/new secret keys:
+      S3_BUCKET_NAME or S3_BUCKET
+      AWS_REGION or AWS_DEFAULT_REGION
+      S3_BASE_PREFIX or S3_PREFIX
+- Display:
+  * CURRENT DAY summary first.
+  * ACCUMULATED section shown below CURRENT DAY.
+  * Accumulated table does NOT show internal columns.
+
+If your main app already sets st.session_state["center_key"], this page will use it.
+Otherwise it provides a center selector.
+"""
+
 import io
+import os
 import re
-import hashlib
+import pickle
 from datetime import datetime, date
+from typing import Dict, Tuple, Optional, List
 
 import pandas as pd
 import streamlit as st
 
-# Optional (only used if S3 is configured)
-import boto3
-from botocore.exceptions import ClientError
+# Optional S3
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+except Exception:
+    boto3 = None
+    ClientError = Exception
+
 
 st.set_page_config(page_title="Registration Summary", layout="wide")
 st.title("Registration Summary (Registration + CashOut + Pending)")
 
-# =========================
-# Helpers
-# =========================
-def _sha1_bytes(b: bytes) -> str:
-    return hashlib.sha1(b).hexdigest()[:8]
 
-def _norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(s).strip().lower())
+def _norm_col(c: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(c).strip().lower())
 
-def find_emr_column(df: pd.DataFrame):
-    # Accept many variants
-    candidates = {"emrno", "emr", "emrnumber", "mrn", "medicalrecordno", "medicalrecordnumber", "patientid"}
-    for c in df.columns:
-        if _norm(c) in candidates:
-            return c
-    # If columns are weird, try to detect a header row in first 10 rows:
-    # Sometimes first row is a title like "EXCELLENT MEDICAL CENTER" and real header is next row.
-    # We'll scan first 10 rows and if any row contains "EMR", treat it as header.
-    for i in range(min(10, len(df))):
-        row = df.iloc[i].astype(str).tolist()
-        row_norm = [_norm(x) for x in row]
-        if any(x in candidates for x in row_norm):
-            # rebuild with that row as header
-            new_header = df.iloc[i].astype(str).tolist()
-            df2 = df.iloc[i + 1 :].copy()
-            df2.columns = new_header
-            df2 = df2.reset_index(drop=True)
-            for c in df2.columns:
-                if _norm(c) in candidates:
-                    return c, df2
+
+def _find_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    norm_map = {_norm_col(c): c for c in df.columns}
+    for cand in candidates:
+        key = _norm_col(cand)
+        if key in norm_map:
+            return norm_map[key]
+    # fuzzy: contains
+    for cand in candidates:
+        key = _norm_col(cand)
+        for k, orig in norm_map.items():
+            if key and key in k:
+                return orig
     return None
 
-def try_read_excel(uploaded_file):
-    # Works for .xls/.xlsx
-    # Try default, then fallback to header=None if headers are broken
+
+def read_excel_any(uploaded_file) -> pd.DataFrame:
+    data = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
+    bio = io.BytesIO(data)
+
     try:
-        return pd.read_excel(uploaded_file)
+        return pd.read_excel(bio)
     except Exception:
-        uploaded_file.seek(0)
-        return pd.read_excel(uploaded_file, header=None)
+        pass
 
-def safe_sheet_name(name: str) -> str:
-    # Excel sheet name max 31 chars
-    name = re.sub(r"[\[\]\*\?:/\\]", "-", name)
-    return name[:31]
-
-def to_excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
-    bio = io.BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        for sheet, df in sheets.items():
-            if df is None:
-                continue
-            df.to_excel(writer, sheet_name=safe_sheet_name(sheet), index=False)
-    return bio.getvalue()
-
-# =========================
-# S3 Secrets (accept both naming styles)
-# =========================
-def get_secret(*names, default=None):
-    for n in names:
-        if n in st.secrets:
-            return st.secrets.get(n)
-    return default
-
-AWS_KEY = get_secret("AWS_ACCESS_KEY_ID")
-AWS_SECRET = get_secret("AWS_SECRET_ACCESS_KEY")
-AWS_REGION = get_secret("AWS_REGION", "AWS_DEFAULT_REGION")
-S3_BUCKET = get_secret("S3_BUCKET_NAME", "S3_BUCKET")
-S3_PREFIX = get_secret("S3_BASE_PREFIX", default="streamlit")
-
-S3_OK = all([AWS_KEY, AWS_SECRET, AWS_REGION, S3_BUCKET])
-
-def s3_client():
-    return boto3.client(
-        "s3",
-        aws_access_key_id=AWS_KEY,
-        aws_secret_access_key=AWS_SECRET,
-        region_name=AWS_REGION,
-    )
-
-def s3_key(*parts):
-    # store inside streamlit/registration/...
-    return "/".join([S3_PREFIX.strip("/"), "registration", *[p.strip("/") for p in parts]])
-
-def s3_put_bytes(key: str, b: bytes):
-    c = s3_client()
-    c.put_object(Bucket=S3_BUCKET, Key=key, Body=b)
-
-def s3_get_bytes(key: str) -> bytes | None:
-    c = s3_client()
-    try:
-        obj = c.get_object(Bucket=S3_BUCKET, Key=key)
-        return obj["Body"].read()
-    except ClientError:
-        return None
-
-def s3_list(prefix: str):
-    c = s3_client()
-    out = []
-    token = None
-    while True:
-        kwargs = {"Bucket": S3_BUCKET, "Prefix": prefix}
-        if token:
-            kwargs["ContinuationToken"] = token
-        resp = c.list_objects_v2(**kwargs)
-        for it in resp.get("Contents", []):
-            out.append(it["Key"])
-        if resp.get("IsTruncated"):
-            token = resp.get("NextContinuationToken")
-        else:
+    bio.seek(0)
+    raw = pd.read_excel(bio, header=None)
+    likely = {"emrno", "emr", "visitno", "visit", "registrationdate", "regdate", "insurance"}
+    header_idx = 0
+    for i in range(min(30, len(raw))):
+        row = raw.iloc[i].astype(str).str.lower().tolist()
+        row_keys = {_norm_col(x) for x in row}
+        if row_keys & likely:
+            header_idx = i
             break
+
+    bio.seek(0)
+    df = pd.read_excel(bio, header=header_idx)
+    df = df.loc[:, ~df.columns.astype(str).str.match(r"^Unnamed", na=False)]
+    return df
+
+
+def ensure_required(df: pd.DataFrame, required: List[str], label: str) -> Dict[str, str]:
+    mapping = {}
+    for r in required:
+        if r == "EMRNo":
+            col = _find_col(df, ["EMRNo", "EMR NO", "EMR", "MRN", "PatientID", "Patient Id", "FileNo"])
+        elif r == "VisitNo":
+            col = _find_col(df, ["VisitNo", "Visit No", "Visit#", "Visit Number", "VisitID", "EncounterNo", "Encounter No"])
+        else:
+            col = _find_col(df, [r])
+        if not col:
+            raise ValueError(f"{label} file must contain '{r}'. Found: {list(df.columns)}")
+        mapping[r] = col
+    return mapping
+
+
+def get_day_from_registration(reg_df: pd.DataFrame) -> Optional[pd.Timestamp]:
+    date_col = _find_col(reg_df, ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
+    if not date_col:
+        return None
+    s = pd.to_datetime(reg_df[date_col], errors="coerce").dropna()
+    if s.empty:
+        return None
+    day = s.dt.normalize()
+    try:
+        return day.mode().iloc[0]
+    except Exception:
+        return day.min()
+
+
+def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15) -> pd.DataFrame:
+    if not col or col not in df.columns:
+        return pd.DataFrame(columns=["Value", "Count"])
+    out = (
+        df[col]
+        .fillna("Blank")
+        .astype(str)
+        .str.strip()
+        .replace("", "Blank")
+        .value_counts(dropna=False)
+        .head(n)
+        .reset_index()
+    )
+    out.columns = ["Value", "Count"]
     return out
 
-with st.expander("Storage Status (S3)", expanded=False):
-    if S3_OK:
-        st.success(f"S3 configured ✅  Bucket: {S3_BUCKET} | Region: {AWS_REGION} | Prefix: {S3_PREFIX}")
-    else:
-        st.warning("S3 is NOT configured. Uploaders will work and summary will display, but files will NOT be saved to S3.")
 
-# =========================
-# Session state
-# =========================
-for k in ["reg_file", "cash_file", "pend_file"]:
-    if k not in st.session_state:
-        st.session_state[k] = None
+def excel_bytes_from_dfs(dfs: Dict[str, pd.DataFrame]) -> bytes:
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        for name, df in dfs.items():
+            df.to_excel(writer, sheet_name=str(name)[:31], index=False)
+    bio.seek(0)
+    return bio.read()
 
-# =========================
-# Step 0: day picker (fallback only)
-# =========================
-st.caption("✅ Day is read from Registration file (if date column exists). Date picker is used only if file has no date column.")
-manual_day = st.date_input("Manual Day (fallback only)", value=date.today())
 
-# =========================
-# Step 1: Registration file
-# =========================
-st.subheader("1) RegistrationList (.xls / .xlsx)")
-c1, c2 = st.columns([4, 1])
-with c1:
-    reg = st.file_uploader("Upload Registration file", type=["xls", "xlsx"], key="u_reg")
-with c2:
-    if st.button("🗑️ Delete Step 1", use_container_width=True):
-        st.session_state["reg_file"] = None
-        st.session_state["cash_file"] = None
-        st.session_state["pend_file"] = None
-        st.rerun()
-
-if reg is not None:
-    st.session_state["reg_file"] = reg
-
-if st.session_state["reg_file"] is None:
-    st.info("Please upload Registration file (Step 1).")
-    st.stop()
-
-# =========================
-# Step 2: CashOut file
-# =========================
-st.subheader("2) PatientCashOutList (.xls / .xlsx)")
-c1, c2 = st.columns([4, 1])
-with c1:
-    cash = st.file_uploader("Upload CashOut file", type=["xls", "xlsx"], key="u_cash")
-with c2:
-    if st.button("🗑️ Delete Step 2", use_container_width=True):
-        st.session_state["cash_file"] = None
-        st.session_state["pend_file"] = None
-        st.rerun()
-
-if cash is not None:
-    st.session_state["cash_file"] = cash
-
-if st.session_state["cash_file"] is None:
-    st.warning("Upload CashOut file (Step 2) to continue.")
-    st.stop()
-
-# =========================
-# Step 3: Pending file
-# =========================
-st.subheader("3) Pending file (.xls / .xlsx)")
-c1, c2 = st.columns([4, 1])
-with c1:
-    pend = st.file_uploader("Upload Pending file", type=["xls", "xlsx"], key="u_pend")
-with c2:
-    if st.button("🗑️ Delete Step 3", use_container_width=True):
-        st.session_state["pend_file"] = None
-        st.rerun()
-
-if pend is not None:
-    st.session_state["pend_file"] = pend
-
-if st.session_state["pend_file"] is None:
-    st.warning("Upload Pending file (Step 3) to continue.")
-    st.stop()
-
-# =========================
-# Read + validate EMR from Cash/Pending
-# =========================
-def read_emr_list(uploaded) -> pd.Series:
-    df = try_read_excel(uploaded)
-    if isinstance(find_emr_column(df), tuple):
-        emr_col, df2 = find_emr_column(df)
-        df = df2
-    else:
-        emr_col = find_emr_column(df)
-
-    if emr_col is None:
-        raise ValueError(f"File must contain EMR column (EMRNo / EMR No / MRN etc). Found columns: {list(df.columns)}")
-
-    s = df[emr_col].dropna().astype(str).str.strip()
-    s = s[s != ""]
-    return s
-
-# =========================
-# Registration processing (tables come ONLY from registration)
-# =========================
-def process_registration(reg_file):
-    df = pd.read_excel(reg_file)
-
-    # Guess date column
-    date_candidates = ["regdate", "registrationdate", "date", "visitdate", "createddate"]
-    date_col = None
-    for c in df.columns:
-        if _norm(c) in date_candidates:
-            date_col = c
-            break
-
-    if date_col:
-        day_val = pd.to_datetime(df[date_col], errors="coerce").dropna()
-        if len(day_val) > 0:
-            day = day_val.dt.date.mode().iloc[0]
-        else:
-            day = manual_day
-    else:
-        day = manual_day
-
-    # EMR / Visit no
-    emr_col = None
-    visit_col = None
-    for c in df.columns:
-        if _norm(c) in {"emrno", "emr", "mrn"}:
-            emr_col = c
-        if _norm(c) in {"visitno", "visit", "visitnumber"}:
-            visit_col = c
-
-    total_visits = len(df)
-    unique_emr = df[emr_col].nunique() if emr_col else None
-    unique_visit = df[visit_col].nunique() if visit_col else None
-
-    # Doctor-wise
-    doctor_col = None
-    for c in df.columns:
-        if _norm(c) in {"doctor", "doctorname", "physician"}:
-            doctor_col = c
-            break
-    doctor_wise = (
-        df.groupby(doctor_col).size().reset_index(name="Count").rename(columns={doctor_col: "Value"})
-        if doctor_col else pd.DataFrame(columns=["Value", "Count"])
-    )
-
-    # Insurance-wise
-    ins_col = None
-    for c in df.columns:
-        if _norm(c) in {"insurance", "payer", "tpainsurance", "insurancename"}:
-            ins_col = c
-            break
-    insurance_wise = (
-        df.groupby(ins_col).size().reset_index(name="Count").rename(columns={ins_col: "Value"})
-        if ins_col else pd.DataFrame(columns=["Value", "Count"])
-    )
-
-    # Employer-wise
-    emp_col = None
-    for c in df.columns:
-        if _norm(c) in {"employer", "company", "employername"}:
-            emp_col = c
-            break
-    employer_wise = (
-        df.groupby(emp_col).size().reset_index(name="Count").rename(columns={emp_col: "Value"})
-        if emp_col else pd.DataFrame(columns=["Value", "Count"])
-    )
-
-    # Bill type (Insurance/Cash)
-    bill_col = None
-    for c in df.columns:
-        if _norm(c) in {"billtype", "billingtype", "paymenttype"}:
-            bill_col = c
-            break
-    bill_type = (
-        df.groupby(bill_col).size().reset_index(name="Count").rename(columns={bill_col: "Value"})
-        if bill_col else pd.DataFrame(columns=["Value", "Count"])
-    )
-
-    # Visit type
-    vtype_col = None
-    for c in df.columns:
-        if _norm(c) in {"visittype", "appointmenttype", "type"}:
-            vtype_col = c
-            break
-    visit_type = (
-        df.groupby(vtype_col).size().reset_index(name="Count").rename(columns={vtype_col: "Value"})
-        if vtype_col else pd.DataFrame(columns=["Value", "Count"])
-    )
-
-    # Registration user wise
-    user_col = None
-    for c in df.columns:
-        if _norm(c) in {"user", "createdby", "registrationuser"}:
-            user_col = c
-            break
-    reg_user = (
-        df.groupby(user_col).size().reset_index(name="Count").rename(columns={user_col: "Value"})
-        if user_col else pd.DataFrame(columns=["Value", "Count"])
-    )
-
-    # Status wise
-    status_col = None
-    for c in df.columns:
-        if _norm(c) in {"status"}:
-            status_col = c
-            break
-    status_wise = (
-        df.groupby(status_col).size().reset_index(name="Count").rename(columns={status_col: "Value"})
-        if status_col else pd.DataFrame(columns=["Value", "Count"])
-    )
+# ---------------------------
+# S3 helpers
+# ---------------------------
+def load_secrets() -> Dict[str, str]:
+    def get_any(*keys):
+        for k in keys:
+            if k in st.secrets:
+                v = st.secrets.get(k)
+                if v is not None and str(v).strip() != "":
+                    return str(v).strip()
+            v = os.getenv(k)
+            if v is not None and str(v).strip() != "":
+                return str(v).strip()
+        return ""
 
     return {
-        "day": pd.to_datetime(day),
-        "df": df,
-        "total_visits": int(total_visits),
-        "unique_emr": int(unique_emr) if unique_emr is not None else None,
-        "unique_visit": int(unique_visit) if unique_visit is not None else None,
-        "doctor_wise": doctor_wise.sort_values("Count", ascending=False),
-        "insurance_wise": insurance_wise.sort_values("Count", ascending=False),
-        "employer_wise": employer_wise.sort_values("Count", ascending=False),
-        "bill_type": bill_type.sort_values("Count", ascending=False),
-        "visit_type": visit_type.sort_values("Count", ascending=False),
-        "reg_user": reg_user.sort_values("Count", ascending=False),
-        "status_wise": status_wise.sort_values("Count", ascending=False),
+        "AWS_ACCESS_KEY_ID": get_any("AWS_ACCESS_KEY_ID"),
+        "AWS_SECRET_ACCESS_KEY": get_any("AWS_SECRET_ACCESS_KEY"),
+        "AWS_REGION": get_any("AWS_REGION", "AWS_DEFAULT_REGION"),
+        "S3_BUCKET_NAME": get_any("S3_BUCKET_NAME", "S3_BUCKET"),
+        "S3_BASE_PREFIX": get_any("S3_BASE_PREFIX", "S3_PREFIX"),
     }
 
-# =========================
-# Process button
-# =========================
-st.divider()
-process_and_save = st.checkbox("Process & Save to S3", value=True if S3_OK else False)
 
-if st.button("✅ Process", type="primary", use_container_width=True):
-    # read
-    reg_res = process_registration(st.session_state["reg_file"])
-    cash_emr = read_emr_list(st.session_state["cash_file"])
-    pend_emr = read_emr_list(st.session_state["pend_file"])
+def s3_enabled(cfg: Dict[str, str]) -> bool:
+    return bool(cfg.get("S3_BUCKET_NAME")) and bool(cfg.get("AWS_REGION")) and bool(cfg.get("AWS_ACCESS_KEY_ID")) and bool(cfg.get("AWS_SECRET_ACCESS_KEY")) and boto3 is not None
 
-    cash_count = int(cash_emr.nunique())
-    pend_count = int(pend_emr.nunique())
 
-    # CURRENT DAY section
-    st.subheader("Current Day")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Visits", reg_res["total_visits"])
-    m2.metric("Unique EMR (Patients)", reg_res["unique_emr"] if reg_res["unique_emr"] is not None else 0)
-    m3.metric("CashOut Patients", cash_count)
-    m4.metric("Pending Patients", pend_count)
+@st.cache_resource(show_spinner=False)
+def s3_client_cached(cfg: Dict[str, str]):
+    if not s3_enabled(cfg):
+        return None
+    return boto3.client(
+        "s3",
+        region_name=cfg["AWS_REGION"],
+        aws_access_key_id=cfg["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=cfg["AWS_SECRET_ACCESS_KEY"],
+    )
 
-    # Display tables (from Registration only)
-    left, right = st.columns(2)
-    with left:
-        st.markdown("### Doctor Wise Visits")
-        st.dataframe(reg_res["doctor_wise"], use_container_width=True)
-        st.markdown("### Bill Type (Insurance/Cash)")
-        st.dataframe(reg_res["bill_type"], use_container_width=True)
-        st.markdown("### Status Wise")
-        st.dataframe(reg_res["status_wise"], use_container_width=True)
 
-    with right:
-        st.markdown("### Insurance Wise Visits")
-        st.dataframe(reg_res["insurance_wise"], use_container_width=True)
-        st.markdown("### Visit Type (Consult/Follow-up)")
-        st.dataframe(reg_res["visit_type"], use_container_width=True)
-        st.markdown("### Employer Wise")
-        st.dataframe(reg_res["employer_wise"], use_container_width=True)
+def s3_key(*parts: str) -> str:
+    return "/".join([p.strip("/").strip() for p in parts if p is not None and str(p).strip() != ""])
 
-    st.markdown("### Registration User Wise")
-    st.dataframe(reg_res["reg_user"], use_container_width=True)
 
-    # Download filtered lists (simple)
-    st.divider()
-    st.subheader("Download Lists (from Registration file)")
-    df_reg = reg_res["df"]
+def s3_put_bytes(s3, bucket: str, key: str, b: bytes, content_type: str = "application/octet-stream"):
+    s3.put_object(Bucket=bucket, Key=key, Body=b, ContentType=content_type)
 
-    # try infer insurance column for filtering
-    ins_col = None
-    for c in df_reg.columns:
-        if _norm(c) in {"insurance", "payer", "tpainsurance", "insurancename"}:
-            ins_col = c
-            break
 
-    bill_col = None
-    for c in df_reg.columns:
-        if _norm(c) in {"billtype", "billingtype", "paymenttype"}:
-            bill_col = c
-            break
+def s3_get_bytes(s3, bucket: str, key: str) -> Optional[bytes]:
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        return obj["Body"].read()
+    except Exception:
+        return None
 
-    cA, cB = st.columns(2)
-    with cA:
-        if ins_col:
-            ins_values = sorted([x for x in df_reg[ins_col].dropna().astype(str).unique().tolist() if x.strip() != ""])
-            pick_ins = st.selectbox("Insurance", ["(select)"] + ins_values)
-            if pick_ins != "(select)":
-                dfi = df_reg[df_reg[ins_col].astype(str) == pick_ins].copy()
-                st.download_button(
-                    f"⬇️ Download Insurance: {pick_ins}",
-                    data=to_excel_bytes({"Insurance_List": dfi}),
-                    file_name=f"registration_insurance_{_norm(pick_ins)[:20]}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-        else:
-            st.info("Insurance column not found in Registration file.")
 
-    with cB:
-        if bill_col:
-            bill_values = sorted([x for x in df_reg[bill_col].dropna().astype(str).unique().tolist() if x.strip() != ""])
-            pick_bill = st.selectbox("Bill Type", ["(select)"] + bill_values)
-            if pick_bill != "(select)":
-                dfb = df_reg[df_reg[bill_col].astype(str) == pick_bill].copy()
-                st.download_button(
-                    f"⬇️ Download Bill Type: {pick_bill}",
-                    data=to_excel_bytes({"BillType_List": dfb}),
-                    file_name=f"registration_billtype_{_norm(pick_bill)[:20]}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-        else:
-            st.info("Bill Type column not found in Registration file.")
+def s3_list_prefixes(s3, bucket: str, prefix: str) -> List[str]:
+    out = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix.rstrip("/") + "/", Delimiter="/"):
+        for cp in page.get("CommonPrefixes", []):
+            p = cp.get("Prefix", "")
+            if p:
+                out.append(p)
+    return out
 
-    # =========================
-    # Save to S3 + Accumulate
-    # =========================
-    day_str = pd.to_datetime(reg_res["day"]).strftime("%Y-%m-%d")
-    run_id = _sha1_bytes((day_str + str(datetime.utcnow())).encode())
 
-    # Summary row (day-based; if you upload old file, it saves to that day)
-    row = {
-        "day": pd.to_datetime(reg_res["day"]),
-        "total_visits": reg_res["total_visits"],
-        "unique_emr": reg_res["unique_emr"] or 0,
-        "unique_visitno": reg_res["unique_visit"] or 0,
-        "cash_patients": cash_count,
-        "pending_patients": pend_count,
-        "run_id": run_id,
-        "created_utc": datetime.utcnow(),
-    }
+# ---------------------------
+# Center selection
+# ---------------------------
+CENTERS = {
+    "easyhealth": "Easy Health Medical Clinic (MF8031)",
+    "excellent": "Excellent Medical Center (MF4777)",
+    "pharmacy": "Excellent Pharmacy (PF3205)",
+}
 
-    if S3_OK and process_and_save:
-        # store uploaded files with clear names (not only date folder)
-        reg_bytes = st.session_state["reg_file"].getvalue()
-        cash_bytes = st.session_state["cash_file"].getvalue()
-        pend_bytes = st.session_state["pend_file"].getvalue()
+center_key = st.session_state.get("center_key") or st.query_params.get("center") or None
+if center_key not in CENTERS:
+    center_key = st.selectbox("Center", options=list(CENTERS.keys()), format_func=lambda k: CENTERS[k])
 
-        s3_put_bytes(s3_key(day_str, f"registration_{run_id}.xlsx"), reg_bytes)
-        s3_put_bytes(s3_key(day_str, f"cashout_{run_id}.xls"), cash_bytes)
-        s3_put_bytes(s3_key(day_str, f"pending_{run_id}.xls"), pend_bytes)
+cfg = load_secrets()
+s3_ok = s3_enabled(cfg)
+s3 = s3_client_cached(cfg) if s3_ok else None
 
-        # also store a snapshot export of tables
-        export_book = to_excel_bytes({
-            "DoctorWise": reg_res["doctor_wise"],
-            "InsuranceWise": reg_res["insurance_wise"],
-            "EmployerWise": reg_res["employer_wise"],
-            "BillType": reg_res["bill_type"],
-            "VisitType": reg_res["visit_type"],
-            "RegUserWise": reg_res["reg_user"],
-            "StatusWise": reg_res["status_wise"],
-        })
-        s3_put_bytes(s3_key(day_str, f"summary_tables_{run_id}.xlsx"), export_book)
-
-        # accumulate into one history csv in S3
-        history_key = s3_key("history.csv")
-        old = s3_get_bytes(history_key)
-        if old:
-            hist = pd.read_csv(io.BytesIO(old))
-            # ensure datetime
-            hist["day"] = pd.to_datetime(hist["day"], errors="coerce")
-        else:
-            hist = pd.DataFrame(columns=list(row.keys()))
-
-        hist_new = pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
-        # If same day uploaded again, keep latest by created_utc
-        hist_new["created_utc"] = pd.to_datetime(hist_new["created_utc"], errors="coerce")
-        hist_new = hist_new.sort_values(["day", "created_utc"]).drop_duplicates(subset=["day"], keep="last")
-        hist_new = hist_new.sort_values("day")
-
-        s3_put_bytes(history_key, hist_new.to_csv(index=False).encode("utf-8"))
-        st.success(f"Saved to S3 ✅  Day: {day_str}")
-
-        # =========================
-        # Accumulated view (all saved days)
-        # =========================
-        st.divider()
-        st.subheader("Accumulated (All Saved Days)")
-        cum = hist_new.copy()
-        cum["cum_total_visits"] = cum["total_visits"].cumsum()
-        cum["cum_unique_emr"] = cum["unique_emr"].cumsum()
-        cum["cum_cash_patients"] = cum["cash_patients"].cumsum()
-        cum["cum_pending_patients"] = cum["pending_patients"].cumsum()
-
-        cm1, cm2, cm3, cm4 = st.columns(4)
-        cm1.metric("Cumulative Visits", int(cum["cum_total_visits"].iloc[-1]) if len(cum) else 0)
-        cm2.metric("Cumulative Unique EMR", int(cum["cum_unique_emr"].iloc[-1]) if len(cum) else 0)
-        cm3.metric("Cumulative CashOut", int(cum["cum_cash_patients"].iloc[-1]) if len(cum) else 0)
-        cm4.metric("Cumulative Pending", int(cum["cum_pending_patients"].iloc[-1]) if len(cum) else 0)
-
-        st.dataframe(cum, use_container_width=True)
-
+with st.expander("Storage Status (S3)", expanded=False):
+    if s3_ok:
+        st.success(f"S3 is configured ✅  Bucket: {cfg['S3_BUCKET_NAME']}  Region: {cfg['AWS_REGION']}")
+        st.caption(f"Base prefix: {cfg.get('S3_BASE_PREFIX') or '(none)'}")
     else:
-        st.warning("Processed locally. S3 save is OFF or not configured.")
+        st.warning("S3 is NOT configured. Uploaders will work and summary will display, but files will NOT be saved to S3.")
+        st.caption("Expected secrets: S3_BUCKET_NAME (or S3_BUCKET), AWS_REGION (or AWS_DEFAULT_REGION), AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY. Optional: S3_BASE_PREFIX")
 
+st.caption("✅ Day is read from Registration file (if it has a date column). Date picker is used only if file has no date column.")
+manual_day = st.date_input("Manual Day (fallback only)", value=date.today())
+
+SS = st.session_state
+SS.setdefault("reg_file", None)
+SS.setdefault("cash_file", None)
+SS.setdefault("pend_file", None)
+SS.setdefault("reg_df", None)
+SS.setdefault("cash_df", None)
+SS.setdefault("pend_df", None)
+
+# Step 1
+c1, c2 = st.columns([3, 1])
+with c1:
+    up1 = st.file_uploader("Upload Registration file", type=["xls", "xlsx"], key="uploader_reg")
+with c2:
+    if st.button("🗑️ Delete Step 1", use_container_width=True):
+        SS["reg_file"], SS["reg_df"] = None, None
+        st.rerun()
+
+if up1 is not None:
+    try:
+        reg_df = read_excel_any(up1)
+        ensure_required(reg_df, ["EMRNo", "VisitNo"], "Step 1 (Registration)")
+        SS["reg_file"] = {"name": up1.name, "bytes": up1.getvalue()}
+        SS["reg_df"] = reg_df
+        st.success(f"Step 1 OK ✅  ({up1.name})")
+    except Exception as e:
+        SS["reg_file"], SS["reg_df"] = None, None
+        st.error(str(e))
+
+# Step 2
+st.markdown("### 2) PatientCashOutList (.xls / .xlsx)")
+c1, c2 = st.columns([3, 1])
+with c1:
+    up2 = st.file_uploader("Upload CashOut file", type=["xls", "xlsx"], key="uploader_cash", disabled=(SS["reg_df"] is None))
+with c2:
+    if st.button("🗑️ Delete Step 2", use_container_width=True):
+        SS["cash_file"], SS["cash_df"] = None, None
+        st.rerun()
+
+if up2 is not None:
+    try:
+        cash_df = read_excel_any(up2)
+        ensure_required(cash_df, ["EMRNo"], "Step 2 (CashOut)")
+        SS["cash_file"] = {"name": up2.name, "bytes": up2.getvalue()}
+        SS["cash_df"] = cash_df
+        st.success(f"Step 2 OK ✅  ({up2.name})")
+    except Exception as e:
+        SS["cash_file"], SS["cash_df"] = None, None
+        st.error(str(e))
+
+# Step 3
+st.markdown("### 3) Pending file (.xls / .xlsx)")
+c1, c2 = st.columns([3, 1])
+with c1:
+    up3 = st.file_uploader("Upload Pending file", type=["xls", "xlsx"], key="uploader_pend", disabled=(SS["cash_df"] is None))
+with c2:
+    if st.button("🗑️ Delete Step 3", use_container_width=True):
+        SS["pend_file"], SS["pend_df"] = None, None
+        st.rerun()
+
+if up3 is not None:
+    try:
+        pend_df = read_excel_any(up3)
+        ensure_required(pend_df, ["EMRNo"], "Step 3 (Pending)")
+        SS["pend_file"] = {"name": up3.name, "bytes": up3.getvalue()}
+        SS["pend_df"] = pend_df
+        st.success(f"Step 3 OK ✅  ({up3.name})")
+    except Exception as e:
+        SS["pend_file"], SS["pend_df"] = None, None
+        st.error(str(e))
+
+
+def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.DataFrame, day_ts: pd.Timestamp) -> Dict[str, pd.DataFrame]:
+    reg_map = ensure_required(reg_df, ["EMRNo", "VisitNo"], "Registration")
+    emr_col, visit_col = reg_map["EMRNo"], reg_map["VisitNo"]
+
+    doctor_col = _find_col(reg_df, ["Doctor", "DoctorName", "Physician", "Provider"])
+    ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
+    emp_col = _find_col(reg_df, ["Employer", "Company", "EmployerName"])
+    bill_col = _find_col(reg_df, ["BillType", "Bill Type", "Insurance/Cash", "Cash/Insurance"])
+    visit_type_col = _find_col(reg_df, ["VisitType", "Visit Type", "VisitCategory"])
+    status_col = _find_col(reg_df, ["Status", "VisitStatus"])
+    reg_user_col = _find_col(reg_df, ["RegUser", "RegistrationUser", "User", "CreatedBy"])
+    reg_date_col = _find_col(reg_df, ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
+
+    total_visits = int(len(reg_df))
+    unique_emr = int(pd.Series(reg_df[emr_col]).nunique(dropna=True))
+    unique_visitno = int(pd.Series(reg_df[visit_col]).nunique(dropna=True))
+
+    cash_emr = ensure_required(cash_df, ["EMRNo"], "CashOut")["EMRNo"]
+    pend_emr = ensure_required(pend_df, ["EMRNo"], "Pending")["EMRNo"]
+    cash_patients = int(pd.Series(cash_df[cash_emr]).nunique(dropna=True))
+    pending_patients = int(pd.Series(pend_df[pend_emr]).nunique(dropna=True))
+
+    if reg_date_col:
+        d = pd.to_datetime(reg_df[reg_date_col], errors="coerce").dt.date
+        reg_daywise = pd.Series(d).dropna().value_counts().sort_index().reset_index()
+        reg_daywise.columns = ["Reg Date", "Count"]
+    else:
+        reg_daywise = pd.DataFrame({"Reg Date": [day_ts.date()], "Count": [total_visits]})
+
+    return {
+        "KPI": pd.DataFrame([
+            {"Metric": "Day", "Value": day_ts.date().isoformat()},
+            {"Metric": "Total Visits", "Value": total_visits},
+            {"Metric": "Unique EMR (Patients)", "Value": unique_emr},
+            {"Metric": "Unique Visit No", "Value": unique_visitno},
+            {"Metric": "CashOut Patients", "Value": cash_patients},
+            {"Metric": "Pending Patients", "Value": pending_patients},
+        ]),
+        "Doctor Wise Visits": top_counts(reg_df, doctor_col, n=50),
+        "Insurance Wise Visits": top_counts(reg_df, ins_col, n=50),
+        "Employer Wise": top_counts(reg_df, emp_col, n=50),
+        "Bill Type": top_counts(reg_df, bill_col, n=20),
+        "Visit Type": top_counts(reg_df, visit_type_col, n=20),
+        "Status Wise": top_counts(reg_df, status_col, n=30),
+        "Registration User Wise": top_counts(reg_df, reg_user_col, n=30),
+        "Reg Date Wise (Daily)": reg_daywise,
+    }
+
+
+def history_paths(center: str) -> Tuple[str, str]:
+    base = cfg.get("S3_BASE_PREFIX") or ""
+    root = s3_key(base, center, "registration_summary")
+    return root, s3_key(root, "history.csv")
+
+
+def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
+    root, hist_key = history_paths(center_key)
+    day_str = day_ts.date().isoformat()
+
+    if SS["reg_file"]:
+        s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "registration.xlsx"), SS["reg_file"]["bytes"])
+    if SS["cash_file"]:
+        s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "cashout.xlsx"), SS["cash_file"]["bytes"])
+    if SS["pend_file"]:
+        s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "pending.xlsx"), SS["pend_file"]["bytes"])
+
+    s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "summary.pkl"), pickle.dumps(dfs, protocol=pickle.HIGHEST_PROTOCOL))
+
+    kpi = dfs["KPI"].set_index("Metric")["Value"]
+    row = {
+        "day": pd.to_datetime(day_str),
+        "total_visits": int(kpi["Total Visits"]),
+        "unique_emr": int(kpi["Unique EMR (Patients)"]),
+        "unique_visitno": int(kpi["Unique Visit No"]),
+        "cash_patients": int(kpi["CashOut Patients"]),
+        "pending_patients": int(kpi["Pending Patients"]),
+    }
+
+    existing = None
+    b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key)
+    if b:
+        existing = pd.read_csv(io.BytesIO(b), parse_dates=["day"])
+    if existing is None or existing.empty:
+        new_hist = pd.DataFrame([row])
+    else:
+        existing["day"] = pd.to_datetime(existing["day"]).dt.normalize()
+        new_hist = existing[existing["day"].dt.date.astype(str) != day_str].copy()
+        new_hist = pd.concat([new_hist, pd.DataFrame([row])], ignore_index=True)
+
+    new_hist = new_hist.sort_values("day").reset_index(drop=True)
+    s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key, new_hist.to_csv(index=False).encode("utf-8"), content_type="text/csv")
+
+
+def load_history_from_s3() -> pd.DataFrame:
+    if not s3_ok:
+        return pd.DataFrame()
+    _, hist_key = history_paths(center_key)
+    b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key)
+    if not b:
+        return pd.DataFrame()
+    return pd.read_csv(io.BytesIO(b), parse_dates=["day"])
+
+
+def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
+    if hist is None or hist.empty:
+        return pd.DataFrame()
+    h = hist.sort_values("day").copy()
+    for c in ["total_visits", "unique_emr", "unique_visitno", "cash_patients", "pending_patients"]:
+        h[c] = h[c].fillna(0).astype(int)
+        h[f"cum_{c}"] = h[c].cumsum()
+
+    cols = [
+        "day", "total_visits", "unique_emr", "unique_visitno", "cash_patients", "pending_patients",
+        "cum_total_visits", "cum_unique_emr", "cum_unique_visitno", "cum_cash_patients", "cum_pending_patients"
+    ]
+    cols = [c for c in cols if c in h.columns]
+    return h[cols].sort_values("day", ascending=False).reset_index(drop=True)
+
+
+# ---------------------------
+# Process & display
+# ---------------------------
+can_process = SS["reg_df"] is not None and SS["cash_df"] is not None and SS["pend_df"] is not None
+
+if can_process:
+    detected = get_day_from_registration(SS["reg_df"])
+    day_ts = detected if detected is not None else pd.to_datetime(manual_day)
+    if detected is None:
+        st.warning("Registration file has no readable date column. Using Manual Day.")
+    else:
+        st.success(f"Detected Day from Registration file: {day_ts.date().isoformat()}")  # current day
+
+    if st.button("✅ Process & Save to S3" if s3_ok else "✅ Process (S3 not configured)", type="primary"):
+        dfs = compute_summary(SS["reg_df"], SS["cash_df"], SS["pend_df"], day_ts)
+
+        if s3_ok:
+            try:
+                save_run_to_s3(day_ts, dfs)
+                st.success("Saved to S3 ✅")
+            except Exception as e:
+                st.error(f"Failed to save to S3: {e}")
+
+        st.header(f"Current Day ({day_ts.date().isoformat()})")
+        kpi = dfs["KPI"].set_index("Metric")["Value"]
+
+        a, b, c, d = st.columns(4)
+        a.metric("Total Visits", int(kpi["Total Visits"]))
+        b.metric("Unique EMR (Patients)", int(kpi["Unique EMR (Patients)"]))
+        c.metric("Unique Visit No", int(kpi["Unique Visit No"]))
+        d.metric("CashOut Patients", int(kpi["CashOut Patients"]))
+        e, f = st.columns(2)
+        e.metric("Pending Patients", int(kpi["Pending Patients"]))
+        f.metric("Generated", datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+        st.subheader("Insurance Wise Visits")
+        st.dataframe(dfs["Insurance Wise Visits"], use_container_width=True, hide_index=True)
+
+        st.subheader("Employer Wise")
+        st.dataframe(dfs["Employer Wise"], use_container_width=True, hide_index=True)
+
+        st.subheader("Doctor Wise Visits")
+        st.dataframe(dfs["Doctor Wise Visits"], use_container_width=True, hide_index=True)
+
+        export_dfs = {k: dfs[k] for k in dfs.keys()}
+        st.download_button(
+            "⬇️ Download Summary Excel",
+            data=excel_bytes_from_dfs(export_dfs),
+            file_name=f"Registration_Summary_{center_key}_{day_ts.date().isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        # Accumulated BELOW current day
+        st.header("Accumulated (All Saved Days)")
+        hist = load_history_from_s3() if s3_ok else pd.DataFrame()
+        if hist.empty:
+            st.info("No saved history found yet.")
+        else:
+            acc = add_cumulative(hist)
+            latest = acc.sort_values("day").iloc[-1]
+            a, b, c, d = st.columns(4)
+            a.metric("Cumulative Visits", int(latest.get("cum_total_visits", 0)))
+            b.metric("Cumulative Unique EMR", int(latest.get("cum_unique_emr", 0)))
+            c.metric("Cumulative CashOut", int(latest.get("cum_cash_patients", 0)))
+            d.metric("Cumulative Pending", int(latest.get("cum_pending_patients", 0)))
+            st.dataframe(acc, use_container_width=True, hide_index=True)
+
+elif SS["reg_df"] is not None:
+    st.info("Please upload Step 2 and Step 3 in sequence to enable processing.")
