@@ -368,6 +368,20 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
     doctor_col = _find_col(reg_df, ["Doctor", "DoctorName", "Physician", "Provider"])
     ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
     emp_col = _find_col(reg_df, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name", "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
+
+    # 🔁 FINAL fallback: detect employer column by content (when headers are merged / show as Unnamed)
+    if emp_col is None:
+        for c in reg_df.columns:
+            sample = reg_df[c].dropna().astype(str).head(10)
+            if sample.empty:
+                continue
+            # employer names are usually text (company names), not pure numbers
+            avg_len = sample.str.strip().str.len().mean()
+            has_digits_only = sample.str.strip().str.match(r"^\d+$").any()
+            if avg_len and avg_len > 12 and not has_digits_only:
+                emp_col = c
+                break
+
     bill_col = _find_col(reg_df, ["BillType", "Bill Type", "Insurance/Cash", "Cash/Insurance"])
     visit_type_col = _find_col(reg_df, ["VisitType", "Visit Type", "VisitCategory"])
     status_col = _find_col(reg_df, ["Status", "VisitStatus"])
