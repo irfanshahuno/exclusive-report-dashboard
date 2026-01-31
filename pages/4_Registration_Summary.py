@@ -50,11 +50,10 @@ st.set_page_config(page_title="Registration Summary", layout="wide", initial_sid
 st.title("Registration Summary (Registration + CashOut + Pending)")
 
 # ---------------------------
-# Admin mode (set from MAIN page)
+# Admin mode (admin-only page)
 # ---------------------------
-# Main page should set: st.session_state["admin_mode"] = True/False
-# This page will NOT show any toggle; it will only read the value.
-admin_mode = bool(st.session_state.get("admin_mode", False))
+# Viewer mode removed: this page always shows upload + processing controls.
+admin_mode = True
 
 
 def _norm_col(c: str) -> str:
@@ -370,8 +369,6 @@ if admin_mode:
         except Exception as e:
             SS["pend_file"], SS["pend_df"] = None, None
             st.error(str(e))
-else:
-    st.info('Viewer mode: uploads and processing are disabled. Turn ON Admin mode to upload/process.')
 
 
 def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.DataFrame, day_ts: pd.Timestamp) -> Dict[str, pd.DataFrame]:
@@ -604,15 +601,6 @@ if s3_ok:
     else:
         st.caption("No history.csv found yet in S3 for this center.")
 
-# Auto-load latest saved summary for viewers (and for admin if nothing processed yet)
-if s3_ok and SS.get("last_summary") is None:
-    hist_auto = load_history_from_s3()
-    if not hist_auto.empty:
-        latest_day = pd.to_datetime(hist_auto["day"]).dt.normalize().max()
-        loaded = load_summary_from_s3(latest_day)
-        if loaded:
-            SS["last_summary"] = loaded
-            SS["last_day_ts"] = latest_day
 
 if admin_mode and can_process:
     detected = get_day_from_registration(SS["reg_df"])
