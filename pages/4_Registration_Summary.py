@@ -454,6 +454,70 @@ def load_history_from_s3() -> pd.DataFrame:
     return pd.read_csv(io.BytesIO(b), parse_dates=["day"])
 
 
+def load_summary_from_s3(day_ts: pd.Timestamp) -> Optional[Dict[str, pd.DataFrame]]:
+    """Load a previously saved summary.pkl for a given day from S3."""
+    if not s3_ok:
+        return None
+    root, _ = history_paths(center_key)
+    day_str = pd.to_datetime(day_ts).date().isoformat()
+    key = s3_key(root, day_str, "summary.pkl")
+    b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], key)
+    if not b:
+        return None
+    try:
+        return pickle.loads(b)
+    except Exception:
+        return None
+
+
+def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
+    """Render the Current Day + Accumulated sections."""
+    st.header(f"Current Day ({day_ts.date().isoformat()})")
+
+    kpi = dfs["KPI"].set_index("Metric")["Value"]
+
+    a, b, c, d = st.columns(4)
+    a.metric("Total Visits", int(kpi["Total Visits"]))
+    b.metric("Unique EMR (Patients)", int(kpi["Unique EMR (Patients)"]))
+    c.metric("Unique Visit No", int(kpi["Unique Visit No"]))
+    d.metric("CashOut Patients", int(kpi["CashOut Patients"]))
+    e, f = st.columns(2)
+    e.metric("Pending Patients", int(kpi["Pending Patients"]))
+    f.metric("Generated", datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+    st.subheader("Insurance Wise Visits")
+    st.dataframe(dfs["Insurance Wise Visits"], use_container_width=True, hide_index=True)
+
+    st.subheader("Employer Wise")
+    st.dataframe(dfs["Employer Wise"], use_container_width=True, hide_index=True)
+
+    st.subheader("Doctor Wise Visits")
+    st.dataframe(dfs["Doctor Wise Visits"], use_container_width=True, hide_index=True)
+
+    export_dfs = {k: dfs[k] for k in dfs.keys()}
+    st.download_button(
+        "⬇️ Download Summary Excel",
+        data=excel_bytes_from_dfs(export_dfs),
+        file_name=f"Registration_Summary_{center_key}_{day_ts.date().isoformat()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    # Accumulated BELOW current day
+    st.header("Accumulated (All Saved Days)")
+    hist = load_history_from_s3() if s3_ok else pd.DataFrame()
+    if hist.empty:
+        st.info("No saved history found yet.")
+    else:
+        acc = add_cumulative(hist)
+        latest = acc.sort_values("day").iloc[-1]
+        a, b, c, d = st.columns(4)
+        a.metric("Cumulative Visits", int(latest.get("cum_total_visits", 0)))
+        b.metric("Cumulative Unique EMR", int(latest.get("cum_unique_emr", 0)))
+        c.metric("Cumulative CashOut", int(latest.get("cum_cash_patients", 0)))
+        d.metric("Cumulative Pending", int(latest.get("cum_pending_patients", 0)))
+        st.dataframe(acc, use_container_width=True, hide_index=True)
+
+
 def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
     if hist is None or hist.empty:
         return pd.DataFrame()
@@ -473,7 +537,35 @@ def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------
 # Process & display
 # ---------------------------
+
 can_process = SS["reg_df"] is not None and SS["cash_df"] is not None and SS["pend_df"] is not None
+
+# Persist last result in-session (so it doesn't disappear on rerun)
+SS.setdefault("last_summary", None)
+SS.setdefault("last_day_ts", None)
+
+# If S3 is enabled, allow viewing previously saved results without re-processing
+if s3_ok:
+    hist_view = load_history_from_s3()
+    if not hist_view.empty:
+        days = sorted(pd.to_datetime(hist_view["day"]).dt.normalize().unique())
+        # newest first in UI
+        days_ui = list(reversed(days))
+        picked = st.selectbox(
+            "View saved day (from S3)",
+            options=days_ui,
+            format_func=lambda x: pd.to_datetime(x).date().isoformat(),
+        )
+        if st.button("📥 Load Saved Summary", use_container_width=True):
+            loaded = load_summary_from_s3(pd.to_datetime(picked))
+            if loaded:
+                SS["last_summary"] = loaded
+                SS["last_day_ts"] = pd.to_datetime(picked)
+                st.success(f"Loaded saved summary for {pd.to_datetime(picked).date().isoformat()} ✅")
+            else:
+                st.warning("No saved summary.pkl found for that day.")
+    else:
+        st.caption("No history.csv found yet in S3 for this center.")
 
 if can_process:
     detected = get_day_from_registration(SS["reg_df"])
@@ -481,7 +573,7 @@ if can_process:
     if detected is None:
         st.warning("Registration file has no readable date column. Using Manual Day.")
     else:
-        st.success(f"Detected Day from Registration file: {day_ts.date().isoformat()}")  # current day
+        st.success(f"Detected Day from Registration file: {day_ts.date().isoformat()}")
 
     if st.button("✅ Process & Save to S3" if s3_ok else "✅ Process (S3 not configured)", type="primary"):
         dfs = compute_summary(SS["reg_df"], SS["cash_df"], SS["pend_df"], day_ts)
@@ -493,49 +585,12 @@ if can_process:
             except Exception as e:
                 st.error(f"Failed to save to S3: {e}")
 
-        st.header(f"Current Day ({day_ts.date().isoformat()})")
-        kpi = dfs["KPI"].set_index("Metric")["Value"]
+        # ✅ keep result in session so it stays visible after any rerun
+        SS["last_summary"] = dfs
+        SS["last_day_ts"] = day_ts
 
-        a, b, c, d = st.columns(4)
-        a.metric("Total Visits", int(kpi["Total Visits"]))
-        b.metric("Unique EMR (Patients)", int(kpi["Unique EMR (Patients)"]))
-        c.metric("Unique Visit No", int(kpi["Unique Visit No"]))
-        d.metric("CashOut Patients", int(kpi["CashOut Patients"]))
-        e, f = st.columns(2)
-        e.metric("Pending Patients", int(kpi["Pending Patients"]))
-        f.metric("Generated", datetime.now().strftime("%Y-%m-%d %H:%M"))
-
-        st.subheader("Insurance Wise Visits")
-        st.dataframe(dfs["Insurance Wise Visits"], use_container_width=True, hide_index=True)
-
-        st.subheader("Employer Wise")
-        st.dataframe(dfs["Employer Wise"], use_container_width=True, hide_index=True)
-
-        st.subheader("Doctor Wise Visits")
-        st.dataframe(dfs["Doctor Wise Visits"], use_container_width=True, hide_index=True)
-
-        export_dfs = {k: dfs[k] for k in dfs.keys()}
-        st.download_button(
-            "⬇️ Download Summary Excel",
-            data=excel_bytes_from_dfs(export_dfs),
-            file_name=f"Registration_Summary_{center_key}_{day_ts.date().isoformat()}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-        # Accumulated BELOW current day
-        st.header("Accumulated (All Saved Days)")
-        hist = load_history_from_s3() if s3_ok else pd.DataFrame()
-        if hist.empty:
-            st.info("No saved history found yet.")
-        else:
-            acc = add_cumulative(hist)
-            latest = acc.sort_values("day").iloc[-1]
-            a, b, c, d = st.columns(4)
-            a.metric("Cumulative Visits", int(latest.get("cum_total_visits", 0)))
-            b.metric("Cumulative Unique EMR", int(latest.get("cum_unique_emr", 0)))
-            c.metric("Cumulative CashOut", int(latest.get("cum_cash_patients", 0)))
-            d.metric("Cumulative Pending", int(latest.get("cum_pending_patients", 0)))
-            st.dataframe(acc, use_container_width=True, hide_index=True)
-
+# Show last result (either processed now, or loaded from S3)
+if SS.get("last_summary") is not None and SS.get("last_day_ts") is not None:
+    render_summary(SS["last_summary"], pd.to_datetime(SS["last_day_ts"]))
 elif SS["reg_df"] is not None:
-    st.info("Please upload Step 2 and Step 3 in sequence to enable processing.")
+    st.info("Please upload Step 2 and Step 3 in sequence to enable processing, or load a saved day from S3.")
