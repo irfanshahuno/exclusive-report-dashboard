@@ -49,6 +49,13 @@ except Exception:
 st.set_page_config(page_title="Registration Summary", layout="wide")
 st.title("Registration Summary (Registration + CashOut + Pending)")
 
+# ---------------------------
+# Admin toggle (controls upload/process UI)
+# ---------------------------
+# If Admin mode is OFF, users will only be able to VIEW results (no uploads / no processing).
+admin_mode = st.sidebar.toggle("Admin mode", value=bool(st.session_state.get("admin_mode", False)))
+st.session_state["admin_mode"] = admin_mode
+
 
 def _norm_col(c: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(c).strip().lower())
@@ -288,67 +295,70 @@ SS.setdefault("reg_df", None)
 SS.setdefault("cash_df", None)
 SS.setdefault("pend_df", None)
 
-# Step 1
-c1, c2 = st.columns([3, 1])
-with c1:
-    up1 = st.file_uploader("Upload Registration file", type=["xls", "xlsx"], key="uploader_reg")
-with c2:
-    if st.button("🗑️ Delete Step 1", use_container_width=True):
-        SS["reg_file"], SS["reg_df"] = None, None
-        st.rerun()
+if admin_mode:
+    # Step 1
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        up1 = st.file_uploader("Upload Registration file", type=["xls", "xlsx"], key="uploader_reg")
+    with c2:
+        if st.button("🗑️ Delete Step 1", use_container_width=True):
+            SS["reg_file"], SS["reg_df"] = None, None
+            st.rerun()
 
-if up1 is not None:
-    try:
-        reg_df = read_excel_any(up1, required_hint=["EMRNo", "VisitNo"])
-        ensure_required(reg_df, ["EMRNo", "VisitNo"], "Step 1 (Registration)")
-        SS["reg_file"] = {"name": up1.name, "bytes": up1.getvalue()}
-        SS["reg_df"] = reg_df
-        st.success(f"Step 1 OK ✅  ({up1.name})")
-    except Exception as e:
-        SS["reg_file"], SS["reg_df"] = None, None
-        st.error(str(e))
+    if up1 is not None:
+        try:
+            reg_df = read_excel_any(up1, required_hint=["EMRNo", "VisitNo"])
+            ensure_required(reg_df, ["EMRNo", "VisitNo"], "Step 1 (Registration)")
+            SS["reg_file"] = {"name": up1.name, "bytes": up1.getvalue()}
+            SS["reg_df"] = reg_df
+            st.success(f"Step 1 OK ✅  ({up1.name})")
+        except Exception as e:
+            SS["reg_file"], SS["reg_df"] = None, None
+            st.error(str(e))
 
-# Step 2
-st.markdown("### 2) PatientCashOutList (.xls / .xlsx)")
-c1, c2 = st.columns([3, 1])
-with c1:
-    up2 = st.file_uploader("Upload CashOut file", type=["xls", "xlsx"], key="uploader_cash", disabled=(SS["reg_df"] is None))
-with c2:
-    if st.button("🗑️ Delete Step 2", use_container_width=True):
-        SS["cash_file"], SS["cash_df"] = None, None
-        st.rerun()
+    # Step 2
+    st.markdown("### 2) PatientCashOutList (.xls / .xlsx)")
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        up2 = st.file_uploader("Upload CashOut file", type=["xls", "xlsx"], key="uploader_cash", disabled=(SS["reg_df"] is None))
+    with c2:
+        if st.button("🗑️ Delete Step 2", use_container_width=True):
+            SS["cash_file"], SS["cash_df"] = None, None
+            st.rerun()
 
-if up2 is not None:
-    try:
-        cash_df = read_excel_any(up2, required_hint=["EMRNo"])
-        ensure_required(cash_df, ["EMRNo"], "Step 2 (CashOut)")
-        SS["cash_file"] = {"name": up2.name, "bytes": up2.getvalue()}
-        SS["cash_df"] = cash_df
-        st.success(f"Step 2 OK ✅  ({up2.name})")
-    except Exception as e:
-        SS["cash_file"], SS["cash_df"] = None, None
-        st.error(str(e))
+    if up2 is not None:
+        try:
+            cash_df = read_excel_any(up2, required_hint=["EMRNo"])
+            ensure_required(cash_df, ["EMRNo"], "Step 2 (CashOut)")
+            SS["cash_file"] = {"name": up2.name, "bytes": up2.getvalue()}
+            SS["cash_df"] = cash_df
+            st.success(f"Step 2 OK ✅  ({up2.name})")
+        except Exception as e:
+            SS["cash_file"], SS["cash_df"] = None, None
+            st.error(str(e))
 
-# Step 3
-st.markdown("### 3) Pending file (.xls / .xlsx)")
-c1, c2 = st.columns([3, 1])
-with c1:
-    up3 = st.file_uploader("Upload Pending file", type=["xls", "xlsx"], key="uploader_pend", disabled=(SS["cash_df"] is None))
-with c2:
-    if st.button("🗑️ Delete Step 3", use_container_width=True):
-        SS["pend_file"], SS["pend_df"] = None, None
-        st.rerun()
+    # Step 3
+    st.markdown("### 3) Pending file (.xls / .xlsx)")
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        up3 = st.file_uploader("Upload Pending file", type=["xls", "xlsx"], key="uploader_pend", disabled=(SS["cash_df"] is None))
+    with c2:
+        if st.button("🗑️ Delete Step 3", use_container_width=True):
+            SS["pend_file"], SS["pend_df"] = None, None
+            st.rerun()
 
-if up3 is not None:
-    try:
-        pend_df = read_excel_any(up3, required_hint=["EMRNo"])
-        ensure_required(pend_df, ["EMRNo"], "Step 3 (Pending)")
-        SS["pend_file"] = {"name": up3.name, "bytes": up3.getvalue()}
-        SS["pend_df"] = pend_df
-        st.success(f"Step 3 OK ✅  ({up3.name})")
-    except Exception as e:
-        SS["pend_file"], SS["pend_df"] = None, None
-        st.error(str(e))
+    if up3 is not None:
+        try:
+            pend_df = read_excel_any(up3, required_hint=["EMRNo"])
+            ensure_required(pend_df, ["EMRNo"], "Step 3 (Pending)")
+            SS["pend_file"] = {"name": up3.name, "bytes": up3.getvalue()}
+            SS["pend_df"] = pend_df
+            st.success(f"Step 3 OK ✅  ({up3.name})")
+        except Exception as e:
+            SS["pend_file"], SS["pend_df"] = None, None
+            st.error(str(e))
+else:
+    st.info('Viewer mode: uploads and processing are disabled. Turn ON Admin mode to upload/process.')
 
 
 def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.DataFrame, day_ts: pd.Timestamp) -> Dict[str, pd.DataFrame]:
@@ -567,7 +577,17 @@ if s3_ok:
     else:
         st.caption("No history.csv found yet in S3 for this center.")
 
-if can_process:
+# Auto-load latest saved summary for viewers (and for admin if nothing processed yet)
+if s3_ok and SS.get("last_summary") is None:
+    hist_auto = load_history_from_s3()
+    if not hist_auto.empty:
+        latest_day = pd.to_datetime(hist_auto["day"]).dt.normalize().max()
+        loaded = load_summary_from_s3(latest_day)
+        if loaded:
+            SS["last_summary"] = loaded
+            SS["last_day_ts"] = latest_day
+
+if admin_mode and can_process:
     detected = get_day_from_registration(SS["reg_df"])
     day_ts = detected if detected is not None else pd.to_datetime(manual_day)
     if detected is None:
