@@ -78,6 +78,8 @@ require_view_access()
 # ====================== ✅ NEEDFUL: BALANCE PAGE INSIDE SAME APP ======================
 BALANCE_PAGE_PATH = "pages/3_Balance_Attempt_Aging.py"
 
+
+DAILY_REPORT_PAGE_PATH = "pages/4_Registration_Summary.py"
 def build_balance_url(center: str, year: int) -> str:
     return f"?nav=balance&center={center}&year={year}"
 # ================================================================================
@@ -385,6 +387,25 @@ if nav == "balance":
 
     st.switch_page(BALANCE_PAGE_PATH)
 # ================================================================================
+
+# ====================== ✅ NEEDFUL: NAV HANDLER for Daily Report ======================
+if nav == "daily":
+    y = st.query_params.get("year")
+    try:
+        if y:
+            y_int = int(y)
+            st.session_state.year = y_int
+            st.session_state.rcm_year = y_int
+    except Exception:
+        pass
+
+    try:
+        del st.query_params["nav"]
+    except Exception:
+        pass
+
+    st.switch_page(DAILY_REPORT_PAGE_PATH)
+# ==============================================================================
 
 
 # ====================== ✅ NEEDFUL S3 HELPERS (NEW) ======================
@@ -743,10 +764,15 @@ def load_center_kpis(center_key: str, year: int):
 
 
 # ====================== Header & routing ======================
-t1, t2 = st.columns([6, 2])
+t1, t2, t3 = st.columns([6, 2, 2])
 with t1:
     st.title("📊 Excellent Medical Group")
 with t2:
+    if st.button("📅 Daily Report", use_container_width=True, key="btn_daily_report"):
+        st.query_params["nav"] = "daily"
+        st.query_params["year"] = str(st.session_state.get("rcm_year") or st.session_state.get("year") or 2026)
+        st.rerun()
+with t3:
     if st.button("⬅ Change Year", use_container_width=True, key="btn_change_year"):
         reset_year_selection()
 
