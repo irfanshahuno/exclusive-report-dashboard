@@ -354,6 +354,7 @@ if admin_mode:
     if up1 is not None:
         try:
             reg_df = read_excel_any(up1, required_hint=["EMRNo", "VisitNo"])
+    SS["reg_df_cached"] = reg_df.copy()
             ensure_required(reg_df, ["EMRNo", "VisitNo"], "Step 1 (Registration)")
             SS["reg_file"] = {"name": up1.name, "bytes": up1.getvalue()}
             SS["reg_df"] = reg_df
@@ -560,10 +561,33 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     st.dataframe(dfs["Employer Wise"], use_container_width=True, hide_index=True)
 
     st.subheader("Employer × Insurance")
+    # If not present in saved summary, compute it on-the-fly from the latest uploaded Registration file (admin page)
+    if "Employer × Insurance" not in dfs:
+        reg_df_cached = SS.get("reg_df_cached")
+        if isinstance(reg_df_cached, pd.DataFrame) and not reg_df_cached.empty:
+            # detect columns again from cached reg_df
+            ins_col = _find_col(reg_df_cached, ["Insurance", "InsuranceName", "Payer", "Payer Name", "TPA", "TPA Name"])
+            emp_col = _find_col(reg_df_cached, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name", "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
+
+            # fallback: detect employer column by content (some exports store it under 'Unnamed')
+            if emp_col is None:
+                for c in reg_df_cached.columns:
+                    sample = reg_df_cached[c].dropna().astype(str).head(10)
+                    if sample.empty:
+                        continue
+                    avg_len = sample.str.strip().str.len().mean()
+                    has_digits_only = sample.str.strip().str.match(r"^\d+$").any()
+                    if avg_len and avg_len > 12 and not has_digits_only:
+                        emp_col = c
+                        break
+
+            if emp_col and ins_col:
+                dfs["Employer × Insurance"] = employer_insurance_table(reg_df_cached, emp_col, ins_col)
+
     if "Employer × Insurance" in dfs:
         st.dataframe(dfs["Employer × Insurance"], use_container_width=True, hide_index=True)
     else:
-        st.info("Employer × Insurance breakdown will appear after you re-process once with the updated script.")
+        st.info("Upload the Registration file (Step 1) and click Process once to generate Employer × Insurance.")
     st.subheader("Doctor Wise Visits")
     st.dataframe(dfs["Doctor Wise Visits"], use_container_width=True, hide_index=True)
 
