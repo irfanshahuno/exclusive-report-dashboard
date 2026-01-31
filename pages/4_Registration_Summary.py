@@ -50,7 +50,7 @@ s3_required_or_stop()
 BUCKET = get_secret("S3_BUCKET_NAME")
 REGION = get_secret("AWS_REGION")
 BASE_PREFIX = (get_secret("S3_BASE_PREFIX", "streamlit") or "streamlit").strip("/")
-MODULE = "registration"   # ✅ module folder
+MODULE = "registration"   # module folder in S3
 
 def get_s3_client():
     return boto3.client(
@@ -76,7 +76,6 @@ def pick_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     for c in df.columns:
         if norm_col(c) in want:
             return c
-    # fuzzy contains
     for c in df.columns:
         nc = norm_col(c)
         for w in want:
@@ -85,14 +84,12 @@ def pick_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     return None
 
 def try_parse_date_series(s: pd.Series) -> pd.Series:
-    # handles Excel datetimes/strings
     return pd.to_datetime(s, errors="coerce")
 
 def detect_header_row_xls(file_bytes: bytes, must_have: str = "emrno", scan_rows: int = 25) -> int:
     """
-    Some .xls files have title rows and the real header is not row 0.
-    We scan first N rows and find the row that contains 'EMRNo' (or similar).
-    Returns header row index.
+    Some .xls have title rows; actual header isn't row 0.
+    We scan first N rows and find a header row containing EMRNo.
     """
     for hdr in range(0, scan_rows):
         try:
@@ -106,7 +103,7 @@ def detect_header_row_xls(file_bytes: bytes, must_have: str = "emrno", scan_rows
 
 def read_excel_smart(uploaded_file) -> Tuple[pd.DataFrame, bytes]:
     """
-    Reads xlsx/xls. For xls, auto-detects header row if needed.
+    Reads xlsx/xls. For xls, auto-detect header row if needed.
     Returns (df, raw_bytes)
     """
     raw = uploaded_file.getvalue()
@@ -117,7 +114,6 @@ def read_excel_smart(uploaded_file) -> Tuple[pd.DataFrame, bytes]:
         df = pd.read_excel(io.BytesIO(raw), header=hdr, engine="xlrd")
         return df, raw
 
-    # xlsx
     df = pd.read_excel(io.BytesIO(raw), engine="openpyxl")
     return df, raw
 
@@ -133,8 +129,7 @@ def extract_day_from_registration(reg_df: pd.DataFrame) -> Optional[str]:
     if not date_col:
         return None
 
-    ds = try_parse_date_series(reg_df[date_col])
-    ds = ds.dropna()
+    ds = try_parse_date_series(reg_df[date_col]).dropna()
     if ds.empty:
         return None
 
@@ -148,13 +143,41 @@ def df_value_counts(df: pd.DataFrame, col: str, top_n: int = 50) -> pd.DataFrame
     out.columns = ["Value", "Count"]
     return out
 
+# -------- FIX: Safe + Unique Excel sheet names --------
+def safe_sheet_name(name: str, used: set) -> str:
+    # Excel rules: max 31 chars, no : \ / ? * [ ]
+    if name is None:
+        name = "Sheet"
+    name = str(name).strip()
+
+    name = re.sub(r'[:\\/?*\[\]]', " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+
+    if not name:
+        name = "Sheet"
+
+    base = name[:31]
+
+    final = base
+    i = 2
+    while final.lower() in used:
+        suffix = f"_{i}"
+        final = (base[: 31 - len(suffix)] + suffix).strip()
+        i += 1
+
+    used.add(final.lower())
+    return final
+
 def to_excel_bytes(dfs: Dict[str, pd.DataFrame]) -> bytes:
     out = io.BytesIO()
+    used = set()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         for sheet, df in dfs.items():
-            df.to_excel(writer, sheet_name=sheet[:31], index=False)
+            sheet_name = safe_sheet_name(sheet, used)
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
     return out.getvalue()
 
+# -------- S3 helpers --------
 def s3_put_bytes(key: str, data: bytes, content_type: str):
     s3.put_object(Bucket=BUCKET, Key=key, Body=data, ContentType=content_type)
 
@@ -185,7 +208,6 @@ def s3_delete_prefix(prefix: str):
     keys = s3_list_prefix(prefix)
     if not keys:
         return
-    # batch delete
     for i in range(0, len(keys), 1000):
         chunk = keys[i:i+1000]
         s3.delete_objects(
@@ -194,7 +216,6 @@ def s3_delete_prefix(prefix: str):
         )
 
 def day_prefix(day_str: str) -> str:
-    # ✅ Correct structure: streamlit/registration/YYYY-MM-DD/
     return f"{BASE_PREFIX}/{MODULE}/{day_str}/"
 
 def json_key(day_str: str) -> str:
@@ -231,7 +252,7 @@ with st.expander("Storage Status (S3)", expanded=False):
 
 
 # =========================================================
-# Step 0: Choose day (optional) — used only if file has no date
+# Step 0: Manual Day (fallback only)
 # =========================================================
 st.caption("✅ Day is read from Registration file. Date picker is used only if file has no date column.")
 manual_day = st.date_input("Manual Day (fallback only)", value=date.today())
@@ -246,7 +267,6 @@ st.subheader("1) RegistrationList (.xls / .xlsx)")
 colA, colB = st.columns([3, 1])
 with colA:
     up1 = st.file_uploader("Upload Registration file", type=["xls", "xlsx"], key="uploader_step1")
-
 with colB:
     if st.button("🗑️ Delete Step 1"):
         st.session_state.step1 = None
@@ -256,13 +276,11 @@ with colB:
         st.rerun()
 
 step1_error = None
-detected_day = None
 
 if up1 is not None:
     try:
         df1, raw1 = read_excel_smart(up1)
 
-        # required columns for registration summary
         col_emr = pick_col(df1, ["EMRNo", "EMR No", "MRN", "Patient MRN", "EMR"])
         col_visit = pick_col(df1, ["Visit No", "VisitNo", "Visit Number", "VisitID", "Visit Id"])
 
@@ -271,9 +289,7 @@ if up1 is not None:
         if not col_visit:
             step1_error = (step1_error or "") + f"\nStep 1 error: Registration file must contain Visit No. Found: {list(df1.columns)}"
 
-        detected_day = extract_day_from_registration(df1)
-        if not detected_day:
-            detected_day = manual_day_str
+        detected_day = extract_day_from_registration(df1) or manual_day_str
 
         if step1_error is None:
             st.session_state.step1 = (df1, raw1, detected_day)
@@ -294,7 +310,6 @@ st.subheader("2) PatientCashOutList (.xls / .xlsx)  — only EMRNo required")
 colA, colB = st.columns([3, 1])
 with colA:
     up2 = st.file_uploader("Upload CashOut file", type=["xls", "xlsx"], key="uploader_step2")
-
 with colB:
     if st.button("🗑️ Delete Step 2"):
         st.session_state.step2 = None
@@ -330,7 +345,6 @@ st.subheader("3) Pending file (.xls / .xlsx) — only EMRNo required (can be emp
 colA, colB = st.columns([3, 1])
 with colA:
     up3 = st.file_uploader("Upload Pending file", type=["xls", "xlsx"], key="uploader_step3")
-
 with colB:
     if st.button("🗑️ Delete Step 3"):
         st.session_state.step3 = None
@@ -346,7 +360,6 @@ if up3 is not None:
     else:
         try:
             df3, raw3 = read_excel_smart(up3)
-            # pending can be empty, but if has data it must have EMRNo
             if len(df3.columns) > 0 and len(df3) > 0:
                 col_emr3 = pick_col(df3, ["EMRNo", "EMR No", "MRN", "Patient MRN", "EMR"])
                 if not col_emr3:
@@ -374,11 +387,9 @@ else:
     df3, raw3 = st.session_state.step3
 
     if st.button("✅ Process & Save to S3"):
-        # --- Required columns from Registration ---
         col_emr = pick_col(df1, ["EMRNo", "EMR No", "MRN", "Patient MRN", "EMR"])
         col_visit = pick_col(df1, ["Visit No", "VisitNo", "Visit Number", "VisitID", "Visit Id"])
 
-        # Optional group columns (for tables)
         col_doc = pick_col(df1, ["Doctor", "Doctor Name", "Physician", "Provider"])
         col_ins = pick_col(df1, [
             "Insurance", "Insurance Name", "Insurance Company", "Payer", "Payer Name",
@@ -390,7 +401,6 @@ else:
         col_status = pick_col(df1, ["Status", "Visit Status", "Reg Status"])
         col_user = pick_col(df1, ["User", "Created By", "Registration User", "Reg User", "Receptionist"])
 
-        # --- CashOut / Pending EMR ---
         col_emr2 = pick_col(df2, ["EMRNo", "EMR No", "MRN", "Patient MRN", "EMR"])
         col_emr3 = pick_col(df3, ["EMRNo", "EMR No", "MRN", "Patient MRN", "EMR"])
 
@@ -405,12 +415,10 @@ else:
         cash_patients = int(cash_emr.nunique())
 
         pending_patients = 0
-        pending_emr = pd.Series([], dtype=str)
         if len(df3) > 0 and col_emr3:
             pending_emr = df3[col_emr3].dropna().astype(str).str.strip()
             pending_patients = int(pending_emr.nunique())
 
-        # Build summary tables from Registration only
         tables = {}
         if col_doc:
             tables["Doctor Wise Visits"] = df_value_counts(df1, col_doc, top_n=50)
@@ -427,7 +435,6 @@ else:
         if col_user:
             tables["Registration User Wise"] = df_value_counts(df1, col_user, top_n=50)
 
-        # Store the exact day used
         run_id = datetime.now().strftime("%H%M%S")
 
         summary = {
@@ -446,10 +453,9 @@ else:
             }
         }
 
-        # ✅ Save in correct module/date folder (overwrite same day)
         prefix = day_prefix(day_str)
 
-        # optional: clean that day folder before saving (keeps latest truth)
+        # overwrite same day folder (keep latest truth)
         s3_delete_prefix(prefix)
 
         s3_put_bytes(json_key(day_str), json.dumps(summary, ensure_ascii=False).encode("utf-8"), "application/json")
@@ -457,12 +463,14 @@ else:
         s3_put_bytes(cash_key(day_str), raw2, "application/vnd.ms-excel")
         s3_put_bytes(pending_key(day_str), raw3, "application/vnd.ms-excel")
 
-        # Also store “tables export” as Excel for easy download
+        # Export tables Excel
         export_dfs = {"KPIs": pd.DataFrame([summary["kpis"]])}
-        for k, v in tables.items():
-            export_dfs[k] = v
-        export_bytes = to_excel_bytes(export_dfs)
-        s3_put_bytes(prefix + "summary_export.xlsx", export_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        for kname, vdf in tables.items():
+            export_dfs[kname] = vdf
+
+        export_bytes = to_excel_bytes(export_dfs)  # ✅ FIXED
+        s3_put_bytes(prefix + "summary_export.xlsx", export_bytes,
+                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         st.success(f"Saved ✅  {BASE_PREFIX}/{MODULE}/{day_str}/")
         st.session_state.result = {"day": day_str, "kpis": summary["kpis"], "tables": tables, "reg_df": df1}
@@ -474,7 +482,6 @@ else:
 st.divider()
 st.subheader("Load Saved Day (from S3)")
 
-# list days from S3: streamlit/registration/YYYY-MM-DD/summary.json
 all_keys = s3_list_prefix(f"{BASE_PREFIX}/{MODULE}/")
 day_list = sorted({
     k.split(f"{BASE_PREFIX}/{MODULE}/", 1)[1].split("/", 1)[0]
@@ -484,26 +491,34 @@ day_list = sorted({
 
 if day_list:
     sel_day = st.selectbox("Select saved day", day_list, index=len(day_list)-1)
-    if st.button("📥 Load Selected Day"):
-        raw = s3_get_bytes(json_key(sel_day))
-        if raw:
-            summary = json.loads(raw.decode("utf-8"))
-            # try load export tables xlsx? (optional)
-            st.session_state.result = {
-                "day": summary["day"],
-                "kpis": summary["kpis"],
-                "tables": {},
-                "reg_df": None,
-            }
-            st.success(f"Loaded ✅ {sel_day}")
-        else:
-            st.error("Could not load summary.json")
+
+    colL, colR = st.columns([1, 1])
+    with colL:
+        if st.button("📥 Load Selected Day"):
+            raw = s3_get_bytes(json_key(sel_day))
+            if raw:
+                summary = json.loads(raw.decode("utf-8"))
+                st.session_state.result = {
+                    "day": summary["day"],
+                    "kpis": summary["kpis"],
+                    "tables": {},
+                    "reg_df": None,
+                }
+                st.success(f"Loaded ✅ {sel_day}")
+            else:
+                st.error("Could not load summary.json")
+
+    with colR:
+        if st.button("🧨 Delete Selected Day Folder"):
+            s3_delete_prefix(day_prefix(sel_day))
+            st.success(f"Deleted ✅ {sel_day}")
+            st.rerun()
 else:
     st.info("No saved days found yet.")
 
 
 # =========================================================
-# Display — Current Day Summary + Tables
+# Display — Current Day Summary + Tables (live run)
 # =========================================================
 if st.session_state.result:
     k = st.session_state.result["kpis"]
@@ -518,13 +533,10 @@ if st.session_state.result:
     c.metric("Today CashOut", k["cash_patients"])
     d.metric("Today Pending", k["pending_patients"])
 
-    # If we have registration df in session (processed this run) show tables live
     tables = st.session_state.result.get("tables", {})
     if tables:
         st.divider()
         st.subheader("Registration Breakdown (from Registration file)")
-
-        # Show in same style: tables stacked like your Excel sections
         for title, df_tbl in tables.items():
             st.markdown(f"### {title}")
             st.dataframe(df_tbl, use_container_width=True, height=330)
@@ -545,25 +557,23 @@ else:
         if not raw:
             continue
         s = json.loads(raw.decode("utf-8"))
-        k = s["kpis"]
+        kk = s["kpis"]
         rows.append({
             "day": d,
-            "total_visits": k["total_visits"],
-            "unique_emr": k["unique_emr"],
-            "unique_visitno": k["unique_visitno"],
-            "cash_patients": k["cash_patients"],
-            "pending_patients": k["pending_patients"],
+            "total_visits": kk["total_visits"],
+            "unique_emr": kk["unique_emr"],
+            "unique_visitno": kk["unique_visitno"],
+            "cash_patients": kk["cash_patients"],
+            "pending_patients": kk["pending_patients"],
             "run_id": s.get("run_id", "")
         })
 
     acc = pd.DataFrame(rows).sort_values("day")
-    # cumulative sums
     acc["cum_total_visits"] = acc["total_visits"].cumsum()
     acc["cum_unique_emr"] = acc["unique_emr"].cumsum()
     acc["cum_cash_patients"] = acc["cash_patients"].cumsum()
     acc["cum_pending_patients"] = acc["pending_patients"].cumsum()
 
-    # KPIs
     x1, x2, x3, x4 = st.columns(4)
     x1.metric("Cumulative Visits", int(acc["cum_total_visits"].iloc[-1]) if len(acc) else 0)
     x2.metric("Cumulative Unique EMR", int(acc["cum_unique_emr"].iloc[-1]) if len(acc) else 0)
@@ -572,7 +582,6 @@ else:
 
     st.dataframe(acc, use_container_width=True)
 
-    # download accumulated CSV
     st.download_button(
         "⬇️ Download Accumulated CSV",
         data=acc.to_csv(index=False).encode("utf-8"),
