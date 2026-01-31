@@ -46,15 +46,15 @@ except Exception:
     ClientError = Exception
 
 
-st.set_page_config(page_title="Registration Summary", layout="wide")
+st.set_page_config(page_title="Registration Summary", layout="wide", initial_sidebar_state="collapsed")
 st.title("Registration Summary (Registration + CashOut + Pending)")
 
 # ---------------------------
-# Admin toggle (controls upload/process UI)
+# Admin mode (set from MAIN page)
 # ---------------------------
-# If Admin mode is OFF, users will only be able to VIEW results (no uploads / no processing).
-admin_mode = st.sidebar.toggle("Admin mode", value=bool(st.session_state.get("admin_mode", False)))
-st.session_state["admin_mode"] = admin_mode
+# Main page should set: st.session_state["admin_mode"] = True/False
+# This page will NOT show any toggle; it will only read the value.
+admin_mode = bool(st.session_state.get("admin_mode", False))
 
 
 def _norm_col(c: str) -> str:
