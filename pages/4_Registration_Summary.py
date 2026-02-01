@@ -595,8 +595,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     emp_ins_df = employer_with_insurance(reg_df, emp_col, ins_col, n=50)
     st.dataframe(emp_ins_df, use_container_width=True)
 
-    st.subheader
-("Doctor Wise Visits")
+    st.subheader("Doctor Wise Visits")
     st.dataframe(dfs["Doctor Wise Visits"], use_container_width=True, hide_index=True)
 
     export_dfs = {k: dfs[k] for k in dfs.keys()}
