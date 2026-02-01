@@ -178,11 +178,11 @@ def get_day_from_registration(reg_df: pd.DataFrame) -> Optional[pd.Timestamp]:
         return day.min()
 
 
-def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15) -> pd.DataFrame:
+def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15, label: str = "Value") -> pd.DataFrame:
     """Return top-N counts for a column and append a TOTAL row.
 
     - Normalizes blanks -> 'Blank' (or 'CASH' for insurance-like columns)
-    - Returns columns: Value, Count
+    - Returns columns: <label>, Count
     - Appends TOTAL (sum of shown rows) at the end
     """
     if not col or col not in df.columns:
@@ -202,7 +202,7 @@ def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15) -> pd.DataFram
         .head(n)
         .reset_index()
     )
-    out.columns = ["Value", "Count"]
+    out.columns = [label, "Count"]
 
     # ✅ TOTAL row (sum of displayed rows)
     total = int(out["Count"].sum()) if not out.empty else 0
@@ -475,13 +475,13 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
             {"Metric": "CashOut Patients", "Value": cash_patients},
             {"Metric": "Pending Patients", "Value": pending_patients},
         ]),
-        "Doctor Wise Visits": top_counts(reg_df, doctor_col, n=50),
-        "Insurance Wise Visits": top_counts(reg_df, ins_col, n=50),
-        "Employer Wise": top_counts(reg_df, emp_col, n=50),
-        "Bill Type": top_counts(reg_df, bill_col, n=20),
-        "Visit Type": top_counts(reg_df, visit_type_col, n=20),
-        "Status Wise": top_counts(reg_df, status_col, n=30),
-        "Registration User Wise": top_counts(reg_df, reg_user_col, n=30),
+        "Doctor Wise Visits": top_counts(reg_df, doctor_col, n=50, label="Doctor"),
+        "Insurance Wise Visits": top_counts(reg_df, ins_col, n=50, label="Insurance"),
+        "Employer Wise": top_counts(reg_df, emp_col, n=50, label="Employer"),
+        "Bill Type": top_counts(reg_df, bill_col, n=20, label="Bill Type"),
+        "Visit Type": top_counts(reg_df, visit_type_col, n=20, label="Visit Type"),
+        "Status Wise": top_counts(reg_df, status_col, n=30, label="Status"),
+        "Registration User Wise": top_counts(reg_df, reg_user_col, n=30, label="User"),
         "Reg Date Wise (Daily)": reg_daywise,
     }
 
@@ -577,34 +577,6 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     st.subheader("Employer Wise")
     st.dataframe(dfs["Employer Wise"], use_container_width=True, hide_index=True)
 
-    st.subheader("Employer × Insurance")
-    # If not present in saved summary, compute it on-the-fly from the latest uploaded Registration file (admin page)
-    if "Employer × Insurance" not in dfs:
-        reg_df_cached = SS.get("reg_df_cached")
-        if isinstance(reg_df_cached, pd.DataFrame) and not reg_df_cached.empty:
-            # detect columns again from cached reg_df
-            ins_col = _find_col(reg_df_cached, ["Insurance", "InsuranceName", "Payer", "Payer Name", "TPA", "TPA Name"])
-            emp_col = _find_col(reg_df_cached, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name", "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
-
-            # fallback: detect employer column by content (some exports store it under 'Unnamed')
-            if emp_col is None:
-                for c in reg_df_cached.columns:
-                    sample = reg_df_cached[c].dropna().astype(str).head(10)
-                    if sample.empty:
-                        continue
-                    avg_len = sample.str.strip().str.len().mean()
-                    has_digits_only = sample.str.strip().str.match(r"^\d+$").any()
-                    if avg_len and avg_len > 12 and not has_digits_only:
-                        emp_col = c
-                        break
-
-            if emp_col and ins_col:
-                dfs["Employer × Insurance"] = employer_insurance_table(reg_df_cached, emp_col, ins_col)
-
-    if "Employer × Insurance" in dfs:
-        st.dataframe(dfs["Employer × Insurance"], use_container_width=True, hide_index=True)
-    else:
-        st.info("Upload the Registration file (Step 1) and click Process once to generate Employer × Insurance.")
     st.subheader("Doctor Wise Visits")
     st.dataframe(dfs["Doctor Wise Visits"], use_container_width=True, hide_index=True)
 
