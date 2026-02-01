@@ -631,7 +631,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     e.metric("Pending Patients", int(kpi["Pending Patients"]))
     f.metric("Generated", datetime.now().strftime("%Y-%m-%d %H:%M"))
 
-        st.subheader("Pending Status Wise")
+    st.subheader("Pending Status Wise")
     st.dataframe(dfs["Pending Status Wise"], use_container_width=True, hide_index=True)
 
     st.subheader("Insurance Wise Visits")
