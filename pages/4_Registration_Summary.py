@@ -210,43 +210,6 @@ def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15, label: str = "
     return out
 
 
-def employer_insurance_table(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 200) -> pd.DataFrame:
-    """Employer x Insurance breakdown (top rows) with TOTAL row at end.
-    Insurance blanks are shown as 'CASH'.
-    """
-    if not emp_col or emp_col not in df.columns or not ins_col or ins_col not in df.columns:
-        return pd.DataFrame(columns=["Employer", "Insurance", "Count"])
-
-    tmp = df[[emp_col, ins_col]].copy()
-
-    # Employer: keep as Blank
-    tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
-
-    # Insurance: blanks => CASH
-    tmp[ins_col] = (
-        tmp[ins_col]
-        .fillna("CASH")
-        .astype(str)
-        .str.strip()
-        .replace("", "CASH")
-        .replace("Blank", "CASH")
-    )
-
-    out = (
-        tmp.groupby([emp_col, ins_col])
-        .size()
-        .reset_index(name="Count")
-        .sort_values("Count", ascending=False)
-        .head(n)
-    )
-    out.columns = ["Employer", "Insurance", "Count"]
-
-    total = int(out["Count"].sum()) if not out.empty else 0
-    out.loc[len(out)] = ["TOTAL", "", total]
-    return out
-
-
-# ✅ NEEDFUL CHANGE: Employer Wise (single row per employer) + show dominant insurance
 def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 50) -> pd.DataFrame:
     """
     Employer Wise counts, plus ONE insurance name per employer:
@@ -298,6 +261,43 @@ def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_c
     out = counts.merge(dominant, on=emp_col, how="left")
     out = out.rename(columns={emp_col: "Employer", ins_col: "Insurance"})
     out = out.sort_values("Count", ascending=False).head(n).reset_index(drop=True)
+
+    total = int(out["Count"].sum()) if not out.empty else 0
+    out.loc[len(out)] = ["TOTAL", "", total]
+    return out
+
+
+
+def employer_insurance_table(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 200) -> pd.DataFrame:
+    """Employer x Insurance breakdown (top rows) with TOTAL row at end.
+    Insurance blanks are shown as 'CASH'.
+    """
+    if not emp_col or emp_col not in df.columns or not ins_col or ins_col not in df.columns:
+        return pd.DataFrame(columns=["Employer", "Insurance", "Count"])
+
+    tmp = df[[emp_col, ins_col]].copy()
+
+    # Employer: keep as Blank
+    tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
+
+    # Insurance: blanks => CASH
+    tmp[ins_col] = (
+        tmp[ins_col]
+        .fillna("CASH")
+        .astype(str)
+        .str.strip()
+        .replace("", "CASH")
+        .replace("Blank", "CASH")
+    )
+
+    out = (
+        tmp.groupby([emp_col, ins_col])
+        .size()
+        .reset_index(name="Count")
+        .sort_values("Count", ascending=False)
+        .head(n)
+    )
+    out.columns = ["Employer", "Insurance", "Count"]
 
     total = int(out["Count"].sum()) if not out.empty else 0
     out.loc[len(out)] = ["TOTAL", "", total]
@@ -505,6 +505,7 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
     bill_col = _find_col(reg_df, ["BillType", "Bill Type", "Insurance/Cash", "Cash/Insurance"])
     visit_type_col = _find_col(reg_df, ["VisitType", "Visit Type", "VisitCategory"])
     status_col = _find_col(reg_df, ["Status", "VisitStatus"])
+    pend_status_col = _find_col(pend_df, ["Status", "VisitStatus", "Pending Status"])
     reg_user_col = _find_col(reg_df, ["RegUser", "RegistrationUser", "User", "CreatedBy"])
     reg_date_col = _find_col(reg_df, ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
 
@@ -535,13 +536,11 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
         ]),
         "Doctor Wise Visits": top_counts(reg_df, doctor_col, n=50, label="Doctor"),
         "Insurance Wise Visits": top_counts(reg_df, ins_col, n=50, label="Insurance"),
-
-        # ✅ NEEDFUL CHANGE USED HERE
         "Employer Wise": employer_wise_with_insurance(reg_df, emp_col=emp_col, ins_col=ins_col, n=50),
-
         "Bill Type": top_counts(reg_df, bill_col, n=20, label="Bill Type"),
         "Visit Type": top_counts(reg_df, visit_type_col, n=20, label="Visit Type"),
         "Status Wise": top_counts(reg_df, status_col, n=30, label="Status"),
+        "Pending Status Wise": top_counts(pend_df, pend_status_col, n=30, label="Status"),
         "Registration User Wise": top_counts(reg_df, reg_user_col, n=30, label="User"),
         "Reg Date Wise (Daily)": reg_daywise,
     }
@@ -631,6 +630,9 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     e, f = st.columns(2)
     e.metric("Pending Patients", int(kpi["Pending Patients"]))
     f.metric("Generated", datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+        st.subheader("Pending Status Wise")
+    st.dataframe(dfs["Pending Status Wise"], use_container_width=True, hide_index=True)
 
     st.subheader("Insurance Wise Visits")
     st.dataframe(dfs["Insurance Wise Visits"], use_container_width=True, hide_index=True)
