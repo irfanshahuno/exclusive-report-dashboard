@@ -164,13 +164,32 @@ def ensure_required(df: pd.DataFrame, required: List[str], label: str) -> Dict[s
     return mapping
 
 
+
 def get_day_from_registration(reg_df: pd.DataFrame) -> Optional[pd.Timestamp]:
+    """Detect the report day from Registration file.
+
+    EMR exports often store dates as dd/mm/yyyy but pandas defaults to mm/dd/yyyy.
+    We therefore try BOTH parses (dayfirst False and True) and pick the one that
+    yields more valid dates. If tied, we prefer dayfirst=True (common in UAE).
+    """
     date_col = _find_col(reg_df, ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
     if not date_col:
         return None
-    s = pd.to_datetime(reg_df[date_col], errors="coerce").dropna()
+
+    s_raw = reg_df[date_col]
+
+    # Try both date interpretations
+    s1 = pd.to_datetime(s_raw, errors="coerce", dayfirst=False)
+    s2 = pd.to_datetime(s_raw, errors="coerce", dayfirst=True)
+
+    n1 = int(s1.notna().sum())
+    n2 = int(s2.notna().sum())
+
+    s = s2 if n2 >= n1 else s1
+    s = s.dropna()
     if s.empty:
         return None
+
     day = s.dt.normalize()
     try:
         return day.mode().iloc[0]
@@ -544,7 +563,9 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
     pending_patients = int(pd.Series(pend_df[pend_emr]).nunique(dropna=True))
 
     if reg_date_col:
-        d = pd.to_datetime(reg_df[reg_date_col], errors="coerce").dt.date
+        d1 = pd.to_datetime(reg_df[reg_date_col], errors="coerce", dayfirst=False)
+        d2 = pd.to_datetime(reg_df[reg_date_col], errors="coerce", dayfirst=True)
+        d = (d2 if int(d2.notna().sum()) >= int(d1.notna().sum()) else d1).dt.date
         reg_daywise = pd.Series(d).dropna().value_counts().sort_index().reset_index()
         reg_daywise.columns = ["Reg Date", "Count"]
     else:
