@@ -142,6 +142,9 @@ BALANCE_PAGE_PATH = "pages/3_Balance_Attempt_Aging.py"
 
 
 DAILY_REPORT_PAGE_PATH = "pages/4_Registration_Summary.py"
+# External Daily Report (separate Streamlit app)
+DAILY_REPORT_EXTERNAL_BASE = "https://exclusive-report-dashboard-ctan8jpussjzffxz2arkgh.streamlit.app"
+DAILY_REPORT_EXTERNAL_PAGE = "/Registration_View"
 def build_balance_url(center: str, year: int) -> str:
     return f"?nav=balance&center={center}&year={year}"
 # ================================================================================
@@ -872,11 +875,17 @@ t1, t2, t3 = st.columns([6, 2, 2])
 with t1:
     st.title("📊 Excellent Medical Group")
 with t2:
-    # ✅ Open Daily Report in a NEW browser tab
+    # ✅ Open External Daily Report (view page) in a NEW browser tab
     yr = int(st.session_state.get("rcm_year") or st.session_state.get("year") or 2026)
-    token = make_url_token({'year': yr})
-    href = f"?nav=daily&year={yr}" + (f"&token={token}" if token else "")
-    st.markdown(f'<a class="navlink" href="{href}" target="_blank">📅 Daily Report</a>', unsafe_allow_html=True)
+    ck = st.session_state.get("center_key") or st.query_params.get("center")
+    # Build URL with auto-passed center/year when available
+    params = []
+    if ck:
+        params.append(f"center={ck}")
+    params.append(f"year={yr}")
+    qp = ("?" + "&".join(params)) if params else ""
+    daily_url = f"{DAILY_REPORT_EXTERNAL_BASE}{DAILY_REPORT_EXTERNAL_PAGE}{qp}"
+    st.markdown(f'<a class="navlink" href="{daily_url}" target="_blank">📅 Daily Report</a>', unsafe_allow_html=True)
 with t3:
     if st.button("⬅ Change Year", use_container_width=True, key="btn_change_year"):
         reset_year_selection()
