@@ -792,31 +792,9 @@ def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
 can_process = SS["reg_df"] is not None and SS["cash_df"] is not None and SS["pend_df"] is not None
 
 # Persist last result in-session (so it doesn't disappear on rerun)
-SS.setdefault("last_summary", None)
-SS.setdefault("last_day_ts", None)
+SS.setdefault("last_saved_day", None)
+SS.setdefault("last_saved_center", None)
 
-# If S3 is enabled, allow viewing previously saved results without re-processing
-if s3_ok:
-    hist_view = load_history_from_s3()
-    if not hist_view.empty:
-        days = sorted(pd.to_datetime(hist_view["day"]).dt.normalize().unique())
-        # newest first in UI
-        days_ui = list(reversed(days))
-        picked = st.selectbox(
-            "View saved day (from S3)",
-            options=days_ui,
-            format_func=lambda x: pd.to_datetime(x).date().isoformat(),
-        )
-        if st.button("📥 Load Saved Summary", use_container_width=True):
-            loaded = load_summary_from_s3(pd.to_datetime(picked))
-            if loaded:
-                SS["last_summary"] = loaded
-                SS["last_day_ts"] = pd.to_datetime(picked)
-                st.success(f"Loaded saved summary for {pd.to_datetime(picked).date().isoformat()} ✅")
-            else:
-                st.warning("No saved summary.pkl found for that day.")
-    else:
-        st.caption("No history.csv found yet in S3 for this center.")
 
 
 if admin_mode and can_process:
@@ -837,12 +815,13 @@ if admin_mode and can_process:
             except Exception as e:
                 st.error(f"Failed to save to S3: {e}")
 
-        # ✅ keep result in session so it stays visible after any rerun
-        SS["last_summary"] = dfs
-        SS["last_day_ts"] = day_ts
+        # Keep a simple confirmation flag (no on-screen KPI/details on this admin upload page)
+        SS["last_saved_day"] = day_ts
+        SS["last_saved_center"] = center_key
 
-# Show last result (either processed now, or loaded from S3)
-if SS.get("last_summary") is not None and SS.get("last_day_ts") is not None:
-    render_summary(SS["last_summary"], pd.to_datetime(SS["last_day_ts"]))
+# Confirmation (this admin upload page does not display KPI/details)
+if SS.get("last_saved_day") is not None and SS.get("last_saved_center") is not None:
+    st.success(f"✅ Uploaded & saved for {pd.to_datetime(SS['last_saved_day']).date().isoformat()}  |  Center: {CENTERS.get(SS['last_saved_center'], SS['last_saved_center'])}")
+    st.caption("Open **Registration View** page to see the summary results.")
 elif SS["reg_df"] is not None:
-    st.info("Please upload Step 2 and Step 3 in sequence to enable processing, or load a saved day from S3.")
+    st.info("Upload Step 2 and Step 3, then click **Process & Save**.")
