@@ -313,6 +313,10 @@ def excel_bytes_from_dfs(dfs: Dict[str, pd.DataFrame]) -> bytes:
     return bio.read()
 
 
+# ---------------------------
+# S3 helpers
+# ---------------------------
+
 def _safe_filename(name: str, max_len: int = 80) -> str:
     """Make a filename-safe chunk (no slashes/illegal chars)."""
     name = str(name)
@@ -337,10 +341,6 @@ def download_excel_button(df: pd.DataFrame, filename: str, label: str):
     )
 
 
-
-# ---------------------------
-# S3 helpers
-# ---------------------------
 def load_secrets() -> Dict[str, str]:
     def get_any(*keys):
         for k in keys:
@@ -647,93 +647,105 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     """Render the Current Day + Accumulated sections."""
     st.header(f"Current Day ({day_ts.date().isoformat()})")
 
-    kpi = dfs["KPI"].set_index("Metric")["Value"]
+    # KPI cards
+    kpi = dfs.get("KPI")
+    if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
+        k = kpi.set_index("Metric")["Value"]
+        a, b, c, d = st.columns(4)
+        a.metric("Total Visits", int(k.get("Total Visits", 0)))
+        b.metric("Unique EMR (Patients)", int(k.get("Unique EMR (Patients)", 0)))
+        c.metric("Unique Visit No", int(k.get("Unique Visit No", 0)))
+        d.metric("CashOut Patients", int(k.get("CashOut Patients", 0)))
+        e, f = st.columns(2)
+        e.metric("Pending Patients", int(k.get("Pending Patients", 0)))
+        f.metric("Generated", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    else:
+        st.info("KPI is not available for this summary.")
 
-    a, b, c, d = st.columns(4)
-    a.metric("Total Visits", int(kpi["Total Visits"]))
-    b.metric("Unique EMR (Patients)", int(kpi["Unique EMR (Patients)"]))
-    c.metric("Unique Visit No", int(kpi["Unique Visit No"]))
-    d.metric("CashOut Patients", int(kpi["CashOut Patients"]))
-    e, f = st.columns(2)
-    e.metric("Pending Patients", int(kpi["Pending Patients"]))
-    f.metric("Generated", datetime.now().strftime("%Y-%m-%d %H:%M"))
-
+    # Pending Status Wise (before Insurance)
     st.subheader("Pending Status Wise")
     if "Pending Status Wise" in dfs:
         st.dataframe(dfs["Pending Status Wise"], use_container_width=True, hide_index=True)
     else:
-        st.info("Pending Status Wise is not available for this saved summary. Please re-process today's files to generate it.")
-    
-    st.subheader("Insurance Wise Visits")
-    st.dataframe(dfs["Insurance Wise Visits"], use_container_width=True, hide_index=True)
+        st.info("Pending Status Wise is not available for this saved summary. Please re-process today’s files to generate it.")
 
+    # Insurance Wise
+    st.subheader("Insurance Wise Visits")
+    if "Insurance Wise Visits" in dfs:
+        st.dataframe(dfs["Insurance Wise Visits"], use_container_width=True, hide_index=True)
+    else:
+        st.info("Insurance Wise Visits is not available.")
+
+    # Employer Wise
     st.subheader("Employer Wise")
     if "Employer Wise" in dfs:
         st.dataframe(dfs["Employer Wise"], use_container_width=True, hide_index=True)
     else:
-        st.info("Employer Wise is not available for this saved summary. Please re-process today's files to generate it.")
-    
-    
-# ----------------------------
-# Row-level Downloads (Excel)
-# ----------------------------
-st.markdown("---")
-st.subheader("Download Details (Row-level)")
+        st.info("Employer Wise is not available for this saved summary. Please re-process today’s files to generate it.")
 
-with st.expander("Download Pending Details (by Status)", expanded=False):
-    pend_df = SS.get("pend_df")
-    if pend_df is None:
-        st.info("Pending file is not loaded in this session. Upload/Process today’s files to enable row-level download.")
+    # Doctor Wise
+    st.subheader("Doctor Wise Visits")
+    if "Doctor Wise Visits" in dfs:
+        st.dataframe(dfs["Doctor Wise Visits"], use_container_width=True, hide_index=True)
     else:
-        pend_status_col = _find_col(pend_df, ["Status", "VisitStatus", "Pending Status"])
-        if not pend_status_col:
-            st.warning("Pending file has no Status column (Status / VisitStatus).")
+        st.info("Doctor Wise Visits is not available.")
+
+    # Row-level Downloads
+    st.markdown("---")
+    st.subheader("Download Details (Row-level)")
+
+    with st.expander("Download Pending Details (by Status)", expanded=False):
+        pend_df = SS.get("pend_df")
+        if pend_df is None:
+            st.info("Pending file is not loaded in this session. Upload/Process today’s files to enable row-level download.")
         else:
-            tmp = pend_df.copy()
-            tmp[pend_status_col] = tmp[pend_status_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
-            statuses = sorted(tmp[pend_status_col].unique())
-            pick_status = st.selectbox("Select Pending Status", options=statuses, key="dl_pending_status")
-            detail = tmp[tmp[pend_status_col] == pick_status].copy()
-            fn = f"Pending_{_safe_filename(pick_status)}_{day_ts.date().isoformat()}.xlsx"
-            download_excel_button(detail, fn, "⬇️ Download Pending Rows (Excel)")
+            pend_status_col = _find_col(pend_df, ["Status", "VisitStatus", "Pending Status"])
+            if not pend_status_col:
+                st.warning("Pending file has no Status column (Status / VisitStatus).")
+            else:
+                tmp = pend_df.copy()
+                tmp[pend_status_col] = tmp[pend_status_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
+                statuses = sorted(tmp[pend_status_col].unique())
+                pick_status = st.selectbox("Select Pending Status", options=statuses, key="dl_pending_status")
+                detail = tmp[tmp[pend_status_col] == pick_status].copy()
+                fn = f"Pending_{_safe_filename(pick_status)}_{day_ts.date().isoformat()}.xlsx"
+                download_excel_button(detail, fn, "⬇️ Download Pending Rows (Excel)")
 
-with st.expander("Download Registration Details (by Insurance)", expanded=False):
-    reg_df = SS.get("reg_df")
-    if reg_df is None:
-        st.info("Registration file is not loaded in this session. Upload/Process today’s files to enable row-level download.")
-    else:
-        ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
-        if not ins_col:
-            st.warning("Registration file has no Insurance/Payer column.")
+    with st.expander("Download Registration Details (by Insurance)", expanded=False):
+        reg_df = SS.get("reg_df")
+        if reg_df is None:
+            st.info("Registration file is not loaded in this session. Upload/Process today’s files to enable row-level download.")
         else:
-            tmp = reg_df.copy()
-            tmp[ins_col] = tmp[ins_col].fillna("CASH").astype(str).str.strip().replace("", "CASH").replace("Blank", "CASH")
-            ins_list = sorted(tmp[ins_col].unique())
-            pick_ins = st.selectbox("Select Insurance", options=ins_list, key="dl_insurance")
-            detail = tmp[tmp[ins_col] == pick_ins].copy()
-            fn = f"Registration_Insurance_{_safe_filename(pick_ins)}_{day_ts.date().isoformat()}.xlsx"
-            download_excel_button(detail, fn, "⬇️ Download Insurance Rows (Excel)")
+            ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
+            if not ins_col:
+                st.warning("Registration file has no Insurance/Payer column.")
+            else:
+                tmp = reg_df.copy()
+                tmp[ins_col] = tmp[ins_col].fillna("CASH").astype(str).str.strip().replace("", "CASH").replace("Blank", "CASH")
+                ins_list = sorted(tmp[ins_col].unique())
+                pick_ins = st.selectbox("Select Insurance", options=ins_list, key="dl_insurance")
+                detail = tmp[tmp[ins_col] == pick_ins].copy()
+                fn = f"Registration_Insurance_{_safe_filename(pick_ins)}_{day_ts.date().isoformat()}.xlsx"
+                download_excel_button(detail, fn, "⬇️ Download Insurance Rows (Excel)")
 
-with st.expander("Download Registration Details (by Employer)", expanded=False):
-    reg_df = SS.get("reg_df")
-    if reg_df is None:
-        st.info("Registration file is not loaded in this session. Upload/Process today’s files to enable row-level download.")
-    else:
-        emp_col = _find_col(reg_df, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name", "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
-        if not emp_col:
-            st.warning("Registration file has no Employer/Company column.")
+    with st.expander("Download Registration Details (by Employer)", expanded=False):
+        reg_df = SS.get("reg_df")
+        if reg_df is None:
+            st.info("Registration file is not loaded in this session. Upload/Process today’s files to enable row-level download.")
         else:
-            tmp = reg_df.copy()
-            tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
-            emp_list = sorted(tmp[emp_col].unique())
-            pick_emp = st.selectbox("Select Employer", options=emp_list, key="dl_employer")
-            detail = tmp[tmp[emp_col] == pick_emp].copy()
-            fn = f"Registration_Employer_{_safe_filename(pick_emp)}_{day_ts.date().isoformat()}.xlsx"
-            download_excel_button(detail, fn, "⬇️ Download Employer Rows (Excel)")
+            emp_col = _find_col(reg_df, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name", "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
+            if not emp_col:
+                st.warning("Registration file has no Employer/Company column.")
+            else:
+                tmp = reg_df.copy()
+                tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
+                emp_list = sorted(tmp[emp_col].unique())
+                pick_emp = st.selectbox("Select Employer", options=emp_list, key="dl_employer")
+                detail = tmp[tmp[emp_col] == pick_emp].copy()
+                fn = f"Registration_Employer_{_safe_filename(pick_emp)}_{day_ts.date().isoformat()}.xlsx"
+                download_excel_button(detail, fn, "⬇️ Download Employer Rows (Excel)")
 
-st.subheader("Doctor Wise Visits")
-    st.dataframe(dfs["Doctor Wise Visits"], use_container_width=True, hide_index=True)
-
+    # Whole Summary Excel
     export_dfs = {k: dfs[k] for k in dfs.keys()}
     st.download_button(
         "⬇️ Download Summary Excel",
@@ -742,7 +754,7 @@ st.subheader("Doctor Wise Visits")
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # Accumulated BELOW current day
+    # Accumulated
     st.header("Accumulated (All Saved Days)")
     hist = load_history_from_s3() if s3_ok else pd.DataFrame()
     if hist.empty:
@@ -756,7 +768,6 @@ st.subheader("Doctor Wise Visits")
         c.metric("Cumulative CashOut", int(latest.get("cum_cash_patients", 0)))
         d.metric("Cumulative Pending", int(latest.get("cum_pending_patients", 0)))
         st.dataframe(acc, use_container_width=True, hide_index=True)
-
 
 def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
     if hist is None or hist.empty:
