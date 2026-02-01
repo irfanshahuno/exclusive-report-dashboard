@@ -210,6 +210,21 @@ def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15, label: str = "
     return out
 
 
+def employer_with_insurance(df: pd.DataFrame, emp_col: str, ins_col: str, n: int = 30) -> pd.DataFrame:
+    tmp = df[[emp_col, ins_col]].copy()
+    tmp[emp_col] = tmp[emp_col].fillna("Blank")
+    tmp[ins_col] = tmp[ins_col].fillna("CASH")
+
+    grp = (
+        tmp.groupby([emp_col, ins_col])
+        .size()
+        .reset_index(name="Count")
+        .sort_values("Count", ascending=False)
+    )
+
+    return grp.head(n)
+
+
 def employer_insurance_table(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 200) -> pd.DataFrame:
     """Employer x Insurance breakdown (top rows) with TOTAL row at end.
     Insurance blanks are shown as 'CASH'.
@@ -574,10 +589,14 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     st.subheader("Insurance Wise Visits")
     st.dataframe(dfs["Insurance Wise Visits"], use_container_width=True, hide_index=True)
 
-    st.subheader("Employer Wise")
-    st.dataframe(dfs["Employer Wise"], use_container_width=True, hide_index=True)
+    
+    st.subheader("Employer Wise (with Insurance)")
 
-    st.subheader("Doctor Wise Visits")
+    emp_ins_df = employer_with_insurance(reg_df, emp_col, ins_col, n=50)
+    st.dataframe(emp_ins_df, use_container_width=True)
+
+    st.subheader
+("Doctor Wise Visits")
     st.dataframe(dfs["Doctor Wise Visits"], use_container_width=True, hide_index=True)
 
     export_dfs = {k: dfs[k] for k in dfs.keys()}
