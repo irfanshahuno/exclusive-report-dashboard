@@ -549,7 +549,7 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
 def history_paths(center: str) -> Tuple[str, str]:
     # Save OUTSIDE any global base prefix like 'streamlit/' (top-level folder)
     # Structure: registration_summary/<center>/...
-    root = s3_key("registration_summary", center, "registration_summary")
+    root = s3_key("registration_summary", center)
     return root, s3_key(root, "history.csv")
 
 
@@ -634,20 +634,20 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     f.metric("Generated", datetime.now().strftime("%Y-%m-%d %H:%M"))
 
     st.subheader("Pending Status Wise")
-if "Pending Status Wise" in dfs:
-    st.dataframe(dfs["Pending Status Wise"], use_container_width=True, hide_index=True)
-else:
-    st.info("Pending Status Wise is not available for this saved summary. Please re-process today's files to generate it.")
-
+    if "Pending Status Wise" in dfs:
+        st.dataframe(dfs["Pending Status Wise"], use_container_width=True, hide_index=True)
+    else:
+        st.info("Pending Status Wise is not available for this saved summary. Please re-process today's files to generate it.")
+    
     st.subheader("Insurance Wise Visits")
     st.dataframe(dfs["Insurance Wise Visits"], use_container_width=True, hide_index=True)
 
     st.subheader("Employer Wise")
-if "Employer Wise" in dfs:
-    st.dataframe(dfs["Employer Wise"], use_container_width=True, hide_index=True)
-else:
-    st.info("Employer Wise is not available for this saved summary. Please re-process today's files to generate it.")
-
+    if "Employer Wise" in dfs:
+        st.dataframe(dfs["Employer Wise"], use_container_width=True, hide_index=True)
+    else:
+        st.info("Employer Wise is not available for this saved summary. Please re-process today's files to generate it.")
+    
     st.subheader("Doctor Wise Visits")
     st.dataframe(dfs["Doctor Wise Visits"], use_container_width=True, hide_index=True)
 
