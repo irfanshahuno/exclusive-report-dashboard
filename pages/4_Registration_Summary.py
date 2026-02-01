@@ -210,21 +210,6 @@ def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15, label: str = "
     return out
 
 
-def employer_with_insurance(df: pd.DataFrame, emp_col: str, ins_col: str, n: int = 30) -> pd.DataFrame:
-    tmp = df[[emp_col, ins_col]].copy()
-    tmp[emp_col] = tmp[emp_col].fillna("Blank")
-    tmp[ins_col] = tmp[ins_col].fillna("CASH")
-
-    grp = (
-        tmp.groupby([emp_col, ins_col])
-        .size()
-        .reset_index(name="Count")
-        .sort_values("Count", ascending=False)
-    )
-
-    return grp.head(n)
-
-
 def employer_insurance_table(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 200) -> pd.DataFrame:
     """Employer x Insurance breakdown (top rows) with TOTAL row at end.
     Insurance blanks are shown as 'CASH'.
@@ -255,6 +240,64 @@ def employer_insurance_table(df: pd.DataFrame, emp_col: Optional[str], ins_col: 
         .head(n)
     )
     out.columns = ["Employer", "Insurance", "Count"]
+
+    total = int(out["Count"].sum()) if not out.empty else 0
+    out.loc[len(out)] = ["TOTAL", "", total]
+    return out
+
+
+# ✅ NEEDFUL CHANGE: Employer Wise (single row per employer) + show dominant insurance
+def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 50) -> pd.DataFrame:
+    """
+    Employer Wise counts, plus ONE insurance name per employer:
+    - Insurance shown = most common insurance for that employer.
+    - Employer blanks => 'Blank'
+    - Insurance blanks => 'CASH'
+    """
+    if not emp_col or emp_col not in df.columns:
+        return pd.DataFrame(columns=["Employer", "Insurance", "Count"])
+
+    tmp = df.copy()
+
+    # Employer cleanup
+    tmp[emp_col] = (
+        tmp[emp_col]
+        .fillna("Blank")
+        .astype(str)
+        .str.strip()
+        .replace("", "Blank")
+    )
+
+    # Insurance cleanup
+    if ins_col and ins_col in tmp.columns:
+        tmp[ins_col] = (
+            tmp[ins_col]
+            .fillna("CASH")
+            .astype(str)
+            .str.strip()
+            .replace("", "CASH")
+            .replace("Blank", "CASH")
+        )
+    else:
+        tmp["__ins__"] = "CASH"
+        ins_col = "__ins__"
+
+    # Count per employer
+    counts = tmp.groupby(emp_col).size().reset_index(name="Count")
+
+    # Dominant insurance per employer
+    dominant = (
+        tmp.groupby([emp_col, ins_col])
+        .size()
+        .reset_index(name="cnt")
+        .sort_values(["cnt"], ascending=False)
+        .drop_duplicates(subset=[emp_col])
+        [[emp_col, ins_col]]
+    )
+
+    out = counts.merge(dominant, on=emp_col, how="left")
+    out = out.rename(columns={emp_col: "Employer", ins_col: "Insurance"})
+    out = out.sort_values("Count", ascending=False).head(n).reset_index(drop=True)
 
     total = int(out["Count"].sum()) if not out.empty else 0
     out.loc[len(out)] = ["TOTAL", "", total]
@@ -492,7 +535,10 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
         ]),
         "Doctor Wise Visits": top_counts(reg_df, doctor_col, n=50, label="Doctor"),
         "Insurance Wise Visits": top_counts(reg_df, ins_col, n=50, label="Insurance"),
-        "Employer Wise": top_counts(reg_df, emp_col, n=50, label="Employer"),
+
+        # ✅ NEEDFUL CHANGE USED HERE
+        "Employer Wise": employer_wise_with_insurance(reg_df, emp_col=emp_col, ins_col=ins_col, n=50),
+
         "Bill Type": top_counts(reg_df, bill_col, n=20, label="Bill Type"),
         "Visit Type": top_counts(reg_df, visit_type_col, n=20, label="Visit Type"),
         "Status Wise": top_counts(reg_df, status_col, n=30, label="Status"),
@@ -589,11 +635,8 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     st.subheader("Insurance Wise Visits")
     st.dataframe(dfs["Insurance Wise Visits"], use_container_width=True, hide_index=True)
 
-    
-    st.subheader("Employer Wise (with Insurance)")
-
-    emp_ins_df = employer_with_insurance(reg_df, emp_col, ins_col, n=50)
-    st.dataframe(emp_ins_df, use_container_width=True)
+    st.subheader("Employer Wise")
+    st.dataframe(dfs["Employer Wise"], use_container_width=True, hide_index=True)
 
     st.subheader("Doctor Wise Visits")
     st.dataframe(dfs["Doctor Wise Visits"], use_container_width=True, hide_index=True)
