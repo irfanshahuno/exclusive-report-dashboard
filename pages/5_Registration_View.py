@@ -252,21 +252,33 @@ hist = hist.dropna(subset=["day"]).sort_values("day")
 days = list(hist["day"].unique())
 latest_day = days[-1]
 
-# pick day UI (latest default)
-latest = max(days)
-pick_date = st.date_input(
-    "View saved day",
-    value=pd.to_datetime(latest).date(),
-    min_value=pd.to_datetime(min(days)).date(),
-    max_value=pd.to_datetime(latest).date(),
-)
-picked = pd.to_datetime(pick_date).normalize()
 
-# Auto-load on first run for smooth UX
+# pick day UI (LATEST ONLY by default)
+latest = max(days)
+picked = pd.to_datetime(latest).normalize()
+
+st.caption(f"Showing latest saved day: **{picked.date().strftime('%d %b %Y')}**")
+
 SS = st.session_state
 SS.setdefault("loaded_day", None)
 SS.setdefault("loaded_summary", None)
+SS.setdefault("picked_override", None)
 
+with st.expander("View another day (optional)", expanded=False):
+    other = st.date_input(
+        "Select a different day",
+        value=picked.date(),
+        min_value=pd.to_datetime(min(days)).date(),
+        max_value=pd.to_datetime(latest).date(),
+    )
+    if st.button("Load selected day", use_container_width=True):
+        SS["picked_override"] = pd.to_datetime(other).normalize()
+        SS["loaded_day"] = None
+        SS["loaded_summary"] = None
+        st.rerun()
+
+if SS.get("picked_override") is not None:
+    picked = pd.to_datetime(SS["picked_override"]).normalize()
 need_load = (SS["loaded_day"] is None) or (pd.to_datetime(SS["loaded_day"]) != picked)
 
 if need_load:
