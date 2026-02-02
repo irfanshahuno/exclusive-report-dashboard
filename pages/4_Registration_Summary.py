@@ -232,6 +232,43 @@ def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15, label: str = "
 def normalize_employer_name(x: str) -> str:
     """Normalize employer names so small variations don't create duplicates.
 
+
+
+def employer_prefix_key(x: str, words: int = 2) -> str:
+    """Build a robust grouping key for employer names.
+
+    Goal: merge entries that start with the same employer identity, e.g.
+    - 'QAMRA TRANSPORT ...' variants -> one
+    - 'HILAL BIL BADI ...' variants -> one
+    - 'EXCEED PRECAST ...' variants -> one
+
+    Method:
+    - First normalize with normalize_employer_name()
+    - Tokenize
+    - Drop common/legal/connector words
+    - Take first N meaningful words as the key
+    """
+    s = normalize_employer_name(x)  # lowercased cleaned string
+    toks = [t for t in s.split() if t]
+
+    # words to ignore for grouping (legal forms, connectors, generic terms)
+    stop = {
+        "and","co","company","cont","contract","contracting","general","gen",
+        "est","establishment","services","service","sole","proprietorship",
+        "llc","wll","ltd","limited","partners","partner","group","holding","holdings",
+        "trade","trading","transport","transports"  # keep/omit? we keep 'transport' usually meaningful, but can be generic
+    }
+    # NOTE: we will NOT drop 'transport' by default, because 'QAMRA TRANSPORT' is distinctive.
+    stop.remove("transport") if "transport" in stop else None
+    stop.remove("transports") if "transports" in stop else None
+
+    meaningful = [t for t in toks if t not in stop]
+
+    if not meaningful:
+        meaningful = toks  # fallback
+
+    key = " ".join(meaningful[:max(1, int(words))])
+    return key if key else "blank"
     Examples handled:
     - AND vs &
     - W L L / W.L.L / WLL
@@ -274,7 +311,7 @@ def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_c
 
     # Employer cleanup + normalization
     tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
-    tmp["__emp_norm__"] = tmp[emp_col].apply(normalize_employer_name)
+    tmp["__emp_key__"] = tmp[emp_col].apply(lambda v: employer_prefix_key(v, words=2))
 
     # Insurance cleanup
     if ins_col and ins_col in tmp.columns:
@@ -291,31 +328,31 @@ def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_c
         ins_col = "__ins__"
 
     # Count per normalized employer
-    counts = tmp.groupby("__emp_norm__").size().reset_index(name="Count")
+    counts = tmp.groupby("__emp_key__").size().reset_index(name="Count")
 
     # Pick display employer name (most frequent original within group)
     display_name = (
-        tmp.groupby(["__emp_norm__", emp_col])
+        tmp.groupby(["__emp_key__", emp_col])
         .size()
         .reset_index(name="cnt")
-        .sort_values(["__emp_norm__", "cnt"], ascending=[True, False])
-        .drop_duplicates(subset=["__emp_norm__"])
-        [["__emp_norm__", emp_col]]
+        .sort_values(["__emp_key__", "cnt"], ascending=[True, False])
+        .drop_duplicates(subset=["__emp_key__"])
+        [["__emp_key__", emp_col]]
         .rename(columns={emp_col: "Employer"})
     )
 
     # Pick dominant insurance (most frequent within group)
     dominant_ins = (
-        tmp.groupby(["__emp_norm__", ins_col])
+        tmp.groupby(["__emp_key__", ins_col])
         .size()
         .reset_index(name="cnt")
-        .sort_values(["__emp_norm__", "cnt"], ascending=[True, False])
-        .drop_duplicates(subset=["__emp_norm__"])
-        [["__emp_norm__", ins_col]]
+        .sort_values(["__emp_key__", "cnt"], ascending=[True, False])
+        .drop_duplicates(subset=["__emp_key__"])
+        [["__emp_key__", ins_col]]
         .rename(columns={ins_col: "Insurance"})
     )
 
-    out = counts.merge(display_name, on="__emp_norm__", how="left").merge(dominant_ins, on="__emp_norm__", how="left")
+    out = counts.merge(display_name, on="__emp_key__", how="left").merge(dominant_ins, on="__emp_key__", how="left")
     out = out[["Employer", "Count", "Insurance"]].sort_values("Count", ascending=False).head(n).reset_index(drop=True)
 
     total = int(out["Count"].sum()) if not out.empty else 0
@@ -797,30 +834,30 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
             else:
                 tmp = reg_df.copy()
                 tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
-                tmp["__emp_norm__"] = tmp[emp_col].apply(normalize_employer_name)
+                tmp["__emp_key__"] = tmp[emp_col].apply(lambda v: employer_prefix_key(v, words=2))
 
                 # display name = most frequent original in each normalized group
                 disp = (
-                    tmp.groupby(["__emp_norm__", emp_col]).size().reset_index(name="cnt")
+                    tmp.groupby(["__emp_key__", emp_col]).size().reset_index(name="cnt")
                     .sort_values(["__emp_norm__", "cnt"], ascending=[True, False])
-                    .drop_duplicates(subset=["__emp_norm__"])
+                    .drop_duplicates(subset=["__emp_key__"])
                 )
                 # build select options: "Display Name (count)"
-                counts = tmp.groupby("__emp_norm__").size().reset_index(name="Count")
+                counts = tmp.groupby("__emp_key__").size().reset_index(name="Count")
                 disp = disp.merge(counts, on="__emp_norm__", how="left")
                 disp = disp.sort_values("Count", ascending=False)
 
-                options = disp["__emp_norm__"].tolist()
-                labels = {r["__emp_norm__"]: f"{r[emp_col]} ({int(r['Count'])})" for _, r in disp.iterrows()}
+                options = disp["__emp_key__"].tolist()
+                labels = {r["__emp_key__"]: f"{r[emp_col]} ({int(r['Count'])})" for _, r in disp.iterrows()}
 
-                pick_norm = st.selectbox(
+                pick_key = st.selectbox(
                     "Select Employer (deduped)",
                     options=options,
                     format_func=lambda k: labels.get(k, k),
-                    key="dl_employer_norm",
+                    key="dl_employer_key",
                 )
-                detail = tmp[tmp["__emp_norm__"] == pick_norm].drop(columns=["__emp_norm__"], errors="ignore").copy()
-                fn = f"Registration_Employer_{_safe_filename(labels.get(pick_norm, pick_norm))}_{day_ts.date().isoformat()}.xlsx"
+                detail = tmp[tmp["__emp_key__"] == pick_key].drop(columns=["__emp_key__"], errors="ignore").copy()
+                fn = f"Registration_Employer_{_safe_filename(labels.get(pick_key, pick_key))}_{day_ts.date().isoformat()}.xlsx"
                 download_excel_button(detail, fn, "⬇️ Download Employer Rows (Excel)")
 
     # Whole Summary Excel
