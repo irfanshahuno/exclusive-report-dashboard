@@ -1095,22 +1095,25 @@ if admin_mode:
     # -------------------- Process & Save --------------------
     process_label = "✅ Process & Save to S3" if s3_ok else "✅ Process (S3 not configured)"
     if st.button(process_label, type="primary", disabled=not can_process):
+        # defaults (avoid NameError in any edge-case)
+        day_ts = pd.to_datetime(manual_day)
+        _income_df = None
+
         # re-evaluate day_ts inside click (safe)
-        detected = get_day_from_registration(SS["reg_df"]) if SS["reg_df"] is not None else None
-        day_ts = detected if detected is not None else pd.to_datetime(manual_day)
+        detected = get_day_from_registration(SS['reg_df']) if SS['reg_df'] is not None else None
+        if detected is not None:
+            day_ts = detected
 
-        dfs = compute_summary(SS["reg_df"], SS["cash_df"], SS["pend_df"], day_ts)
-
-        # ---- Step 4: Income analysis (optional) ----
-        SS["income_df"] = None
-        SS["income_tables"] = {}
-        if SS.get("income_file") is not None:
-            _income_df = load_income_details(SS.get("income_file"))
+        dfs = compute_summary(SS["reg_df"], SS["cash_df"], SS["pend_df"], day_ts)        # ---- Step 4: Income analysis (optional) ----
+        SS['income_df'] = None
+        SS['income_tables'] = {}
+        if SS.get('income_file') is not None:
+            _income_df = load_income_details(SS.get('income_file'))
             if _income_df is None or _income_df.empty:
                 st.warning("Income Analysis file loaded, but table header could not be detected. Please upload the correct 'Daily Collection Details' export.")
             else:
-                SS["income_df"] = _income_df
-                SS["income_tables"] = income_tables(_income_df)
+                SS['income_df'] = _income_df
+                SS['income_tables'] = income_tables(_income_df)
 
         if s3_ok:
             try:
