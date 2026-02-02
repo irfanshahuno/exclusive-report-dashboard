@@ -282,23 +282,20 @@ def employer_prefix_key(x: str) -> str:
 
 
 
-def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 50) -> pd.DataFrame:
-    """
-    Employer Wise counts (DEDUPED) + ONE Insurance per employer-group.
 
-    Why duplicates happen:
-    - Employer names often have tiny differences (AND vs &, W L L vs WLL, extra spaces, punctuation).
-    Fix:
-    - We create a normalized employer key and group by that.
-    - Display Employer name = most frequent original employer name inside that group.
-    - Insurance shown = most common insurance inside that group.
+def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 50) -> pd.DataFrame:
+    """Employer Wise counts (DEDUPED) + ONE Insurance per employer-group.
+
+    Grouping rule:
+    - primary grouping key: first token from employer_prefix_key()
+    - final safety: merge again by displayed Employer text (handles any weird edge cases)
     """
     if not emp_col or emp_col not in df.columns:
         return pd.DataFrame(columns=["Employer", "Count", "Insurance"])
 
     tmp = df.copy()
 
-    # Employer cleanup + normalization
+    # Employer cleanup + key
     tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
     tmp["__emp_key__"] = tmp[emp_col].apply(lambda v: employer_prefix_key(v))
 
@@ -316,10 +313,10 @@ def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_c
         tmp["__ins__"] = "CASH"
         ins_col = "__ins__"
 
-    # Count per normalized employer
+    # Count per key
     counts = tmp.groupby("__emp_key__").size().reset_index(name="Count")
 
-    # Pick display employer name (most frequent original within group)
+    # Display name = most frequent original employer name within group
     display_name = (
         tmp.groupby(["__emp_key__", emp_col])
         .size()
@@ -330,7 +327,7 @@ def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_c
         .rename(columns={emp_col: "Employer"})
     )
 
-    # Pick dominant insurance (most frequent within group)
+    # Insurance = most frequent within group
     dominant_ins = (
         tmp.groupby(["__emp_key__", ins_col])
         .size()
@@ -341,13 +338,33 @@ def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_c
         .rename(columns={ins_col: "Insurance"})
     )
 
-    out = counts.merge(display_name, on="__emp_key__", how="left").merge(dominant_ins, on="__emp_key__", how="left")
-    out = out[["Employer", "Count", "Insurance"]].sort_values("Count", ascending=False).head(n).reset_index(drop=True)
+    out = (
+        counts.merge(display_name, on="__emp_key__", how="left")
+        .merge(dominant_ins, on="__emp_key__", how="left")
+    )
+
+    out = out[["Employer", "Count", "Insurance"]]
+
+    # final safety merge by displayed Employer text (sums counts, picks mode insurance)
+    if not out.empty:
+        def _mode_or_first(s: pd.Series) -> str:
+            s2 = s.dropna().astype(str)
+            if s2.empty:
+                return ""
+            md = s2.mode()
+            return md.iat[0] if not md.empty else s2.iloc[0]
+
+        out = (
+            out.groupby("Employer", as_index=False)
+            .agg(Count=("Count", "sum"), Insurance=("Insurance", _mode_or_first))
+            .sort_values("Count", ascending=False)
+            .head(n)
+            .reset_index(drop=True)
+        )
 
     total = int(out["Count"].sum()) if not out.empty else 0
     out.loc[len(out)] = ["TOTAL", total, ""]
     return out
-
 
 
 def employer_insurance_table(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 200) -> pd.DataFrame:
