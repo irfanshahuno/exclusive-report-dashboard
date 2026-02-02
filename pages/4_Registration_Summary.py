@@ -806,16 +806,22 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
     }
 
 
-def history_paths(center: str) -> Tuple[str, str]:
-    # Save OUTSIDE any global base prefix like 'streamlit/' (top-level folder)
-    # Structure: registration_summary/<center>/...
-    root = s3_key("registration_summary", center)
+def history_paths(center: str, base_prefix: str = "") -> Tuple[str, str]:
+    """Return (root_prefix, history_csv_key) for this center.
+
+    If you set S3_BASE_PREFIX (example: 'streamlit'), we save under:
+        <S3_BASE_PREFIX>/registration_summary/<center>/...
+
+    If S3_BASE_PREFIX is empty, we save under:
+        registration_summary/<center>/...
+    """
+    root = s3_key(base_prefix, "registration_summary", center)
     return root, s3_key(root, "history.csv")
 
 
 
 def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
-    root, hist_key = history_paths(center_key)
+    root, hist_key = history_paths(center_key, cfg.get("S3_BASE_PREFIX",""))
     day_str = day_ts.date().isoformat()
 
     if SS["reg_file"]:
@@ -855,7 +861,7 @@ def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
 def load_history_from_s3() -> pd.DataFrame:
     if not s3_ok:
         return pd.DataFrame()
-    _, hist_key = history_paths(center_key)
+    _, hist_key = history_paths(center_key, cfg.get("S3_BASE_PREFIX",""))
     b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key)
     if not b:
         return pd.DataFrame()
@@ -866,7 +872,7 @@ def load_summary_from_s3(day_ts: pd.Timestamp) -> Optional[Dict[str, pd.DataFram
     """Load a previously saved summary.pkl for a given day from S3."""
     if not s3_ok:
         return None
-    root, _ = history_paths(center_key)
+    root, _ = history_paths(center_key, cfg.get("S3_BASE_PREFIX",""))
     day_str = pd.to_datetime(day_ts).date().isoformat()
     key = s3_key(root, day_str, "summary.pkl")
     b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], key)
@@ -1052,51 +1058,59 @@ SS.setdefault("last_saved_center", None)
 
 
 
-if admin_mode and can_process:
-    detected = get_day_from_registration(SS["reg_df"])
+
+if admin_mode:
+    # Day selection (prefer detected from Registration file; fallback to manual picker)
+    detected = get_day_from_registration(SS["reg_df"]) if SS["reg_df"] is not None else None
     day_ts = detected if detected is not None else pd.to_datetime(manual_day)
-    if detected is None:
+
+    if detected is None and SS["reg_df"] is not None:
         st.warning("Registration file has no readable date column. Using Manual Day.")
-    else:
+    elif detected is not None:
         st.success(f"Detected Day from Registration file: {day_ts.date().isoformat()}")
 
-# Step 4 (Income / Doctor Revenue) - optional
-c1, c2 = st.columns([3, 1])
-with c1:
-    st.subheader("4) Income Analysis Report (Doctor Revenue)")
-    income_up = st.file_uploader(
-        "Upload Daily Collection Details (.xls / .xlsx)",
-        type=["xls", "xlsx"],
-        key="income_uploader",
-    )
-    if income_up is not None:
-        SS["income_file"] = income_up
-with c2:
-    if st.button("🗑️ Delete Step 4", use_container_width=True):
-        SS["income_file"] = None
-        SS["income_df"] = None
-        SS["income_tables"] = {}
-        st.rerun()
+    # -------------------- Step 4 (Income / Doctor Revenue) - optional --------------------
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        st.subheader("4) Income Analysis Report (Doctor Revenue)")
+        income_up = st.file_uploader(
+            "Upload Daily Collection Details (.xls / .xlsx)",
+            type=["xls", "xlsx"],
+            key="income_uploader",
+        )
+        if income_up is not None:
+            SS["income_file"] = income_up
+    with c2:
+        if st.button("🗑️ Delete Step 4", use_container_width=True):
+            SS["income_file"] = None
+            SS["income_df"] = None
+            SS["income_tables"] = {}
+            st.rerun()
 
-if SS.get("income_file") is not None:
-    st.success(f"Step 4 OK ✅ ({SS['income_file'].name})")
-else:
-    st.info("Step 4 optional: upload your Daily Collection Details export to generate Doctor/Insurance revenue tables.")
+    if SS.get("income_file") is not None:
+        st.success(f"Step 4 OK ✅ ({SS['income_file'].name})")
+    else:
+        st.info("Step 4 optional: upload your Daily Collection Details export to generate Doctor/Insurance revenue tables.")
 
+    # -------------------- Process & Save --------------------
+    process_label = "✅ Process & Save to S3" if s3_ok else "✅ Process (S3 not configured)"
+    if st.button(process_label, type="primary", disabled=not can_process):
+        # re-evaluate day_ts inside click (safe)
+        detected = get_day_from_registration(SS["reg_df"]) if SS["reg_df"] is not None else None
+        day_ts = detected if detected is not None else pd.to_datetime(manual_day)
 
-    if st.button("✅ Process & Save to S3" if s3_ok else "✅ Process (S3 not configured)", type="primary"):
         dfs = compute_summary(SS["reg_df"], SS["cash_df"], SS["pend_df"], day_ts)
 
-# ---- Step 4: Income analysis (optional) ----
-SS["income_df"] = None
-SS["income_tables"] = {}
-if SS.get("income_file") is not None:
-    _income_df = load_income_details(SS.get("income_file"))
-    if _income_df is None or _income_df.empty:
-        st.warning("Income Analysis file loaded, but table header could not be detected. Please upload the correct 'Daily Collection Details' export.")
-    else:
-        SS["income_df"] = _income_df
-        SS["income_tables"] = income_tables(_income_df)
+        # ---- Step 4: Income analysis (optional) ----
+        SS["income_df"] = None
+        SS["income_tables"] = {}
+        if SS.get("income_file") is not None:
+            _income_df = load_income_details(SS.get("income_file"))
+            if _income_df is None or _income_df.empty:
+                st.warning("Income Analysis file loaded, but table header could not be detected. Please upload the correct 'Daily Collection Details' export.")
+            else:
+                SS["income_df"] = _income_df
+                SS["income_tables"] = income_tables(_income_df)
 
         if s3_ok:
             try:
@@ -1105,15 +1119,18 @@ if SS.get("income_file") is not None:
             except Exception as e:
                 st.error(f"Failed to save to S3: {e}")
 
-        # Keep a simple confirmation flag (no on-screen KPI/details on this admin upload page)
+        # Keep a simple confirmation flag
         SS["last_saved_day"] = day_ts
         SS["last_saved_center"] = center_key
 
 # Confirmation (this admin upload page does not display KPI/details)
 if SS.get("last_saved_day") is not None and SS.get("last_saved_center") is not None:
-    st.success(f"✅ Uploaded & saved for {pd.to_datetime(SS['last_saved_day']).date().isoformat()}  |  Center: {CENTERS.get(SS['last_saved_center'], SS['last_saved_center'])}")
+    st.success(
+        f"✅ Uploaded & saved for {pd.to_datetime(SS['last_saved_day']).date().isoformat()}  |  "
+        f"Center: {CENTERS.get(SS['last_saved_center'], SS['last_saved_center'])}"
+    )
     st.caption("Open **Registration View** page to see the summary results.")
-elif SS["reg_df"] is not None:
+elif SS.get("reg_df") is not None:
     st.info("Upload Step 2 and Step 3, then click **Process & Save**.")
 
 # -------------------- Income Analysis display --------------------
