@@ -229,56 +229,20 @@ def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15, label: str = "
     return out
 
 
+
 def normalize_employer_name(x: str) -> str:
     """Normalize employer names so small variations don't create duplicates.
 
-
-
-def employer_prefix_key(x: str, words: int = 2) -> str:
-    """Build a robust grouping key for employer names.
-
-    Goal: merge entries that start with the same employer identity, e.g.
-    - 'QAMRA TRANSPORT ...' variants -> one
-    - 'HILAL BIL BADI ...' variants -> one
-    - 'EXCEED PRECAST ...' variants -> one
-
-    Method:
-    - First normalize with normalize_employer_name()
-    - Tokenize
-    - Drop common/legal/connector words
-    - Take first N meaningful words as the key
-    """
-    s = normalize_employer_name(x)  # lowercased cleaned string
-    toks = [t for t in s.split() if t]
-
-    # words to ignore for grouping (legal forms, connectors, generic terms)
-    stop = {
-        "and","co","company","cont","contract","contracting","general","gen",
-        "est","establishment","services","service","sole","proprietorship",
-        "llc","wll","ltd","limited","partners","partner","group","holding","holdings",
-        "trade","trading","transport","transports"  # keep/omit? we keep 'transport' usually meaningful, but can be generic
-    }
-    # NOTE: we will NOT drop 'transport' by default, because 'QAMRA TRANSPORT' is distinctive.
-    stop.remove("transport") if "transport" in stop else None
-    stop.remove("transports") if "transports" in stop else None
-
-    meaningful = [t for t in toks if t not in stop]
-
-    if not meaningful:
-        meaningful = toks  # fallback
-
-    key = " ".join(meaningful[:max(1, int(words))])
-    return key if key else "blank"
-    Examples handled:
+    Handles:
     - AND vs &
     - W L L / W.L.L / WLL
-    - extra spaces, hyphens, dots, commas
+    - punctuation, hyphens, dots, commas
+    - extra/multiple spaces
     """
     if x is None:
         return "blank"
     s = str(x).strip().upper()
 
-    # standardize common variants
     s = s.replace("&", " AND ")
     s = re.sub(r"\bW\s*L\s*L\b", "WLL", s)   # W L L -> WLL
     s = re.sub(r"\bL\s*L\s*C\b", "LLC", s)   # L L C -> LLC
@@ -291,6 +255,32 @@ def employer_prefix_key(x: str, words: int = 2) -> str:
 
     return s.lower() if s else "blank"
 
+
+def employer_prefix_key(x: str, words: int = 2) -> str:
+    """Create a grouping key so similar employer names merge into ONE row.
+
+    Method:
+    - Normalize
+    - Tokenize
+    - Drop generic/legal words
+    - Take first N meaningful tokens
+    """
+    s = normalize_employer_name(x)
+    toks = [t for t in s.split() if t]
+
+    stop = {
+        "and","co","company","cont","contract","contracting","general","gen",
+        "est","establishment","services","service",
+        "sole","proprietorship","llc","wll","ltd","limited",
+        "partners","partner","group","holding","holdings","trade","trading"
+    }
+
+    meaningful = [t for t in toks if t not in stop]
+    if not meaningful:
+        meaningful = toks
+
+    key = " ".join(meaningful[:max(1, int(words))]).strip()
+    return key if key else "blank"
 
 
 def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 50) -> pd.DataFrame:
@@ -527,6 +517,12 @@ st.caption("✅ Day is read from Registration file (if it has a date column). Da
 manual_day = st.date_input("Manual Day (fallback only)", value=date.today())
 
 SS = st.session_state
+
+# -------------------- Defaults --------------------
+DEFAULT_CENTER_KEY = "excellent"
+if "center_key" not in SS or not SS.get("center_key"):
+    SS["center_key"] = DEFAULT_CENTER_KEY
+
 SS.setdefault("reg_file", None)
 SS.setdefault("cash_file", None)
 SS.setdefault("pend_file", None)
