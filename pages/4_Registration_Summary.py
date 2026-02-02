@@ -75,6 +75,111 @@ def _find_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     return None
 
 
+# -------------------- Income Analysis (Doctor Revenue) helpers --------------------
+def _detect_header_row(df_raw: pd.DataFrame, must_have: List[str]) -> Optional[int]:
+    for i in range(min(50, len(df_raw))):
+        row = df_raw.iloc[i].astype(str).str.strip().str.lower().tolist()
+        if all(any(k.lower() in cell for cell in row) for k in must_have):
+            return i
+    return None
+
+
+def load_income_details(uploaded_file) -> Optional[pd.DataFrame]:
+    if uploaded_file is None:
+        return None
+    try:
+        df_raw = pd.read_excel(uploaded_file, sheet_name="Daily Collection Details", header=None)
+    except Exception:
+        df_raw = pd.read_excel(uploaded_file, sheet_name=0, header=None)
+
+    hdr = _detect_header_row(df_raw, must_have=["doctor", "department", "insurance name", "visit no"])
+    if hdr is None:
+        return None
+
+    header = df_raw.iloc[hdr].astype(str).str.strip()
+    df = df_raw.iloc[hdr + 1:].copy()
+    df.columns = header
+
+    df = df.dropna(how="all").reset_index(drop=True)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    if df is None or df.empty:
+        return {}
+
+    col_dept = _find_col(df, ["Department"])
+    col_doc  = _find_col(df, ["Doctor"])
+    col_ins  = _find_col(df, ["Insurance Name", "Insurance"])
+    col_visit= _find_col(df, ["Visit No", "VisitNo"])
+    col_cons = _find_col(df, ["Consultation"])
+    col_lab  = _find_col(df, ["Lab"])
+    col_proc = _find_col(df, ["Procedure"])
+
+    needed = [col_doc, col_ins, col_visit, col_cons, col_lab, col_proc]
+    if any(c is None for c in needed):
+        return {}
+
+    tmp = df.copy()
+    for c in [col_cons, col_lab, col_proc]:
+        tmp[c] = pd.to_numeric(tmp[c], errors="coerce").fillna(0.0)
+
+    tmp[col_visit] = tmp[col_visit].astype(str).str.strip()
+    tmp["_total_amt"] = tmp[col_cons] + tmp[col_lab] + tmp[col_proc]
+
+    def _agg(group_cols: List[str]) -> pd.DataFrame:
+        g = tmp.groupby(group_cols, dropna=False).agg(
+            Consultation=(col_cons, "sum"),
+            Lab=(col_lab, "sum"),
+            Procedure=(col_proc, "sum"),
+            Total_Visit=(col_visit, pd.Series.nunique),
+            Total_Amount=("_total_amt", "sum"),
+        ).reset_index()
+        g["Avg_Amount"] = g["Total_Amount"] / g["Total_Visit"].replace(0, pd.NA)
+        g["Lab_%"] = (g["Lab"] / g["Total_Amount"].replace(0, pd.NA)) * 100
+        return g
+
+    if col_dept:
+        doctor_wise = _agg([col_dept, col_doc]).rename(columns={col_dept: "Department", col_doc: "Doctor"})
+    else:
+        doctor_wise = _agg([col_doc]).rename(columns={col_doc: "Doctor"})
+
+    insurance_wise = _agg([col_ins]).rename(columns={col_ins: "Insurance"})
+    doctor_ins_wise = _agg([col_doc, col_ins]).rename(columns={col_doc: "Doctor", col_ins: "Insurance"})
+
+    def _add_grand_total(d: pd.DataFrame, label_cols: List[str]) -> pd.DataFrame:
+        if d.empty:
+            return d
+        total_visit = int(d["Total_Visit"].sum())
+        total_amount = float(d["Total_Amount"].sum())
+        lab_sum = float(d["Lab"].sum())
+
+        row = {c: "" for c in d.columns}
+        for lc in label_cols:
+            if lc in row:
+                row[lc] = "GRAND TOTAL"
+                break
+        row["Consultation"] = float(d["Consultation"].sum())
+        row["Lab"] = lab_sum
+        row["Procedure"] = float(d["Procedure"].sum())
+        row["Total_Visit"] = total_visit
+        row["Total_Amount"] = total_amount
+        row["Avg_Amount"] = (total_amount / total_visit) if total_visit else 0.0
+        row["Lab_%"] = (lab_sum / total_amount * 100) if total_amount else 0.0
+        return pd.concat([d, pd.DataFrame([row])], ignore_index=True)
+
+    doctor_wise = _add_grand_total(doctor_wise, ["Department", "Doctor"])
+    insurance_wise = _add_grand_total(insurance_wise, ["Insurance"])
+    doctor_ins_wise = _add_grand_total(doctor_ins_wise, ["Doctor"])
+
+    return {
+        "Doctor Wise Revenue": doctor_wise,
+        "Insurance Wise Revenue": insurance_wise,
+        "Doctor x Insurance Revenue": doctor_ins_wise,
+    }
+
+
 def read_excel_any(uploaded_file, required_hint: Optional[List[str]] = None) -> pd.DataFrame:
     """Read an Excel report even when the real header is not on the first row.
 
@@ -562,9 +667,12 @@ if "center_key" not in SS or not SS.get("center_key"):
 SS.setdefault("reg_file", None)
 SS.setdefault("cash_file", None)
 SS.setdefault("pend_file", None)
+SS.setdefault("income_file", None)
 SS.setdefault("reg_df", None)
 SS.setdefault("cash_df", None)
 SS.setdefault("pend_df", None)
+SS.setdefault("income_df", None)
+SS.setdefault("income_tables", {})
 
 if admin_mode:
     # Step 1
@@ -952,8 +1060,43 @@ if admin_mode and can_process:
     else:
         st.success(f"Detected Day from Registration file: {day_ts.date().isoformat()}")
 
+# Step 4 (Income / Doctor Revenue) - optional
+c1, c2 = st.columns([3, 1])
+with c1:
+    st.subheader("4) Income Analysis Report (Doctor Revenue)")
+    income_up = st.file_uploader(
+        "Upload Daily Collection Details (.xls / .xlsx)",
+        type=["xls", "xlsx"],
+        key="income_uploader",
+    )
+    if income_up is not None:
+        SS["income_file"] = income_up
+with c2:
+    if st.button("🗑️ Delete Step 4", use_container_width=True):
+        SS["income_file"] = None
+        SS["income_df"] = None
+        SS["income_tables"] = {}
+        st.rerun()
+
+if SS.get("income_file") is not None:
+    st.success(f"Step 4 OK ✅ ({SS['income_file'].name})")
+else:
+    st.info("Step 4 optional: upload your Daily Collection Details export to generate Doctor/Insurance revenue tables.")
+
+
     if st.button("✅ Process & Save to S3" if s3_ok else "✅ Process (S3 not configured)", type="primary"):
         dfs = compute_summary(SS["reg_df"], SS["cash_df"], SS["pend_df"], day_ts)
+
+# ---- Step 4: Income analysis (optional) ----
+SS["income_df"] = None
+SS["income_tables"] = {}
+if SS.get("income_file") is not None:
+    _income_df = load_income_details(SS.get("income_file"))
+    if _income_df is None or _income_df.empty:
+        st.warning("Income Analysis file loaded, but table header could not be detected. Please upload the correct 'Daily Collection Details' export.")
+    else:
+        SS["income_df"] = _income_df
+        SS["income_tables"] = income_tables(_income_df)
 
         if s3_ok:
             try:
@@ -972,3 +1115,23 @@ if SS.get("last_saved_day") is not None and SS.get("last_saved_center") is not N
     st.caption("Open **Registration View** page to see the summary results.")
 elif SS["reg_df"] is not None:
     st.info("Upload Step 2 and Step 3, then click **Process & Save**.")
+
+# -------------------- Income Analysis display --------------------
+if SS.get("income_tables"):
+    st.markdown("---")
+    st.header("Income Analysis (Doctor Revenue)")
+
+    tabs = st.tabs(["Doctor Wise", "Insurance Wise", "Doctor x Insurance"])
+    mapping = [
+        ("Doctor Wise Revenue", 0),
+        ("Insurance Wise Revenue", 1),
+        ("Doctor x Insurance Revenue", 2),
+    ]
+    for key, idx in mapping:
+        with tabs[idx]:
+            df_show = SS["income_tables"].get(key)
+            if df_show is None or df_show.empty:
+                st.info("No data.")
+            else:
+                st.dataframe(df_show, use_container_width=True, hide_index=True)
+
