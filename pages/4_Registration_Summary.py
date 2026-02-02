@@ -256,31 +256,30 @@ def normalize_employer_name(x: str) -> str:
     return s.lower() if s else "blank"
 
 
-def employer_prefix_key(x: str, words: int = 2) -> str:
-    """Create a grouping key so similar employer names merge into ONE row.
 
-    Method:
-    - Normalize
-    - Tokenize
-    - Drop generic/legal words
-    - Take first N meaningful tokens
+def employer_prefix_key(x: str) -> str:
+    """Group employers by FIRST token (robust).
+
+    Some Excel exports contain hidden unicode characters that can make two visually
+    identical names behave differently. This function extracts the FIRST
+    alphanumeric token after normalization to avoid duplicates.
     """
-    s = normalize_employer_name(x)
-    toks = [t for t in s.split() if t]
+    if x is None:
+        return "blank"
+    s = str(x).strip().upper()
 
-    stop = {
-        "and","co","company","cont","contract","contracting","general","gen",
-        "est","establishment","services","service",
-        "sole","proprietorship","llc","wll","ltd","limited",
-        "partners","partner","group","holding","holdings","trade","trading"
-    }
+    # standardize common variants
+    s = s.replace("&", " AND ")
+    s = re.sub(r"\bW\s*L\s*L\b", "WLL", s)   # W L L -> WLL
+    s = re.sub(r"\bL\s*L\s*C\b", "LLC", s)   # L L C -> LLC
 
-    meaningful = [t for t in toks if t not in stop]
-    if not meaningful:
-        meaningful = toks
+    # convert anything non-alnum to spaces (handles hidden chars too)
+    s = re.sub(r"[^A-Z0-9]+", " ", s).strip()
 
-    key = " ".join(meaningful[:max(1, int(words))]).strip()
-    return key if key else "blank"
+    m = re.search(r"[A-Z0-9]+", s)
+    return m.group(0).lower() if m else "blank"
+
+
 
 
 def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 50) -> pd.DataFrame:
