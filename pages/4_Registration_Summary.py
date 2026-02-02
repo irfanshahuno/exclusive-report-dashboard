@@ -301,7 +301,7 @@ def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_c
 
     # Employer cleanup + normalization
     tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
-    tmp["__emp_key__"] = tmp[emp_col].apply(lambda v: employer_prefix_key(v, words=2))
+    tmp["__emp_key__"] = tmp[emp_col].apply(lambda v: employer_prefix_key(v))
 
     # Insurance cleanup
     if ins_col and ins_col in tmp.columns:
@@ -491,16 +491,36 @@ def s3_list_prefixes(s3, bucket: str, prefix: str) -> List[str]:
 # ---------------------------
 # Center selection
 # ---------------------------
+
 CENTERS = {
     "easyhealth": "Easy Health Medical Clinic (MF8031)",
     "excellent": "Excellent Medical Center (MF4777)",
     "pharmacy": "Excellent Pharmacy (PF3205)",
 }
 
-center_key = st.session_state.get("center_key") or st.query_params.get("center") or None
-if center_key not in CENTERS:
-    center_key = st.selectbox("Center", options=list(CENTERS.keys()), format_func=lambda k: CENTERS[k])
+# -------------------- Center default (Excellent) --------------------
+SS = st.session_state
+SS.setdefault("center_key", "excellent")
 
+# if URL contains ?center=..., allow it (and persist it)
+_q_center = st.query_params.get("center")
+if _q_center in CENTERS:
+    SS["center_key"] = _q_center
+
+center_key = SS.get("center_key", "excellent")
+if center_key not in CENTERS:
+    center_key = "excellent"
+    SS["center_key"] = center_key
+
+# optional selector (only if you want to change center manually)
+center_key = st.selectbox(
+    "Center",
+    options=list(CENTERS.keys()),
+    index=(list(CENTERS.keys()).index(center_key) if center_key in CENTERS else 0),
+    format_func=lambda k: CENTERS[k],
+    key="center_selector",
+)
+SS["center_key"] = center_key
 cfg = load_secrets()
 s3_ok = s3_enabled(cfg)
 s3 = s3_client_cached(cfg) if s3_ok else None
@@ -830,7 +850,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
             else:
                 tmp = reg_df.copy()
                 tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
-                tmp["__emp_key__"] = tmp[emp_col].apply(lambda v: employer_prefix_key(v, words=2))
+                tmp["__emp_key__"] = tmp[emp_col].apply(lambda v: employer_prefix_key(v))
 
                 # display name = most frequent original in each normalized group
                 disp = (
