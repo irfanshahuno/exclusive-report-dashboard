@@ -844,6 +844,9 @@ def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
     if SS["pend_file"]:
         s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "pending.xlsx"), SS["pend_file"]["bytes"])
 
+    if SS.get("income_file"):
+        s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "income.xlsx"), SS["income_file"]["bytes"])
+
     s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "summary.pkl"), pickle.dumps(dfs, protocol=pickle.HIGHEST_PROTOCOL))
 
     kpi = dfs["KPI"].set_index("Metric")["Value"]
