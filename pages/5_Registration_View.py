@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Streamlit Page: Registration Summary (View Only) - FINAL
-
-Purpose
-- Management view-only page
-- Loads latest saved summary from S3 (created by the uploader page)
-- Expected structure:
-    registration_summary/<center>/<YYYY-MM-DD>/summary.pkl
-    registration_summary/<center>/history.csv
-"""
 
 import io
 import os
@@ -20,70 +10,60 @@ from typing import Dict, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-# Optional S3
 try:
     import boto3
 except Exception:
     boto3 = None
 
+st.set_page_config(page_title="Registration Summary (View Only)", layout="wide", initial_sidebar_state="collapsed")
+st.title("📅 Registration Summary (View Only)")
 
-# ────────────────────────────────────────────────
-# Date formatting helpers
-# ────────────────────────────────────────────────
-def fmt_day(ts) -> str:
+# ---------------- Date Formatting ----------------
+def fmt_day(ts):
     try:
         return pd.to_datetime(ts).strftime("%d %b %Y")
     except:
         return str(ts)
 
-
-def fmt_dt(ts) -> str:
+def fmt_dt(ts):
     try:
         return pd.to_datetime(ts).strftime("%d %b %Y %H:%M")
     except:
         return str(ts)
 
+# ---------------- Helpers ----------------
+def s3_key(*parts):
+    return "/".join([p.strip("/") for p in parts if p])
 
-st.set_page_config(
-    page_title="Registration Summary (View Only)",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
-st.title("📅 Registration Summary (View Only)")
-
-
-# ────────────────────────────────────────────────
-# S3 helpers
-# ────────────────────────────────────────────────
-def s3_key(*parts: str) -> str:
-    return "/".join(p.strip("/") for p in parts if p and str(p).strip())
-
-
-def load_secrets() -> Dict[str, str]:
+def load_secrets():
     def get_any(*keys):
         for k in keys:
-            v = st.secrets.get(k) or os.getenv(k)
-            if v and str(v).strip():
-                return str(v).strip()
+            if k in st.secrets:
+                return str(st.secrets.get(k))
+            v = os.getenv(k)
+            if v:
+                return str(v)
         return ""
 
     return {
         "AWS_ACCESS_KEY_ID": get_any("AWS_ACCESS_KEY_ID"),
         "AWS_SECRET_ACCESS_KEY": get_any("AWS_SECRET_ACCESS_KEY"),
-        "AWS_REGION": get_any("AWS_REGION", "AWS_DEFAULT_REGION"),
-        "S3_BUCKET_NAME": get_any("S3_BUCKET_NAME", "S3_BUCKET"),
-        "S3_BASE_PREFIX": get_any("S3_BASE_PREFIX", "S3_PREFIX"),  # optional
+        "AWS_REGION": get_any("AWS_REGION","AWS_DEFAULT_REGION"),
+        "S3_BUCKET_NAME": get_any("S3_BUCKET_NAME","S3_BUCKET"),
+        "S3_BASE_PREFIX": get_any("S3_BASE_PREFIX","S3_PREFIX"),
     }
 
+def s3_enabled(cfg):
+    return all([
+        cfg["AWS_ACCESS_KEY_ID"],
+        cfg["AWS_SECRET_ACCESS_KEY"],
+        cfg["AWS_REGION"],
+        cfg["S3_BUCKET_NAME"],
+        boto3 is not None
+    ])
 
-def s3_enabled(cfg: Dict[str, str]) -> bool:
-    required = ["S3_BUCKET_NAME", "AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]
-    return all(cfg.get(k) for k in required) and boto3 is not None
-
-
-@st.cache_resource(show_spinner=False)
-def get_s3_client(cfg: Dict[str, str]):
+@st.cache_resource
+def s3_client_cached(cfg):
     if not s3_enabled(cfg):
         return None
     return boto3.client(
@@ -93,248 +73,148 @@ def get_s3_client(cfg: Dict[str, str]):
         aws_secret_access_key=cfg["AWS_SECRET_ACCESS_KEY"],
     )
 
-
-def s3_get_bytes(s3, bucket: str, key: str) -> Optional[bytes]:
+def s3_get_bytes(s3, bucket, key):
     try:
         obj = s3.get_object(Bucket=bucket, Key=key)
         return obj["Body"].read()
-    except Exception:
+    except:
         return None
 
-
-def history_paths(center: str, base_prefix: str = "") -> Tuple[str, str]:
-    root = s3_key(base_prefix, "registration_summary", center)
+def history_paths(center, prefix=""):
+    root = s3_key(prefix, "registration_summary", center)
     return root, s3_key(root, "history.csv")
 
-
-def load_history(s3, cfg, center_key: str) -> pd.DataFrame:
-    root, hist_key = history_paths(center_key, cfg.get('S3_BASE_PREFIX', ''))
+def load_history_from_s3(s3, cfg, center):
+    root, hist_key = history_paths(center, cfg.get("S3_BASE_PREFIX",""))
     b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key)
     if not b:
         return pd.DataFrame()
-    try:
-        return pd.read_csv(io.BytesIO(b), parse_dates=["day"])
-    except:
-        return pd.DataFrame()
+    return pd.read_csv(io.BytesIO(b), parse_dates=["day"])
 
-
-def load_summary(s3, cfg, center_key: str, day_ts: pd.Timestamp) -> Optional[Dict[str, pd.DataFrame]]:
-    root, _ = history_paths(center_key, cfg.get('S3_BASE_PREFIX', ''))
-    day_str = pd.to_datetime(day_ts).date().isoformat()
-    key = s3_key(root, day_str, "summary.pkl")
+def load_summary_from_s3(s3, cfg, center, day_ts):
+    root,_ = history_paths(center, cfg.get("S3_BASE_PREFIX",""))
+    key = s3_key(root, pd.to_datetime(day_ts).date().isoformat(), "summary.pkl")
     b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], key)
     if not b:
         return None
-    try:
-        return pickle.loads(b)
-    except:
-        return None
+    return pickle.loads(b)
 
-
-def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
+def add_cumulative(hist):
     if hist.empty:
         return pd.DataFrame()
     h = hist.sort_values("day").copy()
-    for c in ["total_visits", "unique_emr", "unique_visitno", "cash_patients", "pending_patients"]:
+    for c in ["total_visits","unique_emr","unique_visitno","cash_patients","pending_patients"]:
         if c in h.columns:
             h[c] = h[c].fillna(0).astype(int)
             h[f"cum_{c}"] = h[c].cumsum()
-    return h.sort_values("day", ascending=False).reset_index(drop=True)
+    return h.sort_values("day", ascending=False)
 
-
-# ────────────────────────────────────────────────
-# Center selection
-# ────────────────────────────────────────────────
+# ---------------- Center Selection ----------------
 CENTERS = {
-    "easyhealth": "Easy Health Medical Clinic (MF8031)",
-    "excellent":  "Excellent Medical Center (MF4777)",
-    "pharmacy":   "Excellent Pharmacy (PF3205)",
+    "easyhealth":"Easy Health Medical Clinic (MF8031)",
+    "excellent":"Excellent Medical Center (MF4777)",
+    "pharmacy":"Excellent Pharmacy (PF3205)"
 }
 
-qp_center = (st.query_params.get("center") or "").strip().lower()
-center_key = qp_center if qp_center in CENTERS else None
+qp_center = (st.query_params.get("center") or "").strip()
+center_key = qp_center if qp_center in CENTERS else st.selectbox("Center", list(CENTERS.keys()))
 
-if center_key:
-    st.selectbox("Center", [center_key], format_func=lambda k: CENTERS[k], disabled=True)
-else:
-    center_key = st.selectbox(
-        "Center",
-        options=list(CENTERS.keys()),
-        format_func=lambda k: CENTERS[k],
-        index=0
-    )
+st.caption(f"Center: **{CENTERS.get(center_key)}**")
 
-st.caption(f"**Selected center:** {CENTERS.get(center_key, center_key)}")
-
-
-# ────────────────────────────────────────────────
-# S3 configuration check
-# ────────────────────────────────────────────────
+# ---------------- S3 Status ----------------
 cfg = load_secrets()
 s3_ok = s3_enabled(cfg)
-s3 = get_s3_client(cfg) if s3_ok else None
+s3 = s3_client_cached(cfg) if s3_ok else None
 
-with st.expander("S3 Connection Status", expanded=not s3_ok):
-    if s3_ok:
-        prefix = cfg.get('S3_BASE_PREFIX', '')
-        full_prefix = f"{prefix}/" if prefix else ""
-        st.success(f"**S3 is configured** • Bucket: `{cfg['S3_BUCKET_NAME']}` • Region: `{cfg['AWS_REGION']}`")
-        st.caption(f"Reading from: `{full_prefix}registration_summary/{center_key}/…`")
-    else:
-        st.error("**S3 is NOT configured** → cannot load reports")
-        st.markdown("""
-        Required secrets / environment variables:
-        - `AWS_ACCESS_KEY_ID`
-        - `AWS_SECRET_ACCESS_KEY`
-        - `AWS_REGION`
-        - `S3_BUCKET_NAME`
-        """)
-        st.stop()
-
-
-# ────────────────────────────────────────────────
-# Load history & show latest day automatically
-# ────────────────────────────────────────────────
-hist = load_history(s3, cfg, center_key)
-
-if hist.empty or "day" not in hist.columns:
-    root, hist_key = history_paths(center_key, cfg.get('S3_BASE_PREFIX', ''))
-    st.warning("No daily reports found for this center yet.")
-    st.info("Expected location:")
-    st.code(hist_key, language="text")
-    st.markdown("""
-    **Next steps:**
-    1. Go to the **Registration Summary (Upload)** page
-    2. Upload files and click **Process & Save to S3**
-    3. Return here to view results
-    """)
+if not s3_ok:
+    st.error("S3 NOT Configured")
     st.stop()
 
-# Normalize & sort days
-hist["day"] = pd.to_datetime(hist["day"], errors="coerce").dt.normalize()
-hist = hist.dropna(subset=["day"]).sort_values("day")
+# ---------------- Load History ----------------
+hist = load_history_from_s3(s3, cfg, center_key)
 
-days = hist["day"].unique()
-latest_day = days[-1]
-picked_day = pd.to_datetime(latest_day).normalize()
+if hist.empty:
+    st.warning("No saved Daily Report found")
+    st.stop()
 
-st.caption(f"**Showing latest available day:** {fmt_day(picked_day)}")
+hist["day"] = pd.to_datetime(hist["day"]).dt.normalize()
+hist = hist.sort_values("day")
 
-# Session state for selected day
-ss = st.session_state
-ss.setdefault("selected_day", picked_day)
-ss.setdefault("loaded_day", None)
-ss.setdefault("loaded_summary", None)
+latest = hist["day"].max()
+st.caption(f"Showing latest saved day: {fmt_day(latest)}")
 
-with st.expander("View a different day", expanded=False):
-    chosen_date = st.date_input(
-        "Select date",
-        value=picked_day.date(),
-        min_value=pd.to_datetime(days.min()).date(),
-        max_value=pd.to_datetime(days.max()).date(),
-    )
-    if st.button("Load this day", use_container_width=True):
-        ss["selected_day"] = pd.to_datetime(chosen_date)
-        ss["loaded_day"] = None
-        ss["loaded_summary"] = None
-        st.rerun()
+dfs = load_summary_from_s3(s3, cfg, center_key, latest)
 
-# Decide which day to show
-target_day = ss["selected_day"]
+if dfs is None:
+    st.error("Summary missing")
+    st.stop()
 
-# Load summary if needed
-if ss["loaded_day"] != target_day:
-    summary = load_summary(s3, cfg, center_key, target_day)
-    ss["loaded_day"] = target_day
-    ss["loaded_summary"] = summary
+# ---------------- KPI ----------------
+kpi = dfs.get("KPI")
+if kpi is not None:
+    k = kpi.set_index("Metric")["Value"]
+    a,b,c,d = st.columns(4)
+    a.metric("Total Visits", int(k.get("Total Visits",0)))
+    b.metric("Unique EMR", int(k.get("Unique EMR (Patients)",0)))
+    c.metric("Unique Visit No", int(k.get("Unique Visit No",0)))
+    d.metric("CashOut", int(k.get("CashOut Patients",0)))
 
-# ────────────────────────────────────────────────
-# Render daily summary
-# ────────────────────────────────────────────────
-if ss["loaded_summary"]:
-    dfs = ss["loaded_summary"]
-    day_str = fmt_day(target_day)
+# ---------------- Tables ----------------
+def show(name):
+    df = dfs.get(name)
+    if df is not None:
+        st.subheader(name)
+        st.dataframe(df, use_container_width=True)
 
-    st.header(f"Daily Summary – {day_str}")
+show("Pending Status Wise")
+show("Insurance Wise Visits")
+show("Employer Wise")
+show("Doctor Wise Visits")
 
-    kpi = dfs.get("KPI")
-    if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
-        k = kpi.set_index("Metric")["Value"]
-        cols = st.columns(4)
-        cols[0].metric("Total Visits", int(k.get("Total Visits", 0)))
-        cols[1].metric("Unique EMR (Patients)", int(k.get("Unique EMR (Patients)", 0)))
-        cols[2].metric("Unique Visit No", int(k.get("Unique Visit No", 0)))
-        cols[3].metric("CashOut Patients", int(k.get("CashOut Patients", 0)))
+# ---------------- Income Analysis ----------------
+income_keys = [k for k in dfs.keys() if str(k).startswith("Income | ")]
 
-        cols = st.columns(2)
-        cols[0].metric("Pending Patients", int(k.get("Pending Patients", 0)))
-        cols[1].metric("Generated", fmt_dt(datetime.now()))
+if income_keys:
+    st.header("💰 Income Analysis")
 
-    st.subheader("Pending Status Wise")
-    st.dataframe(dfs.get("Pending Status Wise", pd.DataFrame()), use_container_width=True, hide_index=True)
+    tab1,tab2,tab3 = st.tabs(["Doctor Wise","Insurance Wise","Doctor x Insurance"])
 
-    st.subheader("Insurance Wise Visits")
-    st.dataframe(dfs.get("Insurance Wise Visits", pd.DataFrame()), use_container_width=True, hide_index=True)
+    with tab1:
+        df = dfs.get("Income | Doctor Wise Revenue")
+        if df is not None:
+            st.dataframe(df,use_container_width=True)
 
-    st.subheader("Employer Wise")
-    st.dataframe(dfs.get("Employer Wise", pd.DataFrame()), use_container_width=True, hide_index=True)
+    with tab2:
+        df = dfs.get("Income | Insurance Wise Revenue")
+        if df is not None:
+            st.dataframe(df,use_container_width=True)
 
-    st.subheader("Doctor Wise Visits")
-    st.dataframe(dfs.get("Doctor Wise Visits", pd.DataFrame()), use_container_width=True, hide_index=True)
+    with tab3:
+        df = dfs.get("Income | Doctor x Insurance Revenue")
+        if df is not None and not df.empty:
 
-    # Income Analysis
-    income_tabs = [k for k in dfs if str(k).startswith("Income | ")]
-    if income_tabs:
-        st.markdown("---")
-        st.header("Income Analysis (Doctor Revenue)")
+            doctors = sorted([
+                d for d in df["Doctor"].dropna().unique()
+                if str(d).strip().upper()!="GRAND TOTAL"
+            ])
 
-        tab_names = ["Doctor Wise", "Insurance Wise", "Doctor × Insurance"]
-        tabs = st.tabs(tab_names)
+            doc = st.selectbox("Select Doctor", doctors, key=f"doc_{latest}")
 
-        with tabs[0]:
-            df = dfs.get("Income | Doctor Wise Revenue")
-            if df is not None and not df.empty:
-                st.dataframe(df, use_container_width=True, hide_index=True)
-            else:
-                st.info("No doctor-wise revenue data")
+            filtered = df[df["Doctor"]==doc].copy()
 
-        with tabs[1]:
-            df = dfs.get("Income | Insurance Wise Revenue")
-            if df is not None and not df.empty:
-                st.dataframe(df, use_container_width=True, hide_index=True)
-            else:
-                st.info("No insurance-wise revenue data")
+            ins_list = ["All"] + sorted([
+                i for i in filtered["Insurance"].dropna().unique()
+                if str(i).strip().upper()!="GRAND TOTAL"
+            ])
 
-        with tabs[2]:
-            df = dfs.get("Income | Doctor x Insurance Revenue")
-            if df is not None and not df.empty:
-                df_f = df.copy()
+            ins = st.selectbox("Select Insurance", ins_list, key=f"ins_{latest}")
 
-                doctors = sorted(df_f["Doctor"].dropna().unique())
-                doctors = [d for d in doctors if str(d).strip().lower() not in ["", "none", "nan", "grand total"]]
+            if ins!="All":
+                filtered = filtered[filtered["Insurance"]==ins]
 
-                if doctors:
-                    doc = st.selectbox("Doctor", options=doctors, key="inc_doc")
-                    df_f = df_f[df_f["Doctor"] == doc]
+            st.dataframe(filtered,use_container_width=True)
 
-                    insurances = ["All"] + sorted(df_f["Insurance"].dropna().unique())
-                    ins = st.selectbox("Insurance", options=insurances, key="inc_ins")
-                    if ins != "All":
-                        df_f = df_f[df_f["Insurance"] == ins]
-
-                st.dataframe(df_f, use_container_width=True, hide_index=True)
-            else:
-                st.info("No doctor × insurance revenue data")
-
-else:
-    st.error(f"No summary found for {fmt_day(target_day)}")
-    root, _ = history_paths(center_key, cfg.get('S3_BASE_PREFIX', ''))
-    st.caption(f"Expected path: `{root}/{target_day.date().isoformat()}/summary.pkl`")
-
-
-# ────────────────────────────────────────────────
-# Accumulated history
-# ────────────────────────────────────────────────
-st.header("Accumulated – All Saved Days")
+# ---------------- Accumulated ----------------
+st.header("Accumulated")
 acc = add_cumulative(hist)
-st.dataframe(acc, use_container_width=True, hide_index=True)
+st.dataframe(acc,use_container_width=True)
