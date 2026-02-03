@@ -656,7 +656,10 @@ s3 = s3_client_cached(cfg) if s3_ok else None
 with st.expander("Storage Status (S3)", expanded=False):
     if s3_ok:
         st.success(f"S3 is configured ✅  Bucket: {cfg['S3_BUCKET_NAME']}  Region: {cfg['AWS_REGION']}")
-        st.caption(f"Base prefix: {cfg.get('S3_BASE_PREFIX') or '(none)'}")
+        if cfg.get('S3_BASE_PREFIX'):
+            st.caption(f"Base prefix: {cfg.get('S3_BASE_PREFIX')}")
+        else:
+            st.caption("No base prefix configured - using root bucket")
     else:
         st.warning("S3 is NOT configured. Uploaders will work and summary will display, but files will NOT be saved to S3.")
         st.caption("Expected secrets: S3_BUCKET_NAME (or S3_BUCKET), AWS_REGION (or AWS_DEFAULT_REGION), AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY. Optional: S3_BASE_PREFIX")
@@ -815,19 +818,19 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
 
 def history_paths(center: str, base_prefix: str = "") -> Tuple[str, str]:
     """Return (root_prefix, history_csv_key) for this center.
-
-    If you set S3_BASE_PREFIX (example: 'streamlit'), we save under:
-        <S3_BASE_PREFIX>/registration_summary/<center>/...
-
-    If S3_BASE_PREFIX is empty, we save under:
-        registration_summary/<center>/...
+    
+    Fixed to match your S3 bucket structure where files are saved under:
+    registration_summary/<center>/...
     """
-    root = s3_key(base_prefix, "registration_summary", center)
+    if base_prefix and base_prefix.strip():
+        root = s3_key(base_prefix, "registration_summary", center)
+    else:
+        root = s3_key("registration_summary", center)
     return root, s3_key(root, "history.csv")
 
 
 def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
-    root, hist_key = history_paths(center_key, cfg.get("S3_BASE_PREFIX",""))
+    root, hist_key = history_paths(center_key, cfg.get("S3_BASE_PREFIX", ""))
     day_str = day_ts.date().isoformat()
 
     if SS["reg_file"]:
@@ -870,7 +873,7 @@ def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
 def load_history_from_s3() -> pd.DataFrame:
     if not s3_ok:
         return pd.DataFrame()
-    _, hist_key = history_paths(center_key, cfg.get("S3_BASE_PREFIX",""))
+    _, hist_key = history_paths(center_key, cfg.get("S3_BASE_PREFIX", ""))
     b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key)
     if not b:
         return pd.DataFrame()
@@ -881,7 +884,7 @@ def load_summary_from_s3(day_ts: pd.Timestamp) -> Optional[Dict[str, pd.DataFram
     """Load a previously saved summary.pkl for a given day from S3."""
     if not s3_ok:
         return None
-    root, _ = history_paths(center_key, cfg.get("S3_BASE_PREFIX",""))
+    root, _ = history_paths(center_key, cfg.get("S3_BASE_PREFIX", ""))
     day_str = pd.to_datetime(day_ts).date().isoformat()
     key = s3_key(root, day_str, "summary.pkl")
     b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], key)
@@ -908,7 +911,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
         d.metric("CashOut Patients", int(k.get("CashOut Patients", 0)))
         e, f = st.columns(2)
         e.metric("Pending Patients", int(k.get("Pending Patients", 0)))
-        f.metric("Generated", datetime.now().strftime("%Y-%m-%d %H:%M"))
+        f.metric("Generated", datetime.now().strftime("%Y-%m-d %H:%M"))
     else:
         st.info("KPI is not available for this summary.")
 
