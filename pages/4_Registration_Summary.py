@@ -282,7 +282,6 @@ def ensure_required(df: pd.DataFrame, required: List[str], label: str) -> Dict[s
     return mapping
 
 
-
 def get_day_from_registration(reg_df: pd.DataFrame) -> Optional[pd.Timestamp]:
     """Detect the report day from Registration file.
 
@@ -347,7 +346,6 @@ def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15, label: str = "
     return out
 
 
-
 def normalize_employer_name(x: str) -> str:
     """Normalize employer names so small variations don't create duplicates.
 
@@ -374,7 +372,6 @@ def normalize_employer_name(x: str) -> str:
     return s.lower() if s else "blank"
 
 
-
 def employer_prefix_key(x: str) -> str:
     """Group employers by FIRST token (robust).
 
@@ -396,9 +393,6 @@ def employer_prefix_key(x: str) -> str:
 
     m = re.search(r"[A-Z0-9]+", s)
     return m.group(0).lower() if m else "blank"
-
-
-
 
 
 def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 50) -> pd.DataFrame:
@@ -832,7 +826,6 @@ def history_paths(center: str, base_prefix: str = "") -> Tuple[str, str]:
     return root, s3_key(root, "history.csv")
 
 
-
 def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
     root, hist_key = history_paths(center_key, cfg.get("S3_BASE_PREFIX",""))
     day_str = day_ts.date().isoformat()
@@ -924,7 +917,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     if "Pending Status Wise" in dfs:
         st.dataframe(dfs["Pending Status Wise"], use_container_width=True, hide_index=True)
     else:
-        st.info("Pending Status Wise is not available for this saved summary. Please re-process today’s files to generate it.")
+        st.info("Pending Status Wise is not available for this saved summary. Please re-process today's files to generate it.")
 
     # Insurance Wise
     st.subheader("Insurance Wise Visits")
@@ -938,7 +931,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     if "Employer Wise" in dfs:
         st.dataframe(dfs["Employer Wise"], use_container_width=True, hide_index=True)
     else:
-        st.info("Employer Wise is not available for this saved summary. Please re-process today’s files to generate it.")
+        st.info("Employer Wise is not available for this saved summary. Please re-process today's files to generate it.")
 
     # Doctor Wise
     st.subheader("Doctor Wise Visits")
@@ -954,7 +947,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     with st.expander("Download Pending Details (by Status)", expanded=False):
         pend_df = SS.get("pend_df")
         if pend_df is None:
-            st.info("Pending file is not loaded in this session. Upload/Process today’s files to enable row-level download.")
+            st.info("Pending file is not loaded in this session. Upload/Process today's files to enable row-level download.")
         else:
             pend_status_col = _find_col(pend_df, ["Status", "VisitStatus", "Pending Status"])
             if not pend_status_col:
@@ -971,7 +964,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     with st.expander("Download Registration Details (by Insurance)", expanded=False):
         reg_df = SS.get("reg_df")
         if reg_df is None:
-            st.info("Registration file is not loaded in this session. Upload/Process today’s files to enable row-level download.")
+            st.info("Registration file is not loaded in this session. Upload/Process today's files to enable row-level download.")
         else:
             ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
             if not ins_col:
@@ -988,7 +981,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     with st.expander("Download Registration Details (by Employer)", expanded=False):
         reg_df = SS.get("reg_df")
         if reg_df is None:
-            st.info("Registration file is not loaded in this session. Upload/Process today’s files to enable row-level download.")
+            st.info("Registration file is not loaded in this session. Upload/Process today's files to enable row-level download.")
         else:
             emp_col = _find_col(reg_df, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name", "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
             if not emp_col:
@@ -1072,9 +1065,6 @@ can_process = SS["reg_df"] is not None and SS["cash_df"] is not None and SS["pen
 SS.setdefault("last_saved_day", None)
 SS.setdefault("last_saved_center", None)
 
-
-
-
 if admin_mode:
     # Day selection (prefer detected from Registration file; fallback to manual picker)
     detected = get_day_from_registration(SS["reg_df"]) if SS["reg_df"] is not None else None
@@ -1120,7 +1110,8 @@ if admin_mode:
         if detected is not None:
             day_ts = detected
 
-        dfs = compute_summary(SS["reg_df"], SS["cash_df"], SS["pend_df"], day_ts)        # ---- Step 4: Income analysis (optional) ----
+        dfs = compute_summary(SS["reg_df"], SS["cash_df"], SS["pend_df"], day_ts)        
+        # ---- Step 4: Income analysis (optional) ----
         SS['income_df'] = None
         SS['income_tables'] = {}
         if SS.get('income_file') is not None:
@@ -1154,4 +1145,3 @@ if SS.get("last_saved_day") is not None and SS.get("last_saved_center") is not N
     st.caption("Open **Registration View** page to see the summary results.")
 elif SS.get("reg_df") is not None:
     st.info("Upload Step 2 and Step 3, then click **Process & Save**.")
-
