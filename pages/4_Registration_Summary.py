@@ -1001,12 +1001,12 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
                 # display name = most frequent original in each normalized group
                 disp = (
                     tmp.groupby(["__emp_key__", emp_col]).size().reset_index(name="cnt")
-                    .sort_values(["__emp_norm__", "cnt"], ascending=[True, False])
+                    .sort_values(["__emp_key__", "cnt"], ascending=[True, False])
                     .drop_duplicates(subset=["__emp_key__"])
                 )
                 # build select options: "Display Name (count)"
                 counts = tmp.groupby("__emp_key__").size().reset_index(name="Count")
-                disp = disp.merge(counts, on="__emp_norm__", how="left")
+                disp = disp.merge(counts, on="__emp_key__", how="left")
                 disp = disp.sort_values("Count", ascending=False)
 
                 options = disp["__emp_key__"].tolist()
