@@ -112,14 +112,20 @@ def s3_get_bytes(s3, bucket: str, key: str) -> Optional[bytes]:
         return None
 
 
-def history_paths(center: str) -> Tuple[str, str]:
-    # MUST match uploader page 4_Registration_Summary.py
-    root = s3_key("registration_summary", center)
+def history_paths(center: str, base_prefix: str = "") -> Tuple[str, str]:
+    """Return (root_prefix, history_csv_key) for this center.
+
+    Must match uploader page logic:
+      <S3_BASE_PREFIX>/registration_summary/<center>/...
+    If base_prefix is empty:
+      registration_summary/<center>/...
+    """
+    root = s3_key(base_prefix, "registration_summary", center)
     return root, s3_key(root, "history.csv")
 
 
 def load_history_from_s3(s3, cfg: Dict[str, str], center_key: str) -> pd.DataFrame:
-    root, hist_key = history_paths(center_key)
+    root, hist_key = history_paths(center_key, cfg.get('S3_BASE_PREFIX',''))
     b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key)
     if not b:
         return pd.DataFrame()
@@ -131,7 +137,7 @@ def load_history_from_s3(s3, cfg: Dict[str, str], center_key: str) -> pd.DataFra
 
 
 def load_summary_from_s3(s3, cfg: Dict[str, str], center_key: str, day_ts: pd.Timestamp) -> Optional[Dict[str, pd.DataFrame]]:
-    root, _ = history_paths(center_key)
+    root, _ = history_paths(center_key, cfg.get('S3_BASE_PREFIX',''))
     day_str = pd.to_datetime(day_ts).date().isoformat()
     key = s3_key(root, day_str, "summary.pkl")
     b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], key)
@@ -186,6 +192,52 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     st.subheader("Doctor Wise Visits")
     st.dataframe(dfs.get("Doctor Wise Visits", pd.DataFrame()), use_container_width=True, hide_index=True)
 
+# -------------------- Income Analysis (Doctor Revenue) --------------------
+income_keys = [k for k in dfs.keys() if str(k).startswith("Income | ")]
+if income_keys:
+    st.markdown("---")
+    st.header("Income Analysis (Doctor Revenue)")
+
+    df_doc = dfs.get("Income | Doctor Wise Revenue")
+    df_ins = dfs.get("Income | Insurance Wise Revenue")
+    df_dx  = dfs.get("Income | Doctor x Insurance Revenue")
+
+    tabs = st.tabs(["Doctor Wise", "Insurance Wise", "Doctor x Insurance"])
+
+    with tabs[0]:
+        if df_doc is None or df_doc.empty:
+            st.info("No Doctor Wise revenue data for this day.")
+        else:
+            st.dataframe(df_doc, use_container_width=True, hide_index=True)
+
+    with tabs[1]:
+        if df_ins is None or df_ins.empty:
+            st.info("No Insurance Wise revenue data for this day.")
+        else:
+            st.dataframe(df_ins, use_container_width=True, hide_index=True)
+
+    with tabs[2]:
+        if df_dx is None or df_dx.empty:
+            st.info("No Doctor x Insurance revenue data for this day.")
+        else:
+            # Filter: pick doctor, then (optional) pick insurance
+            if "Doctor" in df_dx.columns:
+                doctors = sorted([d for d in df_dx["Doctor"].dropna().unique()
+                                  if str(d).strip().lower() not in ["", "none", "nan"] and str(d).strip() != "GRAND TOTAL"])
+                pick_doc = st.selectbox("Select Doctor", options=doctors, key="income_pick_doc")
+                df_f = df_dx[df_dx["Doctor"] == pick_doc].copy()
+            else:
+                df_f = df_dx.copy()
+
+            if "Insurance" in df_f.columns:
+                ins_list = sorted([i for i in df_f["Insurance"].dropna().unique()
+                                   if str(i).strip().lower() not in ["", "none", "nan"]])
+                pick_ins = st.selectbox("Select Insurance", options=["All"] + ins_list, key="income_pick_ins")
+                if pick_ins != "All":
+                    df_f = df_f[df_f["Insurance"] == pick_ins]
+
+            st.dataframe(df_f, use_container_width=True, hide_index=True)
+
 
 # ---------------------------
 # Center selection (LOCKED if passed in URL)
@@ -217,9 +269,9 @@ s3 = s3_client_cached(cfg) if s3_ok else None
 with st.expander("Storage Status (S3)", expanded=False):
     if s3_ok:
         st.success(f"S3 is configured ✅  Bucket: {cfg['S3_BUCKET_NAME']}  Region: {cfg['AWS_REGION']}")
-        st.caption("Path used: registration_summary/<center>/history.csv")
+        st.caption(f"Path used: {(cfg.get('S3_BASE_PREFIX','') + '/' if cfg.get('S3_BASE_PREFIX') else '')}registration_summary/<center>/history.csv")
         if cfg.get("S3_BASE_PREFIX"):
-            st.caption(f"Note: S3_BASE_PREFIX is set to '{cfg['S3_BASE_PREFIX']}', but this viewer/uploader are saving at TOP level (no prefix).")
+            st.caption(f"S3_BASE_PREFIX is set to '{cfg['S3_BASE_PREFIX']}'. Viewer will load from: {cfg['S3_BASE_PREFIX']}/registration_summary/<center>/...")
     else:
         st.error("S3 is NOT configured on this app, so View page cannot load saved results.")
         st.caption("Expected secrets: S3_BUCKET_NAME (or S3_BUCKET), AWS_REGION (or AWS_DEFAULT_REGION), AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
@@ -233,7 +285,7 @@ if not s3_ok:
 hist = load_history_from_s3(s3, cfg, center_key)
 
 if hist.empty or "day" not in hist.columns:
-    root, hist_key = history_paths(center_key)
+    root, hist_key = history_paths(center_key, cfg.get('S3_BASE_PREFIX',''))
     st.warning("No saved Daily Report found for this center yet.")
     st.write("✅ To fix:")
     st.markdown(
@@ -285,7 +337,7 @@ if need_load:
     loaded = load_summary_from_s3(s3, cfg, center_key, picked)
     if loaded is None:
         st.error("history.csv exists, but summary.pkl is missing for this day.")
-        root, _ = history_paths(center_key)
+        root, _ = history_paths(center_key, cfg.get('S3_BASE_PREFIX',''))
         st.caption(f"Expected: {s3_key(root, picked.date().isoformat(), 'summary.pkl')}")
         SS["loaded_day"] = picked
         SS["loaded_summary"] = None
