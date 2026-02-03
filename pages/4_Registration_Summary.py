@@ -122,6 +122,19 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         return {}
 
     tmp = df.copy()
+    # Clean blanks/None so they don't appear as a separate 'None' row and don't affect GRAND TOTAL
+    # Doctor is mandatory for any revenue attribution
+    tmp[col_doc] = tmp[col_doc].astype(str).str.strip()
+    tmp = tmp[~tmp[col_doc].str.lower().isin(['', 'none', 'nan'])].copy()
+    # Optional Department: if present, drop blank departments as well (prevents 'None' department grouping)
+    if col_dept:
+        tmp[col_dept] = tmp[col_dept].astype(str).str.strip()
+        tmp = tmp[~tmp[col_dept].str.lower().isin(['', 'none', 'nan'])].copy()
+    # Insurance: blanks treated as CASH
+    tmp[col_ins] = tmp[col_ins].fillna('CASH').astype(str).str.strip().replace('', 'CASH')
+    tmp[col_visit] = tmp[col_visit].astype(str).str.strip()
+    tmp = tmp[tmp[col_visit] != ''].copy()
+
     for c in [col_cons, col_lab, col_proc]:
         tmp[c] = pd.to_numeric(tmp[c], errors="coerce").fillna(0.0)
 
@@ -1079,7 +1092,7 @@ if admin_mode:
             key="income_uploader",
         )
         if income_up is not None:
-            SS["income_file"] = income_up
+            SS["income_file"] = {"name": income_up.name, "bytes": income_up.getvalue()}
     with c2:
         if st.button("🗑️ Delete Step 4", use_container_width=True):
             SS["income_file"] = None
@@ -1088,7 +1101,7 @@ if admin_mode:
             st.rerun()
 
     if SS.get("income_file") is not None:
-        st.success(f"Step 4 OK ✅ ({SS['income_file'].name})")
+        st.success(f"Step 4 OK ✅ ({SS['income_file']['name']})")
     else:
         st.info("Step 4 optional: upload your Daily Collection Details export to generate Doctor/Insurance revenue tables.")
 
@@ -1108,12 +1121,15 @@ if admin_mode:
         SS['income_df'] = None
         SS['income_tables'] = {}
         if SS.get('income_file') is not None:
-            _income_df = load_income_details(SS.get('income_file'))
+            _income_df = load_income_details(io.BytesIO(SS.get('income_file', {}).get('bytes', b'')))
             if _income_df is None or _income_df.empty:
                 st.warning("Income Analysis file loaded, but table header could not be detected. Please upload the correct 'Daily Collection Details' export.")
             else:
                 SS['income_df'] = _income_df
                 SS['income_tables'] = income_tables(_income_df)
+                # Include Income Analysis tables inside the saved summary so Registration View can display them
+                for _k, _v in SS['income_tables'].items():
+                    dfs[f"Income | {_k}"] = _v
 
         if s3_ok:
             try:
@@ -1135,23 +1151,4 @@ if SS.get("last_saved_day") is not None and SS.get("last_saved_center") is not N
     st.caption("Open **Registration View** page to see the summary results.")
 elif SS.get("reg_df") is not None:
     st.info("Upload Step 2 and Step 3, then click **Process & Save**.")
-
-# -------------------- Income Analysis display --------------------
-if SS.get("income_tables"):
-    st.markdown("---")
-    st.header("Income Analysis (Doctor Revenue)")
-
-    tabs = st.tabs(["Doctor Wise", "Insurance Wise", "Doctor x Insurance"])
-    mapping = [
-        ("Doctor Wise Revenue", 0),
-        ("Insurance Wise Revenue", 1),
-        ("Doctor x Insurance Revenue", 2),
-    ]
-    for key, idx in mapping:
-        with tabs[idx]:
-            df_show = SS["income_tables"].get(key)
-            if df_show is None or df_show.empty:
-                st.info("No data.")
-            else:
-                st.dataframe(df_show, use_container_width=True, hide_index=True)
 
