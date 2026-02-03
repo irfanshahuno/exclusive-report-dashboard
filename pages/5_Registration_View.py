@@ -193,59 +193,60 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     st.dataframe(dfs.get("Doctor Wise Visits", pd.DataFrame()), use_container_width=True, hide_index=True)
 
 
+    # -------------------- Income Analysis (Doctor Revenue) --------------------
+    income_keys = [k for k in dfs.keys() if str(k).startswith("Income | ")]
+    if income_keys:
+        st.markdown("---")
+        st.header("Income Analysis (Doctor Revenue)")
 
-# -------------------- Income Analysis (Doctor Revenue) --------------------
-income_keys = [k for k in dfs.keys() if str(k).startswith("Income | ")]
-if income_keys:
-    st.markdown("---")
-    st.header("Income Analysis (Doctor Revenue)")
+        df_doc = dfs.get("Income | Doctor Wise Revenue")
+        df_ins = dfs.get("Income | Insurance Wise Revenue")
+        df_dx  = dfs.get("Income | Doctor x Insurance Revenue")
 
-    df_doc = dfs.get("Income | Doctor Wise Revenue")
-    df_ins = dfs.get("Income | Insurance Wise Revenue")
-    df_dx  = dfs.get("Income | Doctor x Insurance Revenue")
+        tabs = st.tabs(["Doctor Wise", "Insurance Wise", "Doctor x Insurance"])
 
-    tabs = st.tabs(["Doctor Wise", "Insurance Wise", "Doctor x Insurance"])
+        with tabs[0]:
+            if df_doc is None or df_doc.empty:
+                st.info("No Doctor Wise revenue data for this day.")
+            else:
+                st.dataframe(df_doc, use_container_width=True, hide_index=True)
 
-    with tabs[0]:
-        if df_doc is None or df_doc.empty:
-            st.info("No Doctor Wise revenue data for this day.")
-        else:
-            st.dataframe(df_doc, use_container_width=True, hide_index=True)
+        with tabs[1]:
+            if df_ins is None or df_ins.empty:
+                st.info("No Insurance Wise revenue data for this day.")
+            else:
+                st.dataframe(df_ins, use_container_width=True, hide_index=True)
 
-    with tabs[1]:
-        if df_ins is None or df_ins.empty:
-            st.info("No Insurance Wise revenue data for this day.")
-        else:
-            st.dataframe(df_ins, use_container_width=True, hide_index=True)
+        with tabs[2]:
+            if df_dx is None or df_dx.empty:
+                st.info("No Doctor x Insurance revenue data for this day.")
+            else:
+                df_f = df_dx.copy()
 
-    with tabs[2]:
-        if df_dx is None or df_dx.empty:
-            st.info("No Doctor x Insurance revenue data for this day.")
-        else:
-            df_f = df_dx.copy()
+                # Filter: pick doctor first
+                if "Doctor" in df_f.columns:
+                    doctors = sorted([
+                        d for d in df_f["Doctor"].dropna().unique()
+                        if str(d).strip().lower() not in ["", "none", "nan"]
+                        and str(d).strip().upper() != "GRAND TOTAL"
+                    ])
+                    if doctors:
+                        pick_doc = st.selectbox("Select Doctor", options=doctors, key="income_pick_doc")
+                        df_f = df_f[df_f["Doctor"] == pick_doc].copy()
 
-            # Filter: pick doctor first
-            if "Doctor" in df_f.columns:
-                doctors = sorted([
-                    d for d in df_f["Doctor"].dropna().unique()
-                    if str(d).strip().lower() not in ["", "none", "nan"]
-                    and str(d).strip().upper() != "GRAND TOTAL"
-                ])
-                if doctors:
-                    pick_doc = st.selectbox("Select Doctor", options=doctors, key="income_pick_doc")
-                    df_f = df_f[df_f["Doctor"] == pick_doc].copy()
+                # Filter: pick insurance (optional)
+                if "Insurance" in df_f.columns:
+                    ins_list = sorted([
+                        i for i in df_f["Insurance"].dropna().unique()
+                        if str(i).strip().lower() not in ["", "none", "nan"]
+                    ])
+                    pick_ins = st.selectbox("Select Insurance", options=["All"] + ins_list, key="income_pick_ins")
+                    if pick_ins != "All":
+                        df_f = df_f[df_f["Insurance"] == pick_ins].copy()
 
-            # Filter: pick insurance (optional)
-            if "Insurance" in df_f.columns:
-                ins_list = sorted([
-                    i for i in df_f["Insurance"].dropna().unique()
-                    if str(i).strip().lower() not in ["", "none", "nan"]
-                ])
-                pick_ins = st.selectbox("Select Insurance", options=["All"] + ins_list, key="income_pick_ins")
-                if pick_ins != "All":
-                    df_f = df_f[df_f["Insurance"] == pick_ins].copy()
+                st.dataframe(df_f, use_container_width=True, hide_index=True)
 
-            st.dataframe(df_f, use_container_width=True, hide_index=True)
+
 
 
 # ---------------------------
