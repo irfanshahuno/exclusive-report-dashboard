@@ -21,7 +21,7 @@ import io
 import os
 import re
 import pickle
-from datetime import datetime
+from datetime import datetime, date
 from typing import Dict, Optional, List, Tuple
 
 import pandas as pd
@@ -356,48 +356,214 @@ days = list(hist["day"].unique())
 latest_day = days[-1]
 
 
-# pick day UI (LATEST ONLY by default)
-latest = max(days)
-picked = pd.to_datetime(latest).normalize()
-
-st.caption(f"Showing latest saved day: **{picked.date().strftime('%d %b %Y')}**")
+# ---------------------------
+# View mode: Daily / Weekly / Monthly
+# ---------------------------
+st.markdown("---")
+mode = st.radio("View Mode", options=["Daily", "Weekly", "Monthly"], horizontal=True, index=0)
 
 SS = st.session_state
-SS.setdefault("loaded_day", None)
-SS.setdefault("loaded_summary", None)
-SS.setdefault("picked_override", None)
+SS.setdefault("loaded_key", None)      # cache key (string) for loaded period
+SS.setdefault("loaded_summary", None)  # dict of dfs
+SS.setdefault("loaded_label", None)    # title label
 
-with st.expander("View another day (optional)", expanded=False):
-    other = st.date_input(
-        "Select a different day",
-        value=picked.date(),
-        min_value=pd.to_datetime(min(days)).date(),
-        max_value=pd.to_datetime(latest).date(),
-    )
-    if st.button("Load selected day", use_container_width=True):
-        SS["picked_override"] = pd.to_datetime(other).normalize()
-        SS["loaded_day"] = None
-        SS["loaded_summary"] = None
-        st.rerun()
+def days_in_week(any_day: pd.Timestamp) -> List[pd.Timestamp]:
+    d = pd.to_datetime(any_day).normalize()
+    start = d - pd.Timedelta(days=int(d.weekday()))  # Monday
+    end = start + pd.Timedelta(days=6)
+    return [x for x in days if (x >= start) and (x <= end)]
 
-if SS.get("picked_override") is not None:
-    picked = pd.to_datetime(SS["picked_override"]).normalize()
-need_load = (SS["loaded_day"] is None) or (pd.to_datetime(SS["loaded_day"]) != picked)
-
-if need_load:
-    loaded = load_summary_from_s3(s3, cfg, root_prefix, picked)
-    if loaded is None:
-        st.error("history.csv exists, but summary.pkl is missing for this day.")
-        root = root_prefix
-        st.caption(f"Expected: {s3_key(root, picked.date().isoformat(), 'summary.pkl')}")
-        SS["loaded_day"] = picked
-        SS["loaded_summary"] = None
+def days_in_month(any_day: pd.Timestamp) -> List[pd.Timestamp]:
+    d = pd.to_datetime(any_day).normalize()
+    start = d.replace(day=1)
+    # next month
+    if start.month == 12:
+        nxt = start.replace(year=start.year+1, month=1, day=1)
     else:
-        SS["loaded_day"] = picked
-        SS["loaded_summary"] = loaded
+        nxt = start.replace(month=start.month+1, day=1)
+    end = nxt - pd.Timedelta(days=1)
+    return [x for x in days if (x >= start) and (x <= end)]
 
-if SS.get("loaded_summary") is not None:
-    render_summary(SS["loaded_summary"], pd.to_datetime(SS["loaded_day"]))
+def aggregate_tables(frames: List[pd.DataFrame]) -> pd.DataFrame:
+    frames = [f for f in frames if f is not None and not f.empty]
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+
+    # Keep only real rows (drop total/grand total rows; we'll rebuild totals)
+    def _is_total_row(x):
+        s = str(x).strip().upper()
+        return s in ["TOTAL", "GRAND TOTAL"]
+    first_col = df.columns[0] if len(df.columns) else None
+    if first_col:
+        df = df[~df[first_col].astype(str).map(_is_total_row)].copy()
+
+    # Group by non-numeric columns, sum numeric
+    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    grp_cols = [c for c in df.columns if c not in num_cols]
+    if num_cols and grp_cols:
+        out = df.groupby(grp_cols, dropna=False, as_index=False)[num_cols].sum()
+    elif "Count" in df.columns:
+        grp_cols = [c for c in df.columns if c != "Count"]
+        out = df.groupby(grp_cols, dropna=False, as_index=False)["Count"].sum()
+    else:
+        out = df
+
+    # Re-add TOTAL / GRAND TOTAL
+    if "Count" in out.columns and first_col:
+        total = int(out["Count"].sum()) if not out.empty else 0
+        out.loc[len(out)] = {first_col: "TOTAL", "Count": total}
+    else:
+        # If there is any numeric column, add GRAND TOTAL
+        if num_cols and first_col:
+            row = {c: "" for c in out.columns}
+            row[first_col] = "GRAND TOTAL"
+            for c in num_cols:
+                row[c] = float(out[c].sum()) if not out.empty else 0.0
+            out.loc[len(out)] = row
+
+    return out
+
+def load_and_aggregate(day_list: List[pd.Timestamp]) -> Optional[Dict[str, pd.DataFrame]]:
+    if not day_list:
+        return None
+    loaded = []
+    for d in day_list:
+        dfs = load_summary_from_s3(s3, cfg, root_prefix, d)
+        if dfs is not None:
+            loaded.append(dfs)
+
+    if not loaded:
+        return None
+
+    keys = sorted(set().union(*[set(x.keys()) for x in loaded]))
+    agg: Dict[str, pd.DataFrame] = {}
+
+    # KPI: sum across days (note: unique patients across a period is approximate because we only have daily aggregates)
+    kpi_rows = []
+    for d in loaded:
+        k = d.get("KPI")
+        if k is not None and not k.empty and "Metric" in k.columns and "Value" in k.columns:
+            kpi_rows.append(k)
+    if kpi_rows:
+        kk = pd.concat(kpi_rows, ignore_index=True)
+        kk["Value"] = pd.to_numeric(kk["Value"], errors="coerce").fillna(0)
+        kpi_sum = kk.groupby("Metric", as_index=False)["Value"].sum()
+        agg["KPI"] = kpi_sum
+
+    for k in keys:
+        if k == "KPI":
+            continue
+        frames = [d.get(k) for d in loaded if isinstance(d.get(k), pd.DataFrame)]
+        agg[k] = aggregate_tables(frames)
+
+    return agg
+
+if mode == "Daily":
+    latest = max(days)
+    picked = pd.to_datetime(latest).normalize()
+
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        st.caption(f"Showing latest saved day: **{picked.date().strftime('%d %b %Y')}**")
+    with c2:
+        if st.button("Today", use_container_width=True):
+            today = pd.to_datetime(date.today()).normalize()
+            if today in days:
+                SS["loaded_key"] = None
+                SS["loaded_summary"] = None
+                SS["loaded_label"] = None
+                SS["picked_override"] = today
+            else:
+                SS["picked_override"] = picked
+            st.rerun()
+
+    SS.setdefault("picked_override", None)
+
+    with st.expander("View another day (optional)", expanded=False):
+        other = st.date_input(
+            "Select a different day",
+            value=picked.date(),
+            min_value=pd.to_datetime(min(days)).date(),
+            max_value=pd.to_datetime(latest).date(),
+        )
+        if st.button("Load selected day", use_container_width=True):
+            SS["picked_override"] = pd.to_datetime(other).normalize()
+            SS["loaded_key"] = None
+            SS["loaded_summary"] = None
+            SS["loaded_label"] = None
+            st.rerun()
+
+    if SS.get("picked_override") is not None:
+        picked = pd.to_datetime(SS["picked_override"]).normalize()
+
+    cache_key = f"daily:{picked.date().isoformat()}"
+    if SS.get("loaded_key") != cache_key:
+        loaded = load_summary_from_s3(s3, cfg, root_prefix, picked)
+        SS["loaded_key"] = cache_key
+        SS["loaded_summary"] = loaded
+        SS["loaded_label"] = f"Current Day ({fmt_day(picked)})"
+
+    if SS.get("loaded_summary") is not None:
+        render_summary(SS["loaded_summary"], picked)
+    else:
+        st.error("summary.pkl is missing for this day.")
+        st.caption(f"Expected: {s3_key(root_prefix, picked.date().isoformat(), 'summary.pkl')}")
+
+elif mode == "Weekly":
+    base = pd.to_datetime(latest_day).normalize()
+    pick = st.date_input("Pick any date in the week", value=base.date())
+    d0 = pd.to_datetime(pick).normalize()
+    week_days = days_in_week(d0)
+
+    if not week_days:
+        st.warning("No saved days found for that week.")
+    else:
+        start_w = min(week_days).date().isoformat()
+        end_w = max(week_days).date().isoformat()
+        st.caption(f"Week range: **{start_w} → {end_w}**  (saved days: {len(week_days)})")
+
+        cache_key = f"week:{start_w}:{end_w}"
+        if SS.get("loaded_key") != cache_key:
+            SS["loaded_summary"] = load_and_aggregate(week_days)
+            SS["loaded_key"] = cache_key
+            SS["loaded_label"] = f"Weekly Summary ({start_w} → {end_w})"
+
+        if SS.get("loaded_summary") is not None:
+            st.header(SS.get("loaded_label", "Weekly Summary"))
+            render_summary(SS["loaded_summary"], pd.to_datetime(max(week_days)))
+            st.info("Note: 'Unique EMR' for week is an approximate sum of daily unique EMR counts.")
+        else:
+            st.warning("No summary.pkl files found for that week.")
+
+else:  # Monthly
+    base = pd.to_datetime(latest_day).normalize()
+    # Build available months from history
+    months = sorted({pd.to_datetime(d).strftime("%Y-%m") for d in days})
+    default_m = pd.to_datetime(base).strftime("%Y-%m")
+    sel_month = st.selectbox("Select Month", options=months, index=months.index(default_m) if default_m in months else len(months)-1)
+    d0 = pd.to_datetime(sel_month + "-01").normalize()
+    month_days = days_in_month(d0)
+
+    if not month_days:
+        st.warning("No saved days found for that month.")
+    else:
+        start_m = min(month_days).date().isoformat()
+        end_m = max(month_days).date().isoformat()
+        st.caption(f"Month range: **{start_m} → {end_m}**  (saved days: {len(month_days)})")
+
+        cache_key = f"month:{sel_month}"
+        if SS.get("loaded_key") != cache_key:
+            SS["loaded_summary"] = load_and_aggregate(month_days)
+            SS["loaded_key"] = cache_key
+            SS["loaded_label"] = f"Monthly Summary ({sel_month})"
+
+        if SS.get("loaded_summary") is not None:
+            st.header(SS.get("loaded_label", "Monthly Summary"))
+            render_summary(SS["loaded_summary"], pd.to_datetime(max(month_days)))
+            st.info("Note: 'Unique EMR' for month is an approximate sum of daily unique EMR counts.")
+        else:
+            st.warning("No summary.pkl files found for that month.")
 
 st.header("Accumulated (All Saved Days)")
 acc = add_cumulative(hist)
