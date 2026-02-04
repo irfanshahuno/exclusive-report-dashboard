@@ -850,6 +850,20 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
 
     bill_col = _find_col(reg_df, ["BillType", "Bill Type", "Insurance/Cash", "Cash/Insurance"])
     visit_type_col = _find_col(reg_df, ["VisitType", "Visit Type", "VisitCategory"])
+
+    # ---------------------------
+    # New vs Established Visits (optional)
+    # ---------------------------
+    new_visits = 0
+    established_visits = 0
+    unknown_visits = 0
+    if visit_type_col and visit_type_col in reg_df.columns:
+        _vt = reg_df[visit_type_col].fillna("").astype(str).str.lower()
+        _new = _vt.str.contains(r"new|first", regex=True)
+        _est = _vt.str.contains(r"establish|follow|review|revisit|old|return", regex=True) & (~_new)
+        new_visits = int(_new.sum())
+        established_visits = int(_est.sum())
+        unknown_visits = int(max(0, len(reg_df) - new_visits - established_visits))
     status_col = _find_col(reg_df, ["Status", "VisitStatus"])
     pend_status_col = _find_col(pend_df, ["Status", "VisitStatus", "Pending Status"])
     reg_user_col = _find_col(reg_df, ["RegUser", "RegistrationUser", "User", "CreatedBy"])
@@ -877,10 +891,8 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
         "KPI": pd.DataFrame([
             {"Metric": "Day", "Value": day_ts.date().isoformat()},
             {"Metric": "Total Visits", "Value": total_visits},
-            {"Metric": "Unique EMR (Patients)", "Value": unique_emr},
-            {"Metric": "Unique Visit No", "Value": unique_visitno},
-            {"Metric": "CashOut Patients", "Value": cash_patients},
-            {"Metric": "Pending Patients", "Value": pending_patients},
+            {"Metric": "New Visits", "Value": new_visits},
+            {"Metric": "Established Visits", "Value": established_visits},
         ]),
         "Doctor Wise Visits": top_counts(reg_df, doctor_col, n=50, label="Doctor"),
         "Insurance Wise Visits": top_counts(reg_df, ins_col, n=50, label="Insurance"),
@@ -927,11 +939,9 @@ def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
     kpi = dfs["KPI"].set_index("Metric")["Value"]
     row = {
         "day": pd.to_datetime(day_str),
-        "total_visits": int(kpi["Total Visits"]),
-        "unique_emr": int(kpi["Unique EMR (Patients)"]),
-        "unique_visitno": int(kpi["Unique Visit No"]),
-        "cash_patients": int(kpi["CashOut Patients"]),
-        "pending_patients": int(kpi["Pending Patients"]),
+        "total_visits": int(kpi.get("Total Visits", 0)),
+        "new_visits": int(kpi.get("New Visits", 0)),
+        "established_visits": int(kpi.get("Established Visits", 0)),
     }
 
     existing = None
