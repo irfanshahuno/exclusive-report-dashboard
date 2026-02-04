@@ -183,7 +183,7 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         return pd.concat([d, pd.DataFrame([row])], ignore_index=True)
 
     doctor_wise = _add_grand_total(doctor_wise, ["Department", "Doctor"])
-    insurance_wise = _add_grand_total(insurance_wise, ["Insurance")
+    insurance_wise = _add_grand_total(insurance_wise, ["Insurance"])
     doctor_ins_wise = _add_grand_total(doctor_ins_wise, ["Doctor"])
 
     return {
