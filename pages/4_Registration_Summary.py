@@ -721,6 +721,27 @@ with st.expander("Storage Status (S3)", expanded=False):
         st.warning("S3 is NOT configured. Uploaders will work and summary will display, but files will NOT be saved to S3.")
         st.caption("Expected secrets: S3_BUCKET_NAME (or S3_BUCKET), AWS_REGION (or AWS_DEFAULT_REGION), AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY. Optional: S3_BASE_PREFIX")
 
+
+with st.expander("Employer Normalization Rules", expanded=False):
+    st.caption("These rules merge employer name variations into ONE company for Employer Wise counts.")
+    st.markdown("**Exact aliases (after cleaning):**")
+    try:
+        _alias_df = pd.DataFrame(sorted(EMPLOYER_ALIAS.items()), columns=["If employer is", "Group as"])
+        st.dataframe(_alias_df, use_container_width=True, hide_index=True)
+    except Exception:
+        st.write(EMPLOYER_ALIAS)
+
+    st.markdown("**Prefix aliases (take initial only):**")
+    try:
+        _pref_df = pd.DataFrame(
+            [{"If employer starts with": a, "Group as": b} for a, b in EMPLOYER_PREFIX_ALIAS],
+        )
+        st.dataframe(_pref_df, use_container_width=True, hide_index=True)
+    except Exception:
+        st.write(EMPLOYER_PREFIX_ALIAS)
+
+    st.caption("Admin tip: Add new spelling variations by editing EMPLOYER_ALIAS / EMPLOYER_PREFIX_ALIAS in this file.")
+
 st.caption("✅ Day is read from Registration file (if it has a date column). Date picker is used only if file has no date column.")
 manual_day = st.date_input("Manual Day (fallback only)", value=date.today())
 
