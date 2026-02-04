@@ -850,17 +850,44 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
 
     bill_col = _find_col(reg_df, ["BillType", "Bill Type", "Insurance/Cash", "Cash/Insurance"])
     visit_type_col = _find_col(reg_df, ["VisitType", "Visit Type", "VisitCategory"])
-    status_col = _find_col(reg_df, ["Status", "VisitStatus"])
-    pend_status_col = _find_col(pend_df, ["Status", "VisitStatus", "Pending Status"])
-    reg_user_col = _find_col(reg_df, ["RegUser", "RegistrationUser", "User", "CreatedBy"])
-    reg_date_col = _find_col(reg_df, ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
 
-    total_visits = int(len(reg_df))
-    unique_emr = int(pd.Series(reg_df[emr_col]).nunique(dropna=True))
-    unique_visitno = int(pd.Series(reg_df[visit_col]).nunique(dropna=True))
+    # ---------------------------
+    # New / Established / Follow Up / Unclassified (from Visit Type)
+    # FINAL rule (as per Irfan):
+    # - "CONSULTATION (ESTD)" => Established
+    # - "FOLLOW UP"           => Follow Up
+    # - "CONSULTATION"        => New
+    # - Any other NON-BLANK Visit Type => Unclassified
+    # - Blank values are ignored from these categories (still part of Total Visits)
+    # ---------------------------
+    new_visits = 0
+    established_visits = 0
+    followup_visits = 0
+    unclassified_visits = 0
 
-    cash_emr = ensure_required(cash_df, ["EMRNo"], "CashOut")["EMRNo"]
-    pend_emr = ensure_required(pend_df, ["EMRNo"], "Pending")["EMRNo"]
+    if visit_type_col and visit_type_col in reg_df.columns:
+        _vt = reg_df[visit_type_col].fillna("").astype(str).str.strip().str.upper()
+
+        # normalize common typos/spaces
+        _vt = (
+            _vt.str.replace("CONSULATATION", "CONSULTATION", regex=False)
+               .str.replace("CONSUALTATION", "CONSULTATION", regex=False)
+               .str.replace("CONSULTAION", "CONSULTATION", regex=False)
+               .str.replace(r"\s+", " ", regex=True)
+        )
+
+        _is_blank = _vt.eq("")
+        _is_est = _vt.str.contains("CONSULTATION (ESTD)", na=False)
+        _is_follow = _vt.str.contains("FOLLOW UP", na=False) | _vt.str.contains("FOLLOW-UP", na=False)
+        _is_new = (_vt.str.contains("CONSULTATION", na=False)) & (~_is_est) & (~_is_blank) & (~_is_follow)
+
+        established_visits = int(_is_est.sum())
+        followup_visits = int(_is_follow.sum())
+        new_visits = int(_is_new.sum())
+
+        _classified = _is_est | _is_follow | _is_new
+        unclassified_visits = int((~_is_blank & ~_classified).sum())
+
     cash_patients = int(pd.Series(cash_df[cash_emr]).nunique(dropna=True))
     pending_patients = int(pd.Series(pend_df[pend_emr]).nunique(dropna=True))
 
@@ -877,9 +904,10 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
         "KPI": pd.DataFrame([
             {"Metric": "Day", "Value": day_ts.date().isoformat()},
             {"Metric": "Total Visits", "Value": total_visits},
-            {"Metric": "Unique EMR (Patients)", "Value": unique_emr},
-            {"Metric": "Unique Visit No", "Value": unique_visitno},
-            {"Metric": "CashOut Patients", "Value": cash_patients},
+            {"Metric": "New Patients", "Value": new_visits},
+            {"Metric": "Established Patients", "Value": established_visits},
+            {"Metric": "Follow Up", "Value": followup_visits},
+            {"Metric": "Unclassified Visits", "Value": unclassified_visits},
             {"Metric": "Pending Patients", "Value": pending_patients},
         ]),
         "Doctor Wise Visits": top_counts(reg_df, doctor_col, n=50, label="Doctor"),
@@ -927,11 +955,12 @@ def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
     kpi = dfs["KPI"].set_index("Metric")["Value"]
     row = {
         "day": pd.to_datetime(day_str),
-        "total_visits": int(kpi["Total Visits"]),
-        "unique_emr": int(kpi["Unique EMR (Patients)"]),
-        "unique_visitno": int(kpi["Unique Visit No"]),
-        "cash_patients": int(kpi["CashOut Patients"]),
-        "pending_patients": int(kpi["Pending Patients"]),
+        "total_visits": int(kpi.get("Total Visits", 0)),
+        "new_patients": int(kpi.get("New Patients", 0)),
+        "established_patients": int(kpi.get("Established Patients", 0)),
+        "follow_up": int(kpi.get("Follow Up", 0)),
+        "unclassified_visits": int(kpi.get("Unclassified Visits", 0)),
+        "pending_patients": int(kpi.get("Pending Patients", 0)),
     }
 
     existing = None
@@ -985,12 +1014,10 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
         k = kpi.set_index("Metric")["Value"]
         a, b, c, d = st.columns(4)
         a.metric("Total Visits", int(k.get("Total Visits", 0)))
-        b.metric("Unique EMR (Patients)", int(k.get("Unique EMR (Patients)", 0)))
-        c.metric("Unique Visit No", int(k.get("Unique Visit No", 0)))
-        d.metric("CashOut Patients", int(k.get("CashOut Patients", 0)))
-        e, f = st.columns(2)
-        e.metric("Pending Patients", int(k.get("Pending Patients", 0)))
-        f.metric("Generated", datetime.now().strftime("%Y-%m-d %H:%M"))
+        b.metric("New Visits", int(k.get("New Visits", 0)))
+        c.metric("Established Visits", int(k.get("Established Visits", 0)))
+        d.metric("Pending Patients", int(k.get("Pending Patients", 0)))
+        st.caption(f"Generated: **{datetime.now().strftime('%d %b %Y %H:%M')}**")
     else:
         st.info("KPI is not available for this summary.")
 
@@ -1125,13 +1152,13 @@ def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
     if hist is None or hist.empty:
         return pd.DataFrame()
     h = hist.sort_values("day").copy()
-    for c in ["total_visits", "unique_emr", "unique_visitno", "cash_patients", "pending_patients"]:
+    for c in ["total_visits", "new_patients", "established_patients", "follow_up", "unclassified_visits", "pending_patients"]:
         h[c] = h[c].fillna(0).astype(int)
         h[f"cum_{c}"] = h[c].cumsum()
 
     cols = [
-        "day", "total_visits", "unique_emr", "unique_visitno", "cash_patients", "pending_patients",
-        "cum_total_visits", "cum_unique_emr", "cum_unique_visitno", "cum_cash_patients", "cum_pending_patients"
+        "day", "total_visits", "new_patients", "established_patients", "follow_up", "unclassified_visits", "pending_patients",
+        "cum_total_visits", "cum_new_patients", "cum_established_patients", "cum_follow_up", "cum_unclassified_visits", "cum_pending_patients"
     ]
     cols = [c for c in cols if c in h.columns]
     return h[cols].sort_values("day", ascending=False).reset_index(drop=True)
