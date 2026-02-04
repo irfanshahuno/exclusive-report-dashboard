@@ -1,206 +1,404 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-S3 Debug Script for Registration View
+Streamlit Page: Registration Summary (View Only)
+
+Purpose
+- Management should ONLY view results (no upload).
+- Loads the latest saved summary from S3 created by:
+    pages/4_Registration_Summary.py  (Process & Save to S3)
+
+Important
+- This viewer MUST read the SAME S3 folder structure as the uploader page:
+    registration/<center>/<YYYY-MM-DD>/summary.pkl
+    registration/<center>/history.csv
+
+So we intentionally IGNORE any `year=` query param for storage paths, unless you
+also change the uploader to save year-wise.
 """
 
-import boto3
-import streamlit as st
-import pandas as pd
 import io
+import os
+import re
+import pickle
+from datetime import datetime
+from typing import Dict, Optional, List, Tuple
 
-# Use the same configuration
-config = {
-    "AWS_ACCESS_KEY_ID": "AWs-2ZGGXHTX4",
-    "AWS_SECRET_ACCESS_KEY": "keyv7e7ez/dq1YJswx1V0A8b5tS1r",
-    "AWS_REGION": "eu-north-1",
-    "S3_BUCKET_NAME": "emc-rcm-storage-2026",
-    "S3_BASE_PREFIX": "",
-}
+import pandas as pd
+import streamlit as st
 
-st.set_page_config(page_title="S3 Debug Tool", layout="wide")
-st.title("🔍 S3 Debug Tool for Registration View")
-
-# Initialize S3 client
+# Optional S3
 try:
-    s3 = boto3.client(
-        "s3",
-        region_name=config["AWS_REGION"],
-        aws_access_key_id=config["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=config["AWS_SECRET_ACCESS_KEY"],
+    import boto3
+except Exception:
+    boto3 = None
+
+
+
+# ---------------------------
+# Date formatting (management-friendly)
+# ---------------------------
+def fmt_day(ts) -> str:
+    try:
+        return pd.to_datetime(ts).strftime("%d %b %Y")
+    except Exception:
+        return str(ts)
+
+def fmt_dt(ts) -> str:
+    try:
+        return pd.to_datetime(ts).strftime("%d %b %Y %H:%M")
+    except Exception:
+        return str(ts)
+
+st.set_page_config(page_title="Registration Summary (View Only)", layout="wide", initial_sidebar_state="collapsed")
+st.title("📅 Registration Summary (View Only)")
+
+
+# ---------------------------
+# Helpers
+# ---------------------------
+def s3_key(*parts: str) -> str:
+    return "/".join([p.strip("/").strip() for p in parts if p is not None and str(p).strip() != ""])
+
+
+def load_secrets() -> Dict[str, str]:
+    def get_any(*keys):
+        for k in keys:
+            if k in st.secrets:
+                v = st.secrets.get(k)
+                if v is not None and str(v).strip() != "":
+                    return str(v).strip()
+            v = os.getenv(k)
+            if v is not None and str(v).strip() != "":
+                return str(v).strip()
+        return ""
+
+    return {
+        "AWS_ACCESS_KEY_ID": get_any("AWS_ACCESS_KEY_ID"),
+        "AWS_SECRET_ACCESS_KEY": get_any("AWS_SECRET_ACCESS_KEY"),
+        "AWS_REGION": get_any("AWS_REGION", "AWS_DEFAULT_REGION"),
+        "S3_BUCKET_NAME": get_any("S3_BUCKET_NAME", "S3_BUCKET"),
+        "S3_BASE_PREFIX": get_any("S3_BASE_PREFIX", "S3_PREFIX"),  # optional (unused by default)
+    }
+
+
+def s3_enabled(cfg: Dict[str, str]) -> bool:
+    return (
+        bool(cfg.get("S3_BUCKET_NAME"))
+        and bool(cfg.get("AWS_REGION"))
+        and bool(cfg.get("AWS_ACCESS_KEY_ID"))
+        and bool(cfg.get("AWS_SECRET_ACCESS_KEY"))
+        and boto3 is not None
     )
-    st.success("✅ S3 Connection Successful")
-except Exception as e:
-    st.error(f"❌ S3 Connection Failed: {e}")
-    st.stop()
 
-# List all objects with registration_summary prefix
-st.header("1. Check Bucket Structure")
-prefix = "registration_summary/"
-try:
-    response = s3.list_objects_v2(Bucket=config["S3_BUCKET_NAME"], Prefix=prefix)
-    
-    if 'Contents' not in response:
-        st.error(f"No objects found with prefix: {prefix}")
-        st.info("This means the upload page hasn't saved any data yet.")
+
+@st.cache_resource(show_spinner=False)
+def s3_client_cached(cfg: Dict[str, str]):
+    if not s3_enabled(cfg):
+        return None
+    return boto3.client(
+        "s3",
+        region_name=cfg["AWS_REGION"],
+        aws_access_key_id=cfg["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=cfg["AWS_SECRET_ACCESS_KEY"],
+    )
+
+
+def s3_get_bytes(s3, bucket: str, key: str) -> Optional[bytes]:
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        return obj["Body"].read()
+    except Exception:
+        return None
+
+
+def s3_key_exists(s3, bucket: str, key: str) -> bool:
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except Exception:
+        return False
+
+
+def candidate_base_prefixes(cfg: Dict[str, str]) -> List[str]:
+    """Try a few likely prefixes so the viewer works even if uploader/viewer prefixes differ."""
+    prefs: List[str] = []
+    p = (cfg.get("S3_BASE_PREFIX") or "").strip().strip("/")
+    if p:
+        prefs.append(p)
+    # common fallbacks
+    prefs.append("")  # root of bucket
+    if "streamlit" not in prefs:
+        prefs.append("streamlit")
+    # de-dup while preserving order
+    out: List[str] = []
+    for x in prefs:
+        x = (x or "").strip().strip("/")
+        if x not in out:
+            out.append(x)
+    return out
+
+
+def history_paths(center: str, base_prefix: str = "") -> Tuple[str, str]:
+    """Return (root_prefix, history_csv_key) for this center.
+
+    Expected uploader layout (based on your S3 screenshots):
+      <base_prefix>/registration/<center>/history.csv
+      <base_prefix>/registration/<center>/<YYYY-MM-DD>/summary.pkl
+    """
+    root = s3_key(base_prefix, "registration", center)
+    return root, s3_key(root, "history.csv")
+
+
+def resolve_center_root_from_s3(s3, cfg: Dict[str, str], center_key: str) -> Tuple[str, str]:
+    """Return (root_prefix, history_csv_key) that actually exists in S3."""
+    bucket = cfg["S3_BUCKET_NAME"]
+    for pref in candidate_base_prefixes(cfg):
+        root, hist_key = history_paths(center_key, pref)
+        if s3_key_exists(s3, bucket, hist_key):
+            return root, hist_key
+    # default to the configured prefix path (even if missing), for clearer error messages
+    root, hist_key = history_paths(center_key, (cfg.get("S3_BASE_PREFIX") or ""))
+    return root, hist_key
+
+
+def load_history_from_s3(s3, cfg: Dict[str, str], center_key: str) -> Tuple[pd.DataFrame, str]:
+    root, hist_key = resolve_center_root_from_s3(s3, cfg, center_key)
+    b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key)
+    if not b:
+        return pd.DataFrame(), root
+    try:
+        df = pd.read_csv(io.BytesIO(b), parse_dates=["day"])
+    except Exception:
+        df = pd.read_csv(io.BytesIO(b))
+    return df, root
+
+
+def load_summary_from_s3(
+    s3,
+    cfg: Dict[str, str],
+    root_prefix: str,
+    day_ts: pd.Timestamp
+) -> Optional[Dict[str, pd.DataFrame]]:
+    day_str = pd.to_datetime(day_ts).date().isoformat()
+    key = s3_key(root_prefix, day_str, "summary.pkl")
+    b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], key)
+    if not b:
+        return None
+    try:
+        return pickle.loads(b)
+    except Exception:
+        return None
+
+
+def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
+    if hist is None or hist.empty:
+        return pd.DataFrame()
+    h = hist.sort_values("day").copy()
+    for c in ["total_visits", "unique_emr", "unique_visitno", "cash_patients", "pending_patients"]:
+        if c in h.columns:
+            h[c] = h[c].fillna(0).astype(int)
+            h[f"cum_{c}"] = h[c].cumsum()
+    # show latest first
+    return h.sort_values("day", ascending=False).reset_index(drop=True)
+
+
+def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
+    st.header(f"Current Day ({fmt_day(day_ts)})")
+
+    kpi = dfs.get("KPI")
+    if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
+        k = kpi.set_index("Metric")["Value"]
+
+        a, b, c, d = st.columns(4)
+        a.metric("Total Visits", int(k.get("Total Visits", 0)))
+        b.metric("Unique EMR (Patients)", int(k.get("Unique EMR (Patients)", 0)))
+        c.metric("Unique Visit No", int(k.get("Unique Visit No", 0)))
+        d.metric("CashOut Patients", int(k.get("CashOut Patients", 0)))
+
+        e, f = st.columns(2)
+        e.metric("Pending Patients", int(k.get("Pending Patients", 0)))
+        f.metric("Generated", fmt_dt(datetime.now()))
     else:
-        st.success(f"Found {len(response['Contents'])} objects")
-        
-        # Group by center
-        centers = {}
-        for obj in response['Contents']:
-            path_parts = obj['Key'].split('/')
-            if len(path_parts) > 1:
-                center = path_parts[1] if len(path_parts) > 1 else "root"
-                if center not in centers:
-                    centers[center] = []
-                centers[center].append({
-                    'key': obj['Key'],
-                    'size': obj['Size'],
-                    'last_modified': obj['LastModified']
-                })
-        
-        # Display by center
-        for center, objects in centers.items():
-            with st.expander(f"📁 Center: {center} ({len(objects)} objects)", expanded=True):
-                for obj in objects:
-                    st.write(f"**Path:** `{obj['key']}`")
-                    st.write(f"Size: {obj['size']} bytes | Modified: {obj['last_modified']}")
-                    
-                    # Try to read and display content
-                    if obj['key'].endswith('.csv'):
-                        try:
-                            csv_obj = s3.get_object(Bucket=config["S3_BUCKET_NAME"], Key=obj['key'])
-                            df = pd.read_csv(io.BytesIO(csv_obj['Body'].read()))
-                            st.dataframe(df.head(), use_container_width=True)
-                        except Exception as e:
-                            st.error(f"Error reading CSV: {e}")
-                    
-                    elif obj['key'].endswith('.pkl'):
-                        st.info("Pickle file - Use download button to inspect")
-                        st.download_button(
-                            label="Download pickle",
-                            data=s3.get_object(Bucket=config["S3_BUCKET_NAME"], Key=obj['key'])['Body'].read(),
-                            file_name=obj['key'].split('/')[-1],
-                            mime="application/octet-stream"
-                        )
-                    
-                    st.divider()
-        
-except Exception as e:
-    st.error(f"Error listing objects: {e}")
+        st.info("KPI is not available for this day.")
 
-# Test specific path construction
-st.header("2. Test Path Construction")
-st.write("Your centers are defined as:")
-st.code("""
+    st.subheader("Pending Status Wise")
+    st.dataframe(dfs.get("Pending Status Wise", pd.DataFrame()), use_container_width=True, hide_index=True)
+
+    st.subheader("Insurance Wise Visits")
+    st.dataframe(dfs.get("Insurance Wise Visits", pd.DataFrame()), use_container_width=True, hide_index=True)
+
+    st.subheader("Employer Wise")
+    st.dataframe(dfs.get("Employer Wise", pd.DataFrame()), use_container_width=True, hide_index=True)
+
+    st.subheader("Doctor Wise Visits")
+    st.dataframe(dfs.get("Doctor Wise Visits", pd.DataFrame()), use_container_width=True, hide_index=True)
+
+
+    # -------------------- Income Analysis (Doctor Revenue) --------------------
+    income_keys = [k for k in dfs.keys() if str(k).startswith("Income | ")]
+    if income_keys:
+        st.markdown("---")
+        st.header("Income Analysis (Doctor Revenue)")
+
+        df_doc = dfs.get("Income | Doctor Wise Revenue")
+        df_ins = dfs.get("Income | Insurance Wise Revenue")
+        df_dx  = dfs.get("Income | Doctor x Insurance Revenue")
+
+        tabs = st.tabs(["Doctor Wise", "Insurance Wise", "Doctor x Insurance"])
+
+        with tabs[0]:
+            if df_doc is None or df_doc.empty:
+                st.info("No Doctor Wise revenue data for this day.")
+            else:
+                st.dataframe(df_doc, use_container_width=True, hide_index=True)
+
+        with tabs[1]:
+            if df_ins is None or df_ins.empty:
+                st.info("No Insurance Wise revenue data for this day.")
+            else:
+                st.dataframe(df_ins, use_container_width=True, hide_index=True)
+
+        with tabs[2]:
+            if df_dx is None or df_dx.empty:
+                st.info("No Doctor x Insurance revenue data for this day.")
+            else:
+                df_f = df_dx.copy()
+
+                # Filter: pick doctor first
+                if "Doctor" in df_f.columns:
+                    doctors = sorted([
+                        d for d in df_f["Doctor"].dropna().unique()
+                        if str(d).strip().lower() not in ["", "none", "nan"]
+                        and str(d).strip().upper() != "GRAND TOTAL"
+                    ])
+                    if doctors:
+                        pick_doc = st.selectbox("Select Doctor", options=doctors, key=f"income_pick_doc_{str(day_ts)}")
+                        df_f = df_f[df_f["Doctor"] == pick_doc].copy()
+
+                # Filter: pick insurance (optional)
+                if "Insurance" in df_f.columns:
+                    ins_list = sorted([
+                        i for i in df_f["Insurance"].dropna().unique()
+                        if str(i).strip().lower() not in ["", "none", "nan"] and str(i).strip().upper() != "GRAND TOTAL"
+                    ])
+                    pick_ins = st.selectbox("Select Insurance", options=["All"] + ins_list, key=f"income_pick_ins_{str(day_ts)}")
+                    if pick_ins != "All":
+                        df_f = df_f[df_f["Insurance"] == pick_ins].copy()
+
+                st.dataframe(df_f, use_container_width=True, hide_index=True)
+
+
+
+
+# ---------------------------
+# Center selection (LOCKED if passed in URL)
+# ---------------------------
 CENTERS = {
     "easyhealth": "Easy Health Medical Clinic (MF8031)",
     "excellent": "Excellent Medical Center (MF4777)",
     "pharmacy": "Excellent Pharmacy (PF3205)",
 }
-""")
 
-center_to_test = st.selectbox("Select center to test", 
-                              ["easyhealth", "excellent", "pharmacy"])
+# Streamlit new API: st.query_params is dict-like
+qp_center = (st.query_params.get("center") or "").strip()
+center_key = qp_center if qp_center in CENTERS else None
 
-# Construct paths as per your code
-def s3_key(*parts: str) -> str:
-    return "/".join([p.strip("/").strip() for p in parts if p is not None and str(p).strip() != ""])
+if center_key:
+    st.selectbox("Center", [center_key], format_func=lambda k: CENTERS[k], disabled=True, key="center_locked")
+else:
+    center_key = st.selectbox("Center", options=list(CENTERS.keys()), format_func=lambda k: CENTERS[k], key="center_pick")
 
-def history_paths(center: str, base_prefix: str = ""):
-    root = s3_key(base_prefix, "registration_summary", center)
-    return root, s3_key(root, "history.csv")
+st.caption(f"Center: **{CENTERS.get(center_key, center_key)}**")
 
-root, hist_key = history_paths(center_to_test, config.get('S3_BASE_PREFIX',''))
+# ---------------------------
+# S3 status
+# ---------------------------
+cfg = load_secrets()
+s3_ok = s3_enabled(cfg)
+s3 = s3_client_cached(cfg) if s3_ok else None
 
-st.write(f"**Root path:** `{root}`")
-st.write(f"**History key:** `{hist_key}`")
+with st.expander("Storage Status (S3)", expanded=False):
+    if s3_ok:
+        st.success(f"S3 is configured ✅  Bucket: {cfg['S3_BUCKET_NAME']}  Region: {cfg['AWS_REGION']}")
+        prefs = candidate_base_prefixes(cfg)
+        st.caption('Viewer will look for: ' + '  |  '.join([((p + '/') if p else '') + 'registration/<center>/history.csv' for p in prefs]))
+    else:
+        st.error("S3 is NOT configured on this app, so View page cannot load saved results.")
+        st.caption("Expected secrets: S3_BUCKET_NAME (or S3_BUCKET), AWS_REGION (or AWS_DEFAULT_REGION), AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
 
-# Check if history.csv exists
-try:
-    hist_obj = s3.get_object(Bucket=config["S3_BUCKET_NAME"], Key=hist_key)
-    st.success(f"✅ history.csv exists at: {hist_key}")
-    
-    # Read and display history
-    hist_df = pd.read_csv(io.BytesIO(hist_obj['Body'].read()))
-    st.subheader("History DataFrame")
-    st.dataframe(hist_df, use_container_width=True)
-    
-    # Check for latest day summary
-    if not hist_df.empty and 'day' in hist_df.columns:
-        latest_day = pd.to_datetime(hist_df['day'].max()).date()
-        st.write(f"**Latest day in history:** {latest_day}")
-        
-        # Construct summary.pkl path
-        summary_key = s3_key(root, str(latest_day), "summary.pkl")
-        st.write(f"**Expected summary.pkl path:** `{summary_key}`")
-        
-        # Try to load it
-        try:
-            summary_obj = s3.get_object(Bucket=config["S3_BUCKET_NAME"], Key=summary_key)
-            st.success(f"✅ summary.pkl exists at: {summary_key}")
-            
-            # Try to load pickle
-            import pickle
-            summary_data = pickle.loads(summary_obj['Body'].read())
-            st.success("✅ Pickle loaded successfully!")
-            st.write(f"**Keys in pickle:** {list(summary_data.keys())}")
-            
-            # Show sample of each dataframe
-            for key, df in summary_data.items():
-                with st.expander(f"DataFrame: {key}"):
-                    if isinstance(df, pd.DataFrame):
-                        st.write(f"Shape: {df.shape}")
-                        st.dataframe(df.head(), use_container_width=True)
-                    else:
-                        st.write(f"Type: {type(df)}")
-                        st.write(f"Value: {df}")
-                        
-        except s3.exceptions.NoSuchKey:
-            st.error(f"❌ summary.pkl NOT found at: {summary_key}")
-            st.info("Check if the upload page is saving summary.pkl correctly")
-        except Exception as e:
-            st.error(f"❌ Error loading pickle: {e}")
-    
-except s3.exceptions.NoSuchKey:
-    st.error(f"❌ history.csv NOT found at: {hist_key}")
-    st.info("The upload page needs to save history.csv first")
-except Exception as e:
-    st.error(f"❌ Error reading history.csv: {e}")
+if not s3_ok:
+    st.stop()
 
-# Test bucket permissions
-st.header("3. Test Permissions")
-if st.button("Test Read/Write Permissions"):
-    try:
-        # Test write
-        test_key = "test_permissions.txt"
-        s3.put_object(
-            Bucket=config["S3_BUCKET_NAME"],
-            Key=test_key,
-            Body=b"Test file for permissions check"
-        )
-        st.success("✅ Write permission: OK")
-        
-        # Test read
-        obj = s3.get_object(Bucket=config["S3_BUCKET_NAME"], Key=test_key)
-        st.success("✅ Read permission: OK")
-        
-        # Clean up
-        s3.delete_object(Bucket=config["S3_BUCKET_NAME"], Key=test_key)
-        st.success("✅ Delete permission: OK")
-        
-    except Exception as e:
-        st.error(f"❌ Permission error: {e}")
+# ---------------------------
+# Load history and auto-show latest result
+# ---------------------------
+hist, root_prefix = load_history_from_s3(s3, cfg, center_key)
 
-st.header("4. Quick Fixes to Try")
-st.markdown("""
-1. **Check upload page is saving correctly:**
-   - Open `4_Registration_Summary.py`
-   - Make sure it's using the same S3 credentials
-   - Check the save functions are being called
+if hist.empty or "day" not in hist.columns:
+    hist_key = s3_key(root_prefix, 'history.csv')
+    st.warning("No saved Daily Report found for this center yet.")
+    st.write("✅ To fix:")
+    st.markdown(
+        "- Open **Registration Summary (Upload)** page\n"
+        "- Upload Step 1/2/3\n"
+        "- Click **Process & Save to S3**\n"
+        "- Then come back here"
+    )
+    st.caption(f"Expected S3 key: {hist_key}")
+    st.stop()
 
-2. **Manual upload test:**
-   ```python
-   # In 4_Registration_Summary.py, add debug output:
-   st.info(f"Saving to: {s3_key}")
+# normalize day
+hist["day"] = pd.to_datetime(hist["day"], errors="coerce").dt.normalize()
+hist = hist.dropna(subset=["day"]).sort_values("day")
+
+days = list(hist["day"].unique())
+latest_day = days[-1]
+
+
+# pick day UI (LATEST ONLY by default)
+latest = max(days)
+picked = pd.to_datetime(latest).normalize()
+
+st.caption(f"Showing latest saved day: **{picked.date().strftime('%d %b %Y')}**")
+
+SS = st.session_state
+SS.setdefault("loaded_day", None)
+SS.setdefault("loaded_summary", None)
+SS.setdefault("picked_override", None)
+
+with st.expander("View another day (optional)", expanded=False):
+    other = st.date_input(
+        "Select a different day",
+        value=picked.date(),
+        min_value=pd.to_datetime(min(days)).date(),
+        max_value=pd.to_datetime(latest).date(),
+    )
+    if st.button("Load selected day", use_container_width=True):
+        SS["picked_override"] = pd.to_datetime(other).normalize()
+        SS["loaded_day"] = None
+        SS["loaded_summary"] = None
+        st.rerun()
+
+if SS.get("picked_override") is not None:
+    picked = pd.to_datetime(SS["picked_override"]).normalize()
+need_load = (SS["loaded_day"] is None) or (pd.to_datetime(SS["loaded_day"]) != picked)
+
+if need_load:
+    loaded = load_summary_from_s3(s3, cfg, root_prefix, picked)
+    if loaded is None:
+        st.error("history.csv exists, but summary.pkl is missing for this day.")
+        root = root_prefix
+        st.caption(f"Expected: {s3_key(root, picked.date().isoformat(), 'summary.pkl')}")
+        SS["loaded_day"] = picked
+        SS["loaded_summary"] = None
+    else:
+        SS["loaded_day"] = picked
+        SS["loaded_summary"] = loaded
+
+if SS.get("loaded_summary") is not None:
+    render_summary(SS["loaded_summary"], pd.to_datetime(SS["loaded_day"]))
+
+st.header("Accumulated (All Saved Days)")
+acc = add_cumulative(hist)
+st.dataframe(acc, use_container_width=True, hide_index=True)
