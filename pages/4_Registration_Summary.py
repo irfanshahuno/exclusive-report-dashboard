@@ -827,68 +827,88 @@ if admin_mode:
             st.error(str(e))
 
 
-def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.DataFrame, day_ts: pd.Timestamp) -> Dict[str, pd.DataFrame]:
+def compute_summary(reg_df: pd.DataFrame, cash_df: Optional[pd.DataFrame], pend_df: Optional[pd.DataFrame], day_ts: pd.Timestamp) -> Dict[str, pd.DataFrame]:
+    """
+    Compute day-level summary tables.
+
+    VISITS SOURCE OF TRUTH:
+      - Total Visits = number of rows in Registration file (reg_df)
+
+    Category counts (per Irfan final rule) based ONLY on Visit Type in Registration:
+      - CONSULTATION (ESTD) -> Established
+      - FOLLOW UP / FOLLOW-UP -> Follow Up
+      - CONSULTATION -> New
+      - Any other NON-BLANK Visit Type -> Unclassified
+      - Blank Visit Type -> ignored for category counts (still included in Total Visits)
+
+    Pending Patients source of truth:
+      - Pending file (pend_df), unique EMRNo
+    CashOut Patients source of truth:
+      - CashOut file (cash_df), unique EMRNo
+    """
+    if reg_df is None or reg_df.empty:
+        return {
+            "KPI": pd.DataFrame([{"Metric": "Day", "Value": pd.to_datetime(day_ts).date().isoformat()},
+                                 {"Metric": "Total Visits", "Value": 0},
+                                 {"Metric": "New Patients", "Value": 0},
+                                 {"Metric": "Established Patients", "Value": 0},
+                                 {"Metric": "Follow Up", "Value": 0},
+                                 {"Metric": "Unclassified Visits", "Value": 0},
+                                 {"Metric": "Pending Patients", "Value": 0},
+                                 {"Metric": "CashOut Patients", "Value": 0}]),
+        }
+
+    # Required IDs from Registration
     reg_map = ensure_required(reg_df, ["EMRNo", "VisitNo"], "Registration")
     emr_col, visit_col = reg_map["EMRNo"], reg_map["VisitNo"]
 
+    # Useful columns
     doctor_col = _find_col(reg_df, ["Doctor", "DoctorName", "Physician", "Provider"])
     ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
-    emp_col = _find_col(reg_df, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name", "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
+    emp_col = _find_col(reg_df, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name",
+                                 "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
+    visit_type_col = _find_col(reg_df, ["VisitType", "Visit Type", "VisitCategory"])
+    reg_date_col = _find_col(reg_df, ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
 
-    # 🔁 FINAL fallback: detect employer column by content (when headers are merged / show as Unnamed)
+    # Employer fallback (unnamed / merged headers)
     if emp_col is None:
         for c in reg_df.columns:
             sample = reg_df[c].dropna().astype(str).head(10)
             if sample.empty:
                 continue
-            # employer names are usually text (company names), not pure numbers
             avg_len = sample.str.strip().str.len().mean()
             has_digits_only = sample.str.strip().str.match(r"^\d+$").any()
             if avg_len and avg_len > 12 and not has_digits_only:
                 emp_col = c
                 break
 
-    bill_col = _find_col(reg_df, ["BillType", "Bill Type", "Insurance/Cash", "Cash/Insurance"])
-    visit_type_col = _find_col(reg_df, ["VisitType", "Visit Type", "VisitCategory"])
+    # ---- Core counts ----
+    total_visits = int(len(reg_df))
 
-    # ---------------------------
-    # New / Established / Follow Up / Unclassified (from Visit Type)
-    # FINAL rule (as per Irfan):
-    # - "CONSULTATION (ESTD)" => Established
-    # - "FOLLOW UP"           => Follow Up
-    # - "CONSULTATION"        => New
-    # - Any other NON-BLANK Visit Type => Unclassified
-    # - Blank values are ignored from these categories (still part of Total Visits)
-    # ---------------------------
-    new_visits = 0
-    established_visits = 0
-    followup_visits = 0
-    unclassified_visits = 0
-
+    # ---- Visit type categorization ----
+    new_visits = established_visits = followup_visits = unclassified_visits = 0
     if visit_type_col and visit_type_col in reg_df.columns:
-        _vt = reg_df[visit_type_col].fillna("").astype(str).str.strip().str.upper()
-
-        # normalize common typos/spaces
-        _vt = (
-            _vt.str.replace("CONSULATATION", "CONSULTATION", regex=False)
-               .str.replace("CONSUALTATION", "CONSULTATION", regex=False)
-               .str.replace("CONSULTAION", "CONSULTATION", regex=False)
-               .str.replace(r"\s+", " ", regex=True)
+        vt = reg_df[visit_type_col].fillna("").astype(str).str.strip().str.upper()
+        vt = (
+            vt.str.replace("CONSULATATION", "CONSULTATION", regex=False)
+              .str.replace("CONSUALTATION", "CONSULTATION", regex=False)
+              .str.replace("CONSULTAION", "CONSULTATION", regex=False)
+              .str.replace(r"\s+", " ", regex=True)
         )
 
-        _is_blank = _vt.eq("")
-        _is_est = _vt.str.contains("CONSULTATION (ESTD)", na=False)
-        _is_follow = _vt.str.contains("FOLLOW UP", na=False) | _vt.str.contains("FOLLOW-UP", na=False)
-        _is_new = (_vt.str.contains("CONSULTATION", na=False)) & (~_is_est) & (~_is_blank) & (~_is_follow)
+        is_blank = vt.eq("")
+        is_est = vt.str.contains("CONSULTATION (ESTD)", na=False)
+        is_follow = vt.str.contains("FOLLOW UP", na=False) | vt.str.contains("FOLLOW-UP", na=False)
+        is_new = vt.str.contains("CONSULTATION", na=False) & (~is_est) & (~is_follow) & (~is_blank)
 
-        established_visits = int(_is_est.sum())
-        followup_visits = int(_is_follow.sum())
-        new_visits = int(_is_new.sum())
+        established_visits = int(is_est.sum())
+        followup_visits = int(is_follow.sum())
+        new_visits = int(is_new.sum())
 
-        _classified = _is_est | _is_follow | _is_new
-        unclassified_visits = int((~_is_blank & ~_classified).sum())
+        classified = is_est | is_follow | is_new
+        unclassified_visits = int((~is_blank & ~classified).sum())
 
-    # CashOut / Pending counts (safe for bulk-split per-day empty frames)
+    # ---- CashOut / Pending ----
     cash_patients = 0
     if cash_df is not None and not cash_df.empty:
         cash_emr = ensure_required(cash_df, ["EMRNo"], "CashOut")["EMRNo"]
@@ -899,36 +919,43 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
         pend_emr = ensure_required(pend_df, ["EMRNo"], "Pending")["EMRNo"]
         pending_patients = int(pd.Series(pend_df[pend_emr]).nunique(dropna=True))
 
+    # ---- Tables ----
+    dfs: Dict[str, pd.DataFrame] = {}
 
+    dfs["KPI"] = pd.DataFrame([
+        {"Metric": "Day", "Value": pd.to_datetime(day_ts).date().isoformat()},
+        {"Metric": "Total Visits", "Value": total_visits},
+        {"Metric": "New Patients", "Value": new_visits},
+        {"Metric": "Established Patients", "Value": established_visits},
+        {"Metric": "Follow Up", "Value": followup_visits},
+        {"Metric": "Unclassified Visits", "Value": unclassified_visits},
+        {"Metric": "Pending Patients", "Value": pending_patients},
+        {"Metric": "CashOut Patients", "Value": cash_patients},
+    ])
+
+    # Pending status wise (from pending file)
+    if pend_df is not None and not pend_df.empty:
+        pend_status_col = _find_col(pend_df, ["Status", "VisitStatus", "Pending Status"])
+        dfs["Pending Status Wise"] = top_counts(pend_df, pend_status_col, n=30, label="Status")
+    else:
+        dfs["Pending Status Wise"] = pd.DataFrame(columns=["Status", "Count"])
+
+    # Insurance / Doctor / Employer wise (from registration)
+    dfs["Insurance Wise Visits"] = top_counts(reg_df, ins_col, n=50, label="Insurance")
+    dfs["Doctor Wise Visits"] = top_counts(reg_df, doctor_col, n=50, label="Doctor")
+    dfs["Employer Wise"] = employer_wise_with_insurance(reg_df, emp_col=emp_col, ins_col=ins_col, n=50)
+
+    # Optional date-wise distribution (useful for QA)
     if reg_date_col:
         d1 = pd.to_datetime(reg_df[reg_date_col], errors="coerce", dayfirst=False)
         d2 = pd.to_datetime(reg_df[reg_date_col], errors="coerce", dayfirst=True)
         d = (d2 if int(d2.notna().sum()) >= int(d1.notna().sum()) else d1).dt.date
         reg_daywise = pd.Series(d).dropna().value_counts().sort_index().reset_index()
         reg_daywise.columns = ["Reg Date", "Count"]
-    else:
-        reg_daywise = pd.DataFrame({"Reg Date": [day_ts.date()], "Count": [total_visits]})
+        dfs["Reg Date Wise (Daily)"] = reg_daywise
 
-    return {
-        "KPI": pd.DataFrame([
-            {"Metric": "Day", "Value": day_ts.date().isoformat()},
-            {"Metric": "Total Visits", "Value": total_visits},
-            {"Metric": "New Patients", "Value": new_visits},
-            {"Metric": "Established Patients", "Value": established_visits},
-            {"Metric": "Follow Up", "Value": followup_visits},
-            {"Metric": "Unclassified Visits", "Value": unclassified_visits},
-            {"Metric": "Pending Patients", "Value": pending_patients},
-        ]),
-        "Doctor Wise Visits": top_counts(reg_df, doctor_col, n=50, label="Doctor"),
-        "Insurance Wise Visits": top_counts(reg_df, ins_col, n=50, label="Insurance"),
-        "Employer Wise": employer_wise_with_insurance(reg_df, emp_col=emp_col, ins_col=ins_col, n=50),
-        "Bill Type": top_counts(reg_df, bill_col, n=20, label="Bill Type"),
-        "Visit Type": top_counts(reg_df, visit_type_col, n=20, label="Visit Type"),
-        "Status Wise": top_counts(reg_df, status_col, n=30, label="Status"),
-        "Pending Status Wise": top_counts(pend_df, pend_status_col, n=30, label="Status"),
-        "Registration User Wise": top_counts(reg_df, reg_user_col, n=30, label="User"),
-        "Reg Date Wise (Daily)": reg_daywise,
-    }
+    return dfs
+
 
 
 def history_paths(center: str, base_prefix: str = "") -> Tuple[str, str]:
