@@ -827,135 +827,96 @@ if admin_mode:
             st.error(str(e))
 
 
-def compute_summary(reg_df: pd.DataFrame, cash_df: Optional[pd.DataFrame], pend_df: Optional[pd.DataFrame], day_ts: pd.Timestamp) -> Dict[str, pd.DataFrame]:
-    """
-    Compute day-level summary tables.
-
-    VISITS SOURCE OF TRUTH:
-      - Total Visits = number of rows in Registration file (reg_df)
-
-    Category counts (per Irfan final rule) based ONLY on Visit Type in Registration:
-      - CONSULTATION (ESTD) -> Established
-      - FOLLOW UP / FOLLOW-UP -> Follow Up
-      - CONSULTATION -> New
-      - Any other NON-BLANK Visit Type -> Unclassified
-      - Blank Visit Type -> ignored for category counts (still included in Total Visits)
-
-    Pending Patients source of truth:
-      - Pending file (pend_df), unique EMRNo
-    CashOut Patients source of truth:
-      - CashOut file (cash_df), unique EMRNo
-    """
-    if reg_df is None or reg_df.empty:
-        return {
-            "KPI": pd.DataFrame([{"Metric": "Day", "Value": pd.to_datetime(day_ts).date().isoformat()},
-                                 {"Metric": "Total Visits", "Value": 0},
-                                 {"Metric": "New Patients", "Value": 0},
-                                 {"Metric": "Established Patients", "Value": 0},
-                                 {"Metric": "Follow Up", "Value": 0},
-                                 {"Metric": "Unclassified Visits", "Value": 0},
-                                 {"Metric": "Pending Patients", "Value": 0},
-                                 {"Metric": "CashOut Patients", "Value": 0}]),
-        }
-
-    # Required IDs from Registration
+def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.DataFrame, day_ts: pd.Timestamp) -> Dict[str, pd.DataFrame]:
     reg_map = ensure_required(reg_df, ["EMRNo", "VisitNo"], "Registration")
     emr_col, visit_col = reg_map["EMRNo"], reg_map["VisitNo"]
 
-    # Useful columns
     doctor_col = _find_col(reg_df, ["Doctor", "DoctorName", "Physician", "Provider"])
     ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
-    emp_col = _find_col(reg_df, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name",
-                                 "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
+    emp_col = _find_col(reg_df, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name", "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
+    bill_col = _find_col(reg_df, ["BillType", "Bill Type", "Insurance/Cash", "Cash/Insurance"])
     visit_type_col = _find_col(reg_df, ["VisitType", "Visit Type", "VisitCategory"])
+    status_col = _find_col(reg_df, ["Status", "VisitStatus"])
+    pend_status_col = _find_col(pend_df, ["Status", "VisitStatus", "Pending Status"])
+    reg_user_col = _find_col(reg_df, ["RegUser", "RegistrationUser", "User", "CreatedBy"])
     reg_date_col = _find_col(reg_df, ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
 
-    # Employer fallback (unnamed / merged headers)
-    if emp_col is None:
-        for c in reg_df.columns:
-            sample = reg_df[c].dropna().astype(str).head(10)
-            if sample.empty:
-                continue
-            avg_len = sample.str.strip().str.len().mean()
-            has_digits_only = sample.str.strip().str.match(r"^\d+$").any()
-            if avg_len and avg_len > 12 and not has_digits_only:
-                emp_col = c
-                break
-
-    # ---- Core counts ----
     total_visits = int(len(reg_df))
+    unique_emr = int(pd.Series(reg_df[emr_col]).nunique(dropna=True))
+    unique_visitno = int(pd.Series(reg_df[visit_col]).nunique(dropna=True))
 
-    # ---- Visit type categorization ----
-    new_visits = established_visits = followup_visits = unclassified_visits = 0
+    # Calculate New vs Established visits from Visit Type
+    new_visits = "N/A"
+    established_visits = "N/A"
+    
     if visit_type_col and visit_type_col in reg_df.columns:
-        vt = reg_df[visit_type_col].fillna("").astype(str).str.strip().str.upper()
-        vt = (
-            vt.str.replace("CONSULATATION", "CONSULTATION", regex=False)
-              .str.replace("CONSUALTATION", "CONSULTATION", regex=False)
-              .str.replace("CONSULTAION", "CONSULTATION", regex=False)
-              .str.replace(r"\s+", " ", regex=True)
+        # Clean and categorize visit types
+        visit_types = reg_df[visit_type_col].astype(str).str.lower().str.strip().fillna('')
+        
+        # Create masks for new and established visits
+        # New Visits: contains 'consultation' but NOT 'established', 'estd', or 'follow'
+        new_mask = (
+            visit_types.str.contains('consultation') & 
+            ~visit_types.str.contains('established') &
+            ~visit_types.str.contains('estd') &
+            ~visit_types.str.contains('follow')
         )
+        
+        # Established Visits: contains 'established', 'estd', 'follow up', or 'follow-up'
+        est_mask = (
+            visit_types.str.contains('established') | 
+            visit_types.str.contains('estd') |
+            visit_types.str.contains('follow up') |
+            visit_types.str.contains('follow-up')
+        )
+        
+        # Count using boolean masks
+        new_visits = int(new_mask.sum())
+        established_visits = int(est_mask.sum())
+        
+        # If not found with patterns, use simpler logic
+        if new_visits == 0 and established_visits == 0:
+            # Try exact matches
+            new_exact_mask = visit_types.isin(['consultation', 'new', 'first visit', 'new patient'])
+            est_exact_mask = visit_types.isin(['consultation (established)', 'established', 'return', 'follow up', 'follow-up', 'review'])
+            new_visits = int(new_exact_mask.sum())
+            established_visits = int(est_exact_mask.sum())
 
-        is_blank = vt.eq("")
-        is_est = vt.str.contains("CONSULTATION (ESTD)", na=False)
-        is_follow = vt.str.contains("FOLLOW UP", na=False) | vt.str.contains("FOLLOW-UP", na=False)
-        is_new = vt.str.contains("CONSULTATION", na=False) & (~is_est) & (~is_follow) & (~is_blank)
+    cash_emr = ensure_required(cash_df, ["EMRNo"], "CashOut")["EMRNo"]
+    pend_emr = ensure_required(pend_df, ["EMRNo"], "Pending")["EMRNo"]
+    cash_patients = int(pd.Series(cash_df[cash_emr]).nunique(dropna=True))
+    pending_patients = int(pd.Series(pend_df[pend_emr]).nunique(dropna=True))
 
-        established_visits = int(is_est.sum())
-        followup_visits = int(is_follow.sum())
-        new_visits = int(is_new.sum())
-
-        classified = is_est | is_follow | is_new
-        unclassified_visits = int((~is_blank & ~classified).sum())
-
-    # ---- CashOut / Pending ----
-    cash_patients = 0
-    if cash_df is not None and not cash_df.empty:
-        cash_emr = ensure_required(cash_df, ["EMRNo"], "CashOut")["EMRNo"]
-        cash_patients = int(pd.Series(cash_df[cash_emr]).nunique(dropna=True))
-
-    pending_patients = 0
-    if pend_df is not None and not pend_df.empty:
-        pend_emr = ensure_required(pend_df, ["EMRNo"], "Pending")["EMRNo"]
-        pending_patients = int(pd.Series(pend_df[pend_emr]).nunique(dropna=True))
-
-    # ---- Tables ----
-    dfs: Dict[str, pd.DataFrame] = {}
-
-    dfs["KPI"] = pd.DataFrame([
-        {"Metric": "Day", "Value": pd.to_datetime(day_ts).date().isoformat()},
-        {"Metric": "Total Visits", "Value": total_visits},
-        {"Metric": "New Patients", "Value": new_visits},
-        {"Metric": "Established Patients", "Value": established_visits},
-        {"Metric": "Follow Up", "Value": followup_visits},
-        {"Metric": "Unclassified Visits", "Value": unclassified_visits},
-        {"Metric": "Pending Patients", "Value": pending_patients},
-        {"Metric": "CashOut Patients", "Value": cash_patients},
-    ])
-
-    # Pending status wise (from pending file)
-    if pend_df is not None and not pend_df.empty:
-        pend_status_col = _find_col(pend_df, ["Status", "VisitStatus", "Pending Status"])
-        dfs["Pending Status Wise"] = top_counts(pend_df, pend_status_col, n=30, label="Status")
-    else:
-        dfs["Pending Status Wise"] = pd.DataFrame(columns=["Status", "Count"])
-
-    # Insurance / Doctor / Employer wise (from registration)
-    dfs["Insurance Wise Visits"] = top_counts(reg_df, ins_col, n=50, label="Insurance")
-    dfs["Doctor Wise Visits"] = top_counts(reg_df, doctor_col, n=50, label="Doctor")
-    dfs["Employer Wise"] = employer_wise_with_insurance(reg_df, emp_col=emp_col, ins_col=ins_col, n=50)
-
-    # Optional date-wise distribution (useful for QA)
     if reg_date_col:
         d1 = pd.to_datetime(reg_df[reg_date_col], errors="coerce", dayfirst=False)
         d2 = pd.to_datetime(reg_df[reg_date_col], errors="coerce", dayfirst=True)
         d = (d2 if int(d2.notna().sum()) >= int(d1.notna().sum()) else d1).dt.date
         reg_daywise = pd.Series(d).dropna().value_counts().sort_index().reset_index()
         reg_daywise.columns = ["Reg Date", "Count"]
-        dfs["Reg Date Wise (Daily)"] = reg_daywise
+    else:
+        reg_daywise = pd.DataFrame({"Reg Date": [day_ts.date()], "Count": [total_visits]})
 
-    return dfs
+    # Update KPI DataFrame with new structure
+    kpi_data = [
+        {"Metric": "Day", "Value": day_ts.date().isoformat()},
+        {"Metric": "Total Visits", "Value": total_visits},
+        {"Metric": "New Visits", "Value": new_visits},
+        {"Metric": "Established Visits", "Value": established_visits},
+        {"Metric": "Pending Patients", "Value": pending_patients},
+    ]
 
+    return {
+        "KPI": pd.DataFrame(kpi_data),
+        "Doctor Wise Visits": top_counts(reg_df, doctor_col, n=50, label="Doctor"),
+        "Insurance Wise Visits": top_counts(reg_df, ins_col, n=50, label="Insurance"),
+        "Employer Wise": employer_wise_with_insurance(reg_df, emp_col=emp_col, ins_col=ins_col, n=50),
+        "Bill Type": top_counts(reg_df, bill_col, n=20, label="Bill Type"),
+        "Visit Type": top_counts(reg_df, visit_type_col, n=20, label="Visit Type"),
+        "Status Wise": top_counts(reg_df, status_col, n=30, label="Status"),
+        "Pending Status Wise": top_counts(pend_df, pend_status_col, n=30, label="Status"),
+        "Registration User Wise": top_counts(reg_df, reg_user_col, n=30, label="User"),
+        "Reg Date Wise (Daily)": reg_daywise,
+    }
 
 
 def history_paths(center: str, base_prefix: str = "") -> Tuple[str, str]:
@@ -988,16 +949,39 @@ def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
 
     s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "summary.pkl"), pickle.dumps(dfs, protocol=pickle.HIGHEST_PROTOCOL))
 
-    kpi = dfs["KPI"].set_index("Metric")["Value"]
-    row = {
-        "day": pd.to_datetime(day_str),
-        "total_visits": int(kpi.get("Total Visits", 0)),
-        "new_patients": int(kpi.get("New Patients", 0)),
-        "established_patients": int(kpi.get("Established Patients", 0)),
-        "follow_up": int(kpi.get("Follow Up", 0)),
-        "unclassified_visits": int(kpi.get("Unclassified Visits", 0)),
-        "pending_patients": int(kpi.get("Pending Patients", 0)),
-    }
+    # Extract KPI values safely
+    kpi = dfs.get("KPI")
+    if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
+        k = kpi.set_index("Metric")["Value"]
+        
+        # Handle numeric conversion safely
+        def safe_int(val, default=0):
+            try:
+                if isinstance(val, (int, float)):
+                    return int(val)
+                elif isinstance(val, str) and val.replace('.', '').isdigit():
+                    return int(float(val))
+                else:
+                    return default
+            except:
+                return default
+        
+        row = {
+            "day": pd.to_datetime(day_str),
+            "total_visits": safe_int(k.get("Total Visits", 0)),
+            "new_visits": safe_int(k.get("New Visits", 0)),
+            "established_visits": safe_int(k.get("Established Visits", 0)),
+            "pending_patients": safe_int(k.get("Pending Patients", 0)),
+        }
+    else:
+        # Fallback if KPI not found
+        row = {
+            "day": pd.to_datetime(day_str),
+            "total_visits": 0,
+            "new_visits": 0,
+            "established_visits": 0,
+            "pending_patients": 0,
+        }
 
     existing = None
     b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key)
@@ -1050,10 +1034,13 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
         k = kpi.set_index("Metric")["Value"]
         a, b, c, d = st.columns(4)
         a.metric("Total Visits", int(k.get("Total Visits", 0)))
-        b.metric("New Visits", int(k.get("New Visits", 0)))
-        c.metric("Established Visits", int(k.get("Established Visits", 0)))
+        new_val = k.get("New Visits", 0)
+        b.metric("New Visits", 
+                int(new_val) if isinstance(new_val, (int, float)) else new_val)
+        est_val = k.get("Established Visits", 0)
+        c.metric("Established Visits", 
+                int(est_val) if isinstance(est_val, (int, float)) else est_val)
         d.metric("Pending Patients", int(k.get("Pending Patients", 0)))
-        st.caption(f"Generated: **{datetime.now().strftime('%d %b %Y %H:%M')}**")
     else:
         st.info("KPI is not available for this summary.")
 
@@ -1179,8 +1166,8 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
         latest = acc.sort_values("day").iloc[-1]
         a, b, c, d = st.columns(4)
         a.metric("Cumulative Visits", int(latest.get("cum_total_visits", 0)))
-        b.metric("Cumulative Unique EMR", int(latest.get("cum_unique_emr", 0)))
-        c.metric("Cumulative CashOut", int(latest.get("cum_cash_patients", 0)))
+        b.metric("Cumulative New Visits", int(latest.get("cum_new_visits", 0)))
+        c.metric("Cumulative Established Visits", int(latest.get("cum_established_visits", 0)))
         d.metric("Cumulative Pending", int(latest.get("cum_pending_patients", 0)))
         st.dataframe(acc, use_container_width=True, hide_index=True)
 
@@ -1188,13 +1175,14 @@ def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
     if hist is None or hist.empty:
         return pd.DataFrame()
     h = hist.sort_values("day").copy()
-    for c in ["total_visits", "new_patients", "established_patients", "follow_up", "unclassified_visits", "pending_patients"]:
-        h[c] = h[c].fillna(0).astype(int)
-        h[f"cum_{c}"] = h[c].cumsum()
+    for c in ["total_visits", "new_visits", "established_visits", "pending_patients"]:
+        if c in h.columns:
+            h[c] = h[c].fillna(0).astype(int)
+            h[f"cum_{c}"] = h[c].cumsum()
 
     cols = [
-        "day", "total_visits", "new_patients", "established_patients", "follow_up", "unclassified_visits", "pending_patients",
-        "cum_total_visits", "cum_new_patients", "cum_established_patients", "cum_follow_up", "cum_unclassified_visits", "cum_pending_patients"
+        "day", "total_visits", "new_visits", "established_visits", "pending_patients",
+        "cum_total_visits", "cum_new_visits", "cum_established_visits", "cum_pending_patients"
     ]
     cols = [c for c in cols if c in h.columns]
     return h[cols].sort_values("day", ascending=False).reset_index(drop=True)
@@ -1229,7 +1217,6 @@ if admin_mode:
         help="Daily saves one selected/detected day. Bulk will split the Registration file by date and save each day to S3 (best for full-year uploads). Weekly/Monthly are for display in View page (no special save needed).",
     )
     bulk_mode = (scope == "Bulk (split & save all dates found in Registration)")
-
 
     # -------------------- Step 4 (Income / Doctor Revenue) - optional --------------------
     c1, c2 = st.columns([3, 1])
