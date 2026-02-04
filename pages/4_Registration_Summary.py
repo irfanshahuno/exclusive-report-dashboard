@@ -850,37 +850,17 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
 
     bill_col = _find_col(reg_df, ["BillType", "Bill Type", "Insurance/Cash", "Cash/Insurance"])
     visit_type_col = _find_col(reg_df, ["VisitType", "Visit Type", "VisitCategory"])
+    status_col = _find_col(reg_df, ["Status", "VisitStatus"])
+    pend_status_col = _find_col(pend_df, ["Status", "VisitStatus", "Pending Status"])
+    reg_user_col = _find_col(reg_df, ["RegUser", "RegistrationUser", "User", "CreatedBy"])
+    reg_date_col = _find_col(reg_df, ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
 
-    # ---------------------------
-    # New vs Established (from Visit Type)
-    # Rule (as per Irfan):
-    # - If VisitType contains 'ESTD' => Established
-    # - Else if contains 'CONSULT' (consultation typos allowed) => New
-    # - Blank/unknown values are NOT counted in New/Established
-    # ---------------------------
-    new_visits = 0
-    established_visits = 0
-    unknown_visits = 0
+    total_visits = int(len(reg_df))
+    unique_emr = int(pd.Series(reg_df[emr_col]).nunique(dropna=True))
+    unique_visitno = int(pd.Series(reg_df[visit_col]).nunique(dropna=True))
 
-    if visit_type_col and visit_type_col in reg_df.columns:
-        _vt = reg_df[visit_type_col].fillna("").astype(str).str.strip().str.lower()
-
-        # normalize common typos
-        _vt = (
-            _vt.str.replace("consulatation", "consultation", regex=False)
-               .str.replace("consualtation", "consultation", regex=False)
-        )
-
-        _is_blank = _vt.eq("")
-        _is_est = _vt.str.contains("estd", na=False)
-        _is_new = (_vt.str.contains("consult", na=False)) & (~_is_est) & (~_is_blank)
-
-        established_visits = int(_is_est.sum())
-        new_visits = int(_is_new.sum())
-
-        # everything else that is non-blank but not new/est
-        unknown_visits = int((~_is_blank & ~_is_new & ~_is_est).sum())
-
+    cash_emr = ensure_required(cash_df, ["EMRNo"], "CashOut")["EMRNo"]
+    pend_emr = ensure_required(pend_df, ["EMRNo"], "Pending")["EMRNo"]
     cash_patients = int(pd.Series(cash_df[cash_emr]).nunique(dropna=True))
     pending_patients = int(pd.Series(pend_df[pend_emr]).nunique(dropna=True))
 
@@ -897,8 +877,9 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
         "KPI": pd.DataFrame([
             {"Metric": "Day", "Value": day_ts.date().isoformat()},
             {"Metric": "Total Visits", "Value": total_visits},
-            {"Metric": "New Visits", "Value": new_visits},
-            {"Metric": "Established Visits", "Value": established_visits},
+            {"Metric": "Unique EMR (Patients)", "Value": unique_emr},
+            {"Metric": "Unique Visit No", "Value": unique_visitno},
+            {"Metric": "CashOut Patients", "Value": cash_patients},
             {"Metric": "Pending Patients", "Value": pending_patients},
         ]),
         "Doctor Wise Visits": top_counts(reg_df, doctor_col, n=50, label="Doctor"),
@@ -946,10 +927,11 @@ def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
     kpi = dfs["KPI"].set_index("Metric")["Value"]
     row = {
         "day": pd.to_datetime(day_str),
-        "total_visits": int(kpi.get("Total Visits", 0)),
-        "new_visits": int(kpi.get("New Visits", 0)),
-        "established_visits": int(kpi.get("Established Visits", 0)),
-            "pending_patients": int(kpi.get("Pending Patients", 0)),
+        "total_visits": int(kpi["Total Visits"]),
+        "unique_emr": int(kpi["Unique EMR (Patients)"]),
+        "unique_visitno": int(kpi["Unique Visit No"]),
+        "cash_patients": int(kpi["CashOut Patients"]),
+        "pending_patients": int(kpi["Pending Patients"]),
     }
 
     existing = None
@@ -1003,10 +985,12 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
         k = kpi.set_index("Metric")["Value"]
         a, b, c, d = st.columns(4)
         a.metric("Total Visits", int(k.get("Total Visits", 0)))
-        b.metric("New Visits", int(k.get("New Visits", 0)))
-        c.metric("Established Visits", int(k.get("Established Visits", 0)))
-        d.metric("Pending Patients", int(k.get("Pending Patients", 0)))
-        st.caption(f"Generated: **{datetime.now().strftime('%d %b %Y %H:%M')}**")
+        b.metric("Unique EMR (Patients)", int(k.get("Unique EMR (Patients)", 0)))
+        c.metric("Unique Visit No", int(k.get("Unique Visit No", 0)))
+        d.metric("CashOut Patients", int(k.get("CashOut Patients", 0)))
+        e, f = st.columns(2)
+        e.metric("Pending Patients", int(k.get("Pending Patients", 0)))
+        f.metric("Generated", datetime.now().strftime("%Y-%m-d %H:%M"))
     else:
         st.info("KPI is not available for this summary.")
 
