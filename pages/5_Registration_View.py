@@ -209,13 +209,15 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     kpi = dfs.get("KPI")
     if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
         k = kpi.set_index("Metric")["Value"]
+        a, b, c = st.columns(3)
+        a.metric("Total Visits", int(k.get("Total Visits", 0)))
+        b.metric("New Patients", int(k.get("New Patients", 0)))
+        c.metric("Established Patients", int(k.get("Established Patients", 0)))
 
-        a, b, c, d = st.columns(4)
-a.metric("Total Visits", int(k.get("Total Visits", 0)))
-b.metric("New Visits", int(k.get("New Visits", 0)))
-c.metric("Established Visits", int(k.get("Established Visits", 0)))
-d.metric("Pending Patients", int(k.get("Pending Patients", 0)))
-
+        d, e, f = st.columns(3)
+        d.metric("Follow Up", int(k.get("Follow Up", 0)))
+        e.metric("Unclassified Visits", int(k.get("Unclassified Visits", 0)))
+        f.metric("Pending Patients", int(k.get("Pending Patients", 0)))
         st.caption(f"Generated: **{fmt_dt(datetime.now())}**")
     else:
         st.info("KPI is not available for this day.")
@@ -560,4 +562,3 @@ else:  # Monthly
             render_summary(SS["loaded_summary"], pd.to_datetime(max(month_days)))
         else:
             st.warning("No summary.pkl files found for that month.")
-
