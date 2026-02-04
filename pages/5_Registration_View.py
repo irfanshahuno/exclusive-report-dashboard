@@ -210,10 +210,11 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
         k = kpi.set_index("Metric")["Value"]
 
-        a, b, c = st.columns(3)
-        a.metric("Total Visits", int(k.get("Total Visits", 0)))
-        b.metric("New Visits", int(k.get("New Visits", 0)))
-        c.metric("Established Visits", int(k.get("Established Visits", 0)))
+        a, b, c, d = st.columns(4)
+a.metric("Total Visits", int(k.get("Total Visits", 0)))
+b.metric("New Visits", int(k.get("New Visits", 0)))
+c.metric("Established Visits", int(k.get("Established Visits", 0)))
+d.metric("Pending Patients", int(k.get("Pending Patients", 0)))
 
         st.caption(f"Generated: **{fmt_dt(datetime.now())}**")
     else:
