@@ -888,8 +888,17 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
         _classified = _is_est | _is_follow | _is_new
         unclassified_visits = int((~_is_blank & ~_classified).sum())
 
-    cash_patients = int(pd.Series(cash_df[cash_emr]).nunique(dropna=True))
-    pending_patients = int(pd.Series(pend_df[pend_emr]).nunique(dropna=True))
+    # CashOut / Pending counts (safe for bulk-split per-day empty frames)
+    cash_patients = 0
+    if cash_df is not None and not cash_df.empty:
+        cash_emr = ensure_required(cash_df, ["EMRNo"], "CashOut")["EMRNo"]
+        cash_patients = int(pd.Series(cash_df[cash_emr]).nunique(dropna=True))
+
+    pending_patients = 0
+    if pend_df is not None and not pend_df.empty:
+        pend_emr = ensure_required(pend_df, ["EMRNo"], "Pending")["EMRNo"]
+        pending_patients = int(pd.Series(pend_df[pend_emr]).nunique(dropna=True))
+
 
     if reg_date_col:
         d1 = pd.to_datetime(reg_df[reg_date_col], errors="coerce", dayfirst=False)
