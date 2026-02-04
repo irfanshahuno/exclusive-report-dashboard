@@ -397,50 +397,68 @@ def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15, label: str = "
 def normalize_employer_name(x: str) -> str:
     """Normalize employer names so small variations don't create duplicates.
 
-    Handles:
+    Safe normalization:
+    - Case-insensitive
     - AND vs &
     - W L L / W.L.L / WLL
     - punctuation, hyphens, dots, commas
     - extra/multiple spaces
+
+    Also applies a few *clinic-specific* standardizations that you requested:
+    - ARCO* -> ARCO
+    - QAMRA/Qumra/QAMRA... -> QUMRA
+    - EXCEED* -> EXCEED
+    - ALRYUM / AL RYUM / AL-RYUM -> ALRYUM
+    - NOOR AL SAHARA / NOOR AL SAHRA -> NOOR AL SAHARA
+
+    Returns a lowercase canonical key.
     """
     if x is None:
         return "blank"
-    s = str(x).strip().upper()
 
+    s = str(x).strip().upper()
+    if not s or s in {"NONE", "NAN"}:
+        return "blank"
+
+    # basic standardization
     s = s.replace("&", " AND ")
     s = re.sub(r"\bW\s*L\s*L\b", "WLL", s)   # W L L -> WLL
     s = re.sub(r"\bL\s*L\s*C\b", "LLC", s)   # L L C -> LLC
 
     # remove punctuation/symbols (keep letters/numbers/spaces)
-    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"[^A-Z0-9\s]", " ", s)
 
     # collapse spaces
     s = re.sub(r"\s+", " ", s).strip()
 
+    # --- clinic specific canonicalization rules ---
+    # 1) ARCO (take initial only)
+    if s.startswith("ARCO"):
+        return "arco"
+
+    # 2) EXCEED
+    if s.startswith("EXCEED"):
+        return "exceed"
+
+    # 3) ALRYUM (handle AL RYUM / AL-RYUM)
+    if s.replace(" ", "").startswith("ALRYUM"):
+        return "alryum"
+
+    # 4) NOOR AL SAHARA vs SAHRA (common typo)
+    if s.startswith("NOOR AL SAHARA") or s.startswith("NOOR AL SAHRA"):
+        return "noor al sahara"
+
+    # 5) QAMRA / QUMRA variations -> QUMRA
+    _compact = s.replace(" ", "")
+    if _compact.startswith("QAMRA") or _compact.startswith("QUMRA"):
+        return "qumra"
+
     return s.lower() if s else "blank"
 
 
-def employer_prefix_key(x: str) -> str:
-    """Group employers by FIRST token (robust).
-
-    Some Excel exports contain hidden unicode characters that can make two visually
-    identical names behave differently. This function extracts the FIRST
-    alphanumeric token after normalization to avoid duplicates.
-    """
-    if x is None:
-        return "blank"
-    s = str(x).strip().upper()
-
-    # standardize common variants
-    s = s.replace("&", " AND ")
-    s = re.sub(r"\bW\s*L\s*L\b", "WLL", s)   # W L L -> WLL
-    s = re.sub(r"\bL\s*L\s*C\b", "LLC", s)   # L L C -> LLC
-
-    # convert anything non-alnum to spaces (handles hidden chars too)
-    s = re.sub(r"[^A-Z0-9]+", " ", s).strip()
-
-    m = re.search(r"[A-Z0-9]+", s)
-    return m.group(0).lower() if m else "blank"
+def employer_group_key(x: str) -> str:
+    """Employer grouping key used for deduping."""
+    return normalize_employer_name(x)
 
 
 
@@ -1032,7 +1050,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
             else:
                 tmp = reg_df.copy()
                 tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
-                tmp["__emp_key__"] = tmp[emp_col].apply(lambda v: employer_prefix_key(v))
+                tmp["__emp_key__"] = tmp[emp_col].apply(lambda v: employer_group_key(v))
 
                 # display name = most frequent original in each normalized group
                 disp = (
