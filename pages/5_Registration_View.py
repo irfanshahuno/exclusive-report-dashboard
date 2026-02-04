@@ -34,6 +34,259 @@ except Exception:
     boto3 = None
 
 
+# ---------------------------
+# AGGRESSIVE EMPLOYER DEDUPLICATION FUNCTIONS - FIRST WORD GROUPING
+# ---------------------------
+
+def extract_first_company_word(company_name: str) -> str:
+    """
+    Extract the FIRST meaningful word from a company name.
+    Rules:
+    1. Remove all legal forms (LLC, LTD, CO, EST, etc.)
+    2. Remove common words (AL, BIN, AND, THE, FOR, OF, etc.)
+    3. Return FIRST remaining word in UPPERCASE
+    """
+    if not company_name or pd.isna(company_name):
+        return "BLANK"
+    
+    # Convert to uppercase for consistency
+    s = str(company_name).strip().upper()
+    
+    # Step 1: Remove ALL legal forms and suffixes
+    legal_forms = [
+        # Legal entities
+        r'\bLLC\b', r'\bL\.L\.C\.?\b', r'\bL L C\b',
+        r'\bLTD\b', r'\bLIMITED\b',
+        r'\bINC\b', r'\bINCORPORATED\b',
+        r'\bCO\b', r'\bCOMPANY\b',
+        r'\bCORP\b', r'\bCORPORATION\b',
+        r'\bEST\b', r'\bESTABLISHMENT\b',
+        r'\bWLL\b', r'\bW\.L\.L\.?\b', r'\bW L L\b',
+        
+        # Business types
+        r'\bSOLE\b', r'\bPROPRIETORSHIP\b',
+        r'\bPARTNERSHIP\b',
+        
+        # Industry terms
+        r'\bGENERAL\b', r'\bGEN\b',
+        r'\bCONTRACTING\b', r'\bCONTRACTORS\b', r'\bCONT\b',
+        r'\bTRANSPORT\b', r'\bTRANSPORTATION\b',
+        r'\bELECTROMECHANICAL\b', r'\bMECHANICAL\b',
+        r'\bSERVICES\b', r'\bSERVICE\b',
+        r'\bTRADING\b',
+        r'\bCONSTRUCTION\b', r'\bCONSTRUCTIONS\b',
+        r'\bDEVELOPMENT\b',
+        r'\bMAINTENANCE\b', r'\bMAINT\b',
+        r'\bENGINEERING\b',
+        r'\bSECURITY\b',
+        r'\bRECRUITMENT\b',
+        r'\bINTERNATIONAL\b',
+        r'\bINVESTMENT\b',
+        r'\bMANAGEMENT\b',
+        r'\bSOLUTIONS\b',
+        r'\bSYSTEM\b',
+        r'\bEQUIPMENT\b',
+        r'\bREAL ESTATE\b',
+        
+        # Common Arabic words
+        r'\bAL\b', r'\bBIN\b', r'\bAL-\b',
+        
+        # Connectors
+        r'\bAND\b', r'\b&?\b',
+        r'\bFOR\b', r'\bOF\b', r'\bTHE\b', r'\bIN\b', r'\bBY\b',
+        
+        # Punctuation and special characters
+        r'[^\w\s]',  # Remove all punctuation
+    ]
+    
+    # Apply removals
+    for pattern in legal_forms:
+        s = re.sub(pattern, ' ', s, flags=re.IGNORECASE)
+    
+    # Remove extra spaces
+    s = re.sub(r'\s+', ' ', s).strip()
+    
+    # Step 2: Get words and filter out empty/short words
+    words = s.split()
+    
+    # Common short words to skip (2-3 letters that aren't company initials)
+    skip_words = {'AL', 'BIN', 'AND', 'THE', 'FOR', 'OF', 'TO', 'IN', 'BY', 
+                  'CO', 'EST', 'GEN', 'CONT', 'LLC', 'LTD', 'INC', 'CORP'}
+    
+    for word in words:
+        # Skip empty or very short words (unless it's likely an acronym)
+        if len(word) < 2:
+            continue
+        
+        # Skip common words
+        if word in skip_words:
+            continue
+        
+        # Special handling for known variations
+        word_upper = word.upper()
+        
+        # QAMRA variations
+        if word_upper.startswith('QAM') or word_upper.startswith('QUM') or word_upper.startswith('QUR'):
+            return 'QAMRA'
+        
+        # EXCEED variations
+        if word_upper.startswith('EXCE') or word_upper.startswith('EXEE'):
+            return 'EXCEED'
+        
+        # ARCO variations
+        if word_upper == 'ARCO':
+            return 'ARCO'
+        
+        # NOOR variations
+        if word_upper == 'NOOR':
+            return 'NOOR'
+        
+        # HILAL variations
+        if word_upper.startswith('HILAL'):
+            return 'HILAL'
+        
+        # ALOKOZY variations
+        if word_upper.startswith('ALOK'):
+            return 'ALOKOZY'
+        
+        # ALBATEC variations
+        if word_upper.startswith('ALBAT'):
+            return 'ALBATEC'
+        
+        # ALKALINE variations
+        if word_upper.startswith('ALKAL'):
+            return 'ALKALINE'
+        
+        # ALRYUM variations
+        if word_upper.startswith('ALRY'):
+            return 'ALRYUM'
+        
+        # CENSUS variations
+        if word_upper.startswith('CENSUS'):
+            return 'CENSUS'
+        
+        # PROFILE variations
+        if word_upper.startswith('PROFIL'):
+            return 'PROFILE'
+        
+        # G4S variations
+        if word_upper.startswith('G4S'):
+            return 'G4S'
+        
+        # EFS variations
+        if word_upper.startswith('EF'):
+            return 'EFS'
+        
+        # MAZAYA variations
+        if word_upper.startswith('MAZAY'):
+            return 'MAZAYA'
+        
+        # INNOVO variations
+        if word_upper.startswith('INNOV'):
+            return 'INNOVO'
+        
+        # SILVER variations
+        if word_upper.startswith('SILVER'):
+            return 'SILVER'
+        
+        # SKY variations
+        if word_upper.startswith('SKY'):
+            return 'SKY'
+        
+        # TAMOUH variations
+        if word_upper.startswith('TAMOU'):
+            return 'TAMOUH'
+        
+        # PIONEER variations
+        if word_upper.startswith('PIONEE'):
+            return 'PIONEER'
+        
+        # EMIRATES variations
+        if word_upper.startswith('EMIRAT'):
+            return 'EMIRATES'
+        
+        # DOLPHIN variations
+        if word_upper.startswith('DOLPH'):
+            return 'DOLPHIN'
+        
+        # NATIONAL variations
+        if word_upper.startswith('NATION'):
+            return 'NATIONAL'
+        
+        # OPTIMUM variations
+        if word_upper.startswith('OPTIM'):
+            return 'OPTIMUM'
+        
+        # SIBCA variations
+        if word_upper.startswith('SIBC'):
+            return 'SIBCA'
+        
+        # If no special case, return the word
+        return word_upper
+    
+    # If no valid word found
+    return 'BLANK'
+
+def deduplicate_employer_table_first_word(df: pd.DataFrame) -> pd.DataFrame:
+    """Fix Employer Wise table by grouping companies by FIRST WORD."""
+    if df is None or df.empty or "Employer" not in df.columns:
+        return df
+    
+    df_copy = df.copy()
+    
+    # Skip the TOTAL row if present
+    total_row = None
+    if not df_copy.empty and "Employer" in df_copy.columns:
+        total_mask = df_copy["Employer"].astype(str).str.strip().str.upper() == "TOTAL"
+        if total_mask.any():
+            total_row = df_copy[total_mask].iloc[0].to_dict()
+            df_copy = df_copy[~total_mask].copy()
+    
+    if df_copy.empty:
+        return df
+    
+    # Extract first word for grouping
+    df_copy["__first_word__"] = df_copy["Employer"].apply(extract_first_company_word)
+    
+    # Group by first word
+    if "Insurance" in df_copy.columns:
+        # Group counts and take most frequent insurance
+        grouped = df_copy.groupby("__first_word__").agg({
+            "Count": "sum",
+            "Insurance": lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0] if not x.empty else ""
+        }).reset_index()
+        
+        # Get most frequent original name for display (use first word as display name)
+        result = pd.DataFrame()
+        result["Employer"] = grouped["__first_word__"]
+        result["Count"] = grouped["Count"]
+        result["Insurance"] = grouped["Insurance"]
+        
+        # Sort by count descending
+        result = result.sort_values("Count", ascending=False).reset_index(drop=True)
+    else:
+        # If no insurance column
+        grouped = df_copy.groupby("__first_word__").agg({
+            "Count": "sum"
+        }).reset_index()
+        
+        # Use first word as display name
+        result = pd.DataFrame()
+        result["Employer"] = grouped["__first_word__"]
+        result["Count"] = grouped["Count"]
+        
+        # Sort by count descending
+        result = result.sort_values("Count", ascending=False).reset_index(drop=True)
+    
+    # Add back TOTAL row
+    if total_row:
+        if "Insurance" in result.columns:
+            result.loc[len(result)] = {"Employer": "TOTAL", "Count": total_row.get("Count", 0), "Insurance": ""}
+        else:
+            result.loc[len(result)] = {"Employer": "TOTAL", "Count": total_row.get("Count", 0)}
+    
+    return result
+
 
 # ---------------------------
 # Date formatting (management-friendly)
@@ -229,7 +482,13 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     st.dataframe(dfs.get("Insurance Wise Visits", pd.DataFrame()), use_container_width=True, hide_index=True)
 
     st.subheader("Employer Wise")
-    st.dataframe(dfs.get("Employer Wise", pd.DataFrame()), use_container_width=True, hide_index=True)
+    # FIXED: Apply FIRST WORD deduplication to Employer Wise table
+    employer_df = dfs.get("Employer Wise", pd.DataFrame())
+    if not employer_df.empty:
+        deduped_df = deduplicate_employer_table_first_word(employer_df)
+        st.dataframe(deduped_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No employer data available for this day.")
 
     st.subheader("Doctor Wise Visits")
     st.dataframe(dfs.get("Doctor Wise Visits", pd.DataFrame()), use_container_width=True, hide_index=True)
@@ -287,8 +546,6 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
                         df_f = df_f[df_f["Insurance"] == pick_ins].copy()
 
                 st.dataframe(df_f, use_container_width=True, hide_index=True)
-
-
 
 
 # ---------------------------
@@ -456,6 +713,10 @@ def load_and_aggregate(day_list: List[pd.Timestamp]) -> Optional[Dict[str, pd.Da
             continue
         frames = [d.get(k) for d in loaded if isinstance(d.get(k), pd.DataFrame)]
         agg[k] = aggregate_tables(frames)
+        
+        # Apply FIRST WORD deduplication to Employer Wise tables in aggregated view
+        if k == "Employer Wise":
+            agg[k] = deduplicate_employer_table_first_word(agg[k])
 
     return agg
 
