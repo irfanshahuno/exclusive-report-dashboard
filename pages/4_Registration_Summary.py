@@ -56,6 +56,33 @@ st.title("Registration Summary (Registration + CashOut + Pending)")
 admin_mode = True
 
 
+
+# ---------------------------
+# Employer alias dictionary (RCM-safe dedupe)
+# ---------------------------
+# Add/adjust aliases here (left side = raw cleaned key, right side = canonical display name)
+# Keys must be LOWERCASE and already cleaned by `employer_clean_key()`.
+EMPLOYER_ALIAS = {
+    # QAMRA variations
+    "qamra": "QAMRA",
+    "qamara": "QAMRA",
+    "qumra": "QAMRA",
+    # EXCEED variations
+    "exceed": "EXCEED",
+    "excee": "EXCEED",
+    "exeed": "EXCEED",
+    # Others (examples you mentioned)
+    "alryum": "ALRYUM",
+    "noor al sahara": "NOOR AL SAHARA",
+    "noor al sahra": "NOOR AL SAHARA",
+}
+
+# Prefix-based aliases (optional). If the cleaned employer starts with the prefix -> canonical.
+# Useful for cases like ARCO where you want to keep ONLY the initial keyword.
+EMPLOYER_PREFIX_ALIAS = [
+    ("arco", "ARCO"),
+]
+
 def _norm_col(c: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(c).strip().lower())
 
@@ -394,92 +421,64 @@ def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15, label: str = "
     return out
 
 
-def normalize_employer_name(x: str) -> str:
-    """Normalize employer names so small variations don't create duplicates.
+def employer_clean_key(x: str) -> str:
+    """Return a normalized employer key suitable for matching (lowercase).
 
-    Safe normalization:
-    - Case-insensitive
-    - AND vs &
-    - W L L / W.L.L / WLL
-    - punctuation, hyphens, dots, commas
-    - extra/multiple spaces
-
-    Also applies a few *clinic-specific* standardizations that you requested:
-    - ARCO* -> ARCO
-    - QAMRA/Qumra/QAMRA... -> QUMRA
-    - EXCEED* -> EXCEED
-    - ALRYUM / AL RYUM / AL-RYUM -> ALRYUM
-    - NOOR AL SAHARA / NOOR AL SAHRA -> NOOR AL SAHARA
-
-    Returns a lowercase canonical key.
+    This is intentionally conservative: it removes punctuation/extra spaces and
+    normalizes common legal suffix formatting (WLL/LLC), but it does NOT try to
+    guess company identity beyond what you explicitly map in EMPLOYER_ALIAS.
     """
     if x is None:
         return "blank"
-
     s = str(x).strip().upper()
-    if not s or s in {"NONE", "NAN"}:
-        return "blank"
 
-    # basic standardization
+    # Standardize common variants
     s = s.replace("&", " AND ")
     s = re.sub(r"\bW\s*L\s*L\b", "WLL", s)   # W L L -> WLL
     s = re.sub(r"\bL\s*L\s*C\b", "LLC", s)   # L L C -> LLC
 
-    # remove punctuation/symbols (keep letters/numbers/spaces)
-    s = re.sub(r"[^A-Z0-9\s]", " ", s)
-
-    # collapse spaces
+    # Keep letters/numbers/spaces only
+    s = re.sub(r"[^A-Z0-9\s]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-
-    # --- clinic specific canonicalization rules ---
-    # 1) ARCO (take initial only)
-    if s.startswith("ARCO"):
-        return "arco"
-
-    # 2) EXCEED
-    if s.startswith("EXCEED"):
-        return "exceed"
-
-    # 3) ALRYUM (handle AL RYUM / AL-RYUM)
-    if s.replace(" ", "").startswith("ALRYUM"):
-        return "alryum"
-
-    # 4) NOOR AL SAHARA vs SAHRA (common typo)
-    if s.startswith("NOOR AL SAHARA") or s.startswith("NOOR AL SAHRA"):
-        return "noor al sahara"
-
-    # 5) QAMRA / QUMRA variations -> QUMRA
-    _compact = s.replace(" ", "")
-    if _compact.startswith("QAMRA") or _compact.startswith("QUMRA"):
-        return "qumra"
 
     return s.lower() if s else "blank"
 
 
-def employer_group_key(x: str) -> str:
-    """Employer grouping key used for deduping."""
-    return normalize_employer_name(x)
+def employer_canonical_name(x: str) -> str:
+    """Map employer to a single canonical display name using:
+    1) prefix aliases (EMPLOYER_PREFIX_ALIAS)
+    2) exact aliases (EMPLOYER_ALIAS)
+    3) fallback to cleaned uppercase
+    """
+    key = employer_clean_key(x)
 
+    # prefix rules first (e.g., ARCO -> ARCO)
+    for pref, canon in EMPLOYER_PREFIX_ALIAS:
+        if key.startswith(str(pref).lower()):
+            return str(canon).strip()
 
+    # exact aliases next
+    if key in EMPLOYER_ALIAS:
+        return str(EMPLOYER_ALIAS[key]).strip()
+
+    # fallback
+    return key.upper() if key != "blank" else "Blank"
 
 def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 50) -> pd.DataFrame:
-    """Employer Wise counts (DEDUPED) + ONE dominant Insurance per employer.
+    """Employer Wise counts (DEDUPED) + ONE Insurance per employer-group.
 
-    Dedupe rule:
-    - Normalize the FULL employer text (punctuation/spacing, AND/& , WLL/LLC variants, etc.)
-      using `normalize_employer_name()`.
-    - Group by this normalized key so duplicates collapse into ONE row.
-    - Display name = most frequent original employer name within the group.
-    - Insurance = most frequent insurance within the group (blanks -> CASH).
+    Grouping rule:
+    - grouping key: canonical employer name from EMPLOYER_ALIAS / EMPLOYER_PREFIX_ALIAS
+    - final safety: merge again by displayed Employer text (handles any weird edge cases)
     """
     if not emp_col or emp_col not in df.columns:
         return pd.DataFrame(columns=["Employer", "Count", "Insurance"])
 
     tmp = df.copy()
 
-    # Employer cleanup + FULL normalization key
+    # Employer cleanup + key
     tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
-    tmp["__emp_key__"] = tmp[emp_col].apply(normalize_employer_name)
+    tmp["__emp_key__"] = tmp[emp_col].apply(employer_canonical_name)
 
     # Insurance cleanup
     if ins_col and ins_col in tmp.columns:
@@ -495,19 +494,10 @@ def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_c
         tmp["__ins__"] = "CASH"
         ins_col = "__ins__"
 
-    # Count per normalized employer
+    # Count per key
     counts = tmp.groupby("__emp_key__").size().reset_index(name="Count")
 
-    # Display name = most frequent original employer name within group
-    display_name = (
-        tmp.groupby(["__emp_key__", emp_col])
-        .size()
-        .reset_index(name="cnt")
-        .sort_values(["__emp_key__", "cnt"], ascending=[True, False])
-        .drop_duplicates(subset=["__emp_key__"])
-        [["__emp_key__", emp_col]]
-        .rename(columns={emp_col: "Employer"})
-    )
+    # Canonical employer display = __emp_key__ (already mapped by EMPLOYER_ALIAS / EMPLOYER_PREFIX_ALIAS)
 
     # Insurance = most frequent within group
     dominant_ins = (
@@ -520,20 +510,30 @@ def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_c
         .rename(columns={ins_col: "Insurance"})
     )
 
-    out = (
-        counts.merge(display_name, on="__emp_key__", how="left")
-        .merge(dominant_ins, on="__emp_key__", how="left")
-        .sort_values("Count", ascending=False)
-        .head(n)
-        .reset_index(drop=True)
-    )
+    out = counts.merge(dominant_ins, on="__emp_key__", how="left")
+    out = out.rename(columns={"__emp_key__": "Employer"})[["Employer", "Count", "Insurance"]]
 
-    out = out[["Employer", "Count", "Insurance"]]
+
+    # final safety merge by displayed Employer text (sums counts, picks mode insurance)
+    if not out.empty:
+        def _mode_or_first(s: pd.Series) -> str:
+            s2 = s.dropna().astype(str)
+            if s2.empty:
+                return ""
+            md = s2.mode()
+            return md.iat[0] if not md.empty else s2.iloc[0]
+
+        out = (
+            out.groupby("Employer", as_index=False)
+            .agg(Count=("Count", "sum"), Insurance=("Insurance", _mode_or_first))
+            .sort_values("Count", ascending=False)
+            .head(n)
+            .reset_index(drop=True)
+        )
 
     total = int(out["Count"].sum()) if not out.empty else 0
     out.loc[len(out)] = ["TOTAL", total, ""]
     return out
-
 
 
 def employer_insurance_table(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 200) -> pd.DataFrame:
@@ -1050,7 +1050,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
             else:
                 tmp = reg_df.copy()
                 tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
-                tmp["__emp_key__"] = tmp[emp_col].apply(lambda v: employer_group_key(v))
+                tmp["__emp_key__"] = tmp[emp_col].apply(employer_canonical_name)
 
                 # display name = most frequent original in each normalized group
                 disp = (
