@@ -314,6 +314,54 @@ def get_day_from_registration(reg_df: pd.DataFrame) -> Optional[pd.Timestamp]:
         return day.min()
 
 
+def get_days_from_registration(reg_df: pd.DataFrame) -> List[pd.Timestamp]:
+    """Return all unique days found in Registration file (normalized).
+    Uses the same dayfirst heuristic as get_day_from_registration.
+    """
+    date_col = _find_col(reg_df, ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
+    if not date_col:
+        return []
+    s_raw = reg_df[date_col]
+    s1 = pd.to_datetime(s_raw, errors="coerce", dayfirst=False)
+    s2 = pd.to_datetime(s_raw, errors="coerce", dayfirst=True)
+    n1 = int(s1.notna().sum())
+    n2 = int(s2.notna().sum())
+    s = s2 if n2 >= n1 else s1
+    s = s.dropna()
+    if s.empty:
+        return []
+    days = sorted(pd.Series(s.dt.normalize().unique()).dropna())
+    return [pd.to_datetime(d) for d in days]
+
+
+def filter_df_by_day_if_possible(df: Optional[pd.DataFrame], day_ts: pd.Timestamp) -> Optional[pd.DataFrame]:
+    """If df has a recognizable date column, filter it to the given day. Otherwise return df as-is."""
+    if df is None or df.empty:
+        return df
+    date_col = _find_col(df, ["RegDate", "RegistrationDate", "Date", "VisitDate", "CreatedDate", "EntryDate", "Day"])
+    if not date_col:
+        # Try any column that contains 'date'
+        for c in df.columns:
+            if "date" in str(c).lower():
+                date_col = c
+                break
+    if not date_col:
+        return df
+
+    s_raw = df[date_col]
+    s1 = pd.to_datetime(s_raw, errors="coerce", dayfirst=False)
+    s2 = pd.to_datetime(s_raw, errors="coerce", dayfirst=True)
+    n1 = int(s1.notna().sum())
+    n2 = int(s2.notna().sum())
+    s = s2 if n2 >= n1 else s1
+    day = pd.to_datetime(day_ts).normalize()
+    mask = s.dt.normalize() == day
+    if mask.notna().sum() == 0:
+        return df
+    out = df.loc[mask.fillna(False)].copy()
+    return out
+
+
 def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15, label: str = "Value") -> pd.DataFrame:
     """Return top-N counts for a column and append a TOTAL row.
 
@@ -1078,6 +1126,17 @@ if admin_mode:
         st.warning("Registration file has no readable date column. Using Manual Day.")
     elif detected is not None:
         st.success(f"Detected Day from Registration file: {day_ts.date().isoformat()}")
+    st.markdown("---")
+    st.subheader("Processing Scope")
+    scope = st.radio(
+        "Select how you want to process the uploaded files:",
+        options=["Daily (single date)", "Weekly", "Monthly", "Bulk (split & save all dates found in Registration)"],
+        index=0,
+        horizontal=True,
+        help="Daily saves one selected/detected day. Bulk will split the Registration file by date and save each day to S3 (best for full-year uploads). Weekly/Monthly are for display in View page (no special save needed).",
+    )
+    bulk_mode = (scope == "Bulk (split & save all dates found in Registration)")
+
 
     # -------------------- Step 4 (Income / Doctor Revenue) - optional --------------------
     c1, c2 = st.columns([3, 1])
@@ -1114,31 +1173,91 @@ if admin_mode:
         if detected is not None:
             day_ts = detected
 
-        dfs = compute_summary(SS["reg_df"], SS["cash_df"], SS["pend_df"], day_ts)        
-        # ---- Step 4: Income analysis (optional) ----
-        SS['income_df'] = None
-        SS['income_tables'] = {}
-        if SS.get('income_file') is not None:
-            _income_df = load_income_details(io.BytesIO(SS.get('income_file', {}).get('bytes', b'')))
-            if _income_df is None or _income_df.empty:
-                st.warning("Income Analysis file loaded, but table header could not be detected. Please upload the correct 'Daily Collection Details' export.")
-            else:
-                SS['income_df'] = _income_df
-                SS['income_tables'] = income_tables(_income_df)
-                # Include Income Analysis tables inside the saved summary so Registration View can display them
-                for _k, _v in SS['income_tables'].items():
+        # -------------------------
+        # Daily vs Bulk processing
+        # -------------------------
+        if bulk_mode:
+            days = get_days_from_registration(SS["reg_df"]) if SS["reg_df"] is not None else []
+            if not days:
+                st.error("Bulk mode selected, but no readable date column was found in Registration file. Please use Daily mode or upload a file with RegDate/Date.")
+                st.stop()
+
+            st.info(f"Bulk mode: found {len(days)} day(s) in Registration. Saving each day to S3...")
+
+            # Optional income analysis file (applied as-is; if it contains multiple days, we will NOT split it)
+            _income_df = None
+            income_tbls = {}
+            if SS.get('income_file') is not None:
+                _income_df = load_income_details(io.BytesIO(SS.get('income_file', {}).get('bytes', b'')))
+                if _income_df is None or _income_df.empty:
+                    st.warning("Income Analysis file loaded, but header could not be detected. Skipping Income tables in bulk save.")
+                else:
+                    income_tbls = income_tables(_income_df)
+
+            progress = st.progress(0.0)
+            saved = 0
+
+            # Detect Registration date col once for filtering
+            reg_date_col = _find_col(SS["reg_df"], ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
+            s_raw = SS["reg_df"][reg_date_col] if reg_date_col else None
+            s1 = pd.to_datetime(s_raw, errors="coerce", dayfirst=False) if s_raw is not None else None
+            s2 = pd.to_datetime(s_raw, errors="coerce", dayfirst=True) if s_raw is not None else None
+            n1 = int(s1.notna().sum()) if s1 is not None else 0
+            n2 = int(s2.notna().sum()) if s2 is not None else 0
+            s_reg = (s2 if n2 >= n1 else s1) if s1 is not None else None
+
+            for idx, d in enumerate(days, start=1):
+                d_norm = pd.to_datetime(d).normalize()
+                if s_reg is None:
+                    reg_day = SS["reg_df"].copy()
+                else:
+                    mask = s_reg.dt.normalize() == d_norm
+                    reg_day = SS["reg_df"].loc[mask.fillna(False)].copy()
+
+                cash_day = filter_df_by_day_if_possible(SS["cash_df"], d_norm)
+                pend_day = filter_df_by_day_if_possible(SS["pend_df"], d_norm)
+
+                dfs = compute_summary(reg_day, cash_day, pend_day, d_norm)
+
+                # Attach income tables (same tables for all days; if you need day-wise split, upload day-wise income file)
+                for _k, _v in income_tbls.items():
                     dfs[f"Income | {_k}"] = _v
 
-        if s3_ok:
-            try:
-                save_run_to_s3(day_ts, dfs)
-                st.success("Saved to S3 ✅")
-            except Exception as e:
-                st.error(f"Failed to save to S3: {e}")
+                if s3_ok:
+                    save_run_to_s3(d_norm, dfs)
 
-        # Keep a simple confirmation flag
-        SS["last_saved_day"] = day_ts
-        SS["last_saved_center"] = center_key
+                saved += 1
+                progress.progress(saved / max(1, len(days)))
+
+            SS["last_saved_day"] = max(days)
+            SS["last_saved_center"] = center_key
+            st.success(f"Bulk save completed ✅  Days saved: {saved}")
+
+        else:
+            dfs = compute_summary(SS["reg_df"], SS["cash_df"], SS["pend_df"], day_ts)
+
+            # ---- Step 4: Income analysis (optional) ----
+            SS['income_df'] = None
+            SS['income_tables'] = {}
+            if SS.get('income_file') is not None:
+                _income_df = load_income_details(io.BytesIO(SS.get('income_file', {}).get('bytes', b'')))
+                if _income_df is None or _income_df.empty:
+                    st.warning("Income Analysis file loaded, but table header could not be detected. Please upload the correct 'Daily Collection Details' export.")
+                else:
+                    SS['income_df'] = _income_df
+                    SS['income_tables'] = income_tables(_income_df)
+                    for _k, _v in SS['income_tables'].items():
+                        dfs[f"Income | {_k}"] = _v
+
+            if s3_ok:
+                try:
+                    save_run_to_s3(day_ts, dfs)
+                    st.success("Saved to S3 ✅")
+                except Exception as e:
+                    st.error(f"Failed to save to S3: {e}")
+
+            SS["last_saved_day"] = day_ts
+            SS["last_saved_center"] = center_key
 
 # Confirmation (this admin upload page does not display KPI/details)
 if SS.get("last_saved_day") is not None and SS.get("last_saved_center") is not None:
