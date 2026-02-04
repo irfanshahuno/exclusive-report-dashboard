@@ -183,7 +183,7 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         return pd.concat([d, pd.DataFrame([row])], ignore_index=True)
 
     doctor_wise = _add_grand_total(doctor_wise, ["Department", "Doctor"])
-    insurance_wise = _add_grand_total(insurance_wise, ["Insurance"])
+    insurance_wise = _add_grand_total(insurance_wise, ["Insurance")
     doctor_ins_wise = _add_grand_total(doctor_ins_wise, ["Doctor"])
 
     return {
@@ -819,20 +819,21 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
 def history_paths(center: str, base_prefix: str = "") -> Tuple[str, str]:
     """Return (root_prefix, history_csv_key) for this center.
     
-    Fixed to match your S3 bucket structure where files are saved under:
-    registration_summary/<center>/...
+    MODIFIED: Saves to registration/{center}/ at same level as streamlit/, rejection_cache/
     """
-    if base_prefix and base_prefix.strip():
-        root = s3_key(base_prefix, "registration_summary", center)
-    else:
-        root = s3_key("registration_summary", center)
+    # Completely ignore any base_prefix to ensure we save at root level
+    # This creates: registration/{center}/
+    root = s3_key("registration", center)
     return root, s3_key(root, "history.csv")
 
 
 def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
+    # Use the modified history_paths that saves to registration/{center}/
     root, hist_key = history_paths(center_key, cfg.get("S3_BASE_PREFIX", ""))
+    
     day_str = day_ts.date().isoformat()
 
+    # Save files to the new location
     if SS["reg_file"]:
         s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "registration.xlsx"), SS["reg_file"]["bytes"])
     if SS["cash_file"]:
