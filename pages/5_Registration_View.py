@@ -10,8 +10,8 @@ Purpose
 
 Important
 - This viewer MUST read the SAME S3 folder structure as the uploader page:
-    registration_summary/<center>/<YYYY-MM-DD>/summary.pkl
-    registration_summary/<center>/history.csv
+    registration/<center>/<YYYY-MM-DD>/summary.pkl
+    registration/<center>/history.csv
 
 So we intentionally IGNORE any `year=` query param for storage paths, unless you
 also change the uploader to save year-wise.
@@ -112,34 +112,76 @@ def s3_get_bytes(s3, bucket: str, key: str) -> Optional[bytes]:
         return None
 
 
+def s3_key_exists(s3, bucket: str, key: str) -> bool:
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except Exception:
+        return False
+
+
+def candidate_base_prefixes(cfg: Dict[str, str]) -> List[str]:
+    """Try a few likely prefixes so the viewer works even if uploader/viewer prefixes differ."""
+    prefs: List[str] = []
+    p = (cfg.get("S3_BASE_PREFIX") or "").strip().strip("/")
+    if p:
+        prefs.append(p)
+    # common fallbacks
+    prefs.append("")  # root of bucket
+    if "streamlit" not in prefs:
+        prefs.append("streamlit")
+    # de-dup while preserving order
+    out: List[str] = []
+    for x in prefs:
+        x = (x or "").strip().strip("/")
+        if x not in out:
+            out.append(x)
+    return out
+
+
 def history_paths(center: str, base_prefix: str = "") -> Tuple[str, str]:
     """Return (root_prefix, history_csv_key) for this center.
 
-    Must match uploader page logic:
-      <S3_BASE_PREFIX>/registration_summary/<center>/...
-    If base_prefix is empty:
-      registration_summary/<center>/...
+    Expected uploader layout (based on your S3 screenshots):
+      <base_prefix>/registration/<center>/history.csv
+      <base_prefix>/registration/<center>/<YYYY-MM-DD>/summary.pkl
     """
-    root = s3_key(base_prefix, "registration_summary", center)
+    root = s3_key(base_prefix, "registration", center)
     return root, s3_key(root, "history.csv")
 
 
-def load_history_from_s3(s3, cfg: Dict[str, str], center_key: str) -> pd.DataFrame:
-    root, hist_key = history_paths(center_key, cfg.get('S3_BASE_PREFIX',''))
+def resolve_center_root_from_s3(s3, cfg: Dict[str, str], center_key: str) -> Tuple[str, str]:
+    """Return (root_prefix, history_csv_key) that actually exists in S3."""
+    bucket = cfg["S3_BUCKET_NAME"]
+    for pref in candidate_base_prefixes(cfg):
+        root, hist_key = history_paths(center_key, pref)
+        if s3_key_exists(s3, bucket, hist_key):
+            return root, hist_key
+    # default to the configured prefix path (even if missing), for clearer error messages
+    root, hist_key = history_paths(center_key, (cfg.get("S3_BASE_PREFIX") or ""))
+    return root, hist_key
+
+
+def load_history_from_s3(s3, cfg: Dict[str, str], center_key: str) -> Tuple[pd.DataFrame, str]:
+    root, hist_key = resolve_center_root_from_s3(s3, cfg, center_key)
     b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key)
     if not b:
-        return pd.DataFrame()
+        return pd.DataFrame(), root
     try:
-        return pd.read_csv(io.BytesIO(b), parse_dates=["day"])
+        df = pd.read_csv(io.BytesIO(b), parse_dates=["day"])
     except Exception:
-        # fallback if parse fails
-        return pd.read_csv(io.BytesIO(b))
+        df = pd.read_csv(io.BytesIO(b))
+    return df, root
 
 
-def load_summary_from_s3(s3, cfg: Dict[str, str], center_key: str, day_ts: pd.Timestamp) -> Optional[Dict[str, pd.DataFrame]]:
-    root, _ = history_paths(center_key, cfg.get('S3_BASE_PREFIX',''))
+def load_summary_from_s3(
+    s3,
+    cfg: Dict[str, str],
+    root_prefix: str,
+    day_ts: pd.Timestamp
+) -> Optional[Dict[str, pd.DataFrame]]:
     day_str = pd.to_datetime(day_ts).date().isoformat()
-    key = s3_key(root, day_str, "summary.pkl")
+    key = s3_key(root_prefix, day_str, "summary.pkl")
     b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], key)
     if not b:
         return None
@@ -279,9 +321,8 @@ s3 = s3_client_cached(cfg) if s3_ok else None
 with st.expander("Storage Status (S3)", expanded=False):
     if s3_ok:
         st.success(f"S3 is configured ✅  Bucket: {cfg['S3_BUCKET_NAME']}  Region: {cfg['AWS_REGION']}")
-        st.caption(f"Path used: {(cfg.get('S3_BASE_PREFIX','') + '/' if cfg.get('S3_BASE_PREFIX') else '')}registration_summary/<center>/history.csv")
-        if cfg.get("S3_BASE_PREFIX"):
-            st.caption(f"S3_BASE_PREFIX is set to '{cfg['S3_BASE_PREFIX']}'. Viewer will load from: {cfg['S3_BASE_PREFIX']}/registration_summary/<center>/...")
+        prefs = candidate_base_prefixes(cfg)
+        st.caption('Viewer will look for: ' + '  |  '.join([((p + '/') if p else '') + 'registration/<center>/history.csv' for p in prefs]))
     else:
         st.error("S3 is NOT configured on this app, so View page cannot load saved results.")
         st.caption("Expected secrets: S3_BUCKET_NAME (or S3_BUCKET), AWS_REGION (or AWS_DEFAULT_REGION), AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
@@ -292,10 +333,10 @@ if not s3_ok:
 # ---------------------------
 # Load history and auto-show latest result
 # ---------------------------
-hist = load_history_from_s3(s3, cfg, center_key)
+hist, root_prefix = load_history_from_s3(s3, cfg, center_key)
 
 if hist.empty or "day" not in hist.columns:
-    root, hist_key = history_paths(center_key, cfg.get('S3_BASE_PREFIX',''))
+    hist_key = s3_key(root_prefix, 'history.csv')
     st.warning("No saved Daily Report found for this center yet.")
     st.write("✅ To fix:")
     st.markdown(
@@ -344,10 +385,10 @@ if SS.get("picked_override") is not None:
 need_load = (SS["loaded_day"] is None) or (pd.to_datetime(SS["loaded_day"]) != picked)
 
 if need_load:
-    loaded = load_summary_from_s3(s3, cfg, center_key, picked)
+    loaded = load_summary_from_s3(s3, cfg, root_prefix, picked)
     if loaded is None:
         st.error("history.csv exists, but summary.pkl is missing for this day.")
-        root, _ = history_paths(center_key, cfg.get('S3_BASE_PREFIX',''))
+        root = root_prefix
         st.caption(f"Expected: {s3_key(root, picked.date().isoformat(), 'summary.pkl')}")
         SS["loaded_day"] = picked
         SS["loaded_summary"] = None
