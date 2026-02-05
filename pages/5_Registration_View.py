@@ -336,14 +336,48 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
                     elif win.startswith("Next"):
                         n = int(re.findall(r"\d+", win)[0])
                         df_f = df_f[(df_f["Days To Expiry"] >= 0) & (df_f["Days To Expiry"] <= n)]
-                # company filter
-                if "Company" in df_f.columns:
-                    comps = sorted([c for c in df_f["Company"].dropna().unique() if str(c).strip() not in ["", "nan", "None"]])
-                    pick_c = st.selectbox("Company", options=["All"] + comps, key=f"exp_comp_{str(day_ts)}")
-                    if pick_c != "All":
-                        df_f = df_f[df_f["Company"] == pick_c]
-                st.dataframe(df_f, use_container_width=True, hide_index=True)
+                # Employer filter (aligned with Employer Wise)
+                df_f = df_f.copy()
+                emp_ref = dfs.get("Employer Wise", pd.DataFrame())
+                employers_ref = []
+                if isinstance(emp_ref, pd.DataFrame) and (not emp_ref.empty) and ("Employer" in emp_ref.columns):
+                    employers_ref = [e for e in emp_ref["Employer"].dropna().unique().tolist() if str(e).strip() not in ["", "nan", "None"]]
 
+                def _clean_emp(x):
+                    return re.sub(r"[^A-Z0-9]+", " ", str(x).upper()).strip()
+
+                _PREFIX_ALIAS = [
+                    ("ARCO", "ARCO"),
+                    ("EXEED", "EXCEED"),
+                    ("EXCEED", "EXCEED"),
+                    ("EXCEE", "EXCEED"),
+                    ("QUMRA", "QAMRA"),
+                    ("QAMARA", "QAMRA"),
+                    ("QAMRA", "QAMRA"),
+                ]
+
+                def _map_employer(val: object) -> str:
+                    s = _clean_emp(val)
+                    for p, canon in _PREFIX_ALIAS:
+                        if s.startswith(p):
+                            return canon
+                    if employers_ref:
+                        for e in employers_ref:
+                            ce = _clean_emp(e)
+                            if not ce:
+                                continue
+                            if s.startswith(ce) or ce.startswith(s):
+                                return e
+                    return str(val)
+
+                if "Company" in df_f.columns:
+                    df_f["Employer"] = df_f["Company"].apply(_map_employer)
+
+                    emps = sorted([c for c in df_f["Employer"].dropna().unique() if str(c).strip() not in ["", "nan", "None"]])
+                    pick_e = st.selectbox("Employer", options=["All"] + emps, key=f"exp_emp_{str(day_ts)}")
+                    if pick_e != "All":
+                        df_f = df_f[df_f["Employer"] == pick_e]
+                st.dataframe(df_f, use_container_width=True, hide_index=True)
         with tabs[3]:
             st.subheader("Top Diagnosis (Doctor)")
             c1, c2 = st.columns(2)
