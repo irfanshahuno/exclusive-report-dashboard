@@ -406,28 +406,40 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     if df_exp_all is not None and not df_exp_all.empty:
         exp = df_exp_all.copy()
 
-        # Detect company/employer column in the expiry table
-        col_company = None
-        for cand in ["Employer", "Company", "Employer Name", "Company Name"]:
-            if cand in exp.columns:
-                col_company = cand
-                break
+        # Detect company/employer column in the expiry table (robust)
+        def _norm_colname(c: str) -> str:
+            c = str(c or "").strip().lower()
+            c = re.sub(r"\s+", "", c)
+            c = c.replace("_", "")
+            c = c.replace("-", "")
+            return c
 
-        # Detect expiry column
-        col_exp = None
-        for cand in ["Expiry Date", "Expiry", "Insurance Expiry", "Employee Expiry", "Card Expiry"]:
-            if cand in exp.columns:
-                col_exp = cand
-                break
+        cols_norm = {_norm_colname(c): c for c in exp.columns}
+
+        def _pick_col(candidates):
+            for cand in candidates:
+                n = _norm_colname(cand)
+                if n in cols_norm:
+                    return cols_norm[n]
+            # try contains
+            for cand in candidates:
+                n = _norm_colname(cand)
+                for k, orig in cols_norm.items():
+                    if n in k:
+                        return orig
+            return None
+
+        col_company = _pick_col(["Employer","Company","Employer Name","Company Name","Sponsor","EmployerName","CompanyName"])
+        col_exp = _pick_col(["Expiry Date","Expiry","Insurance Expiry","Employee Expiry","Card Expiry","ExpiryDate","EmployeeExpiry","InsuranceExpiry","CardExpiry"])
 
         if col_company and col_exp:
             exp["_expiry_date"] = pd.to_datetime(exp[col_exp], errors="coerce").dt.date
-            exp["Employer_norm"] = exp[col_company].astype(str).map(_norm_txt)
+            exp["Employer"] = exp[col_company].map(_map_company_to_employer)
 
             if not emp_df.empty and "Employer" in emp_df.columns:
                 for emp in emp_df["Employer"].dropna().astype(str).unique().tolist():
                     emp_key = _norm_txt(emp)
-                    dates = exp.loc[exp["Employer_norm"] == emp_key, "_expiry_date"].dropna()
+                    dates = exp.loc[exp["Employer"] == emp_key, "_expiry_date"].dropna()
 
                     # Option B: denominator = only non-null expiry dates
                     if len(dates) == 0:
