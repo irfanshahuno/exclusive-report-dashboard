@@ -151,13 +151,19 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 
     col_dept = _find_col(df, ["Department"])
     col_doc  = _find_col(df, ["Doctor"])
-    col_ins  = _find_col(df, ["Insurance Name", "Insurance"])
+
+    # IMPORTANT:
+    # In your "Daily Collection Details" export, the column named "Insurance" contains the NUMERIC amount.
+    # The payer/TPA name is in "Insurance Name".
+    col_ins  = _find_col(df, ["Insurance Name", "Ins Name", "InsuranceName", "Payer", "Payer Name"])
+    col_amt  = _find_col(df, ["Insurance", "Insuance", "Insurance Amount", "Ins Amount"])
+
     col_visit= _find_col(df, ["Visit No", "VisitNo"])
     col_cons = _find_col(df, ["Consultation"])
     col_lab  = _find_col(df, ["Lab"])
     col_proc = _find_col(df, ["Procedure"])
 
-    needed = [col_doc, col_ins, col_visit, col_cons, col_lab, col_proc]
+    needed = [col_doc, col_ins, col_amt, col_visit, col_cons, col_lab, col_proc]
     if any(c is None for c in needed):
         return {}
 
@@ -171,15 +177,20 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         tmp[col_dept] = tmp[col_dept].astype(str).str.strip()
         tmp = tmp[~tmp[col_dept].str.lower().isin(['', 'none', 'nan'])].copy()
     # Insurance: blanks treated as CASH
-    tmp[col_ins] = tmp[col_ins].fillna('CASH').astype(str).str.strip().replace('', 'CASH')
+    if col_ins is None:
+        tmp["__payer__"] = "CASH"
+        col_ins = "__payer__"
+    else:
+        tmp[col_ins] = tmp[col_ins].fillna('CASH').astype(str).str.strip().replace('', 'CASH')
     tmp[col_visit] = tmp[col_visit].astype(str).str.strip()
     tmp = tmp[tmp[col_visit] != ''].copy()
 
-    for c in [col_cons, col_lab, col_proc]:
+    for c in [col_cons, col_lab, col_proc, col_amt]:
         tmp[c] = pd.to_numeric(tmp[c], errors="coerce").fillna(0.0)
 
     tmp[col_visit] = tmp[col_visit].astype(str).str.strip()
-    tmp["_total_amt"] = tmp[col_cons] + tmp[col_lab] + tmp[col_proc]
+    # Total Amount MUST come from the numeric 'Insurance' column in this report
+    tmp["_total_amt"] = tmp[col_amt]
 
     def _agg(group_cols: List[str]) -> pd.DataFrame:
         g = tmp.groupby(group_cols, dropna=False).agg(
