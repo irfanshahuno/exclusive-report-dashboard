@@ -343,49 +343,38 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     base[col_doc] = base[col_doc].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
     base[col_company] = base[col_company].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
 
-
-    try:
-        rmap = ensure_required(reg_df, ["EMRNo", "VisitNo"], "Registration")
-        r_emr, r_visit = rmap["EMRNo"], rmap["VisitNo"]
-
-        reg_small = reg_df.copy()
-        reg_small[r_emr] = reg_small[r_emr].astype(str).str.strip()
-        reg_small[r_visit] = reg_small[r_visit].astype(str).str.strip()
-
-        # optional columns from registration
-        r_visit_type = _find_col(reg_small, ["VisitType", "Visit Type", "VisitCategory"])
-        r_ins = _find_col(reg_small, ["Insurance", "InsuranceName", "Payer", "PayerName"])
-        r_emp = _find_col(reg_small, ["Employer", "Company", "Sponsor", "Employer Name", "Company Name"])
-
-        keep_cols = [r_emr, r_visit]
-        if r_visit_type:
-            keep_cols.append(r_visit_type)
-        if r_ins:
-            keep_cols.append(r_ins)
-        if r_emp:
-            keep_cols.append(r_emp)
-
-        reg_small = reg_small[keep_cols].drop_duplicates()
-
-        # normalize base keys
-        base[col_emr] = base[col_emr].astype(str).str.strip()
-        base[col_visit] = base[col_visit].astype(str).str.strip()
-
-        base = base.merge(
-            reg_small,
-            left_on=[col_emr, col_visit],
-            right_on=[r_emr, r_visit],
-            how="left",
-            suffixes=("", "_reg"),
-        )
-
-        # If employer exists in registration, overwrite company with employer for downstream employer analytics
-        if r_emp and r_emp in base.columns:
-            base[col_company] = base[r_emp].fillna(base[col_company]).astype(str).str.strip().replace("", "UNKNOWN")
-
-    except Exception:
-        pass
-
+    # optional merge with registration to enrich (Visit Type, Insurance etc.)
+    if reg_df is not None and isinstance(reg_df, pd.DataFrame) and not reg_df.empty:
+        try:
+            rmap = ensure_required(reg_df, ["EMRNo", "VisitNo"], "Registration")
+            r_emr, r_visit = rmap["EMRNo"], rmap["VisitNo"]
+            reg_small = reg_df.copy()
+            reg_small[r_emr] = reg_small[r_emr].astype(str).str.strip()
+            reg_small[r_visit] = reg_small[r_visit].astype(str).str.strip()
+            # pick useful columns
+            r_visit_type = _find_col(reg_small, ["VisitType", "Visit Type", "VisitCategory"])
+            r_ins = _find_col(reg_small, ["Insurance", "InsuranceName", "Payer", "PayerName"])
+            
+            r_emp = _find_col(reg_small, [\"Employer\", \"Company\", \"Sponsor\", \"Employer Name\", \"Company Name\"])
+keep_cols = [r_emr, r_visit]
+            if r_visit_type: keep_cols.append(r_visit_type)
+            if r_ins: keep_cols.append(r_ins)
+            
+            
+            if r_emp: keep_cols.append(r_emp)
+if r_emp: keep_cols.append(r_emp)
+reg_small = reg_small[keep_cols].drop_duplicates()
+            base[col_emr] = base[col_emr].astype(str).str.strip() if col_emr else ""
+            base[col_visit] = base[col_visit].astype(str).str.strip() if col_visit else ""
+            base = base.merge(
+                reg_small,
+                left_on=[col_emr, col_visit] if col_emr and col_visit else [col_emr],
+                right_on=[r_emr, r_visit] if col_emr and col_visit else [r_emr],
+                how="left",
+                suffixes=("", "_reg"),
+            )
+        except Exception:
+            pass
 
     # explode ICD and CPT
     pri = base[[col_doc, col_company, col_pri, col_pri_desc]].copy()
@@ -1564,7 +1553,7 @@ if admin_mode:
                     cpticd_tbls = cpticd_tables(_cpticd_df, reg_df=SS.get("reg_df"))
                     if not cpticd_tbls:
                         st.warning("CPT/ICD file loaded, but required columns were not detected. Skipping CPT/ICD tables in bulk save.")
-            progress = st.progress(0.0)
+progress = st.progress(0.0)
             saved = 0
 
             # Detect Registration date col once for filtering
