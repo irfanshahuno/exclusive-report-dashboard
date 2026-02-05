@@ -1543,7 +1543,7 @@ if admin_mode:
                     cpticd_tbls = cpticd_tables(_cpticd_df, reg_df=SS.get("reg_df"))
                     if not cpticd_tbls:
                         st.warning("CPT/ICD file loaded, but required columns were not detected. Skipping CPT/ICD tables in bulk save.")
-progress = st.progress(0.0)
+            progress = st.progress(0.0)
             saved = 0
 
             # Detect Registration date col once for filtering
