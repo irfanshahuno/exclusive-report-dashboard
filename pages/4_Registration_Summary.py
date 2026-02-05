@@ -146,77 +146,51 @@ def load_income_details(uploaded_file) -> Optional[pd.DataFrame]:
 
 
 def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-    """Build Income Analysis (Doctor Revenue) tables from the uploaded
-    'Daily Collection Details' report.
-
-    Outputs (per grouping):
-      - Consultation, Lab, Procedure
-      - Total_Visit (unique Visit No)
-      - Total_Amount_Services = Consultation + Lab + Procedure
-      - Total_Amount_Insurance = numeric 'Insurance' amount column from the report
-      - Avg_Services, Avg_Insurance (per visit)
-      - Lab_% (based on services total)  [User selected option A]
-    """
     if df is None or df.empty:
         return {}
 
     col_dept = _find_col(df, ["Department"])
     col_doc  = _find_col(df, ["Doctor"])
-    # Prefer payer/name column first (usually "Insurance Name")
-    col_ins_name = _find_col(df, ["Insurance Name", "InsuranceName", "Payer", "Payer Name", "Insurance"])
+    col_ins  = _find_col(df, ["Insurance Name", "Ins Name", "Insurer", "Payer", "TPA", "InsuranceName"])
     col_visit= _find_col(df, ["Visit No", "VisitNo"])
     col_cons = _find_col(df, ["Consultation"])
     col_lab  = _find_col(df, ["Lab"])
     col_proc = _find_col(df, ["Procedure"])
 
-    needed = [col_doc, col_ins_name, col_visit, col_cons, col_lab, col_proc]
+    # Insurance numeric amount column in 'Daily Collection Details' is often labelled as "Insuance" (typo) or "Insurance"
+    col_ins_amt = _find_col(df, ["Insuance", "Insurance", "Insurance Amount", "Ins Amount", "Ins Amt", "Ins. Amount"])
+
+    needed = [col_doc, col_ins, col_ins_amt, col_visit, col_cons, col_lab, col_proc]
     if any(c is None for c in needed):
         return {}
 
-    # Detect numeric insurance amount column (your report has a separate column literally named "Insurance")
-    def _find_exact_col(name: str) -> Optional[str]:
-        if name is None:
-            return None
-        for c in df.columns:
-            if str(c).strip().lower() == str(name).strip().lower():
-                return c
-        return None
-
-    col_ins_amt = _find_exact_col("Insurance")  # numeric amount column in your EMC export
-    if col_ins_amt is None:
-        # fallback candidates if future report changes header
-        col_ins_amt = _find_col(df, ["Insurance Amount", "Ins Amount", "Ins Amt", "Insurance"])
-
     tmp = df.copy()
 
-    # Doctor is mandatory for any revenue attribution
-    tmp[col_doc] = tmp[col_doc].astype(str).str.strip()
-    tmp = tmp[~tmp[col_doc].str.lower().isin(["", "none", "nan"])].copy()
+    # ---- Cleaning (keep rows; don't drop, to preserve totals) ----
+    tmp[col_doc] = tmp[col_doc].fillna("UNKNOWN").astype(str).str.strip()
+    tmp[col_doc] = tmp[col_doc].replace({"": "UNKNOWN", "None": "UNKNOWN", "nan": "UNKNOWN", "NaN": "UNKNOWN"})
+    tmp[col_doc] = tmp[col_doc].where(~tmp[col_doc].str.lower().isin(["", "none", "nan"]), "UNKNOWN")
 
-    # Optional Department: drop blank departments (prevents 'None' grouping)
+    # Optional Department
     if col_dept:
-        tmp[col_dept] = tmp[col_dept].astype(str).str.strip()
-        tmp = tmp[~tmp[col_dept].str.lower().isin(["", "none", "nan"])].copy()
+        tmp[col_dept] = tmp[col_dept].fillna("UNKNOWN").astype(str).str.strip()
+        tmp[col_dept] = tmp[col_dept].where(~tmp[col_dept].str.lower().isin(["", "none", "nan"]), "UNKNOWN")
 
-    # Insurance NAME: blanks treated as CASH
-    tmp[col_ins_name] = tmp[col_ins_name].fillna("CASH").astype(str).str.strip().replace("", "CASH")
+    # Insurance name: blanks treated as CASH
+    tmp[col_ins] = tmp[col_ins].fillna("CASH").astype(str).str.strip().replace("", "CASH")
 
-    # Visit
-    tmp[col_visit] = tmp[col_visit].astype(str).str.strip()
+    # Visit: must exist for counting visits
+    tmp[col_visit] = tmp[col_visit].fillna("").astype(str).str.strip()
     tmp = tmp[tmp[col_visit] != ""].copy()
 
-    # Numeric service columns
+
     for c in [col_cons, col_lab, col_proc]:
         tmp[c] = pd.to_numeric(tmp[c], errors="coerce").fillna(0.0)
 
-    # Totals
+    tmp[col_visit] = tmp[col_visit].astype(str).str.strip()
     tmp["_total_services"] = tmp[col_cons] + tmp[col_lab] + tmp[col_proc]
+    tmp["_total_insurance"] = pd.to_numeric(tmp[col_ins_amt], errors="coerce").fillna(0.0) if col_ins_amt else 0.0
 
-    if col_ins_amt and col_ins_amt in tmp.columns:
-        tmp["_total_insurance"] = pd.to_numeric(tmp[col_ins_amt], errors="coerce").fillna(0.0)
-    else:
-        # If insurance amount column is missing, fall back to 0 (keeps tables valid)
-        tmp["_total_insurance"] = 0.0
 
     def _agg(group_cols: List[str]) -> pd.DataFrame:
         g = tmp.groupby(group_cols, dropna=False).agg(
@@ -227,11 +201,9 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
             Total_Amount_Services=("_total_services", "sum"),
             Total_Amount_Insurance=("_total_insurance", "sum"),
         ).reset_index()
-
         g["Avg_Services"] = g["Total_Amount_Services"] / g["Total_Visit"].replace(0, pd.NA)
         g["Avg_Insurance"] = g["Total_Amount_Insurance"] / g["Total_Visit"].replace(0, pd.NA)
-
-        # Option A: Lab_% based on services total only
+        # Option A: Lab_% based on Services total only
         g["Lab_%"] = (g["Lab"] / g["Total_Amount_Services"].replace(0, pd.NA)) * 100
         return g
 
@@ -240,16 +212,15 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     else:
         doctor_wise = _agg([col_doc]).rename(columns={col_doc: "Doctor"})
 
-    insurance_wise = _agg([col_ins_name]).rename(columns={col_ins_name: "Insurance"})
-    doctor_ins_wise = _agg([col_doc, col_ins_name]).rename(columns={col_doc: "Doctor", col_ins_name: "Insurance"})
+    insurance_wise = _agg([col_ins]).rename(columns={col_ins: "Insurance"})
+    doctor_ins_wise = _agg([col_doc, col_ins]).rename(columns={col_doc: "Doctor", col_ins: "Insurance"})
 
     def _add_grand_total(d: pd.DataFrame, label_cols: List[str]) -> pd.DataFrame:
         if d.empty:
             return d
-
         total_visit = int(d["Total_Visit"].sum())
-        tot_services = float(d["Total_Amount_Services"].sum())
-        tot_ins = float(d["Total_Amount_Insurance"].sum())
+        total_services = float(d["Total_Amount_Services"].sum())
+        total_insurance = float(d["Total_Amount_Insurance"].sum())
         lab_sum = float(d["Lab"].sum())
 
         row = {c: "" for c in d.columns}
@@ -257,19 +228,15 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
             if lc in row:
                 row[lc] = "GRAND TOTAL"
                 break
-
         row["Consultation"] = float(d["Consultation"].sum())
         row["Lab"] = lab_sum
         row["Procedure"] = float(d["Procedure"].sum())
         row["Total_Visit"] = total_visit
-
-        row["Total_Amount_Services"] = tot_services
-        row["Total_Amount_Insurance"] = tot_ins
-
-        row["Avg_Services"] = (tot_services / total_visit) if total_visit else 0.0
-        row["Avg_Insurance"] = (tot_ins / total_visit) if total_visit else 0.0
-
-        row["Lab_%"] = (lab_sum / tot_services * 100) if tot_services else 0.0
+        row["Total_Amount_Services"] = total_services
+        row["Total_Amount_Insurance"] = total_insurance
+        row["Avg_Services"] = (total_services / total_visit) if total_visit else 0.0
+        row["Avg_Insurance"] = (total_insurance / total_visit) if total_visit else 0.0
+        row["Lab_%"] = (lab_sum / total_services * 100) if total_services else 0.0
         return pd.concat([d, pd.DataFrame([row])], ignore_index=True)
 
     doctor_wise = _add_grand_total(doctor_wise, ["Department", "Doctor"])
