@@ -209,16 +209,16 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     kpi = dfs.get("KPI")
     if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
         k = kpi.set_index("Metric")["Value"]
-
-        a, b, c, d = st.columns(4)
+        a, b, c = st.columns(3)
         a.metric("Total Visits", int(k.get("Total Visits", 0)))
-        b.metric("Unique EMR (Patients)", int(k.get("Unique EMR (Patients)", 0)))
-        c.metric("Unique Visit No", int(k.get("Unique Visit No", 0)))
-        d.metric("CashOut Patients", int(k.get("CashOut Patients", 0)))
+        b.metric("New Patients", int(k.get("New Patients", 0)))
+        c.metric("Established Patients", int(k.get("Established Patients", 0)))
 
-        e, f = st.columns(2)
-        e.metric("Pending Patients", int(k.get("Pending Patients", 0)))
-        f.metric("Generated", fmt_dt(datetime.now()))
+        d, e, f = st.columns(3)
+        d.metric("Follow Up", int(k.get("Follow Up", 0)))
+        e.metric("Unclassified Visits", int(k.get("Unclassified Visits", 0)))
+        f.metric("Pending Patients", int(k.get("Pending Patients", 0)))
+        st.caption(f"Generated: **{fmt_dt(datetime.now())}**")
     else:
         st.info("KPI is not available for this day.")
 
@@ -228,14 +228,11 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     st.subheader("Insurance Wise Visits")
     st.dataframe(dfs.get("Insurance Wise Visits", pd.DataFrame()), use_container_width=True, hide_index=True)
 
-    st.subheader("Employer Wise")
-    st.dataframe(dfs.get("Employer Wise", pd.DataFrame()), use_container_width=True, hide_index=True)
-
     st.subheader("Doctor Wise Visits")
     st.dataframe(dfs.get("Doctor Wise Visits", pd.DataFrame()), use_container_width=True, hide_index=True)
 
 
-    # -------------------- Income Analysis (Doctor Revenue) --------------------
+    # -------------------- Income Analysis (Doctor Revenue) -------------------- (Doctor Revenue) --------------------
     income_keys = [k for k in dfs.keys() if str(k).startswith("Income | ")]
     if income_keys:
         st.markdown("---")
@@ -289,47 +286,11 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
                 st.dataframe(df_f, use_container_width=True, hide_index=True)
 
 
-# ---------------------------
-# Employer duplicate correction function
-# ---------------------------
-def correct_employer_duplicates(df: pd.DataFrame, employer_col: str = "Employer") -> pd.DataFrame:
-    """
-    Fix common employer naming variations by standardizing them.
-    Returns DataFrame with corrected employer names.
-    """
-    if df.empty or employer_col not in df.columns:
-        return df
-    
-    # Make a copy to avoid modifying the original
-    df_corrected = df.copy()
-    
-    # Define common variations that should be standardized
-    corrections = {
-        # Add common corrections here
-        "HAL": "HAL",  # This ensures HAL variations like "HAL " or " HAL" are corrected
-        "MICROSOFT": "Microsoft",
-        "GOOGLE": "Google",
-        # Add more as needed
-    }
-    
-    def standardize_name(name):
-        if pd.isna(name):
-            return name
-        
-        name_str = str(name).strip().upper()
-        
-        # Apply specific corrections
-        for wrong, right in corrections.items():
-            if wrong.upper() in name_str or name_str == wrong.upper():
-                return right
-        
-        # General standardization
-        return str(name).strip()
-    
-    # Apply standardization
-    df_corrected[employer_col] = df_corrected[employer_col].apply(standardize_name)
-    
-    return df_corrected
+
+    st.subheader("Employer Wise")
+    st.dataframe(dfs.get("Employer Wise", pd.DataFrame()), use_container_width=True, hide_index=True)
+
+
 
 
 # ---------------------------
@@ -497,47 +458,42 @@ def load_and_aggregate(day_list: List[pd.Timestamp]) -> Optional[Dict[str, pd.Da
             continue
         frames = [d.get(k) for d in loaded if isinstance(d.get(k), pd.DataFrame)]
         agg[k] = aggregate_tables(frames)
-        
-        # Apply employer duplicate correction to "Employer Wise" table
-        if k == "Employer Wise" and not agg[k].empty:
-            agg[k] = correct_employer_duplicates(agg[k], "Employer")
-            # Re-aggregate after correction
-            if "Count" in agg[k].columns and "Employer" in agg[k].columns:
-                # Remove any totals before re-grouping
-                agg_k = agg[k].copy()
-                agg_k = agg_k[~agg_k["Employer"].astype(str).str.upper().isin(["TOTAL", "GRAND TOTAL"])]
-                # Re-group by corrected employer names
-                agg[k] = agg_k.groupby("Employer", as_index=False)["Count"].sum()
-                # Add TOTAL row back
-                total = int(agg[k]["Count"].sum()) if not agg[k].empty else 0
-                agg[k].loc[len(agg[k])] = {"Employer": "TOTAL", "Count": total}
 
     return agg
 
 
-if mode == "Daily":
-    # Use ONLY saved days (sync with stored data)
-    days_sorted = sorted(days)
-    latest = max(days_sorted)
-    SS.setdefault("daily_pick", latest.date())
+def _snap_to_saved(chosen: pd.Timestamp, saved: List[pd.Timestamp]) -> Tuple[pd.Timestamp, bool]:
+    """Return (snapped_day, was_snapped). Picks the nearest saved day <= chosen, else the earliest."""
+    if not saved:
+        return chosen, False
+    chosen = pd.to_datetime(chosen).normalize()
+    saved_sorted = sorted(pd.to_datetime(saved).tolist())
+    if chosen in saved_sorted:
+        return chosen, False
+    earlier = [d for d in saved_sorted if d <= chosen]
+    if earlier:
+        return earlier[-1], True
+    return saved_sorted[0], True
 
-    sel_day = st.selectbox(
-        "Select saved day",
-        options=[d.date() for d in days_sorted],
-        index=[d.date() for d in days_sorted].index(SS["daily_pick"]) if SS["daily_pick"] in [d.date() for d in days_sorted] else len(days_sorted)-1,
-        format_func=lambda x: pd.to_datetime(x).strftime("%d %b %Y"),
+
+min_day = pd.to_datetime(min(days)).normalize()
+max_day = pd.to_datetime(max(days)).normalize()
+
+if mode == "Daily":
+    chosen = st.date_input(
+        "Select day",
+        value=max_day.date(),
+        min_value=min_day.date(),
+        max_value=max_day.date(),
     )
-    SS["daily_pick"] = sel_day
-    picked = pd.to_datetime(sel_day).normalize()
+    picked, snapped = _snap_to_saved(pd.to_datetime(chosen), days)
+    if snapped:
+        st.info(f"No saved data for **{pd.to_datetime(chosen).strftime('%d %b %Y')}**. Showing nearest saved day: **{fmt_day(picked)}**")
 
     cache_key = f"daily:{picked.date().isoformat()}"
     if SS.get("loaded_key") != cache_key:
-        loaded = load_summary_from_s3(s3, cfg, root_prefix, picked)
-        # Apply employer duplicate correction for daily view
-        if loaded is not None and "Employer Wise" in loaded:
-            loaded["Employer Wise"] = correct_employer_duplicates(loaded["Employer Wise"], "Employer")
+        SS["loaded_summary"] = load_summary_from_s3(s3, cfg, root_prefix, picked)
         SS["loaded_key"] = cache_key
-        SS["loaded_summary"] = loaded
         SS["loaded_label"] = f"Current Day ({fmt_day(picked)})"
 
     if SS.get("loaded_summary") is not None:
@@ -547,76 +503,50 @@ if mode == "Daily":
         st.caption(f"Expected: {s3_key(root_prefix, picked.date().isoformat(), 'summary.pkl')}")
 
 elif mode == "Weekly":
-    # You said: select TWO dates then show the week/range summary
-    days_sorted = sorted(days)
-    day_dates = [d.date() for d in days_sorted]
-    latest_date = max(day_dates)
-
-    # Default range: last 7 saved days (or all if < 7)
-    default_start = day_dates[max(0, len(day_dates)-7)]
-    default_end = latest_date
-    SS.setdefault("week_start", default_start)
-    SS.setdefault("week_end", default_end)
-
     c1, c2 = st.columns(2)
     with c1:
-        start_d = st.selectbox(
-            "Week Start (saved day)",
-            options=day_dates,
-            index=day_dates.index(SS["week_start"]) if SS["week_start"] in day_dates else 0,
-            format_func=lambda x: pd.to_datetime(x).strftime("%d %b %Y"),
-        )
+        s_in = st.date_input("Week Start", value=max_day.date(), min_value=min_day.date(), max_value=max_day.date(), key="wk_start")
     with c2:
-        end_d = st.selectbox(
-            "Week End (saved day)",
-            options=day_dates,
-            index=day_dates.index(SS["week_end"]) if SS["week_end"] in day_dates else len(day_dates)-1,
-            format_func=lambda x: pd.to_datetime(x).strftime("%d %b %Y"),
-        )
+        e_in = st.date_input("Week End", value=max_day.date(), min_value=min_day.date(), max_value=max_day.date(), key="wk_end")
 
-    # Normalize and fix order
-    start_ts = pd.to_datetime(min(start_d, end_d)).normalize()
-    end_ts = pd.to_datetime(max(start_d, end_d)).normalize()
-    SS["week_start"], SS["week_end"] = start_ts.date(), end_ts.date()
+    start_d, s_snap = _snap_to_saved(pd.to_datetime(s_in), days)
+    end_d, e_snap = _snap_to_saved(pd.to_datetime(e_in), days)
+    if start_d > end_d:
+        start_d, end_d = end_d, start_d
 
-    week_days = [d for d in days_sorted if (d >= start_ts) and (d <= end_ts)]
+    selected = [d for d in days if (d >= start_d) and (d <= end_d)]
+    st.caption(f"Selected range: **{start_d.date().isoformat()} → {end_d.date().isoformat()}**  (saved days: {len(selected)})")
 
-    if not week_days:
-        st.warning("No saved days found in that selected range.")
+    if not selected:
+        st.warning("No saved days found in this range.")
     else:
-        start_w = start_ts.date().isoformat()
-        end_w = end_ts.date().isoformat()
-        st.caption(f"Selected range: **{start_w} → {end_w}**  (saved days: {len(week_days)})")
-
-        cache_key = f"week:{start_w}:{end_w}"
+        cache_key = f"range:{start_d.date().isoformat()}:{end_d.date().isoformat()}"
         if SS.get("loaded_key") != cache_key:
-            SS["loaded_summary"] = load_and_aggregate(week_days)
+            SS["loaded_summary"] = load_and_aggregate(selected)
             SS["loaded_key"] = cache_key
-            SS["loaded_label"] = f"Weekly Summary ({start_w} → {end_w})"
+            SS["loaded_label"] = f"Weekly Summary ({start_d.date().isoformat()} → {end_d.date().isoformat()})"
 
         if SS.get("loaded_summary") is not None:
             st.header(SS.get("loaded_label", "Weekly Summary"))
-            render_summary(SS["loaded_summary"], pd.to_datetime(max(week_days)))
-            st.info("Note: 'Unique EMR' for week is an approximate sum of daily unique EMR counts.")
+            render_summary(SS["loaded_summary"], pd.to_datetime(max(selected)))
         else:
-            st.warning("No summary.pkl files found for that range.")
+            st.warning("No summary.pkl files found in this range.")
 
 else:  # Monthly
-    base = pd.to_datetime(latest_day).normalize()
-    # Build available months from history
-    months = sorted({pd.to_datetime(d).strftime("%Y-%m") for d in days})
-    default_m = pd.to_datetime(base).strftime("%Y-%m")
-    sel_month = st.selectbox(
-        "Select Month",
-        options=months,
-        index=months.index(default_m) if default_m in months else len(months)-1
+    chosen = st.date_input(
+        "Select any date in the month",
+        value=max_day.date(),
+        min_value=min_day.date(),
+        max_value=max_day.date(),
+        key="mo_pick",
     )
-    d0 = pd.to_datetime(sel_month + "-01").normalize()
+    d0 = pd.to_datetime(chosen).normalize()
     month_days = days_in_month(d0)
 
     if not month_days:
         st.warning("No saved days found for that month.")
     else:
+        sel_month = d0.strftime("%Y-%m")
         start_m = min(month_days).date().isoformat()
         end_m = max(month_days).date().isoformat()
         st.caption(f"Month range: **{start_m} → {end_m}**  (saved days: {len(month_days)})")
@@ -630,11 +560,5 @@ else:  # Monthly
         if SS.get("loaded_summary") is not None:
             st.header(SS.get("loaded_label", "Monthly Summary"))
             render_summary(SS["loaded_summary"], pd.to_datetime(max(month_days)))
-            st.info("Note: 'Unique EMR' for month is an approximate sum of daily unique EMR counts.")
         else:
             st.warning("No summary.pkl files found for that month.")
-
-
-st.header("Accumulated (All Saved Days)")
-acc = add_cumulative(hist)
-st.dataframe(acc, use_container_width=True, hide_index=True)
