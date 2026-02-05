@@ -843,7 +843,7 @@ def excel_bytes_from_dfs(dfs: Dict[str, pd.DataFrame]) -> bytes:
 def _safe_filename(name: str, max_len: int = 80) -> str:
     """Make a filename-safe chunk (no slashes/illegal chars)."""
     name = str(name)
-    name = re.sub(r"[\\/:*?"<>|\n\r\t]+", "_", name)
+    name = re.sub(r'[\\/:*?"<>|\n\r\t]+', "_", name)
     name = re.sub(r"\s+", " ", name).strip()
     if len(name) > max_len:
         name = name[:max_len].rstrip()
