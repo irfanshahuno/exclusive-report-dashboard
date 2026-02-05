@@ -336,48 +336,14 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
                     elif win.startswith("Next"):
                         n = int(re.findall(r"\d+", win)[0])
                         df_f = df_f[(df_f["Days To Expiry"] >= 0) & (df_f["Days To Expiry"] <= n)]
-                # Employer filter (aligned with Employer Wise)
-                df_f = df_f.copy()
-                emp_ref = dfs.get("Employer Wise", pd.DataFrame())
-                employers_ref = []
-                if isinstance(emp_ref, pd.DataFrame) and (not emp_ref.empty) and ("Employer" in emp_ref.columns):
-                    employers_ref = [e for e in emp_ref["Employer"].dropna().unique().tolist() if str(e).strip() not in ["", "nan", "None"]]
-
-                def _clean_emp(x):
-                    return re.sub(r"[^A-Z0-9]+", " ", str(x).upper()).strip()
-
-                _PREFIX_ALIAS = [
-                    ("ARCO", "ARCO"),
-                    ("EXEED", "EXCEED"),
-                    ("EXCEED", "EXCEED"),
-                    ("EXCEE", "EXCEED"),
-                    ("QUMRA", "QAMRA"),
-                    ("QAMARA", "QAMRA"),
-                    ("QAMRA", "QAMRA"),
-                ]
-
-                def _map_employer(val: object) -> str:
-                    s = _clean_emp(val)
-                    for p, canon in _PREFIX_ALIAS:
-                        if s.startswith(p):
-                            return canon
-                    if employers_ref:
-                        for e in employers_ref:
-                            ce = _clean_emp(e)
-                            if not ce:
-                                continue
-                            if s.startswith(ce) or ce.startswith(s):
-                                return e
-                    return str(val)
-
+                # company filter
                 if "Company" in df_f.columns:
-                    df_f["Employer"] = df_f["Company"].apply(_map_employer)
-
-                    emps = sorted([c for c in df_f["Employer"].dropna().unique() if str(c).strip() not in ["", "nan", "None"]])
-                    pick_e = st.selectbox("Employer", options=["All"] + emps, key=f"exp_emp_{str(day_ts)}")
-                    if pick_e != "All":
-                        df_f = df_f[df_f["Employer"] == pick_e]
+                    comps = sorted([c for c in df_f["Company"].dropna().unique() if str(c).strip() not in ["", "nan", "None"]])
+                    pick_c = st.selectbox("Company", options=["All"] + comps, key=f"exp_comp_{str(day_ts)}")
+                    if pick_c != "All":
+                        df_f = df_f[df_f["Company"] == pick_c]
                 st.dataframe(df_f, use_container_width=True, hide_index=True)
+
         with tabs[3]:
             st.subheader("Top Diagnosis (Doctor)")
             c1, c2 = st.columns(2)
@@ -398,9 +364,82 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
                 st.markdown("**Secondary DX (Top 1)**")
                 st.dataframe(df_co_sec if df_co_sec is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
     st.subheader("Employer Wise")
-    st.dataframe(dfs.get("Employer Wise", pd.DataFrame()), use_container_width=True, hide_index=True)
+    emp_df = dfs.get("Employer Wise", pd.DataFrame()).copy()
 
+    # Add dominant Expiry Date per Employer from CPT/ICD report (Option B: only non-null expiry dates)
+    df_exp_all = dfs.get("CPTICD | Employer Expiry Tracker")
+    exp_map = {}
+    today = date.today()
 
+    def _norm_txt(x: str) -> str:
+        s = str(x or "").strip().upper()
+        s = re.sub(r"\s+", " ", s)
+        return s
+
+    # Basic aliases/prefix merges (same idea as Employer Wise)
+    PREFIX_ALIAS = [
+        ("ARCO", "ARCO"),
+        ("EXEED", "EXCEED"),
+        ("EXCEED", "EXCEED"),
+        ("QUMRA", "QAMRA"),
+        ("QAMARA", "QAMRA"),
+        ("QAMRA", "QAMRA"),
+    ]
+
+    def _map_company_to_employer(company: str) -> str:
+        c = _norm_txt(company)
+        for pfx, canon in PREFIX_ALIAS:
+            if c.startswith(pfx):
+                return canon
+        return c  # fallback (still useful)
+
+    if df_exp_all is not None and not df_exp_all.empty and "Company" in df_exp_all.columns:
+        exp = df_exp_all.copy()
+        # Parse expiry date
+        if "Expiry Date" in exp.columns:
+            exp["_expiry_date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce").dt.date
+        elif "Expiry" in exp.columns:
+            exp["_expiry_date"] = pd.to_datetime(exp["Expiry"], errors="coerce").dt.date
+        else:
+            exp["_expiry_date"] = pd.NaT
+
+        exp["Employer"] = exp["Company"].map(_map_company_to_employer)
+
+        # For each employer present in Employer Wise table, pick dominant expiry date (>=70%) among non-null dates
+        if not emp_df.empty and "Employer" in emp_df.columns:
+            for emp in emp_df["Employer"].dropna().astype(str).unique().tolist():
+                emp_key = _norm_txt(emp)
+                dates = exp.loc[exp["Employer"] == emp_key, "_expiry_date"].dropna()
+                if len(dates) == 0:
+                    continue
+                vc = dates.value_counts()
+                top_date = vc.index[0]
+                pct = float(vc.iloc[0]) / float(len(dates))
+                if pct >= 0.70:
+                    exp_map[emp_key] = top_date
+                else:
+                    exp_map[emp_key] = "Mixed"
+
+    if emp_df is None or emp_df.empty:
+        st.dataframe(emp_df if emp_df is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+    else:
+        # Attach Expiry column
+        if "Employer" in emp_df.columns:
+            emp_df["Expiry Date"] = emp_df["Employer"].map(lambda e: exp_map.get(_norm_txt(e), ""))
+        else:
+            emp_df["Expiry Date"] = ""
+
+        # Styling: turn red if expiry is within 30 days (or already expired)
+        def _style_exp(v):
+            if isinstance(v, date):
+                d = (v - today).days
+                if d <= 30:
+                    return "color: red; font-weight: 700;"
+            return ""
+
+        show_df = emp_df.copy()
+        sty = show_df.style.applymap(_style_exp, subset=["Expiry Date"])
+        st.dataframe(sty, use_container_width=True, hide_index=True)
 
 
 # ---------------------------
