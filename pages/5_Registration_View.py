@@ -286,15 +286,16 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
                 st.dataframe(df_f, use_container_width=True, hide_index=True)
 
 
-
-    
-
     # -------------------- CPT / ICD Analysis --------------------
     cpticd_keys = [k for k in dfs.keys() if str(k).startswith("CPTICD | ")]
     if cpticd_keys:
         st.markdown("---")
         st.header("CPT / ICD Analysis")
-
+        
+        # Debug: Show available CPT/ICD keys
+        with st.expander("Debug: Available CPT/ICD Tables", expanded=False):
+            st.write("Available CPT/ICD tables:", cpticd_keys)
+        
         # Pick known tables
         df_docco_pri = dfs.get("CPTICD | Doctor x Company | Principal DX (Top1)")
         df_docco_sec = dfs.get("CPTICD | Doctor x Company | Secondary DX (Top1)")
@@ -304,7 +305,19 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
         df_doc_sec    = dfs.get("CPTICD | Doctor | Secondary DX (Top1)")
         df_co_pri     = dfs.get("CPTICD | Company | Principal DX (Top1)")
         df_co_sec     = dfs.get("CPTICD | Company | Secondary DX (Top1)")
-
+        
+        # Debug: Check if expiry tracker was found
+        with st.expander("Debug: Expiry Tracker", expanded=False):
+            if df_exp is None or df_exp.empty:
+                st.warning("Employer Expiry Tracker NOT FOUND or empty")
+                st.write("Looking for key: 'CPTICD | Employer Expiry Tracker'")
+            else:
+                st.success("Employer Expiry Tracker FOUND")
+                st.write(f"Shape: {df_exp.shape}")
+                st.write("Columns:", df_exp.columns.tolist())
+                st.write("Sample data:")
+                st.dataframe(df_exp.head())
+        
         tabs = st.tabs(["Doctor x Company", "CPT Mapping", "Employer Expiry", "Doctor Wise", "Company Wise"])
 
         with tabs[0]:
@@ -363,71 +376,16 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
             with c2:
                 st.markdown("**Secondary DX (Top 1)**")
                 st.dataframe(df_co_sec if df_co_sec is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+    
     st.subheader("Employer Wise")
     emp_df = dfs.get("Employer Wise", pd.DataFrame()).copy()
 
     # ---------------------------
     # Expiry summary (from CPT/ICD data)
     # ---------------------------
-    # We try to find an expiry source table. Priority:
-    # 1) A table whose name includes both 'expiry' and 'employer'
-    # 2) Any table whose name includes 'expiry'
-    # 3) Any table that contains an expiry-date column + an employer/company column
-    df_exp_all = None
-    df_exp_all_key = None
-
-    def _norm_colname(c: str) -> str:
-        c = str(c or "").strip().lower()
-        c = re.sub(r"\s+", "", c)
-        c = c.replace("_", "").replace("-", "")
-        return c
-
-    def _find_col_in_df(df: pd.DataFrame, candidates):
-        cols_norm = {_norm_colname(c): c for c in df.columns}
-        for cand in candidates:
-            n = _norm_colname(cand)
-            if n in cols_norm:
-                return cols_norm[n]
-        # contains match
-        for cand in candidates:
-            n = _norm_colname(cand)
-            for k, orig in cols_norm.items():
-                if n in k:
-                    return orig
-        return None
-
-    EXP_CANDS = ["Expiry Date","Expiry","Insurance Expiry","Employee Expiry","Card Expiry","ExpiryDate","EmployeeExpiry","InsuranceExpiry","CardExpiry"]
-    EMP_CANDS = ["Employer","Company","Employer Name","Company Name","Sponsor","EmployerName","CompanyName"]
-
-    # Pass 1: key has employer+expiry
-    for _k, _v in dfs.items():
-        if isinstance(_k, str) and "expiry" in _k.lower() and "employer" in _k.lower():
-            if isinstance(_v, pd.DataFrame) and not _v.empty:
-                df_exp_all = _v
-                df_exp_all_key = _k
-                break
-
-    # Pass 2: key has expiry
-    if df_exp_all is None:
-        for _k, _v in dfs.items():
-            if isinstance(_k, str) and "expiry" in _k.lower():
-                if isinstance(_v, pd.DataFrame) and not _v.empty:
-                    df_exp_all = _v
-                    df_exp_all_key = _k
-                    break
-
-    # Pass 3: any df with both expiry+employer columns
-    if df_exp_all is None:
-        for _k, _v in dfs.items():
-            if not isinstance(_v, pd.DataFrame) or _v.empty:
-                continue
-            c_exp = _find_col_in_df(_v, EXP_CANDS)
-            c_emp = _find_col_in_df(_v, EMP_CANDS)
-            if c_exp and c_emp:
-                df_exp_all = _v
-                df_exp_all_key = _k
-                break
-
+    # Look for the CPT/ICD expiry tracker table
+    df_exp_all = dfs.get("CPTICD | Employer Expiry Tracker", pd.DataFrame())
+    
     exp_map_display = {}   # Employer -> display string
     exp_map_date = {}      # Employer -> top expiry date (date) for styling (if available)
     today = date.today()
@@ -457,34 +415,24 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     if df_exp_all is not None and not df_exp_all.empty:
         exp = df_exp_all.copy()
 
-        # Detect company/employer column in the expiry table (robust)
-        cols_norm = {_norm_colname(c): c for c in exp.columns}
-
-
-        def _pick_col(candidates):
-            for cand in candidates:
-                n = _norm_colname(cand)
-                if n in cols_norm:
-                    return cols_norm[n]
-            # try contains
-            for cand in candidates:
-                n = _norm_colname(cand)
-                for k, orig in cols_norm.items():
-                    if n in k:
-                        return orig
-            return None
-
-        col_company = _pick_col(["Employer","Company","Employer Name","Company Name","Sponsor","EmployerName","CompanyName"])
-        col_exp = _pick_col(["Expiry Date","Expiry","Insurance Expiry","Employee Expiry","Card Expiry","ExpiryDate","EmployeeExpiry","InsuranceExpiry","CardExpiry"])
-
-        if col_company and col_exp:
-            exp["_expiry_date"] = pd.to_datetime(exp[col_exp], errors="coerce").dt.date
-            exp["Employer"] = exp[col_company].map(_map_company_to_employer)
+        # Check if we have the expected columns
+        if "Employer" in exp.columns and "Expiry Date" in exp.columns:
+            exp["_expiry_date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce").dt.date
+            exp["Employer_Norm"] = exp["Employer"].apply(_norm_txt)
 
             if not emp_df.empty and "Employer" in emp_df.columns:
                 for emp in emp_df["Employer"].dropna().astype(str).unique().tolist():
                     emp_key = _norm_txt(emp)
-                    dates = exp.loc[exp["Employer"] == emp_key, "_expiry_date"].dropna()
+                    
+                    # Try to find matching employer in expiry data
+                    matching_exp = exp[exp["Employer_Norm"] == emp_key]
+                    
+                    if matching_exp.empty:
+                        # Try fuzzy matching with prefix aliases
+                        canonical_emp = _map_company_to_employer(emp_key)
+                        matching_exp = exp[exp["Employer_Norm"] == canonical_emp]
+                    
+                    dates = matching_exp["_expiry_date"].dropna()
 
                     # Option B: denominator = only non-null expiry dates
                     if len(dates) == 0:
@@ -533,7 +481,6 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
             st.dataframe(sty, use_container_width=True, hide_index=True)
         except Exception:
             st.dataframe(show_df, use_container_width=True, hide_index=True)
-
 
 
 # ---------------------------
