@@ -422,12 +422,12 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
 
         if col_company and col_exp:
             exp["_expiry_date"] = pd.to_datetime(exp[col_exp], errors="coerce").dt.date
-            exp["Employer"] = exp[col_company].map(_map_company_to_employer)
+            exp["Employer_norm"] = exp[col_company].astype(str).map(_norm_txt)
 
             if not emp_df.empty and "Employer" in emp_df.columns:
                 for emp in emp_df["Employer"].dropna().astype(str).unique().tolist():
                     emp_key = _norm_txt(emp)
-                    dates = exp.loc[exp["Employer"] == emp_key, "_expiry_date"].dropna()
+                    dates = exp.loc[exp["Employer_norm"] == emp_key, "_expiry_date"].dropna()
 
                     # Option B: denominator = only non-null expiry dates
                     if len(dates) == 0:
