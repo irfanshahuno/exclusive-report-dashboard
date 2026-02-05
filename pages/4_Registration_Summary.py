@@ -453,8 +453,8 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     if "Name" not in exp.columns:
         exp["Name"] = ""
     # de-dup per EMR/company expiry
-    exp = exp.drop_duplicates(subset=["Company","EMR No","Expiry Date"])
-    exp = exp.sort_values(["Days To Expiry","Company","Name"], ascending=[True, True, True]).reset_index(drop=True)
+    exp = exp.drop_duplicates(subset=["Employer","EMR No","Expiry Date"])
+    exp = exp.sort_values(["Days To Expiry","Employer","Name"], ascending=[True, True, True]).reset_index(drop=True)
 
     return {
         "Doctor x Company | Principal DX (Top1)": docco_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
@@ -1556,8 +1556,9 @@ if admin_mode:
                     cpticd_tbls = cpticd_tables(_cpticd_df, reg_df=SS.get("reg_df"))
                     if not cpticd_tbls:
                         st.warning("CPT/ICD file loaded, but required columns were not detected. Skipping CPT/ICD tables in bulk save.")
-            progress = st.progress(0.0)
+progress = st.progress(0.0)
             saved = 0
+
             # Detect Registration date col once for filtering
             reg_date_col = _find_col(SS["reg_df"], ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
             s_raw = SS["reg_df"][reg_date_col] if reg_date_col else None
