@@ -363,7 +363,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
             with c2:
                 st.markdown("**Secondary DX (Top 1)**")
                 st.dataframe(df_co_sec if df_co_sec is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
-st.subheader("Employer Wise")
+    st.subheader("Employer Wise")
     st.dataframe(dfs.get("Employer Wise", pd.DataFrame()), use_container_width=True, hide_index=True)
 
 
