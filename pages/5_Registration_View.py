@@ -369,12 +369,63 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     # ---------------------------
     # Expiry summary (from CPT/ICD data)
     # ---------------------------
-    # We try to find the expiry tracker table even if the key name changes slightly.
+    # We try to find an expiry source table. Priority:
+    # 1) A table whose name includes both 'expiry' and 'employer'
+    # 2) Any table whose name includes 'expiry'
+    # 3) Any table that contains an expiry-date column + an employer/company column
     df_exp_all = None
+    df_exp_all_key = None
+
+    def _norm_colname(c: str) -> str:
+        c = str(c or "").strip().lower()
+        c = re.sub(r"\s+", "", c)
+        c = c.replace("_", "").replace("-", "")
+        return c
+
+    def _find_col_in_df(df: pd.DataFrame, candidates):
+        cols_norm = {_norm_colname(c): c for c in df.columns}
+        for cand in candidates:
+            n = _norm_colname(cand)
+            if n in cols_norm:
+                return cols_norm[n]
+        # contains match
+        for cand in candidates:
+            n = _norm_colname(cand)
+            for k, orig in cols_norm.items():
+                if n in k:
+                    return orig
+        return None
+
+    EXP_CANDS = ["Expiry Date","Expiry","Insurance Expiry","Employee Expiry","Card Expiry","ExpiryDate","EmployeeExpiry","InsuranceExpiry","CardExpiry"]
+    EMP_CANDS = ["Employer","Company","Employer Name","Company Name","Sponsor","EmployerName","CompanyName"]
+
+    # Pass 1: key has employer+expiry
     for _k, _v in dfs.items():
         if isinstance(_k, str) and "expiry" in _k.lower() and "employer" in _k.lower():
             if isinstance(_v, pd.DataFrame) and not _v.empty:
                 df_exp_all = _v
+                df_exp_all_key = _k
+                break
+
+    # Pass 2: key has expiry
+    if df_exp_all is None:
+        for _k, _v in dfs.items():
+            if isinstance(_k, str) and "expiry" in _k.lower():
+                if isinstance(_v, pd.DataFrame) and not _v.empty:
+                    df_exp_all = _v
+                    df_exp_all_key = _k
+                    break
+
+    # Pass 3: any df with both expiry+employer columns
+    if df_exp_all is None:
+        for _k, _v in dfs.items():
+            if not isinstance(_v, pd.DataFrame) or _v.empty:
+                continue
+            c_exp = _find_col_in_df(_v, EXP_CANDS)
+            c_emp = _find_col_in_df(_v, EMP_CANDS)
+            if c_exp and c_emp:
+                df_exp_all = _v
+                df_exp_all_key = _k
                 break
 
     exp_map_display = {}   # Employer -> display string
@@ -407,14 +458,8 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
         exp = df_exp_all.copy()
 
         # Detect company/employer column in the expiry table (robust)
-        def _norm_colname(c: str) -> str:
-            c = str(c or "").strip().lower()
-            c = re.sub(r"\s+", "", c)
-            c = c.replace("_", "")
-            c = c.replace("-", "")
-            return c
-
         cols_norm = {_norm_colname(c): c for c in exp.columns}
+
 
         def _pick_col(candidates):
             for cand in candidates:
