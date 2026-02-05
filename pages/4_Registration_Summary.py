@@ -81,8 +81,21 @@ EMPLOYER_ALIAS = {
 # Useful for cases like ARCO where you want to keep ONLY the initial keyword.
 EMPLOYER_PREFIX_ALIAS = [
     ("arco", "ARCO"),
-]
 
+    # QAMRA / QUMRA / QAMARA variations
+    ("qamra", "QAMRA"),
+    ("qamara", "QAMRA"),
+    ("qumra", "QAMRA"),
+
+    # EXCEED / EXEED variations
+    ("exceed", "EXCEED"),
+    ("exeed", "EXCEED"),
+    ("excee", "EXCEED"),
+
+    # Strong merge for the specific company name
+    ("exceed precast", "EXCEED PRECAST"),
+    ("exeed precast", "EXCEED PRECAST"),
+]
 def _norm_col(c: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(c).strip().lower())
 
@@ -527,12 +540,19 @@ def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_c
             out.groupby("Employer", as_index=False)
             .agg(Count=("Count", "sum"), Insurance=("Insurance", _mode_or_first))
             .sort_values("Count", ascending=False)
-            .head(n)
             .reset_index(drop=True)
         )
 
-    total = int(out["Count"].sum()) if not out.empty else 0
-    out.loc[len(out)] = ["TOTAL", total, ""]
+    # Keep table readable but make TOTAL consistent with overall visits
+    grand_total = int(out["Count"].sum()) if not out.empty else 0
+    if n and len(out) > n:
+        top = out.head(n).copy()
+        others = int(out.iloc[n:]["Count"].sum())
+        if others > 0:
+            top.loc[len(top)] = ["OTHERS", others, ""]
+        out = top.reset_index(drop=True)
+
+    out.loc[len(out)] = ["TOTAL", grand_total, ""]
     return out
 
 
@@ -845,42 +865,25 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
     unique_emr = int(pd.Series(reg_df[emr_col]).nunique(dropna=True))
     unique_visitno = int(pd.Series(reg_df[visit_col]).nunique(dropna=True))
 
-    # Calculate New vs Established visits from Visit Type
-    new_visits = "N/A"
-    established_visits = "N/A"
-    
+    # Calculate New / Established / Follow Up from Visit Type
+    new_visits = 0
+    established_visits = 0
+    follow_up_visits = 0
+
     if visit_type_col and visit_type_col in reg_df.columns:
-        # Clean and categorize visit types
-        visit_types = reg_df[visit_type_col].astype(str).str.lower().str.strip().fillna('')
-        
-        # Create masks for new and established visits
-        # New Visits: contains 'consultation' but NOT 'established', 'estd', or 'follow'
-        new_mask = (
-            visit_types.str.contains('consultation') & 
-            ~visit_types.str.contains('established') &
-            ~visit_types.str.contains('estd') &
-            ~visit_types.str.contains('follow')
-        )
-        
-        # Established Visits: contains 'established', 'estd', 'follow up', or 'follow-up'
-        est_mask = (
-            visit_types.str.contains('established') | 
-            visit_types.str.contains('estd') |
-            visit_types.str.contains('follow up') |
-            visit_types.str.contains('follow-up')
-        )
-        
-        # Count using boolean masks
-        new_visits = int(new_mask.sum())
+        vt = reg_df[visit_type_col].astype(str).str.lower().str.strip().fillna("")
+
+        follow_mask = vt.str.contains(r"\bfollow\b")  # follow up / follow-up
+        est_mask = (~follow_mask) & (vt.str.contains(r"\bestablished\b") | vt.str.contains(r"\bestd\b"))
+        new_mask = (~follow_mask) & (~est_mask) & (vt.str.len() > 0)
+
+        follow_up_visits = int(follow_mask.sum())
         established_visits = int(est_mask.sum())
-        
-        # If not found with patterns, use simpler logic
-        if new_visits == 0 and established_visits == 0:
-            # Try exact matches
-            new_exact_mask = visit_types.isin(['consultation', 'new', 'first visit', 'new patient'])
-            est_exact_mask = visit_types.isin(['consultation (established)', 'established', 'return', 'follow up', 'follow-up', 'review'])
-            new_visits = int(new_exact_mask.sum())
-            established_visits = int(est_exact_mask.sum())
+        new_visits = int(new_mask.sum())
+
+    unclassified_visits = int(total_visits - (new_visits + established_visits + follow_up_visits))
+    if unclassified_visits < 0:
+        unclassified_visits = 0
 
     cash_emr = ensure_required(cash_df, ["EMRNo"], "CashOut")["EMRNo"]
     pend_emr = ensure_required(pend_df, ["EMRNo"], "Pending")["EMRNo"]
@@ -900,8 +903,10 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
     kpi_data = [
         {"Metric": "Day", "Value": day_ts.date().isoformat()},
         {"Metric": "Total Visits", "Value": total_visits},
-        {"Metric": "New Visits", "Value": new_visits},
-        {"Metric": "Established Visits", "Value": established_visits},
+        {"Metric": "New Patients", "Value": new_visits},
+        {"Metric": "Established Patients", "Value": established_visits},
+        {"Metric": "Follow Up", "Value": follow_up_visits},
+        {"Metric": "Unclassified Visits", "Value": unclassified_visits},
         {"Metric": "Pending Patients", "Value": pending_patients},
     ]
 
