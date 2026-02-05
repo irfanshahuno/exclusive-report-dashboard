@@ -286,16 +286,15 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
                 st.dataframe(df_f, use_container_width=True, hide_index=True)
 
 
+
+    
+
     # -------------------- CPT / ICD Analysis --------------------
     cpticd_keys = [k for k in dfs.keys() if str(k).startswith("CPTICD | ")]
     if cpticd_keys:
         st.markdown("---")
         st.header("CPT / ICD Analysis")
-        
-        # Debug: Show available CPT/ICD keys
-        with st.expander("Debug: Available CPT/ICD Tables", expanded=False):
-            st.write("Available CPT/ICD tables:", cpticd_keys)
-        
+
         # Pick known tables
         df_docco_pri = dfs.get("CPTICD | Doctor x Company | Principal DX (Top1)")
         df_docco_sec = dfs.get("CPTICD | Doctor x Company | Secondary DX (Top1)")
@@ -305,19 +304,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
         df_doc_sec    = dfs.get("CPTICD | Doctor | Secondary DX (Top1)")
         df_co_pri     = dfs.get("CPTICD | Company | Principal DX (Top1)")
         df_co_sec     = dfs.get("CPTICD | Company | Secondary DX (Top1)")
-        
-        # Debug: Check if expiry tracker was found
-        with st.expander("Debug: Expiry Tracker", expanded=False):
-            if df_exp is None or df_exp.empty:
-                st.warning("Employer Expiry Tracker NOT FOUND or empty")
-                st.write("Looking for key: 'CPTICD | Employer Expiry Tracker'")
-            else:
-                st.success("Employer Expiry Tracker FOUND")
-                st.write(f"Shape: {df_exp.shape}")
-                st.write("Columns:", df_exp.columns.tolist())
-                st.write("Sample data:")
-                st.dataframe(df_exp.head())
-        
+
         tabs = st.tabs(["Doctor x Company", "CPT Mapping", "Employer Expiry", "Doctor Wise", "Company Wise"])
 
         with tabs[0]:
@@ -376,111 +363,132 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
             with c2:
                 st.markdown("**Secondary DX (Top 1)**")
                 st.dataframe(df_co_sec if df_co_sec is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
-    
     st.subheader("Employer Wise")
     emp_df = dfs.get("Employer Wise", pd.DataFrame()).copy()
 
-    # ---------------------------
-    # Expiry summary (from CPT/ICD data)
-    # ---------------------------
-    # Look for the CPT/ICD expiry tracker table
-    df_exp_all = dfs.get("CPTICD | Employer Expiry Tracker", pd.DataFrame())
-    
-    exp_map_display = {}   # Employer -> display string
-    exp_map_date = {}      # Employer -> top expiry date (date) for styling (if available)
+    # --- Employer expiry summary (STRICT employer from Registration, expiry from CPT/ICD) ---
+    # We expect the uploader to save a tracker table that includes at least:
+    #   Employer (from RegistrationList "Employer Name") + Expiry Date (from CPT/ICD file)
+    # But to be robust, we also fall back to any table that contains an Employer-like column and an Expiry column.
+    def _pick_expiry_df(dfs_dict: dict) -> pd.DataFrame | None:
+        # 1) Prefer explicit tracker key
+        for k, v in dfs_dict.items():
+            if isinstance(v, pd.DataFrame) and "expiry" in str(k).lower() and "tracker" in str(k).lower():
+                return v
+        # 2) Any key mentioning expiry
+        for k, v in dfs_dict.items():
+            if isinstance(v, pd.DataFrame) and "expiry" in str(k).lower():
+                return v
+        # 3) Any DF that has expiry+employer columns
+        for _, v in dfs_dict.items():
+            if not isinstance(v, pd.DataFrame) or v.empty:
+                continue
+            cols = [c.lower().strip() for c in v.columns]
+            if any("expiry" in c for c in cols) and any(c in ("employer", "employer name") or "employer" in c for c in cols):
+                return v
+        return None
+
+    df_exp_all = _pick_expiry_df(dfs)
+
+    exp_display_map: dict[str, str] = {}
+    exp_top_date_map: dict[str, date | None] = {}
     today = date.today()
 
-    def _norm_txt(x: str) -> str:
+    def _norm_emp(x: str) -> str:
         s = str(x or "").strip().upper()
         s = re.sub(r"\s+", " ", s)
         return s
 
-    # Basic aliases/prefix merges (same idea as Employer Wise)
-    PREFIX_ALIAS = [
-        ("ARCO", "ARCO"),
-        ("EXEED", "EXCEED"),
-        ("EXCEED", "EXCEED"),
-        ("QUMRA", "QAMRA"),
-        ("QAMARA", "QAMRA"),
-        ("QAMRA", "QAMRA"),
-    ]
-
-    def _map_company_to_employer(company: str) -> str:
-        c = _norm_txt(company)
-        for pfx, canon in PREFIX_ALIAS:
-            if c.startswith(pfx):
-                return canon
-        return c  # fallback
-
-    if df_exp_all is not None and not df_exp_all.empty:
+    if df_exp_all is not None and not df_exp_all.empty and not emp_df.empty and "Employer" in emp_df.columns:
         exp = df_exp_all.copy()
 
-        # Check if we have the expected columns
-        if "Employer" in exp.columns and "Expiry Date" in exp.columns:
-            exp["_expiry_date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce").dt.date
-            exp["Employer_Norm"] = exp["Employer"].apply(_norm_txt)
+        # Detect employer column in tracker (STRICT: should already be Employer from RegistrationList)
+        emp_col = None
+        for c in exp.columns:
+            cl = str(c).strip().lower()
+            if cl == "employer" or cl == "employer name" or "employer" in cl:
+                emp_col = c
+                break
 
-            if not emp_df.empty and "Employer" in emp_df.columns:
-                for emp in emp_df["Employer"].dropna().astype(str).unique().tolist():
-                    emp_key = _norm_txt(emp)
-                    
-                    # Try to find matching employer in expiry data
-                    matching_exp = exp[exp["Employer_Norm"] == emp_key]
-                    
-                    if matching_exp.empty:
-                        # Try fuzzy matching with prefix aliases
-                        canonical_emp = _map_company_to_employer(emp_key)
-                        matching_exp = exp[exp["Employer_Norm"] == canonical_emp]
-                    
-                    dates = matching_exp["_expiry_date"].dropna()
+        # Detect expiry column
+        exp_col = None
+        for c in exp.columns:
+            cl = str(c).strip().lower()
+            if "expiry" in cl and ("date" in cl or cl == "expiry"):
+                exp_col = c
+                break
+        if exp_col is None:
+            # fallback: any column containing 'expiry'
+            for c in exp.columns:
+                if "expiry" in str(c).strip().lower():
+                    exp_col = c
+                    break
 
-                    # Option B: denominator = only non-null expiry dates
-                    if len(dates) == 0:
-                        exp_map_display[emp_key] = ""
-                        continue
+        if emp_col and exp_col:
+            exp[emp_col] = exp[emp_col].astype(str).map(_norm_emp)
+            exp["_expiry_date"] = pd.to_datetime(exp[exp_col], errors="coerce").dt.date
 
-                    vc = dates.value_counts()
-                    top_date = vc.index[0]
-                    pct = float(vc.iloc[0]) / float(len(dates))
+            # Option B: base % only on valid (non-null) expiry dates
+            for emp in emp_df["Employer"].dropna().astype(str).unique().tolist():
+                emp_key = _norm_emp(emp)
+                sub = exp.loc[exp[emp_col] == emp_key, "_expiry_date"].dropna()
+                if sub.empty:
+                    exp_display_map[emp_key] = ""
+                    exp_top_date_map[emp_key] = None
+                    continue
 
-                    exp_map_date[emp_key] = top_date
+                vc = sub.value_counts()
+                top_date = vc.index[0]
+                top_count = int(vc.iloc[0])
+                total_valid = int(vc.sum())
+                pct = (top_count / total_valid) * 100.0 if total_valid else 0.0
 
-                    if pct >= 0.70:
-                        exp_map_display[emp_key] = top_date.strftime("%Y-%m-%d")
-                    else:
-                        exp_map_display[emp_key] = f"Mixed (Top: {top_date.strftime('%Y-%m-%d')} – {pct*100:.0f}%)"
+                if pct >= 70.0:
+                    display = top_date.strftime("%Y-%m-%d")
+                else:
+                    display = f"Mixed (Top: {top_date.strftime('%Y-%m-%d')} – {int(round(pct))}%)"
 
-    # ---------------------------
-    # Render table
-    # ---------------------------
+                exp_display_map[emp_key] = display
+                exp_top_date_map[emp_key] = top_date
+        else:
+            # missing columns
+            pass
+
     if emp_df is None or emp_df.empty:
         st.dataframe(emp_df if emp_df is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
     else:
         # Attach Expiry column (string display)
         if "Employer" in emp_df.columns:
-            emp_df["Expiry Date"] = emp_df["Employer"].map(lambda e: exp_map_display.get(_norm_txt(e), ""))
+            emp_df["Expiry Date"] = emp_df["Employer"].map(lambda e: exp_display_map.get(_norm_emp(e), ""))
         else:
             emp_df["Expiry Date"] = ""
 
-        # Styling: turn red if the TOP expiry date (even when Mixed) is within 30 days
-        def _style_exp(row):
-            e = row.get("Employer", "")
-            emp_key = _norm_txt(e)
-            d = exp_map_date.get(emp_key)
-            if isinstance(d, date):
-                days = (d - today).days
-                if days <= 30:
-                    return [""] * (len(row) - 1) + ["color: red; font-weight: 700;"]
-            return [""] * (len(row) - 1) + [""]
+        # Styling bands (today-based):
+        #   expired (<0) -> dark red
+        #   <=30 -> red
+        #   31-60 -> yellow
+        #   >60 -> normal
+        def _style_exp_cell(emp_val, disp_val):
+            if not disp_val:
+                return ""
+            top_date = exp_top_date_map.get(_norm_emp(emp_val))
+            if not top_date:
+                return ""
+            diff = (top_date - today).days
+            if diff < 0:
+                return "background-color:#8B0000;color:white;font-weight:700;"
+            if diff <= 30:
+                return "background-color:red;color:white;font-weight:700;"
+            if diff <= 60:
+                return "background-color:yellow;color:black;font-weight:700;"
+            return ""
 
         show_df = emp_df.copy()
-
-        # Apply style row-wise so we can style only the Expiry Date cell
-        try:
-            sty = show_df.style.apply(_style_exp, axis=1)
-            st.dataframe(sty, use_container_width=True, hide_index=True)
-        except Exception:
-            st.dataframe(show_df, use_container_width=True, hide_index=True)
+        sty = show_df.style.apply(
+            lambda row: [""] * (len(row) - 1) + [_style_exp_cell(row.get("Employer", ""), row.get("Expiry Date", ""))],
+            axis=1,
+        )
+        st.dataframe(sty, use_container_width=True, hide_index=True)
 
 
 # ---------------------------
