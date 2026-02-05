@@ -287,7 +287,83 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
 
 
 
-    st.subheader("Employer Wise")
+    
+
+    # -------------------- CPT / ICD Analysis --------------------
+    cpticd_keys = [k for k in dfs.keys() if str(k).startswith("CPTICD | ")]
+    if cpticd_keys:
+        st.markdown("---")
+        st.header("CPT / ICD Analysis")
+
+        # Pick known tables
+        df_docco_pri = dfs.get("CPTICD | Doctor x Company | Principal DX (Top1)")
+        df_docco_sec = dfs.get("CPTICD | Doctor x Company | Secondary DX (Top1)")
+        df_cpt_map    = dfs.get("CPTICD | CPT -> Top Principal ICD")
+        df_exp        = dfs.get("CPTICD | Employer Expiry Tracker")
+        df_doc_pri    = dfs.get("CPTICD | Doctor | Principal DX (Top1)")
+        df_doc_sec    = dfs.get("CPTICD | Doctor | Secondary DX (Top1)")
+        df_co_pri     = dfs.get("CPTICD | Company | Principal DX (Top1)")
+        df_co_sec     = dfs.get("CPTICD | Company | Secondary DX (Top1)")
+
+        tabs = st.tabs(["Doctor x Company", "CPT Mapping", "Employer Expiry", "Doctor Wise", "Company Wise"])
+
+        with tabs[0]:
+            st.subheader("Top Diagnosis (Doctor x Company)")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Principal DX (Top 1)**")
+                st.dataframe(df_docco_pri if df_docco_pri is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+            with c2:
+                st.markdown("**Secondary DX (Top 1)**")
+                st.dataframe(df_docco_sec if df_docco_sec is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+
+        with tabs[1]:
+            st.subheader("CPT → Most Common Principal ICD")
+            st.dataframe(df_cpt_map if df_cpt_map is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+
+        with tabs[2]:
+            st.subheader("Employer Employee Expiry Tracker")
+            if df_exp is None or df_exp.empty:
+                st.info("No expiry data found in the uploaded CPT/ICD report.")
+            else:
+                # Filters
+                df_f = df_exp.copy()
+                # choose window
+                win = st.selectbox("Expiry Window", options=["All", "Expired", "Next 30 days", "Next 60 days", "Next 90 days"], key=f"exp_win_{str(day_ts)}")
+                if "Days To Expiry" in df_f.columns:
+                    if win == "Expired":
+                        df_f = df_f[df_f["Days To Expiry"] < 0]
+                    elif win.startswith("Next"):
+                        n = int(re.findall(r"\d+", win)[0])
+                        df_f = df_f[(df_f["Days To Expiry"] >= 0) & (df_f["Days To Expiry"] <= n)]
+                # company filter
+                if "Company" in df_f.columns:
+                    comps = sorted([c for c in df_f["Company"].dropna().unique() if str(c).strip() not in ["", "nan", "None"]])
+                    pick_c = st.selectbox("Company", options=["All"] + comps, key=f"exp_comp_{str(day_ts)}")
+                    if pick_c != "All":
+                        df_f = df_f[df_f["Company"] == pick_c]
+                st.dataframe(df_f, use_container_width=True, hide_index=True)
+
+        with tabs[3]:
+            st.subheader("Top Diagnosis (Doctor)")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Principal DX (Top 1)**")
+                st.dataframe(df_doc_pri if df_doc_pri is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+            with c2:
+                st.markdown("**Secondary DX (Top 1)**")
+                st.dataframe(df_doc_sec if df_doc_sec is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+
+        with tabs[4]:
+            st.subheader("Top Diagnosis (Company)")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Principal DX (Top 1)**")
+                st.dataframe(df_co_pri if df_co_pri is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+            with c2:
+                st.markdown("**Secondary DX (Top 1)**")
+                st.dataframe(df_co_sec if df_co_sec is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+st.subheader("Employer Wise")
     st.dataframe(dfs.get("Employer Wise", pd.DataFrame()), use_container_width=True, hide_index=True)
 
 
