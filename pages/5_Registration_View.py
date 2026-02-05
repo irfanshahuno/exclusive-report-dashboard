@@ -366,9 +366,19 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     st.subheader("Employer Wise")
     emp_df = dfs.get("Employer Wise", pd.DataFrame()).copy()
 
-    # Add dominant Expiry Date per Employer from CPT/ICD report (Option B: only non-null expiry dates)
-    df_exp_all = dfs.get("CPTICD | Employer Expiry Tracker")
-    exp_map = {}
+    # ---------------------------
+    # Expiry summary (from CPT/ICD data)
+    # ---------------------------
+    # We try to find the expiry tracker table even if the key name changes slightly.
+    df_exp_all = None
+    for _k, _v in dfs.items():
+        if isinstance(_k, str) and "expiry" in _k.lower() and "employer" in _k.lower():
+            if isinstance(_v, pd.DataFrame) and not _v.empty:
+                df_exp_all = _v
+                break
+
+    exp_map_display = {}   # Employer -> display string
+    exp_map_date = {}      # Employer -> top expiry date (date) for styling (if available)
     today = date.today()
 
     def _norm_txt(x: str) -> str:
@@ -391,55 +401,82 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
         for pfx, canon in PREFIX_ALIAS:
             if c.startswith(pfx):
                 return canon
-        return c  # fallback (still useful)
+        return c  # fallback
 
-    if df_exp_all is not None and not df_exp_all.empty and "Company" in df_exp_all.columns:
+    if df_exp_all is not None and not df_exp_all.empty:
         exp = df_exp_all.copy()
-        # Parse expiry date
-        if "Expiry Date" in exp.columns:
-            exp["_expiry_date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce").dt.date
-        elif "Expiry" in exp.columns:
-            exp["_expiry_date"] = pd.to_datetime(exp["Expiry"], errors="coerce").dt.date
-        else:
-            exp["_expiry_date"] = pd.NaT
 
-        exp["Employer"] = exp["Company"].map(_map_company_to_employer)
+        # Detect company/employer column in the expiry table
+        col_company = None
+        for cand in ["Employer", "Company", "Employer Name", "Company Name"]:
+            if cand in exp.columns:
+                col_company = cand
+                break
 
-        # For each employer present in Employer Wise table, pick dominant expiry date (>=70%) among non-null dates
-        if not emp_df.empty and "Employer" in emp_df.columns:
-            for emp in emp_df["Employer"].dropna().astype(str).unique().tolist():
-                emp_key = _norm_txt(emp)
-                dates = exp.loc[exp["Employer"] == emp_key, "_expiry_date"].dropna()
-                if len(dates) == 0:
-                    continue
-                vc = dates.value_counts()
-                top_date = vc.index[0]
-                pct = float(vc.iloc[0]) / float(len(dates))
-                if pct >= 0.70:
-                    exp_map[emp_key] = top_date
-                else:
-                    exp_map[emp_key] = "Mixed"
+        # Detect expiry column
+        col_exp = None
+        for cand in ["Expiry Date", "Expiry", "Insurance Expiry", "Employee Expiry", "Card Expiry"]:
+            if cand in exp.columns:
+                col_exp = cand
+                break
 
+        if col_company and col_exp:
+            exp["_expiry_date"] = pd.to_datetime(exp[col_exp], errors="coerce").dt.date
+            exp["Employer"] = exp[col_company].map(_map_company_to_employer)
+
+            if not emp_df.empty and "Employer" in emp_df.columns:
+                for emp in emp_df["Employer"].dropna().astype(str).unique().tolist():
+                    emp_key = _norm_txt(emp)
+                    dates = exp.loc[exp["Employer"] == emp_key, "_expiry_date"].dropna()
+
+                    # Option B: denominator = only non-null expiry dates
+                    if len(dates) == 0:
+                        exp_map_display[emp_key] = ""
+                        continue
+
+                    vc = dates.value_counts()
+                    top_date = vc.index[0]
+                    pct = float(vc.iloc[0]) / float(len(dates))
+
+                    exp_map_date[emp_key] = top_date
+
+                    if pct >= 0.70:
+                        exp_map_display[emp_key] = top_date.strftime("%Y-%m-%d")
+                    else:
+                        exp_map_display[emp_key] = f"Mixed (Top: {top_date.strftime('%Y-%m-%d')} – {pct*100:.0f}%)"
+
+    # ---------------------------
+    # Render table
+    # ---------------------------
     if emp_df is None or emp_df.empty:
         st.dataframe(emp_df if emp_df is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
     else:
-        # Attach Expiry column
+        # Attach Expiry column (string display)
         if "Employer" in emp_df.columns:
-            emp_df["Expiry Date"] = emp_df["Employer"].map(lambda e: exp_map.get(_norm_txt(e), ""))
+            emp_df["Expiry Date"] = emp_df["Employer"].map(lambda e: exp_map_display.get(_norm_txt(e), ""))
         else:
             emp_df["Expiry Date"] = ""
 
-        # Styling: turn red if expiry is within 30 days (or already expired)
-        def _style_exp(v):
-            if isinstance(v, date):
-                d = (v - today).days
-                if d <= 30:
-                    return "color: red; font-weight: 700;"
-            return ""
+        # Styling: turn red if the TOP expiry date (even when Mixed) is within 30 days
+        def _style_exp(row):
+            e = row.get("Employer", "")
+            emp_key = _norm_txt(e)
+            d = exp_map_date.get(emp_key)
+            if isinstance(d, date):
+                days = (d - today).days
+                if days <= 30:
+                    return [""] * (len(row) - 1) + ["color: red; font-weight: 700;"]
+            return [""] * (len(row) - 1) + [""]
 
         show_df = emp_df.copy()
-        sty = show_df.style.applymap(_style_exp, subset=["Expiry Date"])
-        st.dataframe(sty, use_container_width=True, hide_index=True)
+
+        # Apply style row-wise so we can style only the Expiry Date cell
+        try:
+            sty = show_df.style.apply(_style_exp, axis=1)
+            st.dataframe(sty, use_container_width=True, hide_index=True)
+        except Exception:
+            st.dataframe(show_df, use_container_width=True, hide_index=True)
+
 
 
 # ---------------------------
