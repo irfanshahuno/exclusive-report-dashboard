@@ -317,21 +317,15 @@ def _top_n_codes(df_exp: pd.DataFrame, group_cols: List[str], code_col: str, des
 
 
 def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Dict[str, pd.DataFrame]:
-    """
-    Build CPT/ICD analytics tables.
-
-    STRICT employer rule (as confirmed by Irfan):
-    - Employer is taken ONLY from RegistrationList -> "Employer Name"
-    - Expiry Date is taken from CPT/ICD report -> "Expiry Date"
-    - Matching is done using EMR No + Visit (Visit ID in CPT file, Visit No in Registration file)
-    """
+    """Build CPT/ICD analytics tables. Uses Company as Employer."""
     if df is None or df.empty:
         return {}
 
-    # CPT/ICD columns
+    # required columns (as provided by you)
     col_emr = _find_col(df, ["EMR No", "EMRNo", "EMR"])
-    col_visit = _find_col(df, ["Visit ID", "VisitNo", "Visit No", "Visit"])
+    col_visit = _find_col(df, ["Visit ID", "VisitNo", "Visit No"])
     col_doc = _find_col(df, ["Doctor"])
+    col_company = _find_col(df, ["Company"])
     col_exp = _find_col(df, ["Expiry Date", "Expiry"])
     col_pri = _find_col(df, ["ICD (Principal)"])
     col_pri_desc = _find_col(df, ["ICD Principal Description"])
@@ -340,163 +334,136 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     col_cpt = _find_col(df, ["CPT Codes", "CPT Code", "CPT"])
     col_cpt_desc = _find_col(df, ["Procedure Description"])
 
-    must = [col_emr, col_visit, col_doc, col_exp, col_pri, col_sec, col_cpt]
+    must = [col_doc, col_company, col_pri, col_sec, col_cpt, col_exp]
     if any(c is None for c in must):
         return {}
 
     base = df.copy()
-
-    # Normalize keys
-    base[col_emr] = base[col_emr].astype(str).str.strip()
-    base[col_visit] = base[col_visit].astype(str).str.strip()
+    # normalize core fields
     base[col_doc] = base[col_doc].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+    base[col_company] = base[col_company].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
 
-    # Parse expiry
-    base[col_exp] = pd.to_datetime(base[col_exp], errors="coerce").dt.date
-
-    # ---- Merge STRICT employer from registration ----
-    employer_col = None
+    # optional merge with registration to enrich (Visit Type, Insurance etc.)
     if reg_df is not None and isinstance(reg_df, pd.DataFrame) and not reg_df.empty:
-        r_emr = _find_col(reg_df, ["EMR No", "EMRNo", "EMR"])
-        r_visit = _find_col(reg_df, ["Visit No", "VisitNo", "Visit ID", "Visit"])
-        r_empname = _find_col(reg_df, ["Employer Name"])  # STRICT
-
-        if r_emr and r_visit and r_empname:
-            reg_small = reg_df[[r_emr, r_visit, r_empname]].copy()
+        try:
+            rmap = ensure_required(reg_df, ["EMRNo", "VisitNo"], "Registration")
+            r_emr, r_visit = rmap["EMRNo"], rmap["VisitNo"]
+            reg_small = reg_df.copy()
             reg_small[r_emr] = reg_small[r_emr].astype(str).str.strip()
             reg_small[r_visit] = reg_small[r_visit].astype(str).str.strip()
-            reg_small[r_empname] = reg_small[r_empname].astype(str).str.strip()
-
-            # Treat blanks as NaN (STRICT)
-            reg_small.loc[reg_small[r_empname].eq(""), r_empname] = pd.NA
-
-            reg_small = reg_small.drop_duplicates(subset=[r_emr, r_visit])
-
+            # pick useful columns
+            r_visit_type = _find_col(reg_small, ["VisitType", "Visit Type", "VisitCategory"])
+            r_ins = _find_col(reg_small, ["Insurance", "InsuranceName", "Payer", "PayerName"])
+            
+            r_emp = _find_col(reg_small, ["Employer", "Company", "Sponsor", "Employer Name", "Company Name"])
+keep_cols = [r_emr, r_visit]
+            if r_visit_type: keep_cols.append(r_visit_type)
+            if r_ins: keep_cols.append(r_ins)
+            
+            
+            if r_emp: keep_cols.append(r_emp)
+if r_emp: keep_cols.append(r_emp)
+reg_small = reg_small[keep_cols].drop_duplicates()
+            base[col_emr] = base[col_emr].astype(str).str.strip() if col_emr else ""
+            base[col_visit] = base[col_visit].astype(str).str.strip() if col_visit else ""
             base = base.merge(
                 reg_small,
-                left_on=[col_emr, col_visit],
-                right_on=[r_emr, r_visit],
+                left_on=[col_emr],
+                right_on=[r_emr],
                 how="left",
                 suffixes=("", "_reg"),
             )
-            employer_col = r_empname
+        except Exception:
+            pass
 
-    # Use employer for analysis (UNKNOWN if missing), but keep a strict version for expiry tracker
-    if employer_col:
-        base["_Employer_Strict"] = base[employer_col]
-    else:
-        base["_Employer_Strict"] = pd.NA
+    # explode ICD and CPT
+    pri = base[[col_doc, col_company, col_pri, col_pri_desc]].copy()
+    pri[col_pri] = _split_multi_codes(pri[col_pri])
+    pri = pri.explode(col_pri)
+    pri[col_pri] = pri[col_pri].fillna("").astype(str).str.strip()
+    pri = pri[pri[col_pri] != ""].copy()
 
-    base["_Employer"] = base["_Employer_Strict"].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+    sec = base[[col_doc, col_company, col_sec, col_sec_desc]].copy()
+    sec[col_sec] = _split_multi_codes(sec[col_sec])
+    sec = sec.explode(col_sec)
+    sec[col_sec] = sec[col_sec].fillna("").astype(str).str.strip()
+    sec = sec[sec[col_sec] != ""].copy()
 
-    # ---- Helpers: Top-1 code + description within a group ----
-    def _top1(df_in: pd.DataFrame, group_cols: List[str], code_col: str, desc_col: Optional[str], out_code: str) -> pd.DataFrame:
-        d = df_in.copy()
-        d[code_col] = d[code_col].fillna("").astype(str).str.strip()
-        d = d[d[code_col].ne("")]
+    cpt = base[[col_doc, col_company, col_cpt, col_cpt_desc]].copy()
+    cpt[col_cpt] = _split_multi_codes(cpt[col_cpt])
+    cpt = cpt.explode(col_cpt)
+    cpt[col_cpt] = cpt[col_cpt].fillna("").astype(str).str.strip()
+    cpt = cpt[cpt[col_cpt] != ""].copy()
 
-        if d.empty:
-            return pd.DataFrame(columns=group_cols + [out_code, "ICD Description", "Count"])
-
-        g = d.groupby(group_cols + [code_col], dropna=False).size().reset_index(name="Count")
-        g = g.sort_values(group_cols + ["Count"], ascending=[True]*len(group_cols) + [False])
-
-        # pick top1 per group
-        top = g.groupby(group_cols, as_index=False).head(1).copy()
-        top = top.rename(columns={code_col: out_code})
-
-        if desc_col and desc_col in d.columns:
-            desc_map = (
-                d[[code_col, desc_col]]
-                .dropna()
-                .astype(str)
-                .drop_duplicates(subset=[code_col])
-                .rename(columns={code_col: out_code, desc_col: "ICD Description"})
-            )
-            top = top.merge(desc_map, on=out_code, how="left")
-        else:
-            top["ICD Description"] = ""
-
-        return top[group_cols + [out_code, "ICD Description", "Count"]]
-
-    # Doctor-wise principal/secondary (Top1)
-    doc_pri_top = _top1(base, ["Doctor"], col_pri, col_pri_desc, "ICD")
-    doc_sec_top = _top1(base, ["Doctor"], col_sec, col_sec_desc, "ICD")
-
-    # Employer-wise principal/secondary (Top1) using STRICT employer name
-    emp_pri_top = _top1(base, ["_Employer"], col_pri, col_pri_desc, "ICD").rename(columns={"_Employer": "Employer"})
-    emp_sec_top = _top1(base, ["_Employer"], col_sec, col_sec_desc, "ICD").rename(columns={"_Employer": "Employer"})
-
-    # Doctor x Employer (Top1)
-    doc_emp_pri = _top1(base, ["Doctor", "_Employer"], col_pri, col_pri_desc, "ICD").rename(columns={"_Employer": "Employer"})
-    doc_emp_sec = _top1(base, ["Doctor", "_Employer"], col_sec, col_sec_desc, "ICD").rename(columns={"_Employer": "Employer"})
+    # Top-1 per Doctor x Company
+    docco_pri_top = _top_code_per_group(pri, [col_doc, col_company], col_pri, col_pri_desc).rename(columns={col_doc:"Doctor", col_company:"Company"})
+    docco_sec_top = _top_code_per_group(sec, [col_doc, col_company], col_sec, col_sec_desc).rename(columns={col_doc:"Doctor", col_company:"Company"})
+    doc_pri_top = _top_code_per_group(pri, [col_doc], col_pri, col_pri_desc).rename(columns={col_doc:"Doctor"})
+    doc_sec_top = _top_code_per_group(sec, [col_doc], col_sec, col_sec_desc).rename(columns={col_doc:"Doctor"})
+    co_pri_top = _top_code_per_group(pri, [col_company], col_pri, col_pri_desc).rename(columns={col_company:"Company"})
+    co_sec_top = _top_code_per_group(sec, [col_company], col_sec, col_sec_desc).rename(columns={col_company:"Company"})
 
     # CPT -> Top principal ICD
-    dpair = base.copy()
-    dpair[col_cpt] = dpair[col_cpt].fillna("").astype(str).str.strip()
-    dpair[col_pri] = dpair[col_pri].fillna("").astype(str).str.strip()
-    dpair = dpair[(dpair[col_cpt] != "") & (dpair[col_pri] != "")]
-    if not dpair.empty:
-        pair = dpair.groupby([col_cpt, col_pri], dropna=False).size().reset_index(name="Count")
-        pair = pair.sort_values([col_cpt, "Count"], ascending=[True, False])
-        pair_top = pair.groupby([col_cpt], as_index=False).head(1).copy().rename(columns={col_cpt: "CPT", col_pri: "ICD"})
-        if col_cpt_desc and col_cpt_desc in dpair.columns:
-            cpt_desc_map = (
-                dpair[[col_cpt, col_cpt_desc]]
-                .dropna()
-                .astype(str)
-                .drop_duplicates(subset=[col_cpt])
-                .rename(columns={col_cpt: "CPT", col_cpt_desc: "CPT Description"})
-            )
-            pair_top = pair_top.merge(cpt_desc_map, on="CPT", how="left")
-        else:
-            pair_top["CPT Description"] = ""
-        if col_pri_desc and col_pri_desc in dpair.columns:
-            icd_desc_map = (
-                dpair[[col_pri, col_pri_desc]]
-                .dropna()
-                .astype(str)
-                .drop_duplicates(subset=[col_pri])
-                .rename(columns={col_pri: "ICD", col_pri_desc: "ICD Description"})
-            )
-            pair_top = pair_top.merge(icd_desc_map, on="ICD", how="left")
-        else:
-            pair_top["ICD Description"] = ""
-        pair_top = pair_top[["CPT", "CPT Description", "ICD", "ICD Description", "Count"]]
+    # link by original rows: explode CPT + principal then count pairs
+    pair = base[[col_cpt, col_pri, col_pri_desc]].copy()
+    pair[col_cpt] = _split_multi_codes(pair[col_cpt])
+    pair[col_pri] = _split_multi_codes(pair[col_pri])
+    pair = pair.explode(col_cpt).explode(col_pri)
+    pair[col_cpt] = pair[col_cpt].fillna("").astype(str).str.strip()
+    pair[col_pri] = pair[col_pri].fillna("").astype(str).str.strip()
+    pair = pair[(pair[col_cpt]!="") & (pair[col_pri]!="")].copy()
+    pair_top = _top_code_per_group(pair, [col_cpt], col_pri, col_pri_desc).rename(columns={col_cpt:"CPT", "Code":"ICD"})
+    # optional add CPT description mode
+    if col_cpt_desc in base.columns:
+        tmpd = base[[col_cpt, col_cpt_desc]].copy()
+        tmpd[col_cpt] = _split_multi_codes(tmpd[col_cpt])
+        tmpd = tmpd.explode(col_cpt)
+        tmpd[col_cpt] = tmpd[col_cpt].fillna("").astype(str).str.strip()
+        tmpd = tmpd[tmpd[col_cpt]!=""]
+        def _mode_desc(x):
+            x = x.dropna().astype(str).str.strip()
+            x = x[x!=""]
+            if x.empty: return ""
+            m=x.mode()
+            return m.iat[0] if not m.empty else x.iloc[0]
+        cptdesc = tmpd.groupby(col_cpt)[col_cpt_desc].apply(_mode_desc).reset_index(name="CPT Description")
+        pair_top = pair_top.merge(cptdesc, left_on="CPT", right_on=col_cpt, how="left").drop(columns=[col_cpt], errors="ignore")
     else:
-        pair_top = pd.DataFrame(columns=["CPT", "CPT Description", "ICD", "ICD Description", "Count"])
+        pair_top["CPT Description"] = ""
 
-    # Employer Expiry Tracker (STRICT employer only)
-    exp = base.copy()
-    exp = exp[exp["_Employer_Strict"].notna()].copy()   # STRICT: drop missing employer
-    exp = exp[exp[col_exp].notna()].copy()             # drop missing expiry
-    exp["Employer"] = exp["_Employer_Strict"].astype(str).str.strip()
-    exp["EMR No"] = exp[col_emr].astype(str).str.strip()
-    exp["Visit ID"] = exp[col_visit].astype(str).str.strip()
-    exp["Doctor"] = exp[col_doc].astype(str).str.strip().replace("", "UNKNOWN")
-    exp["Expiry Date"] = exp[col_exp]
+    pair_top = pair_top[["CPT","CPT Description","ICD","Description","Count"]].rename(columns={"Description":"ICD Description"})
 
-    # optional patient name
-    col_name = _find_col(exp, ["Name", "Patient Name", "Patient"])
-    if col_name:
-        exp["Name"] = exp[col_name].astype(str).str.strip()
+    # Expiry tracker (Employer + Expiry)
+    # Expiry tracker (Employer + Expiry)
+    employer_col_use = "Employer__strict"
+    if (reg_df is not None and 'r_emp' in locals() and r_emp and r_emp in base.columns):
+        base[employer_col_use] = base[r_emp].astype(str).fillna("").str.strip()
     else:
+        base[employer_col_use] = ""
+    exp = base[[employer_col_use, col_emr, col_visit, ("Name" if "Name" in base.columns else None), col_doc, col_exp]].copy()
+    exp = exp.loc[:, [c for c in exp.columns if c is not None]]
+
+    exp = exp.rename(columns={employer_col_use:"Employer", col_doc:"Doctor", col_emr:"EMR No", col_visit:"Visit ID", col_exp:"Expiry Date"})
+    # Clean expiry date
+    exp["Expiry Date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce", dayfirst=True)
+    exp = exp.dropna(subset=["Expiry Date"])
+    # compute days to expiry
+    today = pd.to_datetime(date.today())
+    exp["Days To Expiry"] = (exp["Expiry Date"].dt.normalize() - today.normalize()).dt.days
+    # if Name column missing, create empty
+    if "Name" not in exp.columns:
         exp["Name"] = ""
-
-    # days to expiry (based on TODAY, as confirmed)
-    _today = pd.Timestamp.today().date()
-    exp["Days To Expiry"] = (pd.to_datetime(exp["Expiry Date"]) - pd.to_datetime(_today)).dt.days
-
-    exp = exp.drop_duplicates(subset=["Employer", "EMR No", "Visit ID", "Expiry Date"])
-    exp = exp.sort_values(["Days To Expiry", "Employer", "Name"], ascending=[True, True, True]).reset_index(drop=True)
+    # de-dup per EMR/company expiry
+    exp = exp.drop_duplicates(subset=["Employer","EMR No","Expiry Date"])
+    exp = exp.sort_values(["Days To Expiry","Employer","Name"], ascending=[True, True, True]).reset_index(drop=True)
 
     return {
-        "Doctor | Principal DX (Top1)": doc_pri_top.rename(columns={"ICD":"ICD", "ICD Description":"ICD Description"}),
-        "Doctor | Secondary DX (Top1)": doc_sec_top.rename(columns={"ICD":"ICD", "ICD Description":"ICD Description"}),
-        "Employer | Principal DX (Top1)": emp_pri_top.rename(columns={"ICD":"ICD", "ICD Description":"ICD Description"}),
-        "Employer | Secondary DX (Top1)": emp_sec_top.rename(columns={"ICD":"ICD", "ICD Description":"ICD Description"}),
-        "Doctor x Employer | Principal DX (Top1)": doc_emp_pri.rename(columns={"ICD":"ICD", "ICD Description":"ICD Description"}),
-        "Doctor x Employer | Secondary DX (Top1)": doc_emp_sec.rename(columns={"ICD":"ICD", "ICD Description":"ICD Description"}),
+        "Doctor x Company | Principal DX (Top1)": docco_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+        "Doctor x Company | Secondary DX (Top1)": docco_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+        "Doctor | Principal DX (Top1)": doc_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+        "Doctor | Secondary DX (Top1)": doc_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+        "Company | Principal DX (Top1)": co_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+        "Company | Secondary DX (Top1)": co_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
         "CPT -> Top Principal ICD": pair_top,
         "Employer Expiry Tracker": exp[["Employer","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"]],
     }
@@ -877,7 +844,7 @@ def excel_bytes_from_dfs(dfs: Dict[str, pd.DataFrame]) -> bytes:
 def _safe_filename(name: str, max_len: int = 80) -> str:
     """Make a filename-safe chunk (no slashes/illegal chars)."""
     name = str(name)
-    name = re.sub(r"[\\/:*?\"<>|\n\r\t]+", "_", name)
+    name = re.sub(r"[\\/:*?"<>|\n\r\t]+", "_", name)
     name = re.sub(r"\s+", " ", name).strip()
     if len(name) > max_len:
         name = name[:max_len].rstrip()
@@ -1590,7 +1557,7 @@ if admin_mode:
                     cpticd_tbls = cpticd_tables(_cpticd_df, reg_df=SS.get("reg_df"))
                     if not cpticd_tbls:
                         st.warning("CPT/ICD file loaded, but required columns were not detected. Skipping CPT/ICD tables in bulk save.")
-            progress = st.progress(0.0)
+progress = st.progress(0.0)
             saved = 0
 
             # Detect Registration date col once for filtering
