@@ -354,10 +354,16 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
             # pick useful columns
             r_visit_type = _find_col(reg_small, ["VisitType", "Visit Type", "VisitCategory"])
             r_ins = _find_col(reg_small, ["Insurance", "InsuranceName", "Payer", "PayerName"])
-            keep_cols = [r_emr, r_visit]
+            
+            r_emp = _find_col(reg_small, [\"Employer\", \"Company\", \"Sponsor\", \"Employer Name\", \"Company Name\"])
+keep_cols = [r_emr, r_visit]
             if r_visit_type: keep_cols.append(r_visit_type)
             if r_ins: keep_cols.append(r_ins)
-            reg_small = reg_small[keep_cols].drop_duplicates()
+            
+            
+            if r_emp: keep_cols.append(r_emp)
+if r_emp: keep_cols.append(r_emp)
+reg_small = reg_small[keep_cols].drop_duplicates()
             base[col_emr] = base[col_emr].astype(str).str.strip() if col_emr else ""
             base[col_visit] = base[col_visit].astype(str).str.strip() if col_visit else ""
             base = base.merge(
@@ -428,8 +434,12 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     pair_top = pair_top[["CPT","CPT Description","ICD","Description","Count"]].rename(columns={"Description":"ICD Description"})
 
     # Expiry tracker (Employer + Expiry)
-    exp = base[[col_company, col_emr, col_visit, "Name" if "Name" in base.columns else None, col_doc, col_exp]].copy()
-    exp = exp.rename(columns={col_company:"Company", col_doc:"Doctor", col_emr:"EMR No", col_visit:"Visit ID", col_exp:"Expiry Date"})
+    # Expiry tracker (Employer + Expiry)
+    employer_col_use = r_emp if (reg_df is not None and 'r_emp' in locals() and r_emp and r_emp in base.columns) else col_company
+    exp = base[[employer_col_use, col_emr, col_visit, ("Name" if "Name" in base.columns else None), col_doc, col_exp]].copy()
+    exp = exp.loc[:, [c for c in exp.columns if c is not None]]
+
+    exp = exp.rename(columns={employer_col_use:"Employer", col_doc:"Doctor", col_emr:"EMR No", col_visit:"Visit ID", col_exp:"Expiry Date"})
     # Clean expiry date
     exp["Expiry Date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce", dayfirst=True)
     exp = exp.dropna(subset=["Expiry Date"])
@@ -451,7 +461,7 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
         "Company | Principal DX (Top1)": co_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
         "Company | Secondary DX (Top1)": co_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
         "CPT -> Top Principal ICD": pair_top,
-        "Employer Expiry Tracker": exp[["Company","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"]],
+        "Employer Expiry Tracker": exp[["Employer","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"]],
     }
 
 
@@ -1543,7 +1553,7 @@ if admin_mode:
                     cpticd_tbls = cpticd_tables(_cpticd_df, reg_df=SS.get("reg_df"))
                     if not cpticd_tbls:
                         st.warning("CPT/ICD file loaded, but required columns were not detected. Skipping CPT/ICD tables in bulk save.")
-            progress = st.progress(0.0)
+progress = st.progress(0.0)
             saved = 0
 
             # Detect Registration date col once for filtering
