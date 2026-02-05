@@ -354,21 +354,25 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
             # pick useful columns
             r_visit_type = _find_col(reg_small, ["VisitType", "Visit Type", "VisitCategory"])
             r_ins = _find_col(reg_small, ["Insurance", "InsuranceName", "Payer", "PayerName"])
-            
-            r_emp = _find_col(reg_small, [\"Employer\", \"Company\", \"Sponsor\", \"Employer Name\", \"Company Name\"])
-keep_cols = [r_emr, r_emp]
-            if r_visit_type: keep_cols.append(r_visit_type)
-            if r_ins: keep_cols.append(r_ins)
-            
-            
-            if r_emp: keep_cols.append(r_emp)
-if r_emp: keep_cols.append(r_emp)
-reg_small = reg_small[keep_cols].drop_duplicates()
+
+            r_emp = _find_col(reg_small, ["Employer Name"])  # STRICT Employer Name only
+
+            keep_cols = [r_emr, r_visit]
+            if r_visit_type:
+                keep_cols.append(r_visit_type)
+            if r_ins:
+                keep_cols.append(r_ins)
+            if r_emp:
+                keep_cols.append(r_emp)
+
+            reg_small = reg_small[keep_cols].drop_duplicates()
+
             base[col_emr] = base[col_emr].astype(str).str.strip() if col_emr else ""
+            base[col_visit] = base[col_visit].astype(str).str.strip() if col_visit else ""
             base = base.merge(
                 reg_small,
-                left_on=[col_emr] if col_emr else None,
-                right_on=[r_emr] if r_emr else None,
+                left_on=[col_emr, col_visit] if col_emr and col_visit else [col_emr],
+                right_on=[r_emr, r_visit] if col_emr and col_visit else [r_emr],
                 how="left",
                 suffixes=("", "_reg"),
             )
@@ -434,17 +438,11 @@ reg_small = reg_small[keep_cols].drop_duplicates()
 
     # Expiry tracker (Employer + Expiry)
     # Expiry tracker (Employer + Expiry)
-    # Expiry tracker (Employer + Expiry) - STRICT employer from RegistrationList ("Employer Name")
-employer_col_use = r_emp if (reg_df is not None and 'r_emp' in locals() and r_emp and r_emp in base.columns) else None
-if employer_col_use is None:
-    base["_Employer_STRICT"] = ""
-    employer_col_use = "_Employer_STRICT"
+    employer_col_use = r_emp if (reg_df is not None and 'r_emp' in locals() and r_emp and r_emp in base.columns) else col_company
+    exp = base[[employer_col_use, col_emr, col_visit, ("Name" if "Name" in base.columns else None), col_doc, col_exp]].copy()
+    exp = exp.loc[:, [c for c in exp.columns if c is not None]]
 
-exp = base[[employer_col_use, col_emr, ("Name" if "Name" in base.columns else None), col_doc, col_exp]].copy()
-exp = exp.loc[:, [c for c in exp.columns if c is not None]]
-
-exp = exp.rename(columns={employer_col_use:"Employer", col_doc:"Doctor", col_emr:"EMR No", col_exp:"Expiry Date"})
-
+    exp = exp.rename(columns={employer_col_use:"Employer", col_doc:"Doctor", col_emr:"EMR No", col_visit:"Visit ID", col_exp:"Expiry Date"})
     # Clean expiry date
     exp["Expiry Date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce", dayfirst=True)
     exp = exp.dropna(subset=["Expiry Date"])
@@ -455,8 +453,8 @@ exp = exp.rename(columns={employer_col_use:"Employer", col_doc:"Doctor", col_emr
     if "Name" not in exp.columns:
         exp["Name"] = ""
     # de-dup per EMR/company expiry
-    exp = exp.drop_duplicates(subset=["Employer","EMR No","Expiry Date"])
-    exp = exp.sort_values(["Days To Expiry","Employer","Name"], ascending=[True, True, True]).reset_index(drop=True)
+    exp = exp.drop_duplicates(subset=["Company","EMR No","Expiry Date"])
+    exp = exp.sort_values(["Days To Expiry","Company","Name"], ascending=[True, True, True]).reset_index(drop=True)
 
     return {
         "Doctor x Company | Principal DX (Top1)": docco_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
@@ -845,7 +843,7 @@ def excel_bytes_from_dfs(dfs: Dict[str, pd.DataFrame]) -> bytes:
 def _safe_filename(name: str, max_len: int = 80) -> str:
     """Make a filename-safe chunk (no slashes/illegal chars)."""
     name = str(name)
-    name = re.sub(r"[\\/:*?\"<>|\n\r\t]+", "_", name)
+    name = re.sub(r"[\\/:*?"<>|\n\r\t]+", "_", name)
     name = re.sub(r"\s+", " ", name).strip()
     if len(name) > max_len:
         name = name[:max_len].rstrip()
