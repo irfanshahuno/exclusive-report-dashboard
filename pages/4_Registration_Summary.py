@@ -467,119 +467,117 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     pair_top = pair_top[["CPT","CPT Description","ICD","Description","Count"]].rename(columns={"Description":"ICD Description"})
 
     # --------------------
-# Employer Expiry Tracker (STRICT Employer Name only)
-# --------------------
-# We DO NOT use "Company" for expiry (Company column is usually empty and should be ignored).
-employer_col_use = None
-if reg_df is not None and 'r_emp' in locals() and r_emp and r_emp in base.columns:
-    employer_col_use = r_emp
+    # Employer Expiry Tracker (STRICT Employer Name only)
+    # --------------------
+    # We DO NOT use "Company" for expiry (Company column is usually empty and should be ignored).
+    employer_col_use = None
+    if reg_df is not None and 'r_emp' in locals() and r_emp and r_emp in base.columns:
+        employer_col_use = r_emp
 
-if employer_col_use is None:
-    base["__EmployerName__"] = "Blank"
-    employer_col_use = "__EmployerName__"
+    if employer_col_use is None:
+        base["__EmployerName__"] = "Blank"
+        employer_col_use = "__EmployerName__"
 
-exp = base[[employer_col_use, col_emr, col_visit, ("Name" if "Name" in base.columns else None), col_doc, col_exp]].copy()
-exp = exp.loc[:, [c for c in exp.columns if c is not None]]
+    exp = base[[employer_col_use, col_emr, col_visit, ("Name" if "Name" in base.columns else None), col_doc, col_exp]].copy()
+    exp = exp.loc[:, [c for c in exp.columns if c is not None]]
 
-exp = exp.rename(columns={employer_col_use: "Employer", col_doc: "Doctor", col_emr: "EMR No", col_visit: "Visit ID", col_exp: "Expiry Date"})
-exp["Employer"] = exp["Employer"].fillna("Blank").astype(str).str.strip().replace("", "Blank")
+    exp = exp.rename(columns={employer_col_use: "Employer", col_doc: "Doctor", col_emr: "EMR No", col_visit: "Visit ID", col_exp: "Expiry Date"})
+    exp["Employer"] = exp["Employer"].fillna("Blank").astype(str).str.strip().replace("", "Blank")
 
-# Clean expiry date
-exp["Expiry Date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce", dayfirst=True)
-exp = exp.dropna(subset=["Expiry Date"])
+    # Clean expiry date
+    exp["Expiry Date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce", dayfirst=True)
+    exp = exp.dropna(subset=["Expiry Date"])
 
-# If Name column missing, create empty
-if "Name" not in exp.columns:
-    exp["Name"] = ""
+    # If Name column missing, create empty
+    if "Name" not in exp.columns:
+        exp["Name"] = ""
 
-# De-dup per Employer + EMR + Expiry (unique EMR is what matters)
-exp = exp.drop_duplicates(subset=["Employer", "EMR No", "Expiry Date"])
+    # De-dup per Employer + EMR + Expiry (unique EMR is what matters)
+    exp = exp.drop_duplicates(subset=["Employer", "EMR No", "Expiry Date"])
 
-# Days to expiry
-today = pd.to_datetime(date.today())
-exp["Days To Expiry"] = (exp["Expiry Date"].dt.normalize() - today.normalize()).dt.days
-exp = exp.sort_values(["Days To Expiry", "Employer", "Name"], ascending=[True, True, True]).reset_index(drop=True)
+    # Days to expiry
+    today = pd.to_datetime(date.today())
+    exp["Days To Expiry"] = (exp["Expiry Date"].dt.normalize() - today.normalize()).dt.days
+    exp = exp.sort_values(["Days To Expiry", "Employer", "Name"], ascending=[True, True, True]).reset_index(drop=True)
 
-# --------------------
-# Employer expiry SUMMARY rule (70% / 50% logic)
-# --------------------
-# For each employer, if >=70% of unique EMR have same expiry -> show that expiry date.
-# If <50% -> show TOP TWO dates.
-# Otherwise (50% to <70%) -> show TOP ONE date.
-summ = exp[["Employer", "EMR No", "Expiry Date"]].copy()
-summ["Expiry Date"] = summ["Expiry Date"].dt.date
+    # --------------------
+    # Employer expiry SUMMARY rule (70% / 50% logic)
+    # --------------------
+    # For each employer, if >=70% of unique EMR have same expiry -> show that expiry date.
+    # If <50% -> show TOP TWO dates.
+    # Otherwise (50% to <70%) -> show TOP ONE date.
+    summ = exp[["Employer", "EMR No", "Expiry Date"]].copy()
+    summ["Expiry Date"] = summ["Expiry Date"].dt.date
 
-if not summ.empty:
-    # counts per employer+date (unique EMR already)
-    counts = summ.groupby(["Employer", "Expiry Date"])["EMR No"].nunique().reset_index(name="EMR_Count")
-    totals = summ.groupby("Employer")["EMR No"].nunique().reset_index(name="Total_EMR")
-    counts = counts.merge(totals, on="Employer", how="left")
-    counts["Share"] = counts["EMR_Count"] / counts["Total_EMR"].replace(0, pd.NA)
+    if not summ.empty:
+        # counts per employer+date (unique EMR already)
+        counts = summ.groupby(["Employer", "Expiry Date"])["EMR No"].nunique().reset_index(name="EMR_Count")
+        totals = summ.groupby("Employer")["EMR No"].nunique().reset_index(name="Total_EMR")
+        counts = counts.merge(totals, on="Employer", how="left")
+        counts["Share"] = counts["EMR_Count"] / counts["Total_EMR"].replace(0, pd.NA)
 
-    # rank within employer
-    counts = counts.sort_values(["Employer", "Share", "EMR_Count", "Expiry Date"], ascending=[True, False, False, True])
-    counts["Rank"] = counts.groupby("Employer").cumcount() + 1
+        # rank within employer
+        counts = counts.sort_values(["Employer", "Share", "EMR_Count", "Expiry Date"], ascending=[True, False, False, True])
+        counts["Rank"] = counts.groupby("Employer").cumcount() + 1
 
-    top1 = counts[counts["Rank"] == 1][["Employer", "Expiry Date", "Share", "EMR_Count", "Total_EMR"]].rename(
-        columns={"Expiry Date": "Top1_Expiry", "Share": "Top1_Share", "EMR_Count": "Top1_EMR"}
-    )
-    top2 = counts[counts["Rank"] == 2][["Employer", "Expiry Date", "Share", "EMR_Count"]].rename(
-        columns={"Expiry Date": "Top2_Expiry", "Share": "Top2_Share", "EMR_Count": "Top2_EMR"}
-    )
+        top1 = counts[counts["Rank"] == 1][["Employer", "Expiry Date", "Share", "EMR_Count", "Total_EMR"]].rename(
+            columns={"Expiry Date": "Top1_Expiry", "Share": "Top1_Share", "EMR_Count": "Top1_EMR"}
+        )
+        top2 = counts[counts["Rank"] == 2][["Employer", "Expiry Date", "Share", "EMR_Count"]].rename(
+            columns={"Expiry Date": "Top2_Expiry", "Share": "Top2_Share", "EMR_Count": "Top2_EMR"}
+        )
 
-    employer_expiry_summary = top1.merge(top2, on="Employer", how="left")
+        employer_expiry_summary = top1.merge(top2, on="Employer", how="left")
 
-    def _fmt_date(d):
-        try:
-            return pd.to_datetime(d).date().isoformat()
-        except Exception:
-            return ""
+        def _fmt_date(d):
+            try:
+                return pd.to_datetime(d).date().isoformat()
+            except Exception:
+                return ""
 
-    def _fmt_pct(x):
-        try:
-            return f"{float(x) * 100:.0f}%"
-        except Exception:
-            return ""
+        def _fmt_pct(x):
+            try:
+                return f"{float(x) * 100:.0f}%"
+            except Exception:
+                return ""
 
-    display = []
-    for _, r in employer_expiry_summary.iterrows():
-        top1_share = float(r.get("Top1_Share", 0) or 0)
-        t1 = _fmt_date(r.get("Top1_Expiry"))
-        t2 = _fmt_date(r.get("Top2_Expiry"))
+        display = []
+        for _, r in employer_expiry_summary.iterrows():
+            top1_share = float(r.get("Top1_Share", 0) or 0)
+            top2_share = float(r.get("Top2_Share", 0) or 0)
+            t1 = _fmt_date(r.get("Top1_Expiry"))
+            t2 = _fmt_date(r.get("Top2_Expiry"))
 
-        if top1_share >= 0.70:
-            show = t1
-        elif top1_share < 0.50:
-            show = t1 if not t2 else f"{t1} | {t2}"
-        else:
-            show = t1
+            if top1_share >= 0.70:
+                show = t1
+            elif top1_share < 0.50:
+                show = t1 if not t2 else f"{t1} | {t2}"
+            else:
+                show = t1
 
-        display.append(show)
+            display.append(show)
 
-    employer_expiry_summary["Common_Expiry"] = display
-    employer_expiry_summary = employer_expiry_summary[
-        ["Employer", "Total_EMR", "Common_Expiry", "Top1_Expiry", "Top1_Share", "Top2_Expiry", "Top2_Share"]
-    ].copy()
-    employer_expiry_summary["Top1_Share"] = employer_expiry_summary["Top1_Share"].apply(_fmt_pct)
-    employer_expiry_summary["Top2_Share"] = employer_expiry_summary["Top2_Share"].apply(_fmt_pct)
+        employer_expiry_summary["Common_Expiry"] = display
+        employer_expiry_summary = employer_expiry_summary[
+            ["Employer", "Total_EMR", "Common_Expiry", "Top1_Expiry", "Top1_Share", "Top2_Expiry", "Top2_Share"]
+        ].copy()
+        employer_expiry_summary["Top1_Share"] = employer_expiry_summary["Top1_Share"].apply(_fmt_pct)
+        employer_expiry_summary["Top2_Share"] = employer_expiry_summary["Top2_Share"].apply(_fmt_pct)
+    else:
+        employer_expiry_summary = pd.DataFrame(columns=["Employer", "Total_EMR", "Common_Expiry", "Top1_Expiry", "Top1_Share", "Top2_Expiry", "Top2_Share"])
 
-else:
-    employer_expiry_summary = pd.DataFrame(
-        columns=["Employer", "Total_EMR", "Common_Expiry", "Top1_Expiry", "Top1_Share", "Top2_Expiry", "Top2_Share"]
-    )
+    return {
+            "Doctor x Company | Principal DX (Top1)": docco_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+            "Doctor x Company | Secondary DX (Top1)": docco_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+            "Doctor | Principal DX (Top1)": doc_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+            "Doctor | Secondary DX (Top1)": doc_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+            "Company | Principal DX (Top1)": co_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+            "Company | Secondary DX (Top1)": co_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+            "CPT -> Top Principal ICD": pair_top,
+            "Employer Expiry Summary": employer_expiry_summary,
+            "Employer Expiry Tracker": exp[["Employer","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"]],
+        }
 
-# ✅ ONE return for both cases
-     return {
-    "Doctor x Company | Principal DX (Top1)": docco_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
-    "Doctor x Company | Secondary DX (Top1)": docco_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
-    "Doctor | Principal DX (Top1)": doc_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
-    "Doctor | Secondary DX (Top1)": doc_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
-    "Company | Principal DX (Top1)": co_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
-    "Company | Secondary DX (Top1)": co_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
-    "CPT -> Top Principal ICD": pair_top,
-    "Employer Expiry Summary": employer_expiry_summary,
-    "Employer Expiry Tracker": exp[["Employer","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"]],
-}
 
 def read_excel_any(uploaded_file, required_hint: Optional[List[str]] = None) -> pd.DataFrame:
     """Read an Excel report even when the real header is not on the first row.
