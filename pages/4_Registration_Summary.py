@@ -261,6 +261,32 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     if col_payer and not doctor_ins_wise.empty:
         doctor_ins_wise = _add_grand_total(doctor_ins_wise, ["Doctor"])
 
+    # Recompute averages strictly as: Total Amount ÷ Unique Visit No (Total_Visit)
+    # (Keeps display consistent even if upstream file has repeated/odd visit formats)
+    def _recalc_avg(d: pd.DataFrame) -> pd.DataFrame:
+        if d is None or d.empty:
+            return d
+        # Ensure numeric
+        d["Total_Visit"] = pd.to_numeric(d["Total_Visit"], errors="coerce").fillna(0).astype(int)
+        d["Total_Amount_Service"] = pd.to_numeric(d["Total_Amount_Service"], errors="coerce").fillna(0.0)
+        d["Total_Amount_Insuance"] = pd.to_numeric(d["Total_Amount_Insuance"], errors="coerce").fillna(0.0)
+
+        denom = d["Total_Visit"].replace(0, pd.NA)
+        d["Avg_Amount_Service"] = d["Total_Amount_Service"] / denom
+        d["Avg_Amount_Insuance"] = d["Total_Amount_Insuance"] / denom
+        # Lab_% stays based on Service total
+        d["Lab_%"] = (pd.to_numeric(d["Lab"], errors="coerce").fillna(0.0) / d["Total_Amount_Service"].replace(0, pd.NA)) * 100
+        d["Avg_Amount_Service"] = d["Avg_Amount_Service"].fillna(0.0)
+        d["Avg_Amount_Insuance"] = d["Avg_Amount_Insuance"].fillna(0.0)
+        d["Lab_%"] = d["Lab_%"].fillna(0.0)
+        return d
+
+    doctor_wise = _recalc_avg(doctor_wise)
+    if col_payer and not insurance_wise.empty:
+        insurance_wise = _recalc_avg(insurance_wise)
+    if col_payer and not doctor_ins_wise.empty:
+        doctor_ins_wise = _recalc_avg(doctor_ins_wise)
+
     out = {"Doctor Wise Revenue": doctor_wise}
     if col_payer and not insurance_wise.empty:
         out["Insurance Wise Revenue"] = insurance_wise
@@ -396,19 +422,25 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     base[col_emr] = base[col_emr].fillna("").astype(str).str.strip()
     base[col_visit] = base[col_visit].fillna("").astype(str).str.strip()
 
-    # Build Employer from registration STRICT Employer Name only
+    # Build Employer + Insurance from Registration (STRICT Employer Name only)
     base["Employer"] = "UNKNOWN"
+    base["Insurance"] = "UNKNOWN"
     if reg_df is not None and isinstance(reg_df, pd.DataFrame) and not reg_df.empty:
         try:
-            r_emr = _find_col(reg_df, ["EMRNo", "EMR No", "EMR"])
-            r_visit = _find_col(reg_df, ["VisitNo", "Visit No", "Visit ID", "VisitID"])
+            r_emr = _find_col(reg_df, ["EMRNo", "EMR No", "EMR", "MRN", "Patient ID"])
+            r_visit = _find_col(reg_df, ["VisitNo", "Visit No", "Visit ID", "VisitID", "Visit Number", "Visit#"])
             r_emp = next((c for c in reg_df.columns if _norm_col(c) == "employername"), None)  # STRICT
+            r_ins = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName", "Insuance"])
 
             if r_emr and r_visit and r_emp:
-                reg_small = reg_df[[r_emr, r_visit, r_emp]].copy()
+                keep_cols = [r_emr, r_visit, r_emp] + ([r_ins] if r_ins else [])
+                reg_small = reg_df[keep_cols].copy()
                 reg_small[r_emr] = reg_small[r_emr].fillna("").astype(str).str.strip()
                 reg_small[r_visit] = reg_small[r_visit].fillna("").astype(str).str.strip()
                 reg_small[r_emp] = reg_small[r_emp].fillna("").astype(str).str.strip()
+                if r_ins:
+                    reg_small[r_ins] = reg_small[r_ins].fillna("").astype(str).str.strip()
+
                 reg_small = reg_small[(reg_small[r_emr] != "") & (reg_small[r_visit] != "")].drop_duplicates()
 
                 base = base.merge(
@@ -418,25 +450,30 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
                     how="left",
                     suffixes=("", "_reg"),
                 )
-                base["Employer"] = base[r_emp].fillna("").astype(str).str.strip()
-                base["Employer"] = base["Employer"].replace("", "UNKNOWN")
+                base["Employer"] = base[r_emp].fillna("").astype(str).str.strip().replace("", "UNKNOWN")
+                if r_ins:
+                    base["Insurance"] = base[r_ins].fillna("").astype(str).str.strip()
+                    base["Insurance"] = base["Insurance"].replace("", "CASH")
+                    base["Insurance"] = base["Insurance"].replace("Blank", "CASH")
+                else:
+                    base["Insurance"] = "UNKNOWN"
         except Exception:
             pass
 
     # ---- Explode ICD and CPT (for analytics tables) ----
-    pri = base[[col_doc, "Employer", col_pri] + ([col_pri_desc] if col_pri_desc else [])].copy()
+    pri = base[[col_doc, "Insurance", col_pri] + ([col_pri_desc] if col_pri_desc else [])].copy()
     pri[col_pri] = _split_multi_codes(pri[col_pri])
     pri = pri.explode(col_pri)
     pri[col_pri] = pri[col_pri].fillna("").astype(str).str.strip()
     pri = pri[pri[col_pri] != ""].copy()
 
-    sec = base[[col_doc, "Employer", col_sec] + ([col_sec_desc] if col_sec_desc else [])].copy()
+    sec = base[[col_doc, "Insurance", col_sec] + ([col_sec_desc] if col_sec_desc else [])].copy()
     sec[col_sec] = _split_multi_codes(sec[col_sec])
     sec = sec.explode(col_sec)
     sec[col_sec] = sec[col_sec].fillna("").astype(str).str.strip()
     sec = sec[sec[col_sec] != ""].copy()
 
-    cpt = base[[col_doc, "Employer", col_cpt] + ([col_cpt_desc] if col_cpt_desc else [])].copy()
+    cpt = base[[col_doc, "Insurance", col_cpt] + ([col_cpt_desc] if col_cpt_desc else [])].copy()
     cpt[col_cpt] = _split_multi_codes(cpt[col_cpt])
     cpt = cpt.explode(col_cpt)
     cpt[col_cpt] = cpt[col_cpt].fillna("").astype(str).str.strip()
@@ -458,12 +495,12 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
             out = out.merge(dmap, on=code_col, how="left")
         return out
 
-    # Doctor x Employer
-    doc_emp_pri_top = _top1([col_doc, "Employer"], col_pri, col_pri_desc).rename(
-        columns={col_doc: "Doctor", col_pri: "ICD", (col_pri_desc or "ICD Principal Description"): "ICD Description"}
+    # Doctor x Insurance
+    doc_emp_pri_top = _top1([col_doc, "Insurance"], col_pri, col_pri_desc).rename(
+        columns={col_doc: "Doctor", "Insurance": "Insurance", col_pri: "ICD", (col_pri_desc or "ICD Principal Description"): "ICD Description"}
     )
-    doc_emp_sec_top = _top1([col_doc, "Employer"], col_sec, col_sec_desc).rename(
-        columns={col_doc: "Doctor", col_sec: "ICD", (col_sec_desc or "ICD Secondary Description"): "ICD Description"}
+    doc_emp_sec_top = _top1([col_doc, "Insurance"], col_sec, col_sec_desc).rename(
+        columns={col_doc: "Doctor", "Insurance": "Insurance", col_sec: "ICD", (col_sec_desc or "ICD Secondary Description"): "ICD Description"}
     )
     doc_pri_top = _top1([col_doc], col_pri, col_pri_desc).rename(
         columns={col_doc: "Doctor", col_pri: "ICD", (col_pri_desc or "ICD Principal Description"): "ICD Description"}
@@ -471,11 +508,11 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     doc_sec_top = _top1([col_doc], col_sec, col_sec_desc).rename(
         columns={col_doc: "Doctor", col_sec: "ICD", (col_sec_desc or "ICD Secondary Description"): "ICD Description"}
     )
-    emp_pri_top = _top1(["Employer"], col_pri, col_pri_desc).rename(
-        columns={"Employer": "Employer", col_pri: "ICD", (col_pri_desc or "ICD Principal Description"): "ICD Description"}
+    emp_pri_top = _top1(["Insurance"], col_pri, col_pri_desc).rename(
+        columns={"Insurance": "Insurance", col_pri: "ICD", (col_pri_desc or "ICD Principal Description"): "ICD Description"}
     )
-    emp_sec_top = _top1(["Employer"], col_sec, col_sec_desc).rename(
-        columns={"Employer": "Employer", col_sec: "ICD", (col_sec_desc or "ICD Secondary Description"): "ICD Description"}
+    emp_sec_top = _top1(["Insurance"], col_sec, col_sec_desc).rename(
+        columns={"Insurance": "Insurance", col_sec: "ICD", (col_sec_desc or "ICD Secondary Description"): "ICD Description"}
     )
 
     # CPT -> Top Principal ICD mapping
@@ -493,7 +530,7 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     pair_top = pair_top.rename(columns={col_cpt: "CPT", col_pri: "Top_Principal_ICD"})
 
     # ---- Expiry Tracker (ONLY EMR+Visit + Expiry Date) ----
-    exp = base[[col_emr, col_visit, col_doc, "Employer", col_exp]].copy()
+    exp = base[[col_emr, col_visit, col_doc, "Employer", "Insurance", col_exp]].copy()
     exp = exp.rename(columns={col_emr: "EMR No", col_visit: "Visit ID", col_doc: "Doctor", col_exp: "Expiry Date"})
     exp["Expiry Date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce")
     today = pd.Timestamp.today().normalize()
@@ -582,28 +619,32 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     except Exception:
         employer_wise_exp = pd.DataFrame(columns=["Employer", "Count", "Insurance", "Expiry Date"])
     return {
-        # Backward-compatible keys (UI tabs may still say Company)
-        "Doctor x Company | Principal DX (Top1)": doc_emp_pri_top,
-        "Doctor x Company | Secondary DX (Top1)": doc_emp_sec_top,
-        "Company | Principal DX (Top1)": emp_pri_top,
-        "Company | Secondary DX (Top1)": emp_sec_top,
+        # Diagnosis Top-1 (by Doctor x Insurance)
+        "Doctor x Insurance | Principal DX (Top1)": doc_emp_pri_top[["Doctor", "Insurance", "ICD", "Count", "ICD Description"]].copy()
+            if not doc_emp_pri_top.empty else doc_emp_pri_top,
+        "Doctor x Insurance | Secondary DX (Top1)": doc_emp_sec_top[["Doctor", "Insurance", "ICD", "Count", "ICD Description"]].copy()
+            if not doc_emp_sec_top.empty else doc_emp_sec_top,
 
-        # Clearer keys (Employer-based)
-        "Doctor x Employer | Principal DX (Top1)": doc_emp_pri_top,
-        "Doctor x Employer | Secondary DX (Top1)": doc_emp_sec_top,
-        "Employer | Principal DX (Top1)": emp_pri_top,
-        "Employer | Secondary DX (Top1)": emp_sec_top,
+        # Doctor-wise (Top-1)
+        "Doctor | Principal DX (Top1)": doc_pri_top[["Doctor", "ICD", "Count", "ICD Description"]].copy()
+            if not doc_pri_top.empty else doc_pri_top,
+        "Doctor | Secondary DX (Top1)": doc_sec_top[["Doctor", "ICD", "Count", "ICD Description"]].copy()
+            if not doc_sec_top.empty else doc_sec_top,
 
-        "Doctor | Principal DX (Top1)": doc_pri_top,
-        "Doctor | Secondary DX (Top1)": doc_sec_top,
+        # Insurance-wise (Top-1)
+        "Insurance | Principal DX (Top1)": emp_pri_top[["Insurance", "ICD", "Count", "ICD Description"]].copy()
+            if not emp_pri_top.empty else emp_pri_top,
+        "Insurance | Secondary DX (Top1)": emp_sec_top[["Insurance", "ICD", "Count", "ICD Description"]].copy()
+            if not emp_sec_top.empty else emp_sec_top,
+
+        # CPT -> Top Principal ICD mapping
         "CPT -> Top Principal ICD": pair_top,
 
-        # Employer expiry
+        # Eligibility expiry (Employer-wise) from EMR+Visit match
         "Employer Wise": employer_wise_exp,
         "Employer Expiry Summary": employer_expiry_summary,
-        "Employer Expiry Tracker": exp[["Employer","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"]],
+        "Employer Expiry Tracker": exp[["Employer","Insurance","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"]],
     }
-
 def read_excel_any(uploaded_file, required_hint: Optional[List[str]] = None) -> pd.DataFrame:
     """Read an Excel report even when the real header is not on the first row.
 
@@ -1753,16 +1794,35 @@ if admin_mode:
             # Optional income analysis file (applied as-is; if it contains multiple days, we will NOT split it)
             _income_df = None
             income_tbls = {}
+            income_raw_df = None
+            income_dt = None
             if SS.get('income_file') is not None:
                 _income_df = load_income_details(io.BytesIO(SS.get('income_file', {}).get('bytes', b'')))
                 if _income_df is None or _income_df.empty:
                     st.warning("Income Analysis file loaded, but header could not be detected. Skipping Income tables in bulk save.")
                 else:
-                    income_tbls = income_tables(_income_df)
+                    income_raw_df = _income_df.copy()
 
-            
+                    # Try to detect a date column for day-wise filtering (so Daily/Weekly/Monthly view works correctly)
+                    income_date_col = _find_col(
+                        income_raw_df,
+                        ["Date", "Visit Date", "Service Date", "Invoice Date", "Posting Date", "Bill Date", "Transaction Date", "Created Date"]
+                    )
+                    if income_date_col:
+                        s_raw = income_raw_df[income_date_col]
+                        s1 = pd.to_datetime(s_raw, errors="coerce", dayfirst=False)
+                        s2 = pd.to_datetime(s_raw, errors="coerce", dayfirst=True)
+                        n1 = int(s1.notna().sum())
+                        n2 = int(s2.notna().sum())
+                        income_dt = (s2 if n2 >= n1 else s1)
+                        income_raw_df["_DT_"] = income_dt
+                    else:
+                        income_dt = None
 
-            # Optional CPT/ICD analysis file (applied as-is; if it contains multiple days, we will NOT split it)
+                    # Default tables (whole file) – will be overridden per-day inside the loop when possible
+                    income_tbls = income_tables(income_raw_df)
+
+# Optional CPT/ICD analysis file (applied as-is; if it contains multiple days, we will NOT split it)
             cpticd_tbls = {}
             if SS.get("cpticd_file") is not None:
                 _cpticd_df = load_cpticd_details(io.BytesIO(SS.get("cpticd_file", {}).get("bytes", b"")))
@@ -1797,9 +1857,20 @@ if admin_mode:
 
                 dfs = compute_summary(reg_day, cash_day, pend_day, d_norm)
 
-                # Attach income tables (same tables for all days; if you need day-wise split, upload day-wise income file)
-                for _k, _v in income_tbls.items():
-                    dfs[f"Income | {_k}"] = _v
+                # Attach income tables (day-wise when possible)
+                if income_raw_df is not None and isinstance(income_raw_df, pd.DataFrame) and not income_raw_df.empty:
+                    if "_DT_" in income_raw_df.columns:
+                        _inc_day = income_raw_df.loc[income_raw_df["_DT_"].dt.normalize() == d_norm].copy()
+                    else:
+                        _inc_day = income_raw_df.copy()
+
+                    _inc_tbls = income_tables(_inc_day) if _inc_day is not None and not _inc_day.empty else {}
+                    for _k, _v in _inc_tbls.items():
+                        dfs[f"Income | {_k}"] = _v
+                else:
+                    for _k, _v in income_tbls.items():
+                        dfs[f"Income | {_k}"] = _v
+
                 # Attach CPT/ICD tables (same tables for all days; if you need day-wise split, upload day-wise CPT/ICD file)
                 for _k, _v in cpticd_tbls.items():
                     dfs[f"CPTICD | {_k}"] = _v
