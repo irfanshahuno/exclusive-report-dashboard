@@ -449,7 +449,20 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
         except Exception:
             pass
 
-    # ---- Explode ICD and CPT (for analytics tables) ----
+    # ---- Principal ICD (VISIT-LEVEL) ----
+    # Option (1): Principal DX ONLY, with totals intended to match visits.
+    # If multiple principal codes exist in one visit, we take ONLY the first one.
+    pri1_cols = [col_doc, "Insurance", col_visit, col_pri] + ([col_pri_desc] if col_pri_desc else [])
+    pri1 = base[pri1_cols].copy()
+
+    # Split to list then take first code only (visit-level)
+    pri1[col_pri] = _split_multi_codes(pri1[col_pri])
+    pri1[col_pri] = pri1[col_pri].apply(lambda x: (x[0] if isinstance(x, list) and len(x) else ""))
+    pri1[col_pri] = pri1[col_pri].fillna("").astype(str).str.strip()
+    pri1[col_visit] = pri1[col_visit].fillna("").astype(str).str.strip()
+    pri1 = pri1[(pri1[col_pri] != "") & (pri1[col_visit] != "")].copy()
+
+    # ---- Explode ICD and CPT (for other analytics tables, e.g., Top1, CPT mapping) ----
     pri = base[[col_doc, "Insurance", col_pri] + ([col_pri_desc] if col_pri_desc else [])].copy()
     pri[col_pri] = _split_multi_codes(pri[col_pri])
     pri = pri.explode(col_pri)
@@ -484,7 +497,27 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
             out = out.merge(dmap, on=code_col, how="left")
         return out
 
+    # helpers for Principal DX counts (visit-level; intended to match visits)
+    def _principal_counts(group_cols: List[str]) -> pd.DataFrame:
+        if pri1.empty:
+            return pd.DataFrame()
+        gcols = group_cols + [col_pri]
+        out = pri1.groupby(gcols, dropna=False)[col_visit].nunique().reset_index(name="Count")
+        out = out.sort_values(group_cols + ["Count"], ascending=[True]*len(group_cols) + [False])
+        # attach description (first non-empty)
+        if col_pri_desc and col_pri_desc in pri1.columns:
+            dmap = pri1[[col_pri, col_pri_desc]].dropna().copy()
+            dmap[col_pri] = dmap[col_pri].astype(str).str.strip()
+            dmap[col_pri_desc] = dmap[col_pri_desc].astype(str).str.strip()
+            dmap = dmap[(dmap[col_pri] != "") & (dmap[col_pri_desc] != "")].drop_duplicates(col_pri)
+            out = out.merge(dmap, on=col_pri, how="left")
+        return out
+
     # Doctor x Insurance
+    doc_emp_pri_counts = _principal_counts([col_doc, "Insurance"]).rename(
+        columns={col_doc: "Doctor", "Insurance": "Insurance", col_pri: "ICD", (col_pri_desc or "ICD Principal Description"): "ICD Description"}
+    )
+
     doc_emp_pri_top = _top1([col_doc, "Insurance"], col_pri, col_pri_desc).rename(
         columns={col_doc: "Doctor", "Insurance": "Insurance", col_pri: "ICD", (col_pri_desc or "ICD Principal Description"): "ICD Description"}
     )
@@ -608,6 +641,10 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     except Exception:
         employer_wise_exp = pd.DataFrame(columns=["Employer", "Count", "Insurance", "Expiry Date"])
     return {
+        # Principal DX counts (VISIT-LEVEL; totals intended to match visits)
+        "Doctor x Insurance | Principal DX (Counts)": doc_emp_pri_counts[["Doctor", "Insurance", "ICD", "Count", "ICD Description"]].copy()
+            if not doc_emp_pri_counts.empty else doc_emp_pri_counts,
+
         # Diagnosis Top-1 (by Doctor x Insurance)
         "Doctor x Insurance | Principal DX (Top1)": doc_emp_pri_top[["Doctor", "Insurance", "ICD", "Count", "ICD Description"]].copy()
             if not doc_emp_pri_top.empty else doc_emp_pri_top,
