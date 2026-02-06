@@ -336,6 +336,28 @@ def _top_n_codes(df_exp: pd.DataFrame, group_cols: List[str], code_col: str, des
     return g.sort_values(group_cols + ["Count"], ascending=[True]*len(group_cols) + [False])
 
 
+
+def load_cpticd_details(file_obj):
+    """Load CPT/ICD details report (RegistrationDetailswithICDandCPTList).
+
+    Accepts a file-like object (BytesIO / UploadedFile / path). Returns a DataFrame or empty DF.
+    """
+    try:
+        # pandas can read file-like objects directly
+        df = pd.read_excel(file_obj)
+    except Exception:
+        try:
+            # fallback: if it's an UploadedFile-like object
+            df = pd.read_excel(getattr(file_obj, "getvalue")())
+        except Exception:
+            return pd.DataFrame()
+    # Normalize column names (strip)
+    try:
+        df.columns = [str(c).strip() for c in df.columns]
+    except Exception:
+        pass
+    return df
+
 def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Dict[str, pd.DataFrame]:
     """Build CPT/ICD analytics tables.
 
