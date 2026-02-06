@@ -1530,6 +1530,86 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
                 fn = f"Registration_Employer_{_safe_filename(labels.get(pick_key, pick_key))}_{day_ts.date().isoformat()}.xlsx"
                 download_excel_button(detail, fn, "⬇️ Download Employer Rows (Excel)")
 
+
+    with st.expander("Download Eligibility Expiry (Step 5) — by Insurance / Employer", expanded=False):
+        reg_df = SS.get("reg_df")
+        cpticd_df = SS.get("cpticd_df")
+        if reg_df is None or cpticd_df is None:
+            st.info("Upload/Process Step 1 and Step 5 in this session to enable eligibility expiry download.")
+        else:
+            # --- STRICT columns ---
+            reg_emr_col = _find_col(reg_df, ["EMRNo", "EMR No", "MRN", "Patient ID"])
+            reg_visit_col = _find_col(reg_df, ["VisitNo", "Visit No", "Visit Number", "Visit#"])
+            reg_emp_col = next((c for c in reg_df.columns if _norm_col(c) == "employername"), None)  # STRICT
+            reg_ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
+
+            c_emr_col = _find_col(cpticd_df, ["EMR No", "EMRNo", "MRN", "Patient ID"])
+            c_visit_col = _find_col(cpticd_df, ["Visit ID", "VisitID", "Visit No", "VisitNo"])
+            c_exp_col = _find_col(cpticd_df, ["Expiry Date", "Expiry", "Eligibility Expiry", "EligibilityExpiry", "Card Expiry", "CardExpiry"])
+            c_name_col = _find_col(cpticd_df, ["Name", "Patient Name", "PatientName"])
+            c_doc_col = _find_col(cpticd_df, ["Doctor", "Physician", "Clinician"])
+
+            missing = []
+            for k, v in {
+                "Registration EMRNo": reg_emr_col,
+                "Registration VisitNo": reg_visit_col,
+                "Registration Employer Name": reg_emp_col,
+                "Registration Insurance": reg_ins_col,
+                "CPT/ICD EMR No": c_emr_col,
+                "CPT/ICD Visit ID": c_visit_col,
+                "CPT/ICD Expiry Date": c_exp_col,
+            }.items():
+                if not v:
+                    missing.append(k)
+
+            if missing:
+                st.error("Missing required columns: " + ", ".join(missing))
+            else:
+                # normalize merge keys
+                r = reg_df[[reg_emr_col, reg_visit_col, reg_emp_col, reg_ins_col]].copy()
+                r.columns = ["EMR No", "Visit ID", "Employer", "Insurance"]
+                r["EMR No"] = r["EMR No"].astype(str).str.strip()
+                r["Visit ID"] = r["Visit ID"].astype(str).str.strip()
+
+                ccols = [c_emr_col, c_visit_col, c_exp_col]
+                if c_name_col: ccols.append(c_name_col)
+                if c_doc_col: ccols.append(c_doc_col)
+                c = cpticd_df[ccols].copy()
+                rename_map = {c_emr_col: "EMR No", c_visit_col: "Visit ID", c_exp_col: "Expiry Date"}
+                if c_name_col: rename_map[c_name_col] = "Name"
+                if c_doc_col: rename_map[c_doc_col] = "Doctor"
+                c = c.rename(columns=rename_map)
+                c["EMR No"] = c["EMR No"].astype(str).str.strip()
+                c["Visit ID"] = c["Visit ID"].astype(str).str.strip()
+                c["Expiry Date"] = pd.to_datetime(c["Expiry Date"], errors="coerce")
+
+                merged = r.merge(c, on=["EMR No", "Visit ID"], how="inner")
+                if merged.empty:
+                    st.warning("No matches found between Registration (EMR+VisitNo) and CPT/ICD (EMR+VisitID). Check Visit format / leading zeros.")
+                else:
+                    # Days to expiry
+                    today = pd.Timestamp.today().normalize()
+                    merged["Days To Expiry"] = (merged["Expiry Date"] - today).dt.days
+                    merged["Expiry Date"] = merged["Expiry Date"].dt.date.astype(str)
+
+                    # filters
+                    merged["Insurance"] = merged["Insurance"].fillna("CASH").astype(str).str.strip().replace("", "CASH")
+                    merged["Employer"] = merged["Employer"].fillna("Blank").astype(str).str.strip().replace("", "Blank")
+
+                    ins_pick = st.selectbox("Filter by Insurance", ["(All)"] + sorted(merged["Insurance"].unique()), key="dl_exp_ins")
+                    view = merged.copy()
+                    if ins_pick != "(All)":
+                        view = view[view["Insurance"] == ins_pick]
+
+                    emp_pick = st.selectbox("Filter by Employer", ["(All)"] + sorted(view["Employer"].unique()), key="dl_exp_emp")
+                    if emp_pick != "(All)":
+                        view = view[view["Employer"] == emp_pick]
+
+                    st.dataframe(view, use_container_width=True, hide_index=True)
+
+                    fn = f"Eligibility_Expiry_{_safe_filename(ins_pick)}_{_safe_filename(emp_pick)}_{day_ts.date().isoformat()}.xlsx"
+                    download_excel_button(view, fn, "⬇️ Download Eligibility Expiry (Excel)")
+
     # Whole Summary Excel
     export_dfs = {k: dfs[k] for k in dfs.keys()}
     st.download_button(
