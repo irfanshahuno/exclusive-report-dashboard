@@ -569,7 +569,7 @@ else:
     )
 
 # ✅ ONE return for both cases
-return {
+     return {
     "Doctor x Company | Principal DX (Top1)": docco_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
     "Doctor x Company | Secondary DX (Top1)": docco_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
     "Doctor | Principal DX (Top1)": doc_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
