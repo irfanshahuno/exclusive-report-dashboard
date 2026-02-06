@@ -544,7 +544,6 @@ if not summ.empty:
     display = []
     for _, r in employer_expiry_summary.iterrows():
         top1_share = float(r.get("Top1_Share", 0) or 0)
-        top2_share = float(r.get("Top2_Share", 0) or 0)
         t1 = _fmt_date(r.get("Top1_Expiry"))
         t2 = _fmt_date(r.get("Top2_Expiry"))
 
@@ -563,22 +562,24 @@ if not summ.empty:
     ].copy()
     employer_expiry_summary["Top1_Share"] = employer_expiry_summary["Top1_Share"].apply(_fmt_pct)
     employer_expiry_summary["Top2_Share"] = employer_expiry_summary["Top2_Share"].apply(_fmt_pct)
+
 else:
-    employer_expiry_summary = pd.DataFrame(columns=["Employer", "Total_EMR", "Common_Expiry", "Top1_Expiry", "Top1_Share", "Top2_Expiry", "Top2_Share"])
+    employer_expiry_summary = pd.DataFrame(
+        columns=["Employer", "Total_EMR", "Common_Expiry", "Top1_Expiry", "Top1_Share", "Top2_Expiry", "Top2_Share"]
+    )
 
-    return {
-
-        "Doctor x Company | Principal DX (Top1)": docco_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
-        "Doctor x Company | Secondary DX (Top1)": docco_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
-        "Doctor | Principal DX (Top1)": doc_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
-        "Doctor | Secondary DX (Top1)": doc_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
-        "Company | Principal DX (Top1)": co_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
-        "Company | Secondary DX (Top1)": co_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
-        "CPT -> Top Principal ICD": pair_top,
-        "Employer Expiry Summary": employer_expiry_summary,
-        "Employer Expiry Tracker": exp[["Employer","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"]],
-    }
-
+# ✅ ONE return for both cases
+return {
+    "Doctor x Company | Principal DX (Top1)": docco_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+    "Doctor x Company | Secondary DX (Top1)": docco_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+    "Doctor | Principal DX (Top1)": doc_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+    "Doctor | Secondary DX (Top1)": doc_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+    "Company | Principal DX (Top1)": co_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+    "Company | Secondary DX (Top1)": co_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+    "CPT -> Top Principal ICD": pair_top,
+    "Employer Expiry Summary": employer_expiry_summary,
+    "Employer Expiry Tracker": exp[["Employer","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"]],
+}
 
 def read_excel_any(uploaded_file, required_hint: Optional[List[str]] = None) -> pd.DataFrame:
     """Read an Excel report even when the real header is not on the first row.
