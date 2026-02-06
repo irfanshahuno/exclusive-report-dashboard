@@ -481,7 +481,57 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     cpt[col_cpt] = cpt[col_cpt].fillna("").astype(str).str.strip()
     cpt = cpt[cpt[col_cpt] != ""].copy()
 
-    # helpers for top1
+    
+    # ---- Visit-level counts (so totals can match visits) ----
+    # Unique visits per Doctor x Insurance (based on EMR+Visit in CPT/ICD report; Insurance enriched from Registration when possible)
+    try:
+        _vis = base[[col_doc, "Insurance", col_visit]].copy()
+        _vis[col_doc] = _vis[col_doc].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+        _vis["Insurance"] = _vis["Insurance"].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+        _vis[col_visit] = _vis[col_visit].fillna("").astype(str).str.strip()
+        _vis = _vis[_vis[col_visit] != ""].drop_duplicates()
+        visits_doc_ins = _vis.groupby([col_doc, "Insurance"], dropna=False)[col_visit].nunique().reset_index(name="Visits")
+    except Exception:
+        visits_doc_ins = pd.DataFrame(columns=[col_doc, "Insurance", "Visits"])
+
+    def _counts_table(exp_df: pd.DataFrame, code_col: str, desc_col: Optional[str], out_group_cols: List[str]) -> pd.DataFrame:
+        """Count occurrences per group (NOT top1)."""
+        if exp_df is None or exp_df.empty:
+            cols = out_group_cols + ["ICD", "Count", "ICD Description"]
+            return pd.DataFrame(columns=cols)
+
+        g = exp_df.groupby(out_group_cols + [code_col], dropna=False).size().reset_index(name="Count")
+
+        # attach description as mode (most common) for each group+code
+        if desc_col and desc_col in exp_df.columns:
+            tmp = exp_df[out_group_cols + [code_col, desc_col]].copy()
+            tmp[desc_col] = tmp[desc_col].fillna("").astype(str).str.strip()
+
+            def _mode_desc(x: pd.Series) -> str:
+                x = x[x != ""]
+                if x.empty:
+                    return ""
+                m = x.mode()
+                return m.iat[0] if not m.empty else x.iloc[0]
+
+            dmap = tmp.groupby(out_group_cols + [code_col], dropna=False)[desc_col].apply(_mode_desc).reset_index(name="ICD Description")
+            g = g.merge(dmap, on=out_group_cols + [code_col], how="left")
+        else:
+            g["ICD Description"] = ""
+
+        g = g.rename(columns={code_col: "ICD"})
+        # order + sort
+        g = g[out_group_cols + ["ICD", "Count", "ICD Description"]].sort_values(out_group_cols + ["Count"], ascending=[True]*len(out_group_cols) + [False])
+        return g
+
+    # Doctor x Insurance full counts (principal & secondary)
+    doc_ins_pri_counts = _counts_table(pri, col_pri, col_pri_desc, [col_doc, "Insurance"]).rename(columns={col_doc: "Doctor", "Insurance": "Insurance"})
+    doc_ins_sec_counts = _counts_table(sec, col_sec, col_sec_desc, [col_doc, "Insurance"]).rename(columns={col_doc: "Doctor", "Insurance": "Insurance"})
+
+    # Visits table aligned for view-side matching
+    visits_doc_ins = visits_doc_ins.rename(columns={col_doc: "Doctor", "Insurance": "Insurance"})
+
+# helpers for top1
     def _top1(group_cols: List[str], code_col: str, desc_col: Optional[str] = None) -> pd.DataFrame:
         gcols = group_cols + [code_col]
         agg = pri if code_col == col_pri else (sec if code_col == col_sec else cpt)
@@ -1204,6 +1254,18 @@ SS.setdefault("cpticd_df", None)
 SS.setdefault("cpticd_tables", {})
 
 if admin_mode:
+
+    # -------------------- Processing Scope (show at TOP) --------------------
+
+    st.subheader('1) RegistrationList (.xls / .xlsx)')
+    if SS.get('reg_df') is None:
+        st.error('Step 1: Registration file not uploaded')
+    else:
+        try:
+            st.success(f"Step 1 OK ✅ ({SS.get('reg_file', {}).get('name','')})")
+        except Exception:
+            st.success('Step 1 OK ✅')
+
     # Step 1
     c1, c2 = st.columns([3, 1])
     with c1:
@@ -1225,6 +1287,15 @@ if admin_mode:
             SS["reg_file"], SS["reg_df"] = None, None
             st.error(str(e))
 
+    st.subheader('2) PatientCashOutList (.xls / .xlsx)')
+    if SS.get('cash_df') is None:
+        st.error('Step 2: CashOut file not uploaded')
+    else:
+        try:
+            st.success(f"Step 2 OK ✅ ({SS.get('cash_file', {}).get('name','')})")
+        except Exception:
+            st.success('Step 2 OK ✅')
+
     # Step 2
     st.markdown("### 2) PatientCashOutList (.xls / .xlsx)")
     c1, c2 = st.columns([3, 1])
@@ -1245,6 +1316,15 @@ if admin_mode:
         except Exception as e:
             SS["cash_file"], SS["cash_df"] = None, None
             st.error(str(e))
+
+    st.subheader('3) Pending file (.xls / .xlsx)')
+    if SS.get('pend_df') is None:
+        st.error('Step 3: Pending file not uploaded')
+    else:
+        try:
+            st.success(f"Step 3 OK ✅ ({SS.get('pend_file', {}).get('name','')})")
+        except Exception:
+            st.success('Step 3 OK ✅')
 
     # Step 3
     st.markdown("### 3) Pending file (.xls / .xlsx)")
