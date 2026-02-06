@@ -769,22 +769,22 @@ except Exception:
     st.warning("Counts download is unavailable (Excel writer error).")
 
 # Download full list
-# Download Excel
-                try:
-                    import io as _io
-                    out = _io.BytesIO()
-                    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-                        (df_f[show_cols] if show_cols else df_f).to_excel(writer, index=False, sheet_name="Expiry_List")
-                    st.download_button(
-                        "Download Excel",
-                        data=out.getvalue(),
-                        file_name="expiry_list.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"dl_exp_{str(day_ts)}_{pick_ins}_{pick_emp}",
-                    )
-                except Exception:
-                    st.warning("Download is unavailable (Excel writer not found).")
-
+    # Download full list
+    # Download Excel
+    try:
+        import io as _io
+        out = _io.BytesIO()
+        with pd.ExcelWriter(out, engine="openpyxl") as writer:
+            (df_f[show_cols] if show_cols else df_f).to_excel(writer, index=False, sheet_name="Expiry_List")
+        st.download_button(
+            "Download Excel",
+            data=out.getvalue(),
+            file_name="expiry_list.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"dl_exp_{str(day_ts)}_{pick_ins}_{pick_emp}",
+        )
+    except Exception:
+        st.warning("Download is unavailable (Excel writer not found).")
 
 # ---------------------------
 # Center selection (LOCKED if passed in URL)
