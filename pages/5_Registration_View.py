@@ -745,47 +745,49 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         st.info("Expiry list is missing Employer/Insurance columns, so summary counts cannot be built.")
         df_counts = pd.DataFrame()
 
-# ---- Optional detailed list (only when needed) ----
-show_details = st.checkbox("Show detailed patient list (only if you need to review before download)", value=False, key=f"exp_show_details_{str(day_ts)}")
-if show_details:
-    show_cols = [c for c in ["Employer","Insurance","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"] if c in df_f.columns]
-    st.dataframe(df_f[show_cols] if show_cols else df_f, use_container_width=True, hide_index=True)
-
-# ---- Downloads ----
-# Download counts
-try:
-    import io as _io
-    out_counts = _io.BytesIO()
-    with pd.ExcelWriter(out_counts, engine="openpyxl") as writer:
-        (df_counts if df_counts is not None else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Expiry_Counts")
-    st.download_button(
-        "Download Counts (Excel)",
-        data=out_counts.getvalue(),
-        file_name="expiry_counts.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key=f"dl_exp_counts_{str(day_ts)}",
+    # ---- Optional detailed list (only when needed) ----
+    exp_key = f"{win}_{pick_ins}_{pick_emp}"
+    show_details = st.checkbox(
+        "Show detailed patient list (only if you need to review before download)",
+        value=False,
+        key=f"exp_show_details_{exp_key}",
     )
-except Exception:
-    st.warning("Counts download is unavailable (Excel writer error).")
+    if show_details:
+        show_cols = [c for c in ["Employer","Insurance","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"] if c in df_f.columns]
+        st.dataframe(df_f[show_cols] if show_cols else df_f, use_container_width=True, hide_index=True)
 
-# Download full list
+    # ---- Downloads ----
+    # Download counts
+    try:
+        import io as _io
+        out_counts = _io.BytesIO()
+        with pd.ExcelWriter(out_counts, engine="openpyxl") as writer:
+            (df_counts if isinstance(df_counts, pd.DataFrame) else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Expiry_Counts")
+        st.download_button(
+            "Download Counts (Excel)",
+            data=out_counts.getvalue(),
+            file_name="expiry_counts.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"dl_exp_counts_{exp_key}",
+        )
+    except Exception:
+        st.warning("Counts download is unavailable (Excel writer error).")
+
     # Download full list
-    # Download Excel
     try:
         import io as _io
         out = _io.BytesIO()
         with pd.ExcelWriter(out, engine="openpyxl") as writer:
-            (df_f[show_cols] if show_cols else df_f).to_excel(writer, index=False, sheet_name="Expiry_List")
+            (df_f[show_cols] if (show_details and show_cols) else df_f).to_excel(writer, index=False, sheet_name="Expiry_List")
         st.download_button(
-            "Download Excel",
+            "Download Full List (Excel)",
             data=out.getvalue(),
             file_name="expiry_list.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"dl_exp_{str(day_ts)}_{pick_ins}_{pick_emp}",
+            key=f"dl_exp_full_{exp_key}",
         )
     except Exception:
         st.warning("Download is unavailable (Excel writer not found).")
-
 # ---------------------------
 # Center selection (LOCKED if passed in URL)
 # ---------------------------
