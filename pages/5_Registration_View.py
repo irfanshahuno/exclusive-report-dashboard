@@ -295,25 +295,57 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
     
 
     # -------------------- CPT / ICD Analysis --------------------
-    cpticd_keys = [k for k in dfs.keys() if str(k).startswith("CPTICD | ")]
-    if cpticd_keys:
+    # NOTE: Never use `or` between DataFrames (pandas raises: "truth value of a DataFrame is ambiguous").
+    # We support BOTH key styles:
+    #   New (viewer-style): "CPTICD | ..."
+    #   Old (uploader-style): "Doctor x Company | ..." / "CPT -> Top Principal ICD" / "Employer Expiry Tracker"
+    def _pick_first_df(keys: List[str]) -> Optional[pd.DataFrame]:
+        first_any: Optional[pd.DataFrame] = None
+        for kk in keys:
+            v = dfs.get(kk)
+            if isinstance(v, pd.DataFrame):
+                if first_any is None:
+                    first_any = v
+                if not v.empty:
+                    return v
+        return first_any
+
+    has_cpticd = any(str(k).startswith("CPTICD | ") for k in dfs.keys()) or any(
+        k in dfs for k in [
+            "Doctor x Company | Principal DX (Top1)",
+            "Doctor x Company | Secondary DX (Top1)",
+            "Doctor x Insurance | Principal DX (Top1)",
+            "Doctor x Insurance | Secondary DX (Top1)",
+            "CPT -> Top Principal ICD",
+            "Employer Expiry Tracker",
+        ]
+    )
+
+    if has_cpticd:
         st.markdown("---")
         st.header("CPT / ICD Analysis")
 
-        # Simplified: show Doctor + Insurance only (no Employer/Company)
-        df_pri = (
-            dfs.get("CPTICD | Doctor x Insurance | Principal DX (Top1)")
-            or dfs.get("CPTICD | Doctor x Company | Principal DX (Top1)")
-        )
-        df_sec = (
-            dfs.get("CPTICD | Doctor x Insurance | Secondary DX (Top1)")
-            or dfs.get("CPTICD | Doctor x Company | Secondary DX (Top1)")
-        )
-        df_cpt_map = dfs.get("CPTICD | CPT -> Top Principal ICD")
+        # Simplified display (Doctor + Insurance only)
+        df_pri = _pick_first_df([
+            "CPTICD | Doctor x Insurance | Principal DX (Top1)",
+            "CPTICD | Doctor x Company | Principal DX (Top1)",
+            "Doctor x Insurance | Principal DX (Top1)",
+            "Doctor x Company | Principal DX (Top1)",
+        ])
+        df_sec = _pick_first_df([
+            "CPTICD | Doctor x Insurance | Secondary DX (Top1)",
+            "CPTICD | Doctor x Company | Secondary DX (Top1)",
+            "Doctor x Insurance | Secondary DX (Top1)",
+            "Doctor x Company | Secondary DX (Top1)",
+        ])
+        df_cpt_map = _pick_first_df([
+            "CPTICD | CPT -> Top Principal ICD",
+            "CPT -> Top Principal ICD",
+        ])
 
         tabs = st.tabs(["Doctor x Insurance", "CPT Mapping"])
 
-        def _clean_diag(df: pd.DataFrame) -> pd.DataFrame:
+        def _clean_diag(df: Optional[pd.DataFrame]) -> pd.DataFrame:
             if df is None or df.empty:
                 return pd.DataFrame()
             out = df.copy()
@@ -321,7 +353,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             for drop_c in ["Employer", "Company"]:
                 if drop_c in out.columns:
                     out = out.drop(columns=[drop_c])
-            # Normalize Insurance spelling
+            # Fix common typo
             if "Insuance" in out.columns and "Insurance" not in out.columns:
                 out = out.rename(columns={"Insuance": "Insurance"})
             # Keep only requested columns where available
@@ -340,7 +372,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
 
         with tabs[1]:
             st.subheader("CPT → Most Common Principal ICD")
-            st.dataframe(df_cpt_map if df_cpt_map is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+            st.dataframe(df_cpt_map if isinstance(df_cpt_map, pd.DataFrame) else pd.DataFrame(), use_container_width=True, hide_index=True)
 
     st.subheader("Employer Wise")
     emp_df = dfs.get("Employer Wise", pd.DataFrame()).copy()
