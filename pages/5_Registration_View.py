@@ -362,17 +362,67 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
 
         with tabs[0]:
             st.subheader("Top Diagnosis (Doctor x Insurance)")
+
+            pri_clean = _clean_diag(df_pri)
+            sec_clean = _clean_diag(df_sec)
+
+            # --- Filters (Doctor + Insurance) ---
+            doctors = []
+            ins_list = []
+            for _d in [pri_clean, sec_clean]:
+                if isinstance(_d, pd.DataFrame) and not _d.empty:
+                    if "Doctor" in _d.columns:
+                        doctors += _d["Doctor"].dropna().astype(str).tolist()
+                    if "Insurance" in _d.columns:
+                        ins_list += _d["Insurance"].dropna().astype(str).tolist()
+
+            doctors = sorted({d.strip() for d in doctors if str(d).strip() != ""})
+            ins_list = sorted({i.strip() for i in ins_list if str(i).strip() != ""})
+
+            f1, f2 = st.columns(2)
+            with f1:
+                pick_doc = st.selectbox("Select Doctor", ["All"] + doctors, index=0, key="cpticd_pick_doc")
+            with f2:
+                pick_ins = st.selectbox("Select Insurance", ["All"] + ins_list, index=0, key="cpticd_pick_ins")
+
+            def _filter_diag(df: pd.DataFrame) -> pd.DataFrame:
+                if df is None or df.empty:
+                    return pd.DataFrame()
+                out = df.copy()
+                if pick_doc != "All" and "Doctor" in out.columns:
+                    out = out[out["Doctor"].astype(str) == str(pick_doc)]
+                if pick_ins != "All" and "Insurance" in out.columns:
+                    out = out[out["Insurance"].astype(str) == str(pick_ins)]
+                return out
+
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("**Principal DX (Top 1)**")
-                st.dataframe(_clean_diag(df_pri), use_container_width=True, hide_index=True)
+                st.dataframe(_filter_diag(pri_clean), use_container_width=True, hide_index=True)
             with c2:
                 st.markdown("**Secondary DX (Top 1)**")
-                st.dataframe(_clean_diag(df_sec), use_container_width=True, hide_index=True)
+                st.dataframe(_filter_diag(sec_clean), use_container_width=True, hide_index=True)
 
         with tabs[1]:
+
             st.subheader("CPT → Most Common Principal ICD")
-            st.dataframe(df_cpt_map if isinstance(df_cpt_map, pd.DataFrame) else pd.DataFrame(), use_container_width=True, hide_index=True)
+
+            df_cpt = df_cpt_map if isinstance(df_cpt_map, pd.DataFrame) else pd.DataFrame()
+            if df_cpt is None or df_cpt.empty:
+                st.info("No CPT mapping data for this day.")
+            else:
+                # Optional filters
+                if "CPT" in df_cpt.columns:
+                    cpt_list = sorted(df_cpt["CPT"].dropna().astype(str).unique().tolist())
+                    pick_cpt = st.selectbox("Select CPT", ["All"] + cpt_list, index=0, key="cpticd_pick_cpt")
+                else:
+                    pick_cpt = "All"
+
+                df_show = df_cpt.copy()
+                if pick_cpt != "All" and "CPT" in df_show.columns:
+                    df_show = df_show[df_show["CPT"].astype(str) == str(pick_cpt)].copy()
+
+                st.dataframe(df_show, use_container_width=True, hide_index=True)
 
     st.subheader("Employer Wise")
     emp_df = dfs.get("Employer Wise", pd.DataFrame()).copy()
