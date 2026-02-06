@@ -49,10 +49,6 @@ except Exception:
 st.set_page_config(page_title="Registration Summary", layout="wide", initial_sidebar_state="collapsed")
 st.title("Registration Summary (Registration + CashOut + Pending)")
 
-# Session state shortcut
-SS = st.session_state
-
-
 # ---------------------------
 # Admin mode (admin-only page)
 # ---------------------------
@@ -150,54 +146,40 @@ def load_income_details(uploaded_file) -> Optional[pd.DataFrame]:
 
 
 def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-    """Build Income Analysis tables.
-
-    Adds dual totals/averages:
-    - Total_Amount_Service / Avg_Amount_Service from Consultation+Lab+Procedure
-    - Total_Amount_Insuance / Avg_Amount_Insuance from STRICT 'Insuance' column (same spelling)
-    """
     if df is None or df.empty:
         return {}
 
     col_dept = _find_col(df, ["Department"])
     col_doc  = _find_col(df, ["Doctor"])
-    # Insurance/Payer name is OPTIONAL for grouping. (Some reports may not have it.)
-    col_payer = _find_col(df, ["Insurance Name", "Insurance", "Payer", "Payer Name"])
-    col_visit= _find_col(df, ["Visit No", "VisitNo", "Visit ID", "VisitID"])
+    col_ins  = _find_col(df, ["Insurance Name", "Insurance"])
+    col_visit= _find_col(df, ["Visit No", "VisitNo"])
     col_cons = _find_col(df, ["Consultation"])
     col_lab  = _find_col(df, ["Lab"])
     col_proc = _find_col(df, ["Procedure"])
 
-    # STRICT amount column spelling for Insuance
-    col_insu_amt = next((c for c in df.columns if _norm_col(c) == "insuance"), None)
-
-    needed = [col_doc, col_visit, col_cons, col_lab, col_proc, col_insu_amt]
+    needed = [col_doc, col_ins, col_visit, col_cons, col_lab, col_proc]
     if any(c is None for c in needed):
         return {}
 
     tmp = df.copy()
-
-    # Doctor is mandatory
+    # Clean blanks/None so they don't appear as a separate 'None' row and don't affect GRAND TOTAL
+    # Doctor is mandatory for any revenue attribution
     tmp[col_doc] = tmp[col_doc].astype(str).str.strip()
-    tmp = tmp[~tmp[col_doc].str.lower().isin(["", "none", "nan"])].copy()
-
-    # Optional Department
+    tmp = tmp[~tmp[col_doc].str.lower().isin(['', 'none', 'nan'])].copy()
+    # Optional Department: if present, drop blank departments as well (prevents 'None' department grouping)
     if col_dept:
         tmp[col_dept] = tmp[col_dept].astype(str).str.strip()
-        tmp = tmp[~tmp[col_dept].str.lower().isin(["", "none", "nan"])].copy()
-
-    # Optional payer grouping (if missing, tables that rely on it will be skipped)
-    if col_payer:
-        tmp[col_payer] = tmp[col_payer].fillna("CASH").astype(str).str.strip().replace("", "CASH")
-
+        tmp = tmp[~tmp[col_dept].str.lower().isin(['', 'none', 'nan'])].copy()
+    # Insurance: blanks treated as CASH
+    tmp[col_ins] = tmp[col_ins].fillna('CASH').astype(str).str.strip().replace('', 'CASH')
     tmp[col_visit] = tmp[col_visit].astype(str).str.strip()
-    tmp = tmp[tmp[col_visit] != ""].copy()
+    tmp = tmp[tmp[col_visit] != ''].copy()
 
-    for c in [col_cons, col_lab, col_proc, col_insu_amt]:
+    for c in [col_cons, col_lab, col_proc]:
         tmp[c] = pd.to_numeric(tmp[c], errors="coerce").fillna(0.0)
 
-    tmp["_total_service"] = tmp[col_cons] + tmp[col_lab] + tmp[col_proc]
-    tmp["_total_insuance"] = tmp[col_insu_amt]
+    tmp[col_visit] = tmp[col_visit].astype(str).str.strip()
+    tmp["_total_amt"] = tmp[col_cons] + tmp[col_lab] + tmp[col_proc]
 
     def _agg(group_cols: List[str]) -> pd.DataFrame:
         g = tmp.groupby(group_cols, dropna=False).agg(
@@ -205,34 +187,25 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
             Lab=(col_lab, "sum"),
             Procedure=(col_proc, "sum"),
             Total_Visit=(col_visit, pd.Series.nunique),
-            Total_Amount_Service=("_total_service", "sum"),
-            Total_Amount_Insuance=("_total_insuance", "sum"),
+            Total_Amount=("_total_amt", "sum"),
         ).reset_index()
-
-        g["Avg_Amount_Service"] = g["Total_Amount_Service"] / g["Total_Visit"].replace(0, pd.NA)
-        g["Avg_Amount_Insuance"] = g["Total_Amount_Insuance"] / g["Total_Visit"].replace(0, pd.NA)
-        g["Lab_%"] = (g["Lab"] / g["Total_Amount_Service"].replace(0, pd.NA)) * 100
+        g["Avg_Amount"] = g["Total_Amount"] / g["Total_Visit"].replace(0, pd.NA)
+        g["Lab_%"] = (g["Lab"] / g["Total_Amount"].replace(0, pd.NA)) * 100
         return g
 
-    # Doctor wise
     if col_dept:
         doctor_wise = _agg([col_dept, col_doc]).rename(columns={col_dept: "Department", col_doc: "Doctor"})
     else:
         doctor_wise = _agg([col_doc]).rename(columns={col_doc: "Doctor"})
 
-    # Insurance wise + Doctor x Insurance only if payer column exists
-    insurance_wise = pd.DataFrame()
-    doctor_ins_wise = pd.DataFrame()
-    if col_payer:
-        insurance_wise = _agg([col_payer]).rename(columns={col_payer: "Insurance"})
-        doctor_ins_wise = _agg([col_doc, col_payer]).rename(columns={col_doc: "Doctor", col_payer: "Insurance"})
+    insurance_wise = _agg([col_ins]).rename(columns={col_ins: "Insurance"})
+    doctor_ins_wise = _agg([col_doc, col_ins]).rename(columns={col_doc: "Doctor", col_ins: "Insurance"})
 
     def _add_grand_total(d: pd.DataFrame, label_cols: List[str]) -> pd.DataFrame:
-        if d is None or d.empty:
+        if d.empty:
             return d
         total_visit = int(d["Total_Visit"].sum())
-        total_service = float(d["Total_Amount_Service"].sum())
-        total_insu = float(d["Total_Amount_Insuance"].sum())
+        total_amount = float(d["Total_Amount"].sum())
         lab_sum = float(d["Lab"].sum())
 
         row = {c: "" for c in d.columns}
@@ -240,59 +213,40 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
             if lc in row:
                 row[lc] = "GRAND TOTAL"
                 break
-
         row["Consultation"] = float(d["Consultation"].sum())
         row["Lab"] = lab_sum
         row["Procedure"] = float(d["Procedure"].sum())
         row["Total_Visit"] = total_visit
-
-        row["Total_Amount_Service"] = total_service
-        row["Total_Amount_Insuance"] = total_insu
-
-        row["Avg_Amount_Service"] = (total_service / total_visit) if total_visit else 0.0
-        row["Avg_Amount_Insuance"] = (total_insu / total_visit) if total_visit else 0.0
-        row["Lab_%"] = (lab_sum / total_service * 100) if total_service else 0.0
-
+        row["Total_Amount"] = total_amount
+        row["Avg_Amount"] = (total_amount / total_visit) if total_visit else 0.0
+        row["Lab_%"] = (lab_sum / total_amount * 100) if total_amount else 0.0
         return pd.concat([d, pd.DataFrame([row])], ignore_index=True)
 
     doctor_wise = _add_grand_total(doctor_wise, ["Department", "Doctor"])
-    if col_payer and not insurance_wise.empty:
-        insurance_wise = _add_grand_total(insurance_wise, ["Insurance"])
-    if col_payer and not doctor_ins_wise.empty:
-        doctor_ins_wise = _add_grand_total(doctor_ins_wise, ["Doctor"])
+    insurance_wise = _add_grand_total(insurance_wise, ["Insurance"])
+    doctor_ins_wise = _add_grand_total(doctor_ins_wise, ["Doctor"])
 
-    # Recompute averages strictly as: Total Amount ÷ Unique Visit No (Total_Visit)
-    # (Keeps display consistent even if upstream file has repeated/odd visit formats)
-    def _recalc_avg(d: pd.DataFrame) -> pd.DataFrame:
-        if d is None or d.empty:
-            return d
-        # Ensure numeric
-        d["Total_Visit"] = pd.to_numeric(d["Total_Visit"], errors="coerce").fillna(0).astype(int)
-        d["Total_Amount_Service"] = pd.to_numeric(d["Total_Amount_Service"], errors="coerce").fillna(0.0)
-        d["Total_Amount_Insuance"] = pd.to_numeric(d["Total_Amount_Insuance"], errors="coerce").fillna(0.0)
+    return {
+        "Doctor Wise Revenue": doctor_wise,
+        "Insurance Wise Revenue": insurance_wise,
+        "Doctor x Insurance Revenue": doctor_ins_wise,
+    }
 
-        denom = d["Total_Visit"].replace(0, pd.NA)
-        d["Avg_Amount_Service"] = d["Total_Amount_Service"] / denom
-        d["Avg_Amount_Insuance"] = d["Total_Amount_Insuance"] / denom
-        # Lab_% stays based on Service total
-        d["Lab_%"] = (pd.to_numeric(d["Lab"], errors="coerce").fillna(0.0) / d["Total_Amount_Service"].replace(0, pd.NA)) * 100
-        d["Avg_Amount_Service"] = d["Avg_Amount_Service"].fillna(0.0)
-        d["Avg_Amount_Insuance"] = d["Avg_Amount_Insuance"].fillna(0.0)
-        d["Lab_%"] = d["Lab_%"].fillna(0.0)
-        return d
 
-    doctor_wise = _recalc_avg(doctor_wise)
-    if col_payer and not insurance_wise.empty:
-        insurance_wise = _recalc_avg(insurance_wise)
-    if col_payer and not doctor_ins_wise.empty:
-        doctor_ins_wise = _recalc_avg(doctor_ins_wise)
-
-    out = {"Doctor Wise Revenue": doctor_wise}
-    if col_payer and not insurance_wise.empty:
-        out["Insurance Wise Revenue"] = insurance_wise
-    if col_payer and not doctor_ins_wise.empty:
-        out["Doctor x Insurance Revenue"] = doctor_ins_wise
-    return out
+# -------------------- CPT / ICD Analysis (Step 5) helpers --------------------
+def load_cpticd_details(uploaded_file) -> Optional[pd.DataFrame]:
+    """Load the RegistrationDetailswithICDandCPTList report (single sheet)."""
+    if uploaded_file is None:
+        return None
+    try:
+        df = pd.read_excel(uploaded_file)
+    except Exception:
+        return None
+    if df is None or df.empty:
+        return None
+    # normalize columns (strip)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
 
 
 def _split_multi_codes(s: pd.Series) -> pd.Series:
@@ -362,289 +316,169 @@ def _top_n_codes(df_exp: pd.DataFrame, group_cols: List[str], code_col: str, des
     return g.sort_values(group_cols + ["Count"], ascending=[True]*len(group_cols) + [False])
 
 
-
-def load_cpticd_details(file_obj):
-    """Load CPT/ICD details report (RegistrationDetailswithICDandCPTList).
-
-    Accepts a file-like object (BytesIO / UploadedFile / path). Returns a DataFrame or empty DF.
-    """
-    try:
-        # pandas can read file-like objects directly
-        df = pd.read_excel(file_obj)
-    except Exception:
-        try:
-            # fallback: if it's an UploadedFile-like object
-            df = pd.read_excel(getattr(file_obj, "getvalue")())
-        except Exception:
-            return pd.DataFrame()
-    # Normalize column names (strip)
-    try:
-        df.columns = [str(c).strip() for c in df.columns]
-    except Exception:
-        pass
-    return df
-
 def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Dict[str, pd.DataFrame]:
-    """Build CPT/ICD analytics tables.
-
-    IMPORTANT RULES (as requested):
-    - NEVER use Company column as Employer.
-    - Employer must come ONLY from Registration file 'Employer Name' via EMR + Visit match.
-    - Expiry tracker uses ONLY EMR + Visit match and Expiry Date column (does not depend on ICD/CPT content).
-    - Employer expiry summary rule (based on UNIQUE EMR):
-        * >=70% same date -> show single date
-        * <50% -> show top two dates
-        * 50-70% -> show top1 date with %
-    """
+    """Build CPT/ICD analytics tables. Uses Company as Employer."""
     if df is None or df.empty:
         return {}
 
-    # required columns from CPT/ICD report
+    # required columns (as provided by you)
     col_emr = _find_col(df, ["EMR No", "EMRNo", "EMR"])
-    col_visit = _find_col(df, ["Visit ID", "VisitID", "VisitNo", "Visit No"])
+    col_visit = _find_col(df, ["Visit ID", "VisitNo", "Visit No"])
     col_doc = _find_col(df, ["Doctor"])
+    col_company = _find_col(df, ["Company"])
     col_exp = _find_col(df, ["Expiry Date", "Expiry"])
-    col_pri = _find_col(df, ["ICD (Principal)", "Principal ICD", "Principal DX", "Primary DX", "Primary Diagnosis", "Principal Diagnosis", "Diagnosis (Principal)", "Principal Diagnosis Code", "ICD_Principal", "ICD Principal"])
-    col_pri_desc = _find_col(df, ["ICD Principal Description", "Principal ICD Description", "Principal DX Description", "Primary Diagnosis Description", "Principal Diagnosis Description", "ICD (Principal) Description", "ICD_Principal_Desc"])
-    col_sec = _find_col(df, ["ICD (Secondary)", "Secondary ICD", "Secondary DX", "Secondary Diagnosis", "Diagnosis (Secondary)", "Secondary Diagnosis Code", "ICD_Secondary", "ICD Secondary"])
-    col_sec_desc = _find_col(df, ["ICD Secondary Description", "Secondary ICD Description", "Secondary DX Description", "Secondary Diagnosis Description", "ICD (Secondary) Description", "ICD_Secondary_Desc"])
-    col_cpt = _find_col(df, ["CPT Code", "CPT", "Procedure Code", "CPT_Codes", "CPTCodes", "CPT Co"])
+    col_pri = _find_col(df, ["ICD (Principal)"])
+    col_pri_desc = _find_col(df, ["ICD Principal Description"])
+    col_sec = _find_col(df, ["ICD (Secondary)"])
+    col_sec_desc = _find_col(df, ["ICD Secondary Description"])
+    col_cpt = _find_col(df, ["CPT Codes", "CPT Code", "CPT"])
     col_cpt_desc = _find_col(df, ["Procedure Description"])
 
-    must = [col_emr, col_visit, col_doc, col_exp, col_pri, col_sec, col_cpt]
+    must = [col_doc, col_company, col_pri, col_sec, col_cpt, col_exp]
     if any(c is None for c in must):
         return {}
 
     base = df.copy()
-
     # normalize core fields
     base[col_doc] = base[col_doc].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
-    base[col_emr] = base[col_emr].fillna("").astype(str).str.strip()
-    base[col_visit] = base[col_visit].fillna("").astype(str).str.strip()
+    base[col_company] = base[col_company].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
 
-    # Build Employer + Insurance from Registration (STRICT Employer Name only)
-    base["Employer"] = "UNKNOWN"
-    base["Insurance"] = "UNKNOWN"
+    # optional merge with registration to enrich (Visit Type, Insurance etc.)
     if reg_df is not None and isinstance(reg_df, pd.DataFrame) and not reg_df.empty:
         try:
-            r_emr = _find_col(reg_df, ["EMRNo", "EMR No", "EMR", "MRN", "Patient ID"])
-            r_visit = _find_col(reg_df, ["VisitNo", "Visit No", "Visit ID", "VisitID", "Visit Number", "Visit#"])
-            r_emp = next((c for c in reg_df.columns if _norm_col(c) == "employername"), None)  # STRICT
-            r_ins = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName", "Insuance"])
+            rmap = ensure_required(reg_df, ["EMRNo", "VisitNo"], "Registration")
+            r_emr, r_visit = rmap["EMRNo"], rmap["VisitNo"]
+            reg_small = reg_df.copy()
+            reg_small[r_emr] = reg_small[r_emr].astype(str).str.strip()
+            reg_small[r_visit] = reg_small[r_visit].astype(str).str.strip()
+            # pick useful columns
+            r_visit_type = _find_col(reg_small, ["VisitType", "Visit Type", "VisitCategory"])
+            r_ins = _find_col(reg_small, ["Insurance", "InsuranceName", "Payer", "PayerName"])
 
-            if r_emr and r_visit and r_emp:
-                keep_cols = [r_emr, r_visit, r_emp] + ([r_ins] if r_ins else [])
-                reg_small = reg_df[keep_cols].copy()
-                reg_small[r_emr] = reg_small[r_emr].fillna("").astype(str).str.strip()
-                reg_small[r_visit] = reg_small[r_visit].fillna("").astype(str).str.strip()
-                reg_small[r_emp] = reg_small[r_emp].fillna("").astype(str).str.strip()
-                if r_ins:
-                    reg_small[r_ins] = reg_small[r_ins].fillna("").astype(str).str.strip()
+            r_emp = _find_col(reg_small, ["Employer Name"])  # STRICT Employer Name only
 
-                reg_small = reg_small[(reg_small[r_emr] != "") & (reg_small[r_visit] != "")].drop_duplicates()
+            keep_cols = [r_emr, r_visit]
+            if r_visit_type:
+                keep_cols.append(r_visit_type)
+            if r_ins:
+                keep_cols.append(r_ins)
+            if r_emp:
+                keep_cols.append(r_emp)
 
-                base = base.merge(
-                    reg_small,
-                    left_on=[col_emr, col_visit],
-                    right_on=[r_emr, r_visit],
-                    how="left",
-                    suffixes=("", "_reg"),
-                )
-                base["Employer"] = base[r_emp].fillna("").astype(str).str.strip().replace("", "UNKNOWN")
-                if r_ins:
-                    base["Insurance"] = base[r_ins].fillna("").astype(str).str.strip()
-                    base["Insurance"] = base["Insurance"].replace("", "CASH")
-                    base["Insurance"] = base["Insurance"].replace("Blank", "CASH")
-                else:
-                    base["Insurance"] = "UNKNOWN"
+            reg_small = reg_small[keep_cols].drop_duplicates()
+
+            base[col_emr] = base[col_emr].astype(str).str.strip() if col_emr else ""
+            base[col_visit] = base[col_visit].astype(str).str.strip() if col_visit else ""
+            # --- IMPORTANT: restrict CPT/ICD rows to ONLY the visits present in the provided reg_df (day/week/month) ---
+            # This ensures CPT/ICD counts match the selected period (e.g., Daily 06 Feb 2026).
+            if col_emr and col_visit and r_emr and r_visit:
+                reg_keys = (reg_small[[r_emr, r_visit]]
+                            .dropna()
+                            .astype(str)
+                            .apply(lambda x: x.str.strip()))
+                reg_key_series = (reg_keys[r_emr] + "||" + reg_keys[r_visit]).unique()
+
+                base_key_series = base[col_emr].astype(str).str.strip() + "||" + base[col_visit].astype(str).str.strip()
+                base = base.loc[base_key_series.isin(reg_key_series)].copy()
+            base = base.merge(
+                reg_small,
+                left_on=[col_emr, col_visit] if col_emr and col_visit else [col_emr],
+                right_on=[r_emr, r_visit] if col_emr and col_visit else [r_emr],
+                how="left",
+                suffixes=("", "_reg"),
+            )
         except Exception:
             pass
 
-    # ---- Explode ICD and CPT (for analytics tables) ----
-    pri = base[[col_doc, "Insurance", col_pri] + ([col_pri_desc] if col_pri_desc else [])].copy()
+    # explode ICD and CPT
+    pri = base[[col_doc, col_company, col_pri, col_pri_desc]].copy()
     pri[col_pri] = _split_multi_codes(pri[col_pri])
     pri = pri.explode(col_pri)
     pri[col_pri] = pri[col_pri].fillna("").astype(str).str.strip()
     pri = pri[pri[col_pri] != ""].copy()
 
-    sec = base[[col_doc, "Insurance", col_sec] + ([col_sec_desc] if col_sec_desc else [])].copy()
+    sec = base[[col_doc, col_company, col_sec, col_sec_desc]].copy()
     sec[col_sec] = _split_multi_codes(sec[col_sec])
     sec = sec.explode(col_sec)
     sec[col_sec] = sec[col_sec].fillna("").astype(str).str.strip()
     sec = sec[sec[col_sec] != ""].copy()
 
-    cpt = base[[col_doc, "Insurance", col_cpt] + ([col_cpt_desc] if col_cpt_desc else [])].copy()
+    cpt = base[[col_doc, col_company, col_cpt, col_cpt_desc]].copy()
     cpt[col_cpt] = _split_multi_codes(cpt[col_cpt])
     cpt = cpt.explode(col_cpt)
     cpt[col_cpt] = cpt[col_cpt].fillna("").astype(str).str.strip()
     cpt = cpt[cpt[col_cpt] != ""].copy()
 
-    # helpers for top1
-    def _top1(group_cols: List[str], code_col: str, desc_col: Optional[str] = None) -> pd.DataFrame:
-        gcols = group_cols + [code_col]
-        agg = pri if code_col == col_pri else (sec if code_col == col_sec else cpt)
-        out = agg.groupby(gcols, dropna=False).size().reset_index(name="Count")
-        out = out.sort_values(group_cols + ["Count"], ascending=[True]*len(group_cols) + [False])
-        out = out.drop_duplicates(group_cols, keep="first")
-        if desc_col and desc_col in agg.columns:
-            # bring description (first non-empty)
-            dmap = agg[[code_col, desc_col]].dropna().copy()
-            dmap[code_col] = dmap[code_col].astype(str).str.strip()
-            dmap[desc_col] = dmap[desc_col].astype(str).str.strip()
-            dmap = dmap[dmap[code_col] != ""].drop_duplicates(code_col)
-            out = out.merge(dmap, on=code_col, how="left")
-        return out
+    # Top-1 per Doctor x Company
+    docco_pri_top = _top_code_per_group(pri, [col_doc, col_company], col_pri, col_pri_desc).rename(columns={col_doc:"Doctor", col_company:"Company"})
+    docco_sec_top = _top_code_per_group(sec, [col_doc, col_company], col_sec, col_sec_desc).rename(columns={col_doc:"Doctor", col_company:"Company"})
+    doc_pri_top = _top_code_per_group(pri, [col_doc], col_pri, col_pri_desc).rename(columns={col_doc:"Doctor"})
+    doc_sec_top = _top_code_per_group(sec, [col_doc], col_sec, col_sec_desc).rename(columns={col_doc:"Doctor"})
+    co_pri_top = _top_code_per_group(pri, [col_company], col_pri, col_pri_desc).rename(columns={col_company:"Company"})
+    co_sec_top = _top_code_per_group(sec, [col_company], col_sec, col_sec_desc).rename(columns={col_company:"Company"})
 
-    # Doctor x Insurance
-    doc_emp_pri_top = _top1([col_doc, "Insurance"], col_pri, col_pri_desc).rename(
-        columns={col_doc: "Doctor", "Insurance": "Insurance", col_pri: "ICD", (col_pri_desc or "ICD Principal Description"): "ICD Description"}
-    )
-    doc_emp_sec_top = _top1([col_doc, "Insurance"], col_sec, col_sec_desc).rename(
-        columns={col_doc: "Doctor", "Insurance": "Insurance", col_sec: "ICD", (col_sec_desc or "ICD Secondary Description"): "ICD Description"}
-    )
-    doc_pri_top = _top1([col_doc], col_pri, col_pri_desc).rename(
-        columns={col_doc: "Doctor", col_pri: "ICD", (col_pri_desc or "ICD Principal Description"): "ICD Description"}
-    )
-    doc_sec_top = _top1([col_doc], col_sec, col_sec_desc).rename(
-        columns={col_doc: "Doctor", col_sec: "ICD", (col_sec_desc or "ICD Secondary Description"): "ICD Description"}
-    )
-    emp_pri_top = _top1(["Insurance"], col_pri, col_pri_desc).rename(
-        columns={"Insurance": "Insurance", col_pri: "ICD", (col_pri_desc or "ICD Principal Description"): "ICD Description"}
-    )
-    emp_sec_top = _top1(["Insurance"], col_sec, col_sec_desc).rename(
-        columns={"Insurance": "Insurance", col_sec: "ICD", (col_sec_desc or "ICD Secondary Description"): "ICD Description"}
-    )
-
-    # CPT -> Top Principal ICD mapping
-    # Build CPT -> Principal ICD mapping (best match by frequency)
-    pair = base[[col_cpt, col_pri]].copy()
+    # CPT -> Top principal ICD
+    # link by original rows: explode CPT + principal then count pairs
+    pair = base[[col_cpt, col_pri, col_pri_desc]].copy()
     pair[col_cpt] = _split_multi_codes(pair[col_cpt])
     pair[col_pri] = _split_multi_codes(pair[col_pri])
     pair = pair.explode(col_cpt).explode(col_pri)
     pair[col_cpt] = pair[col_cpt].fillna("").astype(str).str.strip()
     pair[col_pri] = pair[col_pri].fillna("").astype(str).str.strip()
-    pair = pair[(pair[col_cpt] != "") & (pair[col_pri] != "")].copy()
-
-    pair_top = pair.groupby([col_cpt, col_pri], dropna=False).size().reset_index(name="Count")
-    pair_top = pair_top.sort_values([col_cpt, "Count"], ascending=[True, False]).drop_duplicates([col_cpt], keep="first")
-    pair_top = pair_top.rename(columns={col_cpt: "CPT", col_pri: "Top_Principal_ICD"})
-
-    # ---- Expiry Tracker (ONLY EMR+Visit + Expiry Date) ----
-    exp = base[[col_emr, col_visit, col_doc, "Employer", "Insurance", col_exp]].copy()
-    exp = exp.rename(columns={col_emr: "EMR No", col_visit: "Visit ID", col_doc: "Doctor", col_exp: "Expiry Date"})
-    exp["Expiry Date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce")
-    today = pd.Timestamp.today().normalize()
-    exp["Days To Expiry"] = (exp["Expiry Date"] - today).dt.days
-    exp = exp.dropna(subset=["Expiry Date"]).copy()
-    exp = exp.sort_values(["Days To Expiry", "Employer", "Doctor"], ascending=[True, True, True])
-
-    # ---- Employer Expiry Summary (UNIQUE EMR rule) ----
-    summ = exp.dropna(subset=["Employer", "EMR No", "Expiry Date"]).copy()
-    summ["EMR No"] = summ["EMR No"].astype(str).str.strip()
-    summ["Employer"] = summ["Employer"].astype(str).str.strip().replace("", "UNKNOWN")
-    summ["Expiry Date"] = summ["Expiry Date"].dt.date
-
-    if not summ.empty:
-        # unique EMR per employer+date
-        counts = summ.groupby(["Employer", "Expiry Date"])["EMR No"].nunique().reset_index(name="EMR_Count")
-        totals = summ.groupby("Employer")["EMR No"].nunique().reset_index(name="Total_EMR")
-        counts = counts.merge(totals, on="Employer", how="left")
-        counts["Share"] = counts["EMR_Count"] / counts["Total_EMR"].replace(0, pd.NA)
-
-        counts = counts.sort_values(["Employer", "Share", "EMR_Count", "Expiry Date"], ascending=[True, False, False, True])
-        counts["Rank"] = counts.groupby("Employer").cumcount() + 1
-
-        top1 = counts[counts["Rank"] == 1][["Employer", "Expiry Date", "Share", "Total_EMR"]].rename(
-            columns={"Expiry Date": "Top1_Expiry", "Share": "Top1_Share"}
-        )
-        top2 = counts[counts["Rank"] == 2][["Employer", "Expiry Date", "Share"]].rename(
-            columns={"Expiry Date": "Top2_Expiry", "Share": "Top2_Share"}
-        )
-        employer_expiry_summary = top1.merge(top2, on="Employer", how="left")
-
-        def _fmt_date(d):
-            try:
-                return pd.to_datetime(d).date().isoformat()
-            except Exception:
-                return ""
-
-        def _fmt_pct(x):
-            try:
-                return f"{float(x) * 100:.0f}%"
-            except Exception:
-                return ""
-
-        display = []
-        for _, r in employer_expiry_summary.iterrows():
-            top1_share = float(r.get("Top1_Share", 0) or 0)
-            t1 = _fmt_date(r.get("Top1_Expiry"))
-            t2 = _fmt_date(r.get("Top2_Expiry"))
-
-            if top1_share >= 0.70:
-                show = t1
-            elif top1_share < 0.50:
-                show = t1 if not t2 else f"{t1} | {t2}"
-            else:
-                show = f"{t1} ({_fmt_pct(top1_share)})" if t1 else ""
-
-            display.append(show)
-
-        employer_expiry_summary["Common_Expiry"] = display
-        employer_expiry_summary = employer_expiry_summary[["Employer", "Total_EMR", "Common_Expiry", "Top1_Expiry", "Top1_Share", "Top2_Expiry", "Top2_Share"]].copy()
-        employer_expiry_summary["Top1_Share"] = employer_expiry_summary["Top1_Share"].apply(_fmt_pct)
-        employer_expiry_summary["Top2_Share"] = employer_expiry_summary["Top2_Share"].apply(_fmt_pct)
+    pair = pair[(pair[col_cpt]!="") & (pair[col_pri]!="")].copy()
+    pair_top = _top_code_per_group(pair, [col_cpt], col_pri, col_pri_desc).rename(columns={col_cpt:"CPT", "Code":"ICD"})
+    # optional add CPT description mode
+    if col_cpt_desc in base.columns:
+        tmpd = base[[col_cpt, col_cpt_desc]].copy()
+        tmpd[col_cpt] = _split_multi_codes(tmpd[col_cpt])
+        tmpd = tmpd.explode(col_cpt)
+        tmpd[col_cpt] = tmpd[col_cpt].fillna("").astype(str).str.strip()
+        tmpd = tmpd[tmpd[col_cpt]!=""]
+        def _mode_desc(x):
+            x = x.dropna().astype(str).str.strip()
+            x = x[x!=""]
+            if x.empty: return ""
+            m=x.mode()
+            return m.iat[0] if not m.empty else x.iloc[0]
+        cptdesc = tmpd.groupby(col_cpt)[col_cpt_desc].apply(_mode_desc).reset_index(name="CPT Description")
+        pair_top = pair_top.merge(cptdesc, left_on="CPT", right_on=col_cpt, how="left").drop(columns=[col_cpt], errors="ignore")
     else:
-        employer_expiry_summary = pd.DataFrame(columns=["Employer", "Total_EMR", "Common_Expiry", "Top1_Expiry", "Top1_Share", "Top2_Expiry", "Top2_Share"])
+        pair_top["CPT Description"] = ""
 
-    # ---- Employer Wise (for CPT/ICD section) + attach expiry date summary ----
-    try:
-        if reg_df is not None and isinstance(reg_df, pd.DataFrame) and not reg_df.empty:
-            _ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
-            _emp_col = next((c for c in reg_df.columns if _norm_col(c) == "employername"), None)  # STRICT
-            employer_wise_exp = employer_wise_with_insurance(reg_df, emp_col=_emp_col, ins_col=_ins_col, n=200)
-        else:
-            employer_wise_exp = (
-                exp.groupby("Employer")["EMR No"].nunique().reset_index(name="Count").sort_values("Count", ascending=False)
-            )
-            employer_wise_exp["Insurance"] = ""
-        # attach common expiry date (70% rule result) if available
-        if isinstance(employer_expiry_summary, pd.DataFrame) and not employer_expiry_summary.empty:
-            employer_wise_exp = employer_wise_exp.merge(
-                employer_expiry_summary[["Employer", "Common_Expiry"]],
-                on="Employer",
-                how="left",
-            ).rename(columns={"Common_Expiry": "Expiry Date"})
-        else:
-            employer_wise_exp["Expiry Date"] = ""
-    except Exception:
-        employer_wise_exp = pd.DataFrame(columns=["Employer", "Count", "Insurance", "Expiry Date"])
+    pair_top = pair_top[["CPT","CPT Description","ICD","Description","Count"]].rename(columns={"Description":"ICD Description"})
+
+    # Expiry tracker (Employer + Expiry)
+    # Expiry tracker (Employer + Expiry)
+    employer_col_use = r_emp if (reg_df is not None and 'r_emp' in locals() and r_emp and r_emp in base.columns) else col_company
+    exp = base[[employer_col_use, col_emr, col_visit, ("Name" if "Name" in base.columns else None), col_doc, col_exp]].copy()
+    exp = exp.loc[:, [c for c in exp.columns if c is not None]]
+
+    exp = exp.rename(columns={employer_col_use:"Employer", col_doc:"Doctor", col_emr:"EMR No", col_visit:"Visit ID", col_exp:"Expiry Date"})
+    # Clean expiry date
+    exp["Expiry Date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce", dayfirst=True)
+    exp = exp.dropna(subset=["Expiry Date"])
+    # compute days to expiry
+    today = pd.to_datetime(date.today())
+    exp["Days To Expiry"] = (exp["Expiry Date"].dt.normalize() - today.normalize()).dt.days
+    # if Name column missing, create empty
+    if "Name" not in exp.columns:
+        exp["Name"] = ""
+    # de-dup per EMR/company expiry
+    exp = exp.drop_duplicates(subset=["Employer","EMR No","Expiry Date"])
+    exp = exp.sort_values(["Days To Expiry","Employer","Name"], ascending=[True, True, True]).reset_index(drop=True)
+
     return {
-        # Diagnosis Top-1 (by Doctor x Insurance)
-        "Doctor x Insurance | Principal DX (Top1)": doc_emp_pri_top[["Doctor", "Insurance", "ICD", "Count", "ICD Description"]].copy()
-            if not doc_emp_pri_top.empty else doc_emp_pri_top,
-        "Doctor x Insurance | Secondary DX (Top1)": doc_emp_sec_top[["Doctor", "Insurance", "ICD", "Count", "ICD Description"]].copy()
-            if not doc_emp_sec_top.empty else doc_emp_sec_top,
-
-        # Doctor-wise (Top-1)
-        "Doctor | Principal DX (Top1)": doc_pri_top[["Doctor", "ICD", "Count", "ICD Description"]].copy()
-            if not doc_pri_top.empty else doc_pri_top,
-        "Doctor | Secondary DX (Top1)": doc_sec_top[["Doctor", "ICD", "Count", "ICD Description"]].copy()
-            if not doc_sec_top.empty else doc_sec_top,
-
-        # Insurance-wise (Top-1)
-        "Insurance | Principal DX (Top1)": emp_pri_top[["Insurance", "ICD", "Count", "ICD Description"]].copy()
-            if not emp_pri_top.empty else emp_pri_top,
-        "Insurance | Secondary DX (Top1)": emp_sec_top[["Insurance", "ICD", "Count", "ICD Description"]].copy()
-            if not emp_sec_top.empty else emp_sec_top,
-
-        # CPT -> Top Principal ICD mapping
+        "Doctor x Company | Principal DX (Top1)": docco_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+        "Doctor x Company | Secondary DX (Top1)": docco_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+        "Doctor | Principal DX (Top1)": doc_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+        "Doctor | Secondary DX (Top1)": doc_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+        "Company | Principal DX (Top1)": co_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
+        "Company | Secondary DX (Top1)": co_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
         "CPT -> Top Principal ICD": pair_top,
-
-        # Eligibility expiry (Employer-wise) from EMR+Visit match
-        "Employer Wise": employer_wise_exp,
-        "Employer Expiry Summary": employer_expiry_summary,
-        "Employer Expiry Tracker": exp[["Employer","Insurance","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"]],
+        "Employer Expiry Tracker": exp[["Employer","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"]],
     }
+
+
 def read_excel_any(uploaded_file, required_hint: Optional[List[str]] = None) -> pd.DataFrame:
     """Read an Excel report even when the real header is not on the first row.
 
@@ -1269,7 +1103,7 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
 
     doctor_col = _find_col(reg_df, ["Doctor", "DoctorName", "Physician", "Provider"])
     ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
-    emp_col = next((c for c in reg_df.columns if _norm_col(c) == "employername"), None)  # STRICT: Employer Name only
+    emp_col = _find_col(reg_df, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name", "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
     bill_col = _find_col(reg_df, ["BillType", "Bill Type", "Insurance/Cash", "Cash/Insurance"])
     visit_type_col = _find_col(reg_df, ["VisitType", "Visit Type", "VisitCategory"])
     status_col = _find_col(reg_df, ["Status", "VisitStatus"])
@@ -1539,7 +1373,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
         if reg_df is None:
             st.info("Registration file is not loaded in this session. Upload/Process today's files to enable row-level download.")
         else:
-            emp_col = next((c for c in reg_df.columns if _norm_col(c) == "employername"), None)  # STRICT: Employer Name only
+            emp_col = _find_col(reg_df, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name", "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
             if not emp_col:
                 st.warning("Registration file has no Employer/Company column.")
             else:
@@ -1570,86 +1404,6 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
                 detail = tmp[tmp["__emp_key__"] == pick_key].drop(columns=["__emp_key__"], errors="ignore").copy()
                 fn = f"Registration_Employer_{_safe_filename(labels.get(pick_key, pick_key))}_{day_ts.date().isoformat()}.xlsx"
                 download_excel_button(detail, fn, "⬇️ Download Employer Rows (Excel)")
-
-
-    with st.expander("Download Eligibility Expiry (Step 5) — by Insurance / Employer", expanded=False):
-        reg_df = SS.get("reg_df")
-        cpticd_df = SS.get("cpticd_df")
-        if reg_df is None or cpticd_df is None:
-            st.info("Upload/Process Step 1 and Step 5 in this session to enable eligibility expiry download.")
-        else:
-            # --- STRICT columns ---
-            reg_emr_col = _find_col(reg_df, ["EMRNo", "EMR No", "MRN", "Patient ID"])
-            reg_visit_col = _find_col(reg_df, ["VisitNo", "Visit No", "Visit Number", "Visit#"])
-            reg_emp_col = next((c for c in reg_df.columns if _norm_col(c) == "employername"), None)  # STRICT
-            reg_ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
-
-            c_emr_col = _find_col(cpticd_df, ["EMR No", "EMRNo", "MRN", "Patient ID"])
-            c_visit_col = _find_col(cpticd_df, ["Visit ID", "VisitID", "Visit No", "VisitNo"])
-            c_exp_col = _find_col(cpticd_df, ["Expiry Date", "Expiry", "Eligibility Expiry", "EligibilityExpiry", "Card Expiry", "CardExpiry"])
-            c_name_col = _find_col(cpticd_df, ["Name", "Patient Name", "PatientName"])
-            c_doc_col = _find_col(cpticd_df, ["Doctor", "Physician", "Clinician"])
-
-            missing = []
-            for k, v in {
-                "Registration EMRNo": reg_emr_col,
-                "Registration VisitNo": reg_visit_col,
-                "Registration Employer Name": reg_emp_col,
-                "Registration Insurance": reg_ins_col,
-                "CPT/ICD EMR No": c_emr_col,
-                "CPT/ICD Visit ID": c_visit_col,
-                "CPT/ICD Expiry Date": c_exp_col,
-            }.items():
-                if not v:
-                    missing.append(k)
-
-            if missing:
-                st.error("Missing required columns: " + ", ".join(missing))
-            else:
-                # normalize merge keys
-                r = reg_df[[reg_emr_col, reg_visit_col, reg_emp_col, reg_ins_col]].copy()
-                r.columns = ["EMR No", "Visit ID", "Employer", "Insurance"]
-                r["EMR No"] = r["EMR No"].astype(str).str.strip()
-                r["Visit ID"] = r["Visit ID"].astype(str).str.strip()
-
-                ccols = [c_emr_col, c_visit_col, c_exp_col]
-                if c_name_col: ccols.append(c_name_col)
-                if c_doc_col: ccols.append(c_doc_col)
-                c = cpticd_df[ccols].copy()
-                rename_map = {c_emr_col: "EMR No", c_visit_col: "Visit ID", c_exp_col: "Expiry Date"}
-                if c_name_col: rename_map[c_name_col] = "Name"
-                if c_doc_col: rename_map[c_doc_col] = "Doctor"
-                c = c.rename(columns=rename_map)
-                c["EMR No"] = c["EMR No"].astype(str).str.strip()
-                c["Visit ID"] = c["Visit ID"].astype(str).str.strip()
-                c["Expiry Date"] = pd.to_datetime(c["Expiry Date"], errors="coerce")
-
-                merged = r.merge(c, on=["EMR No", "Visit ID"], how="inner")
-                if merged.empty:
-                    st.warning("No matches found between Registration (EMR+VisitNo) and CPT/ICD (EMR+VisitID). Check Visit format / leading zeros.")
-                else:
-                    # Days to expiry
-                    today = pd.Timestamp.today().normalize()
-                    merged["Days To Expiry"] = (merged["Expiry Date"] - today).dt.days
-                    merged["Expiry Date"] = merged["Expiry Date"].dt.date.astype(str)
-
-                    # filters
-                    merged["Insurance"] = merged["Insurance"].fillna("CASH").astype(str).str.strip().replace("", "CASH")
-                    merged["Employer"] = merged["Employer"].fillna("Blank").astype(str).str.strip().replace("", "Blank")
-
-                    ins_pick = st.selectbox("Filter by Insurance", ["(All)"] + sorted(merged["Insurance"].unique()), key="dl_exp_ins")
-                    view = merged.copy()
-                    if ins_pick != "(All)":
-                        view = view[view["Insurance"] == ins_pick]
-
-                    emp_pick = st.selectbox("Filter by Employer", ["(All)"] + sorted(view["Employer"].unique()), key="dl_exp_emp")
-                    if emp_pick != "(All)":
-                        view = view[view["Employer"] == emp_pick]
-
-                    st.dataframe(view, use_container_width=True, hide_index=True)
-
-                    fn = f"Eligibility_Expiry_{_safe_filename(ins_pick)}_{_safe_filename(emp_pick)}_{day_ts.date().isoformat()}.xlsx"
-                    download_excel_button(view, fn, "⬇️ Download Eligibility Expiry (Excel)")
 
     # Whole Summary Excel
     export_dfs = {k: dfs[k] for k in dfs.keys()}
@@ -1794,45 +1548,27 @@ if admin_mode:
             # Optional income analysis file (applied as-is; if it contains multiple days, we will NOT split it)
             _income_df = None
             income_tbls = {}
-            income_raw_df = None
-            income_dt = None
             if SS.get('income_file') is not None:
                 _income_df = load_income_details(io.BytesIO(SS.get('income_file', {}).get('bytes', b'')))
                 if _income_df is None or _income_df.empty:
                     st.warning("Income Analysis file loaded, but header could not be detected. Skipping Income tables in bulk save.")
                 else:
-                    income_raw_df = _income_df.copy()
+                    income_tbls = income_tables(_income_df)
 
-                    # Try to detect a date column for day-wise filtering (so Daily/Weekly/Monthly view works correctly)
-                    income_date_col = _find_col(
-                        income_raw_df,
-                        ["Date", "Visit Date", "Service Date", "Invoice Date", "Posting Date", "Bill Date", "Transaction Date", "Created Date"]
-                    )
-                    if income_date_col:
-                        s_raw = income_raw_df[income_date_col]
-                        s1 = pd.to_datetime(s_raw, errors="coerce", dayfirst=False)
-                        s2 = pd.to_datetime(s_raw, errors="coerce", dayfirst=True)
-                        n1 = int(s1.notna().sum())
-                        n2 = int(s2.notna().sum())
-                        income_dt = (s2 if n2 >= n1 else s1)
-                        income_raw_df["_DT_"] = income_dt
-                    else:
-                        income_dt = None
+            
 
-                    # Default tables (whole file) – will be overridden per-day inside the loop when possible
-                    income_tbls = income_tables(income_raw_df)
-
-# Optional CPT/ICD analysis file (applied as-is; if it contains multiple days, we will NOT split it)
+            # Optional CPT/ICD analysis file (applied as-is; if it contains multiple days, we will NOT split it)
             cpticd_tbls = {}
             if SS.get("cpticd_file") is not None:
                 _cpticd_df = load_cpticd_details(io.BytesIO(SS.get("cpticd_file", {}).get("bytes", b"")))
                 if _cpticd_df is None or _cpticd_df.empty:
                     st.warning("CPT/ICD file loaded, but no data was found. Skipping CPT/ICD tables in bulk save.")
                 else:
-                    cpticd_tbls = cpticd_tables(_cpticd_df, reg_df=SS.get("reg_df"))
+                    cpticd_df_bulk = _cpticd_df
+                    cpticd_tbls = {}  # will be computed per-day inside the loop using reg_day
                     if not cpticd_tbls:
                         st.warning("CPT/ICD file loaded, but required columns were not detected. Skipping CPT/ICD tables in bulk save.")
-            progress = st.progress(0.0)
+progress = st.progress(0.0)
             saved = 0
 
             # Detect Registration date col once for filtering
@@ -1857,23 +1593,14 @@ if admin_mode:
 
                 dfs = compute_summary(reg_day, cash_day, pend_day, d_norm)
 
-                # Attach income tables (day-wise when possible)
-                if income_raw_df is not None and isinstance(income_raw_df, pd.DataFrame) and not income_raw_df.empty:
-                    if "_DT_" in income_raw_df.columns:
-                        _inc_day = income_raw_df.loc[income_raw_df["_DT_"].dt.normalize() == d_norm].copy()
-                    else:
-                        _inc_day = income_raw_df.copy()
-
-                    _inc_tbls = income_tables(_inc_day) if _inc_day is not None and not _inc_day.empty else {}
-                    for _k, _v in _inc_tbls.items():
-                        dfs[f"Income | {_k}"] = _v
-                else:
-                    for _k, _v in income_tbls.items():
-                        dfs[f"Income | {_k}"] = _v
-
-                # Attach CPT/ICD tables (same tables for all days; if you need day-wise split, upload day-wise CPT/ICD file)
-                for _k, _v in cpticd_tbls.items():
-                    dfs[f"CPTICD | {_k}"] = _v
+                # Attach income tables (same tables for all days; if you need day-wise split, upload day-wise income file)
+                for _k, _v in income_tbls.items():
+                    dfs[f"Income | {_k}"] = _v
+                # Attach CPT/ICD tables (filtered to THIS day using reg_day visit IDs)
+                if 'cpticd_df_bulk' in locals() and cpticd_df_bulk is not None and not cpticd_df_bulk.empty:
+                    cpticd_tbls_day = cpticd_tables(cpticd_df_bulk, reg_df=reg_day)
+                    for _k, _v in cpticd_tbls_day.items():
+                        dfs[f"CPTICD | {_k}"] = _v
 
 
                 if s3_ok:
