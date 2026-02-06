@@ -326,7 +326,11 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         st.header("CPT / ICD Analysis")
 
         # Simplified display (Doctor + Insurance only)
+        # Prefer VISIT-LEVEL Principal DX counts (totals intended to match visits)
         df_pri = _pick_first_df([
+            "CPTICD | Doctor x Insurance | Principal DX (Counts)",
+            "Doctor x Insurance | Principal DX (Counts)",
+            # fallback: old Top1 keys
             "CPTICD | Doctor x Insurance | Principal DX (Top1)",
             "CPTICD | Doctor x Company | Principal DX (Top1)",
             "Doctor x Insurance | Principal DX (Top1)",
@@ -395,10 +399,64 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                     out = out[out["Insurance"].astype(str) == str(pick_ins)]
                 return out
 
+            # --- Principal DX (Counts) with TOTAL + match with visits ---
+            pri_show = _filter_diag(pri_clean)
+
+            # Detect if this is visit-level counts table
+            is_counts_view = False
+            if isinstance(df_pri, pd.DataFrame):
+                is_counts_view = any(
+                    str(k).strip() in ["CPTICD | Doctor x Insurance | Principal DX (Counts)", "Doctor x Insurance | Principal DX (Counts)"]
+                    for k in dfs.keys()
+                )
+
+            total_dx = None
+            if not pri_show.empty and "Count" in pri_show.columns:
+                try:
+                    total_dx = int(pd.to_numeric(pri_show["Count"], errors="coerce").fillna(0).sum())
+                except Exception:
+                    total_dx = None
+
+            # Expected visits from Income Doctor x Insurance table (if available)
+            expected_visits = None
+            df_income_dx = dfs.get("Income | Doctor x Insurance Revenue")
+            if isinstance(df_income_dx, pd.DataFrame) and not df_income_dx.empty and "Total_Visit" in df_income_dx.columns:
+                tmp = df_income_dx.copy()
+                if pick_doc != "All" and "Doctor" in tmp.columns:
+                    tmp = tmp[tmp["Doctor"].astype(str) == str(pick_doc)]
+                if pick_ins != "All" and "Insurance" in tmp.columns:
+                    tmp = tmp[tmp["Insurance"].astype(str) == str(pick_ins)]
+                # Exclude GRAND TOTAL rows if present
+                for coln in ["Doctor", "Insurance"]:
+                    if coln in tmp.columns:
+                        tmp = tmp[tmp[coln].astype(str).str.upper() != "GRAND TOTAL"]
+                try:
+                    expected_visits = int(pd.to_numeric(tmp["Total_Visit"], errors="coerce").fillna(0).sum())
+                except Exception:
+                    expected_visits = None
+
+            # Append TOTAL row at end (so user can visually match)
+            if not pri_show.empty and total_dx is not None:
+                total_row = {c: "" for c in pri_show.columns}
+                if "ICD" in pri_show.columns:
+                    total_row["ICD"] = "TOTAL"
+                elif "Doctor" in pri_show.columns:
+                    total_row["Doctor"] = "TOTAL"
+                if "Count" in pri_show.columns:
+                    total_row["Count"] = total_dx
+                pri_show = pd.concat([pri_show, pd.DataFrame([total_row])], ignore_index=True)
+
             c1, c2 = st.columns(2)
             with c1:
-                st.markdown("**Principal DX (Top 1)**")
-                st.dataframe(_filter_diag(pri_clean), use_container_width=True, hide_index=True)
+                st.markdown("**Principal DX (Visit-level Counts)**" if is_counts_view else "**Principal DX**")
+                # Summary line
+                if total_dx is not None:
+                    if expected_visits is not None:
+                        st.caption(f"Principal DX TOTAL: {total_dx}  |  Visits: {expected_visits}")
+                    else:
+                        st.caption(f"Principal DX TOTAL: {total_dx}")
+                st.dataframe(pri_show, use_container_width=True, hide_index=True)
+
             with c2:
                 st.markdown("**Secondary DX (Top 1)**")
                 st.dataframe(_filter_diag(sec_clean), use_container_width=True, hide_index=True)
