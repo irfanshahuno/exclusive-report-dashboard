@@ -378,11 +378,11 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     col_visit = _find_col(df, ["Visit ID", "VisitID", "VisitNo", "Visit No"])
     col_doc = _find_col(df, ["Doctor"])
     col_exp = _find_col(df, ["Expiry Date", "Expiry"])
-    col_pri = _find_col(df, ["ICD (Principal)"])
-    col_pri_desc = _find_col(df, ["ICD Principal Description"])
-    col_sec = _find_col(df, ["ICD (Secondary)"])
-    col_sec_desc = _find_col(df, ["ICD Secondary Description"])
-    col_cpt = _find_col(df, ["CPT Codes", "CPT Code", "CPT"])
+    col_pri = _find_col(df, ["ICD (Principal)", "Principal ICD", "Principal DX", "Primary DX", "Primary Diagnosis", "Principal Diagnosis", "Diagnosis (Principal)", "Principal Diagnosis Code", "ICD_Principal", "ICD Principal"])
+    col_pri_desc = _find_col(df, ["ICD Principal Description", "Principal ICD Description", "Principal DX Description", "Primary Diagnosis Description", "Principal Diagnosis Description", "ICD (Principal) Description", "ICD_Principal_Desc"])
+    col_sec = _find_col(df, ["ICD (Secondary)", "Secondary ICD", "Secondary DX", "Secondary Diagnosis", "Diagnosis (Secondary)", "Secondary Diagnosis Code", "ICD_Secondary", "ICD Secondary"])
+    col_sec_desc = _find_col(df, ["ICD Secondary Description", "Secondary ICD Description", "Secondary DX Description", "Secondary Diagnosis Description", "ICD (Secondary) Description", "ICD_Secondary_Desc"])
+    col_cpt = _find_col(df, ["CPT Code", "CPT", "Procedure Code", "CPT_Codes", "CPTCodes", "CPT Co"])
     col_cpt_desc = _find_col(df, ["Procedure Description"])
 
     must = [col_emr, col_visit, col_doc, col_exp, col_pri, col_sec, col_cpt]
@@ -559,14 +559,47 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     else:
         employer_expiry_summary = pd.DataFrame(columns=["Employer", "Total_EMR", "Common_Expiry", "Top1_Expiry", "Top1_Share", "Top2_Expiry", "Top2_Share"])
 
+    # ---- Employer Wise (for CPT/ICD section) + attach expiry date summary ----
+    try:
+        if reg_df is not None and isinstance(reg_df, pd.DataFrame) and not reg_df.empty:
+            _ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
+            _emp_col = next((c for c in reg_df.columns if _norm_col(c) == "employername"), None)  # STRICT
+            employer_wise_exp = employer_wise_with_insurance(reg_df, emp_col=_emp_col, ins_col=_ins_col, n=200)
+        else:
+            employer_wise_exp = (
+                exp.groupby("Employer")["EMR No"].nunique().reset_index(name="Count").sort_values("Count", ascending=False)
+            )
+            employer_wise_exp["Insurance"] = ""
+        # attach common expiry date (70% rule result) if available
+        if isinstance(employer_expiry_summary, pd.DataFrame) and not employer_expiry_summary.empty:
+            employer_wise_exp = employer_wise_exp.merge(
+                employer_expiry_summary[["Employer", "Common_Expiry"]],
+                on="Employer",
+                how="left",
+            ).rename(columns={"Common_Expiry": "Expiry Date"})
+        else:
+            employer_wise_exp["Expiry Date"] = ""
+    except Exception:
+        employer_wise_exp = pd.DataFrame(columns=["Employer", "Count", "Insurance", "Expiry Date"])
     return {
+        # Backward-compatible keys (UI tabs may still say Company)
+        "Doctor x Company | Principal DX (Top1)": doc_emp_pri_top,
+        "Doctor x Company | Secondary DX (Top1)": doc_emp_sec_top,
+        "Company | Principal DX (Top1)": emp_pri_top,
+        "Company | Secondary DX (Top1)": emp_sec_top,
+
+        # Clearer keys (Employer-based)
         "Doctor x Employer | Principal DX (Top1)": doc_emp_pri_top,
         "Doctor x Employer | Secondary DX (Top1)": doc_emp_sec_top,
-        "Doctor | Principal DX (Top1)": doc_pri_top,
-        "Doctor | Secondary DX (Top1)": doc_sec_top,
         "Employer | Principal DX (Top1)": emp_pri_top,
         "Employer | Secondary DX (Top1)": emp_sec_top,
+
+        "Doctor | Principal DX (Top1)": doc_pri_top,
+        "Doctor | Secondary DX (Top1)": doc_sec_top,
         "CPT -> Top Principal ICD": pair_top,
+
+        # Employer expiry
+        "Employer Wise": employer_wise_exp,
         "Employer Expiry Summary": employer_expiry_summary,
         "Employer Expiry Tracker": exp[["Employer","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"]],
     }
