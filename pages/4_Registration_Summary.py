@@ -146,40 +146,58 @@ def load_income_details(uploaded_file) -> Optional[pd.DataFrame]:
 
 
 def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    """
+    Step 4: Income Analysis (Doctor Revenue)
+
+    IMPORTANT (per your instruction):
+    - "Service Total" = Consultation + Lab + Procedure
+    - "Insuance" column is a SECOND total amount column (spelling is intentionally strict: Insuance)
+    - Output must show totals + averages for BOTH:
+        * Total_Amount_Service / Avg_Amount_Service
+        * Total_Amount_Insuance / Avg_Amount_Insuance
+    """
     if df is None or df.empty:
         return {}
 
     col_dept = _find_col(df, ["Department"])
     col_doc  = _find_col(df, ["Doctor"])
-    col_ins  = _find_col(df, ["Insurance Name", "Insurance"])
+    col_ins_name = _find_col(df, ["Insurance Name", "Insurance"])
     col_visit= _find_col(df, ["Visit No", "VisitNo"])
     col_cons = _find_col(df, ["Consultation"])
     col_lab  = _find_col(df, ["Lab"])
     col_proc = _find_col(df, ["Procedure"])
 
-    needed = [col_doc, col_ins, col_visit, col_cons, col_lab, col_proc]
+    # STRICT: second total amount column name is "Insuance" (do not auto-correct spelling)
+    col_insu_amt = _find_col(df, ["Insuance"])
+
+    needed = [col_doc, col_ins_name, col_visit, col_cons, col_lab, col_proc, col_insu_amt]
     if any(c is None for c in needed):
         return {}
 
     tmp = df.copy()
+
     # Clean blanks/None so they don't appear as a separate 'None' row and don't affect GRAND TOTAL
-    # Doctor is mandatory for any revenue attribution
     tmp[col_doc] = tmp[col_doc].astype(str).str.strip()
-    tmp = tmp[~tmp[col_doc].str.lower().isin(['', 'none', 'nan'])].copy()
-    # Optional Department: if present, drop blank departments as well (prevents 'None' department grouping)
+    tmp = tmp[~tmp[col_doc].str.lower().isin(["", "none", "nan"])].copy()
+
+    # Optional Department: if present, drop blank departments as well
     if col_dept:
         tmp[col_dept] = tmp[col_dept].astype(str).str.strip()
-        tmp = tmp[~tmp[col_dept].str.lower().isin(['', 'none', 'nan'])].copy()
-    # Insurance: blanks treated as CASH
-    tmp[col_ins] = tmp[col_ins].fillna('CASH').astype(str).str.strip().replace('', 'CASH')
-    tmp[col_visit] = tmp[col_visit].astype(str).str.strip()
-    tmp = tmp[tmp[col_visit] != ''].copy()
+        tmp = tmp[~tmp[col_dept].str.lower().isin(["", "none", "nan"])].copy()
 
-    for c in [col_cons, col_lab, col_proc]:
+    # Insurance name: blanks treated as CASH
+    tmp[col_ins_name] = tmp[col_ins_name].fillna("CASH").astype(str).str.strip().replace("", "CASH")
+
+    # Visit: required (used for Total_Visit)
+    tmp[col_visit] = tmp[col_visit].astype(str).str.strip()
+    tmp = tmp[tmp[col_visit] != ""].copy()
+
+    # Numeric columns
+    for c in [col_cons, col_lab, col_proc, col_insu_amt]:
         tmp[c] = pd.to_numeric(tmp[c], errors="coerce").fillna(0.0)
 
-    tmp[col_visit] = tmp[col_visit].astype(str).str.strip()
-    tmp["_total_amt"] = tmp[col_cons] + tmp[col_lab] + tmp[col_proc]
+    tmp["_total_amt_service"] = tmp[col_cons] + tmp[col_lab] + tmp[col_proc]
+    tmp["_total_amt_insu"] = tmp[col_insu_amt]
 
     def _agg(group_cols: List[str]) -> pd.DataFrame:
         g = tmp.groupby(group_cols, dropna=False).agg(
@@ -187,10 +205,15 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
             Lab=(col_lab, "sum"),
             Procedure=(col_proc, "sum"),
             Total_Visit=(col_visit, pd.Series.nunique),
-            Total_Amount=("_total_amt", "sum"),
+            Total_Amount_Service=("_total_amt_service", "sum"),
+            Total_Amount_Insuance=("_total_amt_insu", "sum"),
         ).reset_index()
-        g["Avg_Amount"] = g["Total_Amount"] / g["Total_Visit"].replace(0, pd.NA)
-        g["Lab_%"] = (g["Lab"] / g["Total_Amount"].replace(0, pd.NA)) * 100
+
+        g["Avg_Amount_Service"] = g["Total_Amount_Service"] / g["Total_Visit"].replace(0, pd.NA)
+        g["Avg_Amount_Insuance"] = g["Total_Amount_Insuance"] / g["Total_Visit"].replace(0, pd.NA)
+
+        # Lab_% is based on SERVICE total (Consult + Lab + Procedure)
+        g["Lab_%"] = (g["Lab"] / g["Total_Amount_Service"].replace(0, pd.NA)) * 100
         return g
 
     if col_dept:
@@ -198,14 +221,16 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     else:
         doctor_wise = _agg([col_doc]).rename(columns={col_doc: "Doctor"})
 
-    insurance_wise = _agg([col_ins]).rename(columns={col_ins: "Insurance"})
-    doctor_ins_wise = _agg([col_doc, col_ins]).rename(columns={col_doc: "Doctor", col_ins: "Insurance"})
+    insurance_wise = _agg([col_ins_name]).rename(columns={col_ins_name: "Insurance"})
+    doctor_ins_wise = _agg([col_doc, col_ins_name]).rename(columns={col_doc: "Doctor", col_ins_name: "Insurance"})
 
     def _add_grand_total(d: pd.DataFrame, label_cols: List[str]) -> pd.DataFrame:
         if d.empty:
             return d
+
         total_visit = int(d["Total_Visit"].sum())
-        total_amount = float(d["Total_Amount"].sum())
+        total_service = float(d["Total_Amount_Service"].sum())
+        total_insu = float(d["Total_Amount_Insuance"].sum())
         lab_sum = float(d["Lab"].sum())
 
         row = {c: "" for c in d.columns}
@@ -213,13 +238,19 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
             if lc in row:
                 row[lc] = "GRAND TOTAL"
                 break
+
         row["Consultation"] = float(d["Consultation"].sum())
         row["Lab"] = lab_sum
         row["Procedure"] = float(d["Procedure"].sum())
         row["Total_Visit"] = total_visit
-        row["Total_Amount"] = total_amount
-        row["Avg_Amount"] = (total_amount / total_visit) if total_visit else 0.0
-        row["Lab_%"] = (lab_sum / total_amount * 100) if total_amount else 0.0
+
+        row["Total_Amount_Service"] = total_service
+        row["Total_Amount_Insuance"] = total_insu
+
+        row["Avg_Amount_Service"] = (total_service / total_visit) if total_visit else 0.0
+        row["Avg_Amount_Insuance"] = (total_insu / total_visit) if total_visit else 0.0
+
+        row["Lab_%"] = (lab_sum / total_service * 100) if total_service else 0.0
         return pd.concat([d, pd.DataFrame([row])], ignore_index=True)
 
     doctor_wise = _add_grand_total(doctor_wise, ["Department", "Doctor"])
@@ -231,7 +262,6 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         "Insurance Wise Revenue": insurance_wise,
         "Doctor x Insurance Revenue": doctor_ins_wise,
     }
-
 
 # -------------------- CPT / ICD Analysis (Step 5) helpers --------------------
 def load_cpticd_details(uploaded_file) -> Optional[pd.DataFrame]:
@@ -436,27 +466,107 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
 
     pair_top = pair_top[["CPT","CPT Description","ICD","Description","Count"]].rename(columns={"Description":"ICD Description"})
 
-    # Expiry tracker (Employer + Expiry)
-    # Expiry tracker (Employer + Expiry)
-    employer_col_use = r_emp if (reg_df is not None and 'r_emp' in locals() and r_emp and r_emp in base.columns) else col_company
-    exp = base[[employer_col_use, col_emr, col_visit, ("Name" if "Name" in base.columns else None), col_doc, col_exp]].copy()
-    exp = exp.loc[:, [c for c in exp.columns if c is not None]]
+    # --------------------
+# Employer Expiry Tracker (STRICT Employer Name only)
+# --------------------
+# We DO NOT use "Company" for expiry (Company column is usually empty and should be ignored).
+employer_col_use = None
+if reg_df is not None and 'r_emp' in locals() and r_emp and r_emp in base.columns:
+    employer_col_use = r_emp
 
-    exp = exp.rename(columns={employer_col_use:"Employer", col_doc:"Doctor", col_emr:"EMR No", col_visit:"Visit ID", col_exp:"Expiry Date"})
-    # Clean expiry date
-    exp["Expiry Date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce", dayfirst=True)
-    exp = exp.dropna(subset=["Expiry Date"])
-    # compute days to expiry
-    today = pd.to_datetime(date.today())
-    exp["Days To Expiry"] = (exp["Expiry Date"].dt.normalize() - today.normalize()).dt.days
-    # if Name column missing, create empty
-    if "Name" not in exp.columns:
-        exp["Name"] = ""
-    # de-dup per EMR/company expiry
-    exp = exp.drop_duplicates(subset=["Employer","EMR No","Expiry Date"])
-    exp = exp.sort_values(["Days To Expiry","Employer","Name"], ascending=[True, True, True]).reset_index(drop=True)
+if employer_col_use is None:
+    base["__EmployerName__"] = "Blank"
+    employer_col_use = "__EmployerName__"
 
-    return {
+exp = base[[employer_col_use, col_emr, col_visit, ("Name" if "Name" in base.columns else None), col_doc, col_exp]].copy()
+exp = exp.loc[:, [c for c in exp.columns if c is not None]]
+
+exp = exp.rename(columns={employer_col_use: "Employer", col_doc: "Doctor", col_emr: "EMR No", col_visit: "Visit ID", col_exp: "Expiry Date"})
+exp["Employer"] = exp["Employer"].fillna("Blank").astype(str).str.strip().replace("", "Blank")
+
+# Clean expiry date
+exp["Expiry Date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce", dayfirst=True)
+exp = exp.dropna(subset=["Expiry Date"])
+
+# If Name column missing, create empty
+if "Name" not in exp.columns:
+    exp["Name"] = ""
+
+# De-dup per Employer + EMR + Expiry (unique EMR is what matters)
+exp = exp.drop_duplicates(subset=["Employer", "EMR No", "Expiry Date"])
+
+# Days to expiry
+today = pd.to_datetime(date.today())
+exp["Days To Expiry"] = (exp["Expiry Date"].dt.normalize() - today.normalize()).dt.days
+exp = exp.sort_values(["Days To Expiry", "Employer", "Name"], ascending=[True, True, True]).reset_index(drop=True)
+
+# --------------------
+# Employer expiry SUMMARY rule (70% / 50% logic)
+# --------------------
+# For each employer, if >=70% of unique EMR have same expiry -> show that expiry date.
+# If <50% -> show TOP TWO dates.
+# Otherwise (50% to <70%) -> show TOP ONE date.
+summ = exp[["Employer", "EMR No", "Expiry Date"]].copy()
+summ["Expiry Date"] = summ["Expiry Date"].dt.date
+
+if not summ.empty:
+    # counts per employer+date (unique EMR already)
+    counts = summ.groupby(["Employer", "Expiry Date"])["EMR No"].nunique().reset_index(name="EMR_Count")
+    totals = summ.groupby("Employer")["EMR No"].nunique().reset_index(name="Total_EMR")
+    counts = counts.merge(totals, on="Employer", how="left")
+    counts["Share"] = counts["EMR_Count"] / counts["Total_EMR"].replace(0, pd.NA)
+
+    # rank within employer
+    counts = counts.sort_values(["Employer", "Share", "EMR_Count", "Expiry Date"], ascending=[True, False, False, True])
+    counts["Rank"] = counts.groupby("Employer").cumcount() + 1
+
+    top1 = counts[counts["Rank"] == 1][["Employer", "Expiry Date", "Share", "EMR_Count", "Total_EMR"]].rename(
+        columns={"Expiry Date": "Top1_Expiry", "Share": "Top1_Share", "EMR_Count": "Top1_EMR"}
+    )
+    top2 = counts[counts["Rank"] == 2][["Employer", "Expiry Date", "Share", "EMR_Count"]].rename(
+        columns={"Expiry Date": "Top2_Expiry", "Share": "Top2_Share", "EMR_Count": "Top2_EMR"}
+    )
+
+    employer_expiry_summary = top1.merge(top2, on="Employer", how="left")
+
+    def _fmt_date(d):
+        try:
+            return pd.to_datetime(d).date().isoformat()
+        except Exception:
+            return ""
+
+    def _fmt_pct(x):
+        try:
+            return f"{float(x) * 100:.0f}%"
+        except Exception:
+            return ""
+
+    display = []
+    for _, r in employer_expiry_summary.iterrows():
+        top1_share = float(r.get("Top1_Share", 0) or 0)
+        top2_share = float(r.get("Top2_Share", 0) or 0)
+        t1 = _fmt_date(r.get("Top1_Expiry"))
+        t2 = _fmt_date(r.get("Top2_Expiry"))
+
+        if top1_share >= 0.70:
+            show = t1
+        elif top1_share < 0.50:
+            show = t1 if not t2 else f"{t1} | {t2}"
+        else:
+            show = t1
+
+        display.append(show)
+
+    employer_expiry_summary["Common_Expiry"] = display
+    employer_expiry_summary = employer_expiry_summary[
+        ["Employer", "Total_EMR", "Common_Expiry", "Top1_Expiry", "Top1_Share", "Top2_Expiry", "Top2_Share"]
+    ].copy()
+    employer_expiry_summary["Top1_Share"] = employer_expiry_summary["Top1_Share"].apply(_fmt_pct)
+    employer_expiry_summary["Top2_Share"] = employer_expiry_summary["Top2_Share"].apply(_fmt_pct)
+else:
+    employer_expiry_summary = pd.DataFrame(columns=["Employer", "Total_EMR", "Common_Expiry", "Top1_Expiry", "Top1_Share", "Top2_Expiry", "Top2_Share"])
+
+return {
         "Doctor x Company | Principal DX (Top1)": docco_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
         "Doctor x Company | Secondary DX (Top1)": docco_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
         "Doctor | Principal DX (Top1)": doc_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
@@ -464,6 +574,7 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
         "Company | Principal DX (Top1)": co_pri_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
         "Company | Secondary DX (Top1)": co_sec_top.rename(columns={"Code":"ICD", "Description":"ICD Description"}),
         "CPT -> Top Principal ICD": pair_top,
+        "Employer Expiry Summary": employer_expiry_summary,
         "Employer Expiry Tracker": exp[["Employer","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"]],
     }
 
@@ -1092,7 +1203,12 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
 
     doctor_col = _find_col(reg_df, ["Doctor", "DoctorName", "Physician", "Provider"])
     ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
-    emp_col = _find_col(reg_df, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name", "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
+        # Employer: STRICTLY use "Employer Name" only (Company column is ignored by design)
+    emp_col = _find_col(reg_df, ["Employer Name"])
+    if emp_col is None:
+        # create a safe blank employer column so downstream tables still work
+        reg_df["Employer Name"] = "Blank"
+        emp_col = "Employer Name"
     bill_col = _find_col(reg_df, ["BillType", "Bill Type", "Insurance/Cash", "Cash/Insurance"])
     visit_type_col = _find_col(reg_df, ["VisitType", "Visit Type", "VisitCategory"])
     status_col = _find_col(reg_df, ["Status", "VisitStatus"])
@@ -1139,13 +1255,15 @@ def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.Dat
         reg_daywise = pd.DataFrame({"Reg Date": [day_ts.date()], "Count": [total_visits]})
 
     # Update KPI DataFrame with new structure
+        # KPI
     kpi_data = [
         {"Metric": "Day", "Value": day_ts.date().isoformat()},
         {"Metric": "Total Visits", "Value": total_visits},
-        {"Metric": "New Patients", "Value": new_visits},
-        {"Metric": "Established Patients", "Value": established_visits},
-        {"Metric": "Follow Up", "Value": follow_up_visits},
+        {"Metric": "New Visits", "Value": new_visits},
+        {"Metric": "Established Visits", "Value": established_visits},
+        {"Metric": "Follow Up Visits", "Value": follow_up_visits},
         {"Metric": "Unclassified Visits", "Value": unclassified_visits},
+        {"Metric": "CashOut Patients", "Value": cash_patients},
         {"Metric": "Pending Patients", "Value": pending_patients},
     ]
 
@@ -1177,15 +1295,15 @@ def history_paths(center: str, base_prefix: str = "") -> Tuple[str, str]:
 def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
     # Use the modified history_paths that saves to registration/{center}/
     root, hist_key = history_paths(center_key, cfg.get("S3_BASE_PREFIX", ""))
-    
+
     day_str = day_ts.date().isoformat()
 
-    # Save files to the new location
-    if SS["reg_file"]:
+    # Save uploaded files for this day (if present)
+    if SS.get("reg_file"):
         s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "registration.xlsx"), SS["reg_file"]["bytes"])
-    if SS["cash_file"]:
+    if SS.get("cash_file"):
         s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "cashout.xlsx"), SS["cash_file"]["bytes"])
-    if SS["pend_file"]:
+    if SS.get("pend_file"):
         s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "pending.xlsx"), SS["pend_file"]["bytes"])
 
     if SS.get("income_file"):
@@ -1193,40 +1311,49 @@ def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
     if SS.get("cpticd_file"):
         s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "cpticd.xlsx"), SS["cpticd_file"]["bytes"])
 
+    # Save computed summary pickle
+    s3_put_bytes(
+        s3,
+        cfg["S3_BUCKET_NAME"],
+        s3_key(root, day_str, "summary.pkl"),
+        pickle.dumps(dfs, protocol=pickle.HIGHEST_PROTOCOL),
+    )
 
-    s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "summary.pkl"), pickle.dumps(dfs, protocol=pickle.HIGHEST_PROTOCOL))
-
-    # Extract KPI values safely
+    # Update history.csv
     kpi = dfs.get("KPI")
+
+    def safe_int(val, default=0):
+        try:
+            if pd.isna(val):
+                return default
+            if isinstance(val, (int, float)):
+                return int(val)
+            s = str(val).strip()
+            if s == "":
+                return default
+            return int(float(s))
+        except Exception:
+            return default
+
     if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
         k = kpi.set_index("Metric")["Value"]
-        
-        # Handle numeric conversion safely
-        def safe_int(val, default=0):
-            try:
-                if isinstance(val, (int, float)):
-                    return int(val)
-                elif isinstance(val, str) and val.replace('.', '').isdigit():
-                    return int(float(val))
-                else:
-                    return default
-            except:
-                return default
-        
         row = {
             "day": pd.to_datetime(day_str),
             "total_visits": safe_int(k.get("Total Visits", 0)),
             "new_visits": safe_int(k.get("New Visits", 0)),
             "established_visits": safe_int(k.get("Established Visits", 0)),
+            "follow_up_visits": safe_int(k.get("Follow Up Visits", 0)),
+            "cashout_patients": safe_int(k.get("CashOut Patients", 0)),
             "pending_patients": safe_int(k.get("Pending Patients", 0)),
         }
     else:
-        # Fallback if KPI not found
         row = {
             "day": pd.to_datetime(day_str),
             "total_visits": 0,
             "new_visits": 0,
             "established_visits": 0,
+            "follow_up_visits": 0,
+            "cashout_patients": 0,
             "pending_patients": 0,
         }
 
@@ -1234,6 +1361,7 @@ def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
     b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key)
     if b:
         existing = pd.read_csv(io.BytesIO(b), parse_dates=["day"])
+
     if existing is None or existing.empty:
         new_hist = pd.DataFrame([row])
     else:
@@ -1242,8 +1370,13 @@ def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
         new_hist = pd.concat([new_hist, pd.DataFrame([row])], ignore_index=True)
 
     new_hist = new_hist.sort_values("day").reset_index(drop=True)
-    s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key, new_hist.to_csv(index=False).encode("utf-8"), content_type="text/csv")
-
+    s3_put_bytes(
+        s3,
+        cfg["S3_BUCKET_NAME"],
+        hist_key,
+        new_hist.to_csv(index=False).encode("utf-8"),
+        content_type="text/csv",
+    )
 
 def load_history_from_s3() -> pd.DataFrame:
     if not s3_ok:
@@ -1279,15 +1412,14 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
     kpi = dfs.get("KPI")
     if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
         k = kpi.set_index("Metric")["Value"]
-        a, b, c, d = st.columns(4)
-        a.metric("Total Visits", int(k.get("Total Visits", 0)))
-        new_val = k.get("New Visits", 0)
-        b.metric("New Visits", 
-                int(new_val) if isinstance(new_val, (int, float)) else new_val)
-        est_val = k.get("Established Visits", 0)
-        c.metric("Established Visits", 
-                int(est_val) if isinstance(est_val, (int, float)) else est_val)
-        d.metric("Pending Patients", int(k.get("Pending Patients", 0)))
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("Total Visits", int(float(k.get("Total Visits", 0) or 0)))
+        c2.metric("New Visits", int(float(k.get("New Visits", 0) or 0)))
+        c3.metric("Established Visits", int(float(k.get("Established Visits", 0) or 0)))
+        c4.metric("Follow Up Visits", int(float(k.get("Follow Up Visits", 0) or 0)))
+        c5.metric("CashOut Patients", int(float(k.get("CashOut Patients", 0) or 0)))
+        c6.metric("Pending Patients", int(float(k.get("Pending Patients", 0) or 0)))
+
     else:
         st.info("KPI is not available for this summary.")
 
@@ -1362,98 +1494,20 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
         if reg_df is None:
             st.info("Registration file is not loaded in this session. Upload/Process today's files to enable row-level download.")
         else:
-            emp_col = _find_col(reg_df, ["Employer", "Employer Name", "EmployerName", "Company", "Company Name", "Sponsor", "Sponsor Name", "Corporate", "Corporate Name"])
-            if not emp_col:
-                st.warning("Registration file has no Employer/Company column.")
+            emp_col = _find_col(reg_df, ["Employer Name"])
+            if emp_col is None:
+                st.warning('Registration file does not contain "Employer Name" column.')
             else:
-                tmp = reg_df.copy()
-                tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
-                tmp["__emp_key__"] = tmp[emp_col].apply(employer_canonical_name)
-
-                # display name = most frequent original in each normalized group
-                disp = (
-                    tmp.groupby(["__emp_key__", emp_col]).size().reset_index(name="cnt")
-                    .sort_values(["__emp_key__", "cnt"], ascending=[True, False])
-                    .drop_duplicates(subset=["__emp_key__"])
-                )
-                # build select options: "Display Name (count)"
-                counts = tmp.groupby("__emp_key__").size().reset_index(name="Count")
-                disp = disp.merge(counts, on="__emp_key__", how="left")
-                disp = disp.sort_values("Count", ascending=False)
-
-                options = disp["__emp_key__"].tolist()
-                labels = {r["__emp_key__"]: f"{r[emp_col]} ({int(r['Count'])})" for _, r in disp.iterrows()}
-
-                pick_key = st.selectbox(
-                    "Select Employer (deduped)",
-                    options=options,
-                    format_func=lambda k: labels.get(k, k),
-                    key="dl_employer_key",
-                )
-                detail = tmp[tmp["__emp_key__"] == pick_key].drop(columns=["__emp_key__"], errors="ignore").copy()
-                fn = f"Registration_Employer_{_safe_filename(labels.get(pick_key, pick_key))}_{day_ts.date().isoformat()}.xlsx"
-                download_excel_button(detail, fn, "⬇️ Download Employer Rows (Excel)")
-
-    # Whole Summary Excel
-    export_dfs = {k: dfs[k] for k in dfs.keys()}
-    st.download_button(
-        "⬇️ Download Summary Excel",
-        data=excel_bytes_from_dfs(export_dfs),
-        file_name=f"Registration_Summary_{center_key}_{day_ts.date().isoformat()}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-    # Accumulated
-    st.header("Accumulated (All Saved Days)")
-    hist = load_history_from_s3() if s3_ok else pd.DataFrame()
-    if hist.empty:
-        st.info("No saved history found yet.")
-    else:
-        acc = add_cumulative(hist)
-        latest = acc.sort_values("day").iloc[-1]
-        a, b, c, d = st.columns(4)
-        a.metric("Cumulative Visits", int(latest.get("cum_total_visits", 0)))
-        b.metric("Cumulative New Visits", int(latest.get("cum_new_visits", 0)))
-        c.metric("Cumulative Established Visits", int(latest.get("cum_established_visits", 0)))
-        d.metric("Cumulative Pending", int(latest.get("cum_pending_patients", 0)))
-        st.dataframe(acc, use_container_width=True, hide_index=True)
-
-def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
-    if hist is None or hist.empty:
-        return pd.DataFrame()
-    h = hist.sort_values("day").copy()
-    for c in ["total_visits", "new_visits", "established_visits", "pending_patients"]:
-        if c in h.columns:
-            h[c] = h[c].fillna(0).astype(int)
-            h[f"cum_{c}"] = h[c].cumsum()
-
-    cols = [
-        "day", "total_visits", "new_visits", "established_visits", "pending_patients",
-        "cum_total_visits", "cum_new_visits", "cum_established_visits", "cum_pending_patients"
-    ]
-    cols = [c for c in cols if c in h.columns]
-    return h[cols].sort_values("day", ascending=False).reset_index(drop=True)
-
-
-# ---------------------------
-# Process & display
-# ---------------------------
-
-can_process = SS["reg_df"] is not None and SS["cash_df"] is not None and SS["pend_df"] is not None
-
-# Persist last result in-session (so it doesn't disappear on rerun)
-SS.setdefault("last_saved_day", None)
-SS.setdefault("last_saved_center", None)
-
-if admin_mode:
-    # Day selection (prefer detected from Registration file; fallback to manual picker)
-    detected = get_day_from_registration(SS["reg_df"]) if SS["reg_df"] is not None else None
-    day_ts = detected if detected is not None else pd.to_datetime(manual_day)
-
-    if detected is None and SS["reg_df"] is not None:
-        st.warning("Registration file has no readable date column. Using Manual Day.")
-    elif detected is not None:
-        st.success(f"Detected Day from Registration file: {day_ts.date().isoformat()}")
+                emp_series = reg_df[emp_col].fillna("").astype(str).str.strip()
+                employers = sorted([x for x in emp_series.unique().tolist() if x and x.lower() not in ("nan", "none")])
+                if not employers:
+                    st.info("No employer names found.")
+                else:
+                    pick_emp = st.selectbox("Choose Employer", employers, key="dl_emp_pick")
+                    detail = reg_df[emp_series == pick_emp].copy()
+                    st.dataframe(detail.head(200), use_container_width=True, hide_index=True)
+                    fn = f"Registration_Employer_{_safe_filename(pick_emp)}_{day_ts.date().isoformat()}.xlsx"
+                    download_excel_button(detail, fn, "⬇️ Download Employer Rows (Excel)")
     st.markdown("---")
     st.subheader("Processing Scope")
     scope = st.radio(
