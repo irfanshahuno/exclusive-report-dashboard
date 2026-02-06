@@ -49,6 +49,10 @@ except Exception:
 st.set_page_config(page_title="Registration Summary", layout="wide", initial_sidebar_state="collapsed")
 st.title("Registration Summary (Registration + CashOut + Pending)")
 
+# Session state shortcut
+SS = st.session_state
+
+
 # ---------------------------
 # Admin mode (admin-only page)
 # ---------------------------
