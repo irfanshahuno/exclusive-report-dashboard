@@ -1197,6 +1197,54 @@ if admin_mode:
             st.error(str(e))
 
 
+
+    # -------------------- Step 4 (Income / Doctor Revenue) - optional --------------------
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        st.subheader("4) Income Analysis Report (Doctor Revenue)")
+        income_up = st.file_uploader(
+            "Upload Daily Collection Details (.xls / .xlsx)",
+            type=["xls", "xlsx"],
+            key="income_uploader",
+        )
+        if income_up is not None:
+            SS["income_file"] = {"name": income_up.name, "bytes": income_up.getvalue()}
+    with c2:
+        if st.button("🗑️ Delete Step 4", use_container_width=True):
+            SS["income_file"] = None
+            SS["income_df"] = None
+            SS["income_tables"] = {}
+            st.rerun()
+
+    if SS.get("income_file") is not None:
+        st.success(f"Step 4 OK ✅ ({SS['income_file']['name']})")
+    else:
+        st.info("Step 4 optional: upload your Daily Collection Details export to generate Doctor/Insurance revenue tables.")
+
+    # -------------------- Step 5 (CPT / ICD Analysis) - optional --------------------
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        st.subheader("5) CPT ICD Analysis (Doctor / Company / CPT Mapping)")
+        cpticd_up = st.file_uploader(
+            "Upload RegistrationDetailswithICDandCPTList (.xls / .xlsx)",
+            type=["xls", "xlsx"],
+            key="cpticd_uploader",
+        )
+        if cpticd_up is not None:
+            SS["cpticd_file"] = {"name": cpticd_up.name, "bytes": cpticd_up.getvalue()}
+    with c2:
+        if st.button("🗑️ Delete Step 5", use_container_width=True):
+            SS["cpticd_file"] = None
+            SS["cpticd_df"] = None
+            SS["cpticd_tables"] = {}
+            st.rerun()
+
+    if SS.get("cpticd_file") is not None:
+        st.success(f"Step 5 OK ✅ ({SS['cpticd_file']['name']})")
+    else:
+        st.info("Step 5 optional: upload your RegistrationDetailswithICDandCPTList export to generate CPT/ICD analytics + Employer expiry tracking.")
+
+
 def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.DataFrame, day_ts: pd.Timestamp) -> Dict[str, pd.DataFrame]:
     reg_map = ensure_required(reg_df, ["EMRNo", "VisitNo"], "Registration")
     emr_col, visit_col = reg_map["EMRNo"], reg_map["VisitNo"]
