@@ -721,11 +721,55 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                 if pick_emp != "All" and "Employer" in df_f.columns:
                     df_f = df_f[df_f["Employer"] == pick_emp]
 
-                # Display + download
-                show_cols = [c for c in ["Employer","Insurance","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"] if c in df_f.columns]
-                st.dataframe(df_f[show_cols] if show_cols else df_f, use_container_width=True, hide_index=True)
+                
+# ---- Summary counts (on-screen) ----
+grp_cols = [c for c in ["Employer", "Insurance"] if c in df_f.columns]
+if grp_cols:
+    df_counts = (
+        df_f.groupby(grp_cols, dropna=False)
+        .size()
+        .reset_index(name="Count")
+        .sort_values("Count", ascending=False)
+    )
+    # TOTAL row
+    total_n = int(df_counts["Count"].sum()) if "Count" in df_counts.columns else 0
+    total_row = {c: "" for c in df_counts.columns}
+    if "Employer" in total_row:
+        total_row["Employer"] = "TOTAL"
+    total_row["Count"] = total_n
+    df_counts = pd.concat([pd.DataFrame([total_row]), df_counts], ignore_index=True)
 
-                # Download Excel
+    st.caption(f"Showing summary counts for: **{win}** | Rows: {len(df_counts)-1} | TOTAL: {total_n}")
+    st.dataframe(df_counts, use_container_width=True, hide_index=True)
+else:
+    st.info("Expiry list is missing Employer/Insurance columns, so summary counts cannot be built.")
+    df_counts = pd.DataFrame()
+
+# ---- Optional detailed list (only when needed) ----
+show_details = st.checkbox("Show detailed patient list (only if you need to review before download)", value=False, key=f"exp_show_details_{str(day_ts)}")
+if show_details:
+    show_cols = [c for c in ["Employer","Insurance","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"] if c in df_f.columns]
+    st.dataframe(df_f[show_cols] if show_cols else df_f, use_container_width=True, hide_index=True)
+
+# ---- Downloads ----
+# Download counts
+try:
+    import io as _io
+    out_counts = _io.BytesIO()
+    with pd.ExcelWriter(out_counts, engine="openpyxl") as writer:
+        (df_counts if df_counts is not None else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Expiry_Counts")
+    st.download_button(
+        "Download Counts (Excel)",
+        data=out_counts.getvalue(),
+        file_name="expiry_counts.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"dl_exp_counts_{str(day_ts)}",
+    )
+except Exception:
+    st.warning("Counts download is unavailable (Excel writer error).")
+
+# Download full list
+# Download Excel
                 try:
                     import io as _io
                     out = _io.BytesIO()
