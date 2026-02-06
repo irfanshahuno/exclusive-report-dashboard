@@ -26,6 +26,21 @@ from typing import Dict, Optional, List, Tuple
 
 import pandas as pd
 import streamlit as st
+# --------------------
+# CPT/ICD helper: safe DF pick + debug
+# --------------------
+def _pick_first_df(*candidates):
+    """Return the first candidate that is a non-empty DataFrame."""
+    for x in candidates:
+        if isinstance(x, pd.DataFrame) and not x.empty:
+            return x
+    return pd.DataFrame()
+
+def _summary_keys(dfs):
+    try:
+        return sorted(list(dfs.keys()))
+    except Exception:
+        return []
 
 # Optional S3
 try:
@@ -314,6 +329,9 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         k in dfs for k in [
             "Doctor x Company | Principal DX (Top1)",
             "Doctor x Company | Secondary DX (Top1)",
+            "Doctor x Insurance | Principal DX (Counts)",
+            "Doctor x Insurance | Secondary DX (Counts)",
+            "Doctor x Insurance | Visits",
             "Doctor x Insurance | Principal DX (Top1)",
             "Doctor x Insurance | Secondary DX (Top1)",
             "CPT -> Top Principal ICD",
@@ -337,6 +355,9 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             "Doctor x Company | Principal DX (Top1)",
         ])
         df_sec = _pick_first_df([
+            "CPTICD | Doctor x Insurance | Secondary DX (Counts)",
+            "Doctor x Insurance | Secondary DX (Counts)",
+            # fallback: old Top1 keys
             "CPTICD | Doctor x Insurance | Secondary DX (Top1)",
             "CPTICD | Doctor x Company | Secondary DX (Top1)",
             "Doctor x Insurance | Secondary DX (Top1)",
@@ -353,14 +374,26 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             if df is None or df.empty:
                 return pd.DataFrame()
             out = df.copy()
+
+            # Drop unnamed/blank columns (common after Excel export)
+            bad_cols = []
+            for c in list(out.columns):
+                sc = str(c).strip()
+                if sc == "" or sc.lower().startswith("unnamed"):
+                    bad_cols.append(c)
+            if bad_cols:
+                out = out.drop(columns=bad_cols, errors="ignore")
+
             # Drop employer/company columns if present
             for drop_c in ["Employer", "Company"]:
                 if drop_c in out.columns:
                     out = out.drop(columns=[drop_c])
+
             # Fix common typo
             if "Insuance" in out.columns and "Insurance" not in out.columns:
                 out = out.rename(columns={"Insuance": "Insurance"})
-            # Keep only requested columns where available
+
+            # Keep only requested columns where available (Doctor/Insurance/ICD/Count/Desc)
             keep = [c for c in ["Doctor", "Insurance", "ICD", "Count", "ICD Description"] if c in out.columns]
             return out[keep] if keep else out
 
@@ -418,24 +451,38 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                     total_dx = None
 
             # Expected visits from Income Doctor x Insurance table (if available)
+            # Expected visits (prefer CPT/ICD visit table; fallback to Income Doctor x Insurance)
             expected_visits = None
-            df_income_dx = dfs.get("Income | Doctor x Insurance Revenue")
-            if isinstance(df_income_dx, pd.DataFrame) and not df_income_dx.empty and "Total_Visit" in df_income_dx.columns:
-                tmp = df_income_dx.copy()
-                if pick_doc != "All" and "Doctor" in tmp.columns:
-                    tmp = tmp[tmp["Doctor"].astype(str) == str(pick_doc)]
-                if pick_ins != "All" and "Insurance" in tmp.columns:
-                    tmp = tmp[tmp["Insurance"].astype(str) == str(pick_ins)]
-                # Exclude GRAND TOTAL rows if present
-                for coln in ["Doctor", "Insurance"]:
-                    if coln in tmp.columns:
-                        tmp = tmp[tmp[coln].astype(str).str.upper() != "GRAND TOTAL"]
+
+            df_vis = dfs.get("Doctor x Insurance | Visits")
+            if isinstance(df_vis, pd.DataFrame) and not df_vis.empty and "Visits" in df_vis.columns:
+                tmpv = df_vis.copy()
+                if pick_doc != "All" and "Doctor" in tmpv.columns:
+                    tmpv = tmpv[tmpv["Doctor"].astype(str) == str(pick_doc)]
+                if pick_ins != "All" and "Insurance" in tmpv.columns:
+                    tmpv = tmpv[tmpv["Insurance"].astype(str) == str(pick_ins)]
                 try:
-                    expected_visits = int(pd.to_numeric(tmp["Total_Visit"], errors="coerce").fillna(0).sum())
+                    expected_visits = int(pd.to_numeric(tmpv["Visits"], errors="coerce").fillna(0).sum())
                 except Exception:
                     expected_visits = None
 
-            # Append TOTAL row at end (so user can visually match)
+            if expected_visits is None:
+                df_income_dx = dfs.get("Income | Doctor x Insurance Revenue")
+                if isinstance(df_income_dx, pd.DataFrame) and not df_income_dx.empty and "Total_Visit" in df_income_dx.columns:
+                    tmp = df_income_dx.copy()
+                    if pick_doc != "All" and "Doctor" in tmp.columns:
+                        tmp = tmp[tmp["Doctor"].astype(str) == str(pick_doc)]
+                    if pick_ins != "All" and "Insurance" in tmp.columns:
+                        tmp = tmp[tmp["Insurance"].astype(str) == str(pick_ins)]
+                    # Exclude GRAND TOTAL rows if present
+                    for coln in ["Doctor", "Insurance"]:
+                        if coln in tmp.columns:
+                            tmp = tmp[tmp[coln].astype(str).str.upper() != "GRAND TOTAL"]
+                    try:
+                        expected_visits = int(pd.to_numeric(tmp["Total_Visit"], errors="coerce").fillna(0).sum())
+                    except Exception:
+                        expected_visits = None
+# Append TOTAL row at end (so user can visually match)
             if not pri_show.empty and total_dx is not None:
                 total_row = {c: "" for c in pri_show.columns}
                 if "ICD" in pri_show.columns:
@@ -458,29 +505,51 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                 st.dataframe(pri_show, use_container_width=True, hide_index=True)
 
             with c2:
-                st.markdown("**Secondary DX (Top 1)**")
-                st.dataframe(_filter_diag(sec_clean), use_container_width=True, hide_index=True)
+                st.markdown("**Secondary DX (Counts)**")
+                sec_show = _filter_diag(sec_clean)
 
+                total_sec = None
+                if not sec_show.empty and "Count" in sec_show.columns:
+                    try:
+                        total_sec = int(pd.to_numeric(sec_show["Count"], errors="coerce").fillna(0).sum())
+                    except Exception:
+                        total_sec = None
+
+                if not sec_show.empty and total_sec is not None:
+                    total_row = {c: "" for c in sec_show.columns}
+                    if "Insurance" in sec_show.columns:
+                        total_row["Insurance"] = "TOTAL"
+                    if "Count" in sec_show.columns:
+                        total_row["Count"] = total_sec
+                    sec_show = pd.concat([sec_show, pd.DataFrame([total_row])], ignore_index=True)
+
+                if total_sec is not None:
+                    if expected_visits is not None:
+                        st.caption(f"Secondary DX TOTAL: {total_sec}  |  Visits: {expected_visits}")
+                    else:
+                        st.caption(f"Secondary DX TOTAL: {total_sec}")
+
+                st.dataframe(sec_show, use_container_width=True, hide_index=True)
         with tabs[1]:
 
-            st.subheader("CPT → Most Common Principal ICD")
+                    st.subheader("CPT → Most Common Principal ICD")
 
-            df_cpt = df_cpt_map if isinstance(df_cpt_map, pd.DataFrame) else pd.DataFrame()
-            if df_cpt is None or df_cpt.empty:
-                st.info("No CPT mapping data for this day.")
-            else:
-                # Optional filters
-                if "CPT" in df_cpt.columns:
-                    cpt_list = sorted(df_cpt["CPT"].dropna().astype(str).unique().tolist())
-                    pick_cpt = st.selectbox("Select CPT", ["All"] + cpt_list, index=0, key="cpticd_pick_cpt")
-                else:
-                    pick_cpt = "All"
+                    df_cpt = df_cpt_map if isinstance(df_cpt_map, pd.DataFrame) else pd.DataFrame()
+                    if df_cpt is None or df_cpt.empty:
+                        st.info("No CPT mapping data for this day.")
+                    else:
+                        # Optional filters
+                        if "CPT" in df_cpt.columns:
+                            cpt_list = sorted(df_cpt["CPT"].dropna().astype(str).unique().tolist())
+                            pick_cpt = st.selectbox("Select CPT", ["All"] + cpt_list, index=0, key="cpticd_pick_cpt")
+                        else:
+                            pick_cpt = "All"
 
-                df_show = df_cpt.copy()
-                if pick_cpt != "All" and "CPT" in df_show.columns:
-                    df_show = df_show[df_show["CPT"].astype(str) == str(pick_cpt)].copy()
+                        df_show = df_cpt.copy()
+                        if pick_cpt != "All" and "CPT" in df_show.columns:
+                            df_show = df_show[df_show["CPT"].astype(str) == str(pick_cpt)].copy()
 
-                st.dataframe(df_show, use_container_width=True, hide_index=True)
+                        st.dataframe(df_show, use_container_width=True, hide_index=True)
 
     st.subheader("Employer Wise")
     emp_df = dfs.get("Employer Wise", pd.DataFrame()).copy()
