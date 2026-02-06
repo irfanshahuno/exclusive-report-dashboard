@@ -39,8 +39,9 @@ except Exception:
 # Date formatting (management-friendly)
 # ---------------------------
 def fmt_day(ts) -> str:
+    """Friendly day label with weekday for management views."""
     try:
-        return pd.to_datetime(ts).strftime("%d %b %Y")
+        return pd.to_datetime(ts).strftime("%A, %d %b %Y")
     except Exception:
         return str(ts)
 
@@ -203,8 +204,12 @@ def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
     return h.sort_values("day", ascending=False).reset_index(drop=True)
 
 
-def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
-    st.header(f"Current Day ({fmt_day(day_ts)})")
+def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: str = "header", label: str = "Current Day"):
+    title = f"{label} ({fmt_day(day_ts)})"
+    if heading == "subheader":
+        st.subheader(title)
+    else:
+        st.header(title)
 
     kpi = dfs.get("KPI")
     if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
@@ -295,74 +300,48 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
         st.markdown("---")
         st.header("CPT / ICD Analysis")
 
-        # Pick known tables
-        df_docco_pri = dfs.get("CPTICD | Doctor x Company | Principal DX (Top1)")
-        df_docco_sec = dfs.get("CPTICD | Doctor x Company | Secondary DX (Top1)")
-        df_cpt_map    = dfs.get("CPTICD | CPT -> Top Principal ICD")
-        df_exp        = dfs.get("CPTICD | Employer Expiry Tracker")
-        df_doc_pri    = dfs.get("CPTICD | Doctor | Principal DX (Top1)")
-        df_doc_sec    = dfs.get("CPTICD | Doctor | Secondary DX (Top1)")
-        df_co_pri     = dfs.get("CPTICD | Company | Principal DX (Top1)")
-        df_co_sec     = dfs.get("CPTICD | Company | Secondary DX (Top1)")
+        # Simplified: show Doctor + Insurance only (no Employer/Company)
+        df_pri = (
+            dfs.get("CPTICD | Doctor x Insurance | Principal DX (Top1)")
+            or dfs.get("CPTICD | Doctor x Company | Principal DX (Top1)")
+        )
+        df_sec = (
+            dfs.get("CPTICD | Doctor x Insurance | Secondary DX (Top1)")
+            or dfs.get("CPTICD | Doctor x Company | Secondary DX (Top1)")
+        )
+        df_cpt_map = dfs.get("CPTICD | CPT -> Top Principal ICD")
 
-        tabs = st.tabs(["Doctor x Company", "CPT Mapping", "Employer Expiry", "Doctor Wise", "Company Wise"])
+        tabs = st.tabs(["Doctor x Insurance", "CPT Mapping"])
+
+        def _clean_diag(df: pd.DataFrame) -> pd.DataFrame:
+            if df is None or df.empty:
+                return pd.DataFrame()
+            out = df.copy()
+            # Drop employer/company columns if present
+            for drop_c in ["Employer", "Company"]:
+                if drop_c in out.columns:
+                    out = out.drop(columns=[drop_c])
+            # Normalize Insurance spelling
+            if "Insuance" in out.columns and "Insurance" not in out.columns:
+                out = out.rename(columns={"Insuance": "Insurance"})
+            # Keep only requested columns where available
+            keep = [c for c in ["Doctor", "Insurance", "ICD", "Count", "ICD Description"] if c in out.columns]
+            return out[keep] if keep else out
 
         with tabs[0]:
-            st.subheader("Top Diagnosis (Doctor x Company)")
+            st.subheader("Top Diagnosis (Doctor x Insurance)")
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("**Principal DX (Top 1)**")
-                st.dataframe(df_docco_pri if df_docco_pri is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+                st.dataframe(_clean_diag(df_pri), use_container_width=True, hide_index=True)
             with c2:
                 st.markdown("**Secondary DX (Top 1)**")
-                st.dataframe(df_docco_sec if df_docco_sec is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+                st.dataframe(_clean_diag(df_sec), use_container_width=True, hide_index=True)
 
         with tabs[1]:
             st.subheader("CPT → Most Common Principal ICD")
             st.dataframe(df_cpt_map if df_cpt_map is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
 
-        with tabs[2]:
-            st.subheader("Employer Employee Expiry Tracker")
-            if df_exp is None or df_exp.empty:
-                st.info("No expiry data found in the uploaded CPT/ICD report.")
-            else:
-                # Filters
-                df_f = df_exp.copy()
-                # choose window
-                win = st.selectbox("Expiry Window", options=["All", "Expired", "Next 30 days", "Next 60 days", "Next 90 days"], key=f"exp_win_{str(day_ts)}")
-                if "Days To Expiry" in df_f.columns:
-                    if win == "Expired":
-                        df_f = df_f[df_f["Days To Expiry"] < 0]
-                    elif win.startswith("Next"):
-                        n = int(re.findall(r"\d+", win)[0])
-                        df_f = df_f[(df_f["Days To Expiry"] >= 0) & (df_f["Days To Expiry"] <= n)]
-                # company filter
-                if "Company" in df_f.columns:
-                    comps = sorted([c for c in df_f["Company"].dropna().unique() if str(c).strip() not in ["", "nan", "None"]])
-                    pick_c = st.selectbox("Company", options=["All"] + comps, key=f"exp_comp_{str(day_ts)}")
-                    if pick_c != "All":
-                        df_f = df_f[df_f["Company"] == pick_c]
-                st.dataframe(df_f, use_container_width=True, hide_index=True)
-
-        with tabs[3]:
-            st.subheader("Top Diagnosis (Doctor)")
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("**Principal DX (Top 1)**")
-                st.dataframe(df_doc_pri if df_doc_pri is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
-            with c2:
-                st.markdown("**Secondary DX (Top 1)**")
-                st.dataframe(df_doc_sec if df_doc_sec is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
-
-        with tabs[4]:
-            st.subheader("Top Diagnosis (Company)")
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("**Principal DX (Top 1)**")
-                st.dataframe(df_co_pri if df_co_pri is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
-            with c2:
-                st.markdown("**Secondary DX (Top 1)**")
-                st.dataframe(df_co_sec if df_co_sec is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
     st.subheader("Employer Wise")
     emp_df = dfs.get("Employer Wise", pd.DataFrame()).copy()
 
@@ -489,6 +468,69 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
             axis=1,
         )
         st.dataframe(sty, use_container_width=True, hide_index=True)
+
+        # ---- Expiry Detail List (Step 5) + Download ----
+        with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=False):
+            df_detail = df_exp_all.copy() if df_exp_all is not None else pd.DataFrame()
+            if df_detail is None or df_detail.empty:
+                st.info("No expiry detail list found for this day/period.")
+            else:
+                # Normalize column names
+                if "Insuance" in df_detail.columns and "Insurance" not in df_detail.columns:
+                    df_detail = df_detail.rename(columns={"Insuance": "Insurance"})
+                # Expected columns
+                # Employer, Insurance, Name, EMR No, Visit ID, Doctor, Expiry Date, Days To Expiry
+                # Filters
+                f1, f2, f3 = st.columns([2, 2, 2])
+                with f1:
+                    win = st.selectbox(
+                        "Expiry Window",
+                        options=["All", "Expired", "Next 30 days", "Next 60 days", "Next 90 days"],
+                        key=f"exp_win2_{str(day_ts)}",
+                    )
+                with f2:
+                    ins_opts = []
+                    if "Insurance" in df_detail.columns:
+                        ins_opts = sorted([x for x in df_detail["Insurance"].dropna().unique() if str(x).strip() not in ["", "nan", "None"]])
+                    pick_ins = st.selectbox("Insurance", options=["All"] + ins_opts, key=f"exp_ins2_{str(day_ts)}")
+                with f3:
+                    emp_opts = []
+                    if "Employer" in df_detail.columns:
+                        emp_opts = sorted([x for x in df_detail["Employer"].dropna().unique() if str(x).strip() not in ["", "nan", "None"]])
+                    pick_emp = st.selectbox("Employer", options=["All"] + emp_opts, key=f"exp_emp2_{str(day_ts)}")
+
+                df_f = df_detail.copy()
+                if "Days To Expiry" in df_f.columns:
+                    if win == "Expired":
+                        df_f = df_f[df_f["Days To Expiry"] < 0]
+                    elif win.startswith("Next"):
+                        n = int(re.findall(r"\d+", win)[0])
+                        df_f = df_f[(df_f["Days To Expiry"] >= 0) & (df_f["Days To Expiry"] <= n)]
+
+                if pick_ins != "All" and "Insurance" in df_f.columns:
+                    df_f = df_f[df_f["Insurance"] == pick_ins]
+                if pick_emp != "All" and "Employer" in df_f.columns:
+                    df_f = df_f[df_f["Employer"] == pick_emp]
+
+                # Display + download
+                show_cols = [c for c in ["Employer","Insurance","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"] if c in df_f.columns]
+                st.dataframe(df_f[show_cols] if show_cols else df_f, use_container_width=True, hide_index=True)
+
+                # Download Excel
+                try:
+                    import io as _io
+                    out = _io.BytesIO()
+                    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+                        (df_f[show_cols] if show_cols else df_f).to_excel(writer, index=False, sheet_name="Expiry_List")
+                    st.download_button(
+                        "Download Excel",
+                        data=out.getvalue(),
+                        file_name="expiry_list.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"dl_exp_{str(day_ts)}_{pick_ins}_{pick_emp}",
+                    )
+                except Exception:
+                    st.warning("Download is unavailable (Excel writer not found).")
 
 
 # ---------------------------
@@ -624,6 +666,85 @@ def aggregate_tables(frames: List[pd.DataFrame]) -> pd.DataFrame:
 
     return out
 
+
+def aggregate_income(frames: List[pd.DataFrame]) -> pd.DataFrame:
+    """Aggregate Income tables across many days.
+
+    Rule:
+    - Sum Consultation/Lab/Procedure/Total_Visit/Total_Amount_* across days (grouped by non-numeric columns)
+    - Recompute Avg_Amount_* = Total_Amount_* / Total_Visit
+    - Recompute Lab_% = (Lab / Total_Amount_Service) * 100
+    - Rebuild GRAND TOTAL row
+    """
+    frames = [f for f in frames if f is not None and not f.empty]
+    if not frames:
+        return pd.DataFrame()
+
+    df = pd.concat(frames, ignore_index=True)
+
+    # Remove any TOTAL rows; we rebuild totals after aggregation
+    first_col = df.columns[0] if len(df.columns) else None
+    if first_col:
+        df = df[~df[first_col].astype(str).str.strip().str.upper().isin(["TOTAL", "GRAND TOTAL"])].copy()
+
+    # Identify columns
+    avg_cols = [c for c in df.columns if str(c).strip().lower().startswith("avg_") or str(c).strip().lower().startswith("avg ")]
+    lab_pct_cols = [c for c in df.columns if str(c).strip().lower() in ["lab_%", "lab%", "lab pct", "lab_pct"]]
+    ignore_sum = set(avg_cols + lab_pct_cols)
+
+    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    sum_cols = [c for c in num_cols if c not in ignore_sum]
+
+    grp_cols = [c for c in df.columns if c not in num_cols]
+    if grp_cols and sum_cols:
+        out = df.groupby(grp_cols, dropna=False, as_index=False)[sum_cols].sum()
+    else:
+        out = df.copy()
+
+    # Normalize expected column names
+    # (support both Total_Amount_Insurance and Total_Amount_Insuance)
+    if "Total_Amount_Insurance" in out.columns and "Total_Amount_Insuance" not in out.columns:
+        out["Total_Amount_Insuance"] = out["Total_Amount_Insurance"]
+    if "Avg_Amount_Insurance" in out.columns and "Avg_Amount_Insuance" not in out.columns:
+        out["Avg_Amount_Insuance"] = out["Avg_Amount_Insurance"]
+
+    # Recompute averages (strictly by Total_Visit)
+    if "Total_Visit" in out.columns:
+        denom = out["Total_Visit"].replace(0, pd.NA)
+        if "Total_Amount_Service" in out.columns:
+            out["Avg_Amount_Service"] = out["Total_Amount_Service"] / denom
+        if "Total_Amount_Insuance" in out.columns:
+            out["Avg_Amount_Insuance"] = out["Total_Amount_Insuance"] / denom
+
+    # Recompute Lab_% (service basis)
+    if "Lab" in out.columns and "Total_Amount_Service" in out.columns:
+        denom2 = out["Total_Amount_Service"].replace(0, pd.NA)
+        out["Lab_%"] = (out["Lab"] / denom2) * 100
+
+    # Rebuild GRAND TOTAL
+    if first_col and any(c in out.columns for c in sum_cols):
+        row = {c: "" for c in out.columns}
+        row[first_col] = "GRAND TOTAL"
+        for c in sum_cols:
+            row[c] = float(out[c].sum()) if not out.empty else 0.0
+        # Averages for grand total
+        if "Total_Visit" in out.columns and row.get("Total_Visit", 0):
+            tv = row["Total_Visit"] if row["Total_Visit"] else 0
+            try:
+                tv = float(tv)
+            except Exception:
+                tv = 0
+            if tv:
+                if "Total_Amount_Service" in out.columns:
+                    row["Avg_Amount_Service"] = float(row.get("Total_Amount_Service", 0)) / tv
+                if "Total_Amount_Insuance" in out.columns:
+                    row["Avg_Amount_Insuance"] = float(row.get("Total_Amount_Insuance", 0)) / tv
+                if "Lab" in out.columns and "Total_Amount_Service" in out.columns and float(row.get("Total_Amount_Service", 0)) != 0:
+                    row["Lab_%"] = (float(row.get("Lab", 0)) / float(row.get("Total_Amount_Service", 0))) * 100
+        out.loc[len(out)] = row
+
+    return out
+
 def load_and_aggregate(day_list: List[pd.Timestamp]) -> Optional[Dict[str, pd.DataFrame]]:
     if not day_list:
         return None
@@ -655,7 +776,10 @@ def load_and_aggregate(day_list: List[pd.Timestamp]) -> Optional[Dict[str, pd.Da
         if k == "KPI":
             continue
         frames = [d.get(k) for d in loaded if isinstance(d.get(k), pd.DataFrame)]
-        agg[k] = aggregate_tables(frames)
+        if str(k).startswith("Income | "):
+            agg[k] = aggregate_income(frames)
+        else:
+            agg[k] = aggregate_tables(frames)
 
     return agg
 
@@ -695,7 +819,7 @@ if mode == "Daily":
         SS["loaded_label"] = f"Current Day ({fmt_day(picked)})"
 
     if SS.get("loaded_summary") is not None:
-        render_summary(SS["loaded_summary"], picked)
+                render_summary(SS["loaded_summary"], picked, heading="header", label="Current Day")
     else:
         st.error("summary.pkl is missing for this day.")
         st.caption(f"Expected: {s3_key(root_prefix, picked.date().isoformat(), 'summary.pkl')}")
@@ -726,7 +850,7 @@ elif mode == "Weekly":
 
         if SS.get("loaded_summary") is not None:
             st.header(SS.get("loaded_label", "Weekly Summary"))
-            render_summary(SS["loaded_summary"], pd.to_datetime(max(selected)))
+            render_summary(SS["loaded_summary"], pd.to_datetime(max(selected)), heading="subheader", label="Latest Saved Day")
         else:
             st.warning("No summary.pkl files found in this range.")
 
@@ -753,10 +877,10 @@ else:  # Monthly
         if SS.get("loaded_key") != cache_key:
             SS["loaded_summary"] = load_and_aggregate(month_days)
             SS["loaded_key"] = cache_key
-            SS["loaded_label"] = f"Monthly Summary ({sel_month})"
+            SS["loaded_label"] = f"Monthly Summary ({pd.to_datetime(d0).strftime('%B %Y')})"
 
         if SS.get("loaded_summary") is not None:
             st.header(SS.get("loaded_label", "Monthly Summary"))
-            render_summary(SS["loaded_summary"], pd.to_datetime(max(month_days)))
+            render_summary(SS["loaded_summary"], pd.to_datetime(max(month_days)), heading="subheader", label="Latest Saved Day")
         else:
             st.warning("No summary.pkl files found for that month.")
