@@ -626,7 +626,18 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     # Note: Visit/EMR number is used only for grouping, not required for display.
     # ---------------------------------------------------------
     try:
-        vb = base[[col_doc, "Insurance", col_visit, col_cpt, col_pri, col_sec]].copy()
+        # Build base for visit-bundle summary.
+        # Secondary DX column might be missing in some files, so handle safely.
+        cols_needed = [col_doc, "Insurance", col_visit, col_cpt, col_pri]
+        vb = base[cols_needed].copy()
+
+        # Add Secondary column safely
+        sec_col_ok = (("col_sec" in locals()) and (col_sec is not None) and (col_sec in base.columns))
+        if sec_col_ok:
+            vb[col_sec] = base[col_sec]
+        else:
+            col_sec = "_SECONDARY_DX"
+            vb[col_sec] = ""
 
         vb[col_doc] = vb[col_doc].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
         vb["Insurance"] = vb["Insurance"].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
@@ -634,10 +645,9 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
 
         vb = vb[vb[col_visit] != ""].copy()
 
-        vb["_cpt_list"] = _split_multi_codes(vb[col_cpt])
-        vb["_pri_list"] = _split_multi_codes(vb[col_pri])
-        vb["_sec_list"] = _split_multi_codes(vb[col_sec])
-
+        vb["_cpt_list"] = _split_multi_codes(vb[col_cpt]) if col_cpt in vb.columns else [[] for _ in range(len(vb))]
+        vb["_pri_list"] = _split_multi_codes(vb[col_pri]) if col_pri in vb.columns else [[] for _ in range(len(vb))]
+        vb["_sec_list"] = _split_multi_codes(vb[col_sec]) if col_sec in vb.columns else [[] for _ in range(len(vb))]
         def _uniq_join(series_of_lists):
             items = []
             for lst in series_of_lists:
