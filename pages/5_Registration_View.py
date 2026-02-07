@@ -578,25 +578,70 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
 
                 st.dataframe(sec_show, use_container_width=True, hide_index=True)
         with tabs[1]:
+            st.subheader("CPT → Most Common Principal ICD")
 
-                    st.subheader("CPT → Most Common Principal ICD")
+            df_cpt = df_cpt_map if isinstance(df_cpt_map, pd.DataFrame) else pd.DataFrame()
+            if df_cpt is None or df_cpt.empty:
+                st.info("No CPT mapping data for this day.")
+            else:
+                df_show = df_cpt.copy()
 
-                    df_cpt = df_cpt_map if isinstance(df_cpt_map, pd.DataFrame) else pd.DataFrame()
-                    if df_cpt is None or df_cpt.empty:
-                        st.info("No CPT mapping data for this day.")
+                # --- Optional filters (like ICD tab): Doctor + Insurance + CPT ---
+                f1, f2, f3 = st.columns(3)
+
+                with f1:
+                    if "Doctor" in df_show.columns:
+                        doc_list = sorted([x for x in df_show["Doctor"].dropna().astype(str).unique().tolist() if str(x).strip() not in ["", "nan", "None"]])
+                        pick_doc2 = st.selectbox("Select Doctor", ["All"] + doc_list, index=0, key="cptmap_pick_doc")
                     else:
-                        # Optional filters
-                        if "CPT" in df_cpt.columns:
-                            cpt_list = sorted(df_cpt["CPT"].dropna().astype(str).unique().tolist())
-                            pick_cpt = st.selectbox("Select CPT", ["All"] + cpt_list, index=0, key="cpticd_pick_cpt")
-                        else:
-                            pick_cpt = "All"
+                        pick_doc2 = "All"
 
-                        df_show = df_cpt.copy()
-                        if pick_cpt != "All" and "CPT" in df_show.columns:
-                            df_show = df_show[df_show["CPT"].astype(str) == str(pick_cpt)].copy()
+                with f2:
+                    if "Insurance" in df_show.columns:
+                        ins_list2 = sorted([x for x in df_show["Insurance"].dropna().astype(str).unique().tolist() if str(x).strip() not in ["", "nan", "None"]])
+                        pick_ins2 = st.selectbox("Select Insurance", ["All"] + ins_list2, index=0, key="cptmap_pick_ins")
+                    else:
+                        pick_ins2 = "All"
 
-                        st.dataframe(df_show, use_container_width=True, hide_index=True)
+                with f3:
+                    if "CPT" in df_show.columns:
+                        cpt_list = sorted([x for x in df_show["CPT"].dropna().astype(str).unique().tolist() if str(x).strip() not in ["", "nan", "None"]])
+                        pick_cpt = st.selectbox("Select CPT", ["All"] + cpt_list, index=0, key="cpticd_pick_cpt")
+                    else:
+                        pick_cpt = "All"
+
+                # Apply filters
+                if pick_doc2 != "All" and "Doctor" in df_show.columns:
+                    df_show = df_show[df_show["Doctor"].astype(str) == str(pick_doc2)].copy()
+
+                if pick_ins2 != "All" and "Insurance" in df_show.columns:
+                    df_show = df_show[df_show["Insurance"].astype(str) == str(pick_ins2)].copy()
+
+                if pick_cpt != "All" and "CPT" in df_show.columns:
+                    df_show = df_show[df_show["CPT"].astype(str) == str(pick_cpt)].copy()
+
+                # Sort by Count (largest → smallest) if available
+                if "Count" in df_show.columns:
+                    df_show["Count"] = pd.to_numeric(df_show["Count"], errors="coerce").fillna(0)
+                    df_show = df_show.sort_values("Count", ascending=False)
+
+                # TOTAL row at end (Count)
+                if not df_show.empty and "Count" in df_show.columns:
+                    total_c = int(df_show["Count"].sum())
+                    total_row = {c: "" for c in df_show.columns}
+                    # Put TOTAL label in CPT if present, else first column
+                    if "CPT" in df_show.columns:
+                        total_row["CPT"] = "TOTAL"
+                    else:
+                        total_row[df_show.columns[0]] = "TOTAL"
+                    total_row["Count"] = total_c
+                    df_show = pd.concat([df_show, pd.DataFrame([total_row])], ignore_index=True)
+
+                st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+                # Note for you (in UI) if Doctor/Insurance are missing in saved table
+                if "Doctor" not in df_cpt.columns or "Insurance" not in df_cpt.columns:
+                    st.caption("Note: Doctor/Insurance filters will appear only if the saved CPT mapping table contains Doctor and Insurance columns.")
 
     st.subheader("Employer Wise")
     emp_df = dfs.get("Employer Wise", pd.DataFrame()).copy()
