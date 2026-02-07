@@ -66,6 +66,18 @@ def fmt_dt(ts) -> str:
     except Exception:
         return str(ts)
 
+
+def fmt_short_day(ts) -> str:
+    """Short readable date without weekday."""
+    try:
+        return pd.to_datetime(ts).strftime("%d %b %Y")  # 03 Feb 2026
+    except Exception:
+        return str(ts)
+
+def fmt_range(a, b) -> str:
+    return f"{fmt_short_day(a)} → {fmt_short_day(b)}"
+
+
 st.set_page_config(page_title="Registration Summary (View Only)", layout="wide", initial_sidebar_state="collapsed")
 st.title("📅 Registration Summary (View Only)")
 
@@ -242,7 +254,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
     else:
         st.info("KPI is not available for this day.")
 
-    st.subheader("Pending Status Wise")
+    st.subheader(f"Pending Status Wise (Day: {fmt_day(day_ts)})")
     st.dataframe(dfs.get("Pending Status Wise", pd.DataFrame()), use_container_width=True, hide_index=True)
 
     st.subheader("Insurance Wise Visits")
@@ -264,17 +276,27 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
 
         tabs = st.tabs(["Doctor Wise", "Insurance Wise", "Doctor x Insurance"])
 
+        def _round_income_display(df: pd.DataFrame) -> pd.DataFrame:
+            if df is None or df.empty:
+                return df
+            x = df.copy()
+            for col in ["Avg_Amount_Service", "Avg_Amount_Insuance", "Lab_%"]:
+                if col in x.columns:
+                    x[col] = pd.to_numeric(x[col], errors="coerce").round(2)
+            return x
+
+
         with tabs[0]:
             if df_doc is None or df_doc.empty:
                 st.info("No Doctor Wise revenue data for this day.")
             else:
-                st.dataframe(df_doc, use_container_width=True, hide_index=True)
+                st.dataframe(_round_income_display(df_doc), use_container_width=True, hide_index=True)
 
         with tabs[1]:
             if df_ins is None or df_ins.empty:
                 st.info("No Insurance Wise revenue data for this day.")
             else:
-                st.dataframe(df_ins, use_container_width=True, hide_index=True)
+                st.dataframe(_round_income_display(df_ins), use_container_width=True, hide_index=True)
 
         with tabs[2]:
             if df_dx is None or df_dx.empty:
@@ -303,7 +325,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                     if pick_ins != "All":
                         df_f = df_f[df_f["Insurance"] == pick_ins].copy()
 
-                st.dataframe(df_f, use_container_width=True, hide_index=True)
+                st.dataframe(_round_income_display(df_f), use_container_width=True, hide_index=True)
 
 
 
@@ -804,7 +826,15 @@ center_key = qp_center if qp_center in CENTERS else None
 if center_key:
     st.selectbox("Center", [center_key], format_func=lambda k: CENTERS[k], disabled=True, key="center_locked")
 else:
-    center_key = st.selectbox("Center", options=list(CENTERS.keys()), format_func=lambda k: CENTERS[k], key="center_pick")
+    center_opts = list(CENTERS.keys())
+    default_center = "excellent" if "excellent" in center_opts else center_opts[0]
+    center_key = st.selectbox(
+        "Center",
+        options=center_opts,
+        index=center_opts.index(default_center),
+        format_func=lambda k: CENTERS[k],
+        key="center_pick",
+    )
 
 st.caption(f"Center: **{CENTERS.get(center_key, center_key)}**")
 
@@ -1092,7 +1122,7 @@ elif mode == "Weekly":
         start_d, end_d = end_d, start_d
 
     selected = [d for d in days if (d >= start_d) and (d <= end_d)]
-    st.caption(f"Selected range: **{start_d.date().isoformat()} → {end_d.date().isoformat()}**  (saved days: {len(selected)})")
+    st.caption(f"Selected range: **{fmt_range(start_d, end_d)}**  (saved days: {len(selected)})")
 
     if not selected:
         st.warning("No saved days found in this range.")
@@ -1101,7 +1131,7 @@ elif mode == "Weekly":
         if SS.get("loaded_key") != cache_key:
             SS["loaded_summary"] = load_and_aggregate(selected)
             SS["loaded_key"] = cache_key
-            SS["loaded_label"] = f"Weekly Summary ({start_d.date().isoformat()} → {end_d.date().isoformat()})"
+            SS["loaded_label"] = f"Weekly Summary ({fmt_range(start_d, end_d)})"
 
         if SS.get("loaded_summary") is not None:
             st.header(SS.get("loaded_label", "Weekly Summary"))
@@ -1126,7 +1156,7 @@ else:  # Monthly
         sel_month = d0.strftime("%Y-%m")
         start_m = min(month_days).date().isoformat()
         end_m = max(month_days).date().isoformat()
-        st.caption(f"Month range: **{start_m} → {end_m}**  (saved days: {len(month_days)})")
+        st.caption(f"Month range: **{fmt_range(min(month_days), max(month_days))}**  (saved days: {len(month_days)})")
 
         cache_key = f"month:{sel_month}"
         if SS.get("loaded_key") != cache_key:
