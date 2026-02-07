@@ -588,20 +588,33 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     )
 
     # CPT -> Top Principal ICD mapping
-    # Build CPT -> Principal ICD mapping (best match by frequency) PER Doctor x Insurance x CPT
+    # Build CPT -> Principal ICD mapping (best match by frequency)
+    # IMPORTANT: include Doctor + Insurance so the View page can filter like ICD.
     pair = base[[col_doc, "Insurance", col_cpt, col_pri]].copy()
-    pair[col_doc] = pair[col_doc].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
-    pair["Insurance"] = pair["Insurance"].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
-
     pair[col_cpt] = _split_multi_codes(pair[col_cpt])
     pair[col_pri] = _split_multi_codes(pair[col_pri])
-    pair = pair.explode(col_cpt).explode(col_pri)
 
+    pair = pair.explode(col_cpt).explode(col_pri)
+    pair[col_doc] = pair[col_doc].fillna("").astype(str).str.strip()
+    pair["Insurance"] = pair["Insurance"].fillna("").astype(str).str.strip()
     pair[col_cpt] = pair[col_cpt].fillna("").astype(str).str.strip()
     pair[col_pri] = pair[col_pri].fillna("").astype(str).str.strip()
-    pair = pair[(pair[col_cpt] != "") & (pair[col_pri] != "")].copy()
 
-    pair_top = pair.groupby([col_doc, "Insurance", col_cpt, col_pri], dropna=False).size().reset_index(name="Count")
+    pair = pair[
+        (pair[col_doc] != "") &
+        (pair["Insurance"] != "") &
+        (pair[col_cpt] != "") &
+        (pair[col_pri] != "")
+    ].copy()
+
+    # Count (Doctor, Insurance, CPT, Principal ICD)
+    pair_top = (
+        pair.groupby([col_doc, "Insurance", col_cpt, col_pri], dropna=False)
+        .size()
+        .reset_index(name="Count")
+    )
+
+    # Pick TOP ICD per (Doctor, Insurance, CPT)
     pair_top = pair_top.sort_values([col_doc, "Insurance", col_cpt, "Count"], ascending=[True, True, True, False])
     pair_top = pair_top.drop_duplicates([col_doc, "Insurance", col_cpt], keep="first")
     pair_top = pair_top.rename(columns={col_doc: "Doctor", col_cpt: "CPT", col_pri: "Top_Principal_ICD"})
@@ -685,31 +698,43 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
                 exp.groupby("Employer")["EMR No"].nunique().reset_index(name="Count").sort_values("Count", ascending=False)
             )
             employer_wise_exp["Insurance"] = ""
-        # attach common expiry date (70% rule result) if available
+        # attach expiry date + remaining days (like detailed list)
+        # We will show the nearest (minimum) Days To Expiry per Employer + Insurance.
+        try:
+            exp_min = exp.dropna(subset=["Employer", "Insurance", "Expiry Date"]).copy()
+            exp_min["Expiry Date"] = pd.to_datetime(exp_min["Expiry Date"], errors="coerce")
+            exp_min = exp_min.dropna(subset=["Expiry Date"])
+            exp_min["Days To Expiry"] = pd.to_numeric(exp_min["Days To Expiry"], errors="coerce")
+            exp_min = (
+                exp_min.sort_values(["Employer", "Insurance", "Days To Expiry", "Expiry Date"], ascending=[True, True, True, True])
+                .groupby(["Employer", "Insurance"], dropna=False, as_index=False)
+                .first()[["Employer", "Insurance", "Expiry Date", "Days To Expiry"]]
+            )
+            exp_min["Expiry Date"] = exp_min["Expiry Date"].dt.strftime("%Y-%m-%d")
+            exp_min["Days To Expiry"] = exp_min["Days To Expiry"].fillna(0).astype(int)
+
+            # merge into employer wise summary
+            if "Employer" in employer_wise_exp.columns and "Insurance" in employer_wise_exp.columns:
+                employer_wise_exp = employer_wise_exp.merge(exp_min, on=["Employer", "Insurance"], how="left")
+            else:
+                employer_wise_exp["Expiry Date"] = ""
+                employer_wise_exp["Days To Expiry"] = ""
+        except Exception:
+            employer_wise_exp["Expiry Date"] = ""
+            employer_wise_exp["Days To Expiry"] = ""
+
+        # (Optional) keep the 'Common_Expiry' info as an extra column for reference
         if isinstance(employer_expiry_summary, pd.DataFrame) and not employer_expiry_summary.empty:
             employer_wise_exp = employer_wise_exp.merge(
                 employer_expiry_summary[["Employer", "Common_Expiry"]],
                 on="Employer",
                 how="left",
-            ).rename(columns={"Common_Expiry": "Expiry Date"})
+            ).rename(columns={"Common_Expiry": "Common Expiry"})
         else:
-            employer_wise_exp["Expiry Date"] = ""
+            employer_wise_exp["Common Expiry"] = ""
 
-        # add nearest expiry date + min days-to-expiry (from detailed tracker) for quick review
-        try:
-            if isinstance(exp, pd.DataFrame) and not exp.empty:
-                _near = exp.dropna(subset=["Employer", "Expiry Date"]).copy()
-                _near["Expiry Date"] = pd.to_datetime(_near["Expiry Date"], errors="coerce")
-                _near = _near.dropna(subset=["Expiry Date"]).copy()
-                _min_date = _near.groupby("Employer", dropna=False)["Expiry Date"].min().reset_index(name="Nearest Expiry Date")
-                _min_days = _near.groupby("Employer", dropna=False)["Days To Expiry"].min().reset_index(name="Days To Expiry")
-                employer_wise_exp = employer_wise_exp.merge(_min_date, on="Employer", how="left")
-                employer_wise_exp = employer_wise_exp.merge(_min_days, on="Employer", how="left")
-                employer_wise_exp["Nearest Expiry Date"] = pd.to_datetime(employer_wise_exp["Nearest Expiry Date"], errors="coerce").dt.date.astype(str)
-        except Exception:
-            pass
     except Exception:
-        employer_wise_exp = pd.DataFrame(columns=["Employer", "Count", "Insurance", "Expiry Date"])
+        employer_wise_exp = pd.DataFrame(columns=["Employer", "Count", "Insurance", "Expiry Date", "Days To Expiry", "Common Expiry"])
     return {
         # Principal DX counts (VISIT-LEVEL; totals intended to match visits)
         "Doctor x Insurance | Principal DX (Counts)": doc_emp_pri_counts[["Doctor", "Insurance", "ICD", "Count", "ICD Description"]].copy()
