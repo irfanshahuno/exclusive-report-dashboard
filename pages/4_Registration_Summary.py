@@ -588,18 +588,24 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     )
 
     # CPT -> Top Principal ICD mapping
-    # Build CPT -> Principal ICD mapping (best match by frequency)
-    pair = base[[col_cpt, col_pri]].copy()
+    # Build CPT -> Principal ICD mapping (best match by frequency) PER Doctor x Insurance x CPT
+    pair = base[[col_doc, "Insurance", col_cpt, col_pri]].copy()
+    pair[col_doc] = pair[col_doc].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+    pair["Insurance"] = pair["Insurance"].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+
     pair[col_cpt] = _split_multi_codes(pair[col_cpt])
     pair[col_pri] = _split_multi_codes(pair[col_pri])
     pair = pair.explode(col_cpt).explode(col_pri)
+
     pair[col_cpt] = pair[col_cpt].fillna("").astype(str).str.strip()
     pair[col_pri] = pair[col_pri].fillna("").astype(str).str.strip()
     pair = pair[(pair[col_cpt] != "") & (pair[col_pri] != "")].copy()
 
-    pair_top = pair.groupby([col_cpt, col_pri], dropna=False).size().reset_index(name="Count")
-    pair_top = pair_top.sort_values([col_cpt, "Count"], ascending=[True, False]).drop_duplicates([col_cpt], keep="first")
-    pair_top = pair_top.rename(columns={col_cpt: "CPT", col_pri: "Top_Principal_ICD"})
+    pair_top = pair.groupby([col_doc, "Insurance", col_cpt, col_pri], dropna=False).size().reset_index(name="Count")
+    pair_top = pair_top.sort_values([col_doc, "Insurance", col_cpt, "Count"], ascending=[True, True, True, False])
+    pair_top = pair_top.drop_duplicates([col_doc, "Insurance", col_cpt], keep="first")
+    pair_top = pair_top.rename(columns={col_doc: "Doctor", col_cpt: "CPT", col_pri: "Top_Principal_ICD"})
+
 
     # ---- Expiry Tracker (ONLY EMR+Visit + Expiry Date) ----
     exp = base[[col_emr, col_visit, col_doc, "Employer", "Insurance", col_exp]].copy()
@@ -688,6 +694,20 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
             ).rename(columns={"Common_Expiry": "Expiry Date"})
         else:
             employer_wise_exp["Expiry Date"] = ""
+
+        # add nearest expiry date + min days-to-expiry (from detailed tracker) for quick review
+        try:
+            if isinstance(exp, pd.DataFrame) and not exp.empty:
+                _near = exp.dropna(subset=["Employer", "Expiry Date"]).copy()
+                _near["Expiry Date"] = pd.to_datetime(_near["Expiry Date"], errors="coerce")
+                _near = _near.dropna(subset=["Expiry Date"]).copy()
+                _min_date = _near.groupby("Employer", dropna=False)["Expiry Date"].min().reset_index(name="Nearest Expiry Date")
+                _min_days = _near.groupby("Employer", dropna=False)["Days To Expiry"].min().reset_index(name="Days To Expiry")
+                employer_wise_exp = employer_wise_exp.merge(_min_date, on="Employer", how="left")
+                employer_wise_exp = employer_wise_exp.merge(_min_days, on="Employer", how="left")
+                employer_wise_exp["Nearest Expiry Date"] = pd.to_datetime(employer_wise_exp["Nearest Expiry Date"], errors="coerce").dt.date.astype(str)
+        except Exception:
+            pass
     except Exception:
         employer_wise_exp = pd.DataFrame(columns=["Employer", "Count", "Insurance", "Expiry Date"])
     return {
