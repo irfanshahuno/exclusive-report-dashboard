@@ -620,6 +620,57 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     pair_top = pair_top.rename(columns={col_doc: "Doctor", col_cpt: "CPT", col_pri: "Top_Principal_ICD"})
 
 
+    # ---------------------------------------------------------
+    # CPT Visit Bundle Summary (Doctor + Insurance, grouped by VISIT)
+    # Goal: show common combinations like: CPTs + Principal DX + Secondary DX with visit counts
+    # Note: Visit/EMR number is used only for grouping, not required for display.
+    # ---------------------------------------------------------
+    try:
+        vb = base[[col_doc, "Insurance", col_visit, col_cpt, col_pri, col_sec]].copy()
+
+        vb[col_doc] = vb[col_doc].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+        vb["Insurance"] = vb["Insurance"].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+        vb[col_visit] = vb[col_visit].fillna("").astype(str).str.strip()
+
+        vb = vb[vb[col_visit] != ""].copy()
+
+        vb["_cpt_list"] = _split_multi_codes(vb[col_cpt])
+        vb["_pri_list"] = _split_multi_codes(vb[col_pri])
+        vb["_sec_list"] = _split_multi_codes(vb[col_sec])
+
+        def _uniq_join(series_of_lists):
+            items = []
+            for lst in series_of_lists:
+                if isinstance(lst, list):
+                    items.extend([str(x).strip() for x in lst if str(x).strip() not in ["", "None", "nan"]])
+            items = sorted(set(items))
+            return ", ".join(items)
+
+        # One row per VISIT: build bundles
+        visit_level = (
+            vb.groupby([col_doc, "Insurance", col_visit], dropna=False)
+            .agg(
+                **{
+                    "CPT Bundle": ("_cpt_list", _uniq_join),
+                    "Principal DX": ("_pri_list", _uniq_join),
+                    "Secondary DX": ("_sec_list", _uniq_join),
+                }
+            )
+            .reset_index()
+        )
+
+        # Count visits per bundle
+        cpt_visit_bundle_summary = (
+            visit_level.groupby([col_doc, "Insurance", "CPT Bundle", "Principal DX", "Secondary DX"], dropna=False)
+            .size()
+            .reset_index(name="Visits")
+            .sort_values("Visits", ascending=False)
+            .rename(columns={col_doc: "Doctor"})
+        )
+    except Exception:
+        cpt_visit_bundle_summary = pd.DataFrame()
+
+
     # ---- Expiry Tracker (ONLY EMR+Visit + Expiry Date) ----
     exp = base[[col_emr, col_visit, col_doc, "Employer", "Insurance", col_exp]].copy()
     exp = exp.rename(columns={col_emr: "EMR No", col_visit: "Visit ID", col_doc: "Doctor", col_exp: "Expiry Date"})
@@ -760,6 +811,9 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
 
         # CPT -> Top Principal ICD mapping
         "CPT -> Top Principal ICD": pair_top,
+
+        # Visit bundle summary (CPT + Principal + Secondary) with visit counts
+        "CPT Visit Bundle Summary": cpt_visit_bundle_summary,
 
         # Eligibility expiry (Employer-wise) from EMR+Visit match
         "Employer Wise": employer_wise_exp,
