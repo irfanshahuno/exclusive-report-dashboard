@@ -636,6 +636,28 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                         total_row[df_show.columns[0]] = "TOTAL"
                     total_row["Count"] = total_c
                     df_show = pd.concat([df_show, pd.DataFrame([total_row])], ignore_index=True)
+                else:
+                    total_c = None
+
+                # Caption like ICD: CPT TOTAL + Visits (+ Day)
+                try:
+                    _vis = expected_visits if "expected_visits" in locals() else None
+                except Exception:
+                    _vis = None
+                try:
+                    _day_label = fmt_day(day_ts) if "day_ts" in locals() else None
+                except Exception:
+                    _day_label = None
+
+                if total_c is not None:
+                    if _vis is not None and _day_label:
+                        st.caption(f"CPT TOTAL: {int(total_c)}  |  Visits: {_vis}  |  Day: {_day_label}")
+                    elif _vis is not None:
+                        st.caption(f"CPT TOTAL: {int(total_c)}  |  Visits: {_vis}")
+                    elif _day_label:
+                        st.caption(f"CPT TOTAL: {int(total_c)}  |  Day: {_day_label}")
+                    else:
+                        st.caption(f"CPT TOTAL: {int(total_c)}")
 
                 st.dataframe(df_show, use_container_width=True, hide_index=True)
 
@@ -737,11 +759,27 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
     if emp_df is None or emp_df.empty:
         st.dataframe(emp_df if emp_df is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
     else:
-        # Attach Expiry column (string display)
-        if "Employer" in emp_df.columns:
-            emp_df["Expiry Date"] = emp_df["Employer"].map(lambda e: exp_display_map.get(_norm_emp(e), ""))
-        else:
-            emp_df["Expiry Date"] = ""
+        # Attach Expiry Date / Days To Expiry (prefer saved columns if present)
+        if "Expiry Date" not in emp_df.columns or emp_df["Expiry Date"].fillna("").astype(str).str.strip().eq("").all():
+            if "Employer" in emp_df.columns:
+                emp_df["Expiry Date"] = emp_df["Employer"].map(lambda e: exp_display_map.get(_norm_emp(e), ""))
+            else:
+                emp_df["Expiry Date"] = ""
+
+        # Days To Expiry (prefer saved)
+        if "Days To Expiry" not in emp_df.columns or emp_df["Days To Expiry"].isna().all():
+            if "Employer" in emp_df.columns:
+                def _days_from_emp(e):
+                    d = exp_top_date_map.get(_norm_emp(e))
+                    if d is None:
+                        return ""
+                    try:
+                        return (d - today).days
+                    except Exception:
+                        return ""
+                emp_df["Days To Expiry"] = emp_df["Employer"].map(_days_from_emp)
+            else:
+                emp_df["Days To Expiry"] = ""
 
         # Styling bands (today-based):
         #   expired (<0) -> dark red
