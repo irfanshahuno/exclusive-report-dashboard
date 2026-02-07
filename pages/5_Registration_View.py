@@ -505,22 +505,20 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                     except Exception:
                         expected_visits = None
 
-# Sort by Count (largest → smallest)
-if not pri_show.empty and "Count" in pri_show.columns:
-    pri_show["Count"] = pd.to_numeric(pri_show["Count"], errors="coerce").fillna(0)
-    pri_show = pri_show.sort_values("Count", ascending=False)
-
-# Append TOTAL row at end
-if not pri_show.empty and total_dx is not None:
-    total_row = {c: "" for c in pri_show.columns}
-    if "ICD" in pri_show.columns:
-        total_row["ICD"] = "TOTAL"
-    elif "Doctor" in pri_show.columns:
-        total_row["Doctor"] = "TOTAL"
-    if "Count" in pri_show.columns:
-        total_row["Count"] = total_dx
-
-    pri_show = pd.concat([pri_show, pd.DataFrame([total_row])], ignore_index=True)
+            # Sort by Count (largest → smallest)
+            if not pri_show.empty and "Count" in pri_show.columns:
+            pri_show["Count"] = pd.to_numeric(pri_show["Count"], errors="coerce").fillna(0)
+            pri_show = pri_show.sort_values("Count", ascending=False)
+                        # Append TOTAL row at end
+            if not pri_show.empty and total_dx is not None:
+            total_row = {c: "" for c in pri_show.columns}
+            if "ICD" in pri_show.columns:
+            total_row["ICD"] = "TOTAL"
+            elif "Doctor" in pri_show.columns:
+            total_row["Doctor"] = "TOTAL"
+            if "Count" in pri_show.columns:
+            total_row["Count"] = total_dx
+                        pri_show = pd.concat([pri_show, pd.DataFrame([total_row])], ignore_index=True)
 
 
             c1, c2 = st.columns(2)
@@ -546,18 +544,17 @@ if not pri_show.empty and total_dx is not None:
                         total_sec = None
 
                 
-# Sort by Count (largest → smallest)
-if not sec_show.empty and "Count" in sec_show.columns:
-    sec_show["Count"] = pd.to_numeric(sec_show["Count"], errors="coerce").fillna(0)
-    sec_show = sec_show.sort_values("Count", ascending=False)
-
-# Append TOTAL row
-if not sec_show.empty and total_sec is not None:
-    total_row = {c: "" for c in sec_show.columns}
-    if "Insurance" in sec_show.columns:
-        total_row["Insurance"] = "TOTAL"
-    if "Count" in sec_show.columns:
-        total_row["Count"] = total_sec
+                # Sort by Count (largest → smallest)
+                if not sec_show.empty and "Count" in sec_show.columns:
+                sec_show["Count"] = pd.to_numeric(sec_show["Count"], errors="coerce").fillna(0)
+                sec_show = sec_show.sort_values("Count", ascending=False)
+                                # Append TOTAL row
+                if not sec_show.empty and total_sec is not None:
+                total_row = {c: "" for c in sec_show.columns}
+                if "Insurance" in sec_show.columns:
+                total_row["Insurance"] = "TOTAL"
+                if "Count" in sec_show.columns:
+                total_row["Count"] = total_sec
 
     sec_show = pd.concat([sec_show, pd.DataFrame([total_row])], ignore_index=True)
 
