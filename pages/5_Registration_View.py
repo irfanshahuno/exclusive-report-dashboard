@@ -1538,7 +1538,15 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         df_f = pd.DataFrame()
 
 with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=False):
-            df_detail = df_exp_all.copy() if df_exp_all is not None else pd.DataFrame()
+            df_detail = None
+            # Prefer explicit saved expiry list/tracker from dfs
+            for _k in ("Expiry_List", "Expiry List", "Employer Expiry Tracker", "Expiry_Tracker", "Expiry"):
+                if _k in dfs and isinstance(dfs.get(_k), pd.DataFrame) and not dfs[_k].empty:
+                    df_detail = dfs[_k].copy()
+                    break
+            if df_detail is None:
+                df_detail = pd.DataFrame()
+
             if df_detail is None or df_detail.empty:
                 st.info("No expiry detail list found for this day/period.")
             else:
