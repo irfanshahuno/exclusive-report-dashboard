@@ -1058,9 +1058,9 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
 
     # Apply employer canonicalization to avoid duplicates (QUMRA/QAMRA etc.)
     if not emp_df.empty and "Employer" in emp_df.columns:
-        emp_df["Employer_norm"] = emp_df["Employer"].apply(_norm_emp)
+        
 
-        group_cols = ["Employer_norm"]
+        group_cols = ["Employer"]
         if "Insurance" in emp_df.columns:
             group_cols.append("Insurance")
 
@@ -1070,8 +1070,8 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         else:
             emp_df = emp_df.drop_duplicates(subset=group_cols).copy()
 
-        emp_df["Employer"] = emp_df["Employer_norm"].apply(_display_emp_from_norm)
-        emp_df = emp_df.drop(columns=["Employer_norm"], errors="ignore")
+        emp_df["Employer"] = emp_df["Employer"].apply(_display_emp_from_norm)
+        emp_df = emp_df.drop(columns=["Employer"], errors="ignore")
 
     # --- Employer expiry summary (STRICT employer from Registration, expiry from CPT/ICD) ---
     # We expect the uploader to save a tracker table that includes at least:
