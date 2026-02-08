@@ -782,19 +782,20 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
     if heading == "subheader":
         st.subheader(title)
     else:
-    # Email button (sends the currently displayed summary as HTML)
-    col_a, col_b = st.columns([1, 3])
-    with col_a:
-        if st.button("📧 Email summary", key=f"email_{label}_{str(day_ts.date())}"):
-            try:
-                picked_label = title
-                subject = f"Registration Summary - {picked_label}"
-                html_body = _dfs_to_html(dfs, "Registration Summary", picked_label)
-                _send_email_smtp(subject, html_body)
-                st.success("Email sent ✅")
-            except Exception as e:
-                st.error(f"Email failed: {e}")
-    st.caption("Tip: Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/EMAIL_TO/EMAIL_CC in Streamlit Secrets for this app.")
+        # Email button (sends the currently displayed summary as HTML)
+        col_a, col_b = st.columns([1, 3])
+        with col_a:
+            if st.button("📧 Email summary", key=f"email_{label}_{str(day_ts.date())}"):
+                try:
+                    picked_label = title
+                    subject = f"Registration Summary - {picked_label}"
+                    html_body = _dfs_to_html(dfs, "Registration Summary", picked_label)
+                    _send_email_smtp(subject, html_body)
+                    st.success("Email sent ✅")
+                except Exception as e:
+                    st.error(f"Email failed: {e}")
+
+        st.caption("Tip: Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/EMAIL_TO/EMAIL_CC in Streamlit Secrets for this app.")
 
         st.header(title)
 
@@ -1579,72 +1580,72 @@ with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=F
                     df_f = df_f[df_f["Employer"] == pick_emp]
 
                 
-    # ---- Summary counts (on-screen) ----
-    grp_cols = [c for c in ["Employer", "Insurance"] if c in df_f.columns]
-    if grp_cols:
-        df_counts = (
-            df_f.groupby(grp_cols, dropna=False)
-            .size()
-            .reset_index(name="Count")
-            .sort_values("Count", ascending=False)
-        )
-        # TOTAL row
-        total_n = int(df_counts["Count"].sum()) if "Count" in df_counts.columns else 0
-        total_row = {c: "" for c in df_counts.columns}
-        if "Employer" in total_row:
-            total_row["Employer"] = "TOTAL"
-        total_row["Count"] = total_n
-        df_counts = pd.concat([df_counts, pd.DataFrame([total_row])], ignore_index=True)
+                # ---- Summary counts (on-screen) ----
+                grp_cols = [c for c in ["Employer", "Insurance"] if c in df_f.columns]
+                if grp_cols:
+                    df_counts = (
+                        df_f.groupby(grp_cols, dropna=False)
+                        .size()
+                        .reset_index(name="Count")
+                        .sort_values("Count", ascending=False)
+                    )
+                    # TOTAL row
+                    total_n = int(df_counts["Count"].sum()) if "Count" in df_counts.columns else 0
+                    total_row = {c: "" for c in df_counts.columns}
+                    if "Employer" in total_row:
+                        total_row["Employer"] = "TOTAL"
+                    total_row["Count"] = total_n
+                    df_counts = pd.concat([df_counts, pd.DataFrame([total_row])], ignore_index=True)
     
-        st.caption(f"Showing summary counts for: **{win}** | Rows: {len(df_counts)-1} | TOTAL: {total_n}")
-        st.dataframe(df_counts, use_container_width=True, hide_index=True)
-    else:
-        st.info("Expiry list is missing Employer/Insurance columns, so summary counts cannot be built.")
-        df_counts = pd.DataFrame()
+                    st.caption(f"Showing summary counts for: **{win}** | Rows: {len(df_counts)-1} | TOTAL: {total_n}")
+                    st.dataframe(df_counts, use_container_width=True, hide_index=True)
+                else:
+                    st.info("Expiry list is missing Employer/Insurance columns, so summary counts cannot be built.")
+                    df_counts = pd.DataFrame()
 
-    # ---- Optional detailed list (only when needed) ----
-    exp_key = f"{win}_{pick_ins}_{pick_emp}"
-    show_details = st.checkbox(
-        "Show detailed patient list (only if you need to review before download)",
-        value=False,
-        key=f"exp_show_details_{exp_key}",
-    )
-    if show_details:
-        show_cols = [c for c in ["Employer","Insurance","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"] if c in df_f.columns]
-        st.dataframe(df_f[show_cols] if show_cols else df_f, use_container_width=True, hide_index=True)
+                # ---- Optional detailed list (only when needed) ----
+                exp_key = f"{win}_{pick_ins}_{pick_emp}"
+                show_details = st.checkbox(
+                    "Show detailed patient list (only if you need to review before download)",
+                    value=False,
+                    key=f"exp_show_details_{exp_key}",
+                )
+                if show_details:
+                    show_cols = [c for c in ["Employer","Insurance","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"] if c in df_f.columns]
+                    st.dataframe(df_f[show_cols] if show_cols else df_f, use_container_width=True, hide_index=True)
 
-    # ---- Downloads ----
-    # Download counts
-    try:
-        import io as _io
-        out_counts = _io.BytesIO()
-        with pd.ExcelWriter(out_counts, engine="openpyxl") as writer:
-            (df_counts if isinstance(df_counts, pd.DataFrame) else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Expiry_Counts")
-        st.download_button(
-            "Download Counts (Excel)",
-            data=out_counts.getvalue(),
-            file_name="expiry_counts.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"dl_exp_counts_{exp_key}",
-        )
-    except Exception:
-        st.warning("Counts download is unavailable (Excel writer error).")
+                # ---- Downloads ----
+                # Download counts
+                try:
+                    import io as _io
+                    out_counts = _io.BytesIO()
+                    with pd.ExcelWriter(out_counts, engine="openpyxl") as writer:
+                        (df_counts if isinstance(df_counts, pd.DataFrame) else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Expiry_Counts")
+                    st.download_button(
+                        "Download Counts (Excel)",
+                        data=out_counts.getvalue(),
+                        file_name="expiry_counts.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"dl_exp_counts_{exp_key}",
+                    )
+                except Exception:
+                    st.warning("Counts download is unavailable (Excel writer error).")
 
-    # Download full list
-    try:
-        import io as _io
-        out = _io.BytesIO()
-        with pd.ExcelWriter(out, engine="openpyxl") as writer:
-            (df_f[show_cols] if (show_details and show_cols) else df_f).to_excel(writer, index=False, sheet_name="Expiry_List")
-        st.download_button(
-            "Download Full List (Excel)",
-            data=out.getvalue(),
-            file_name="expiry_list.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"dl_exp_full_{exp_key}",
-        )
-    except Exception:
-        st.warning("Download is unavailable (Excel writer not found).")
+                # Download full list
+                try:
+                    import io as _io
+                    out = _io.BytesIO()
+                    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+                        (df_f[show_cols] if (show_details and show_cols) else df_f).to_excel(writer, index=False, sheet_name="Expiry_List")
+                    st.download_button(
+                        "Download Full List (Excel)",
+                        data=out.getvalue(),
+                        file_name="expiry_list.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"dl_exp_full_{exp_key}",
+                    )
+                except Exception:
+                    st.warning("Download is unavailable (Excel writer not found).")
 # ---------------------------
 # Top Header + Center selection (LOCKED if passed in URL)
 # ---------------------------
