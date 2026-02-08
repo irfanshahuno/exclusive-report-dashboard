@@ -48,42 +48,13 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
         parts.append("<h3 style='margin:16px 0 8px 0'>KPIs</h3>")
         parts.append(kpi_html)
 
-    # Include ALL summary tables (in a friendly order)
-# NOTE: Summary page saves keys like "Insurance Wise Visits", "Doctor Wise Visits", etc.
-priority_keys = [
-    "Insurance Wise Visits",
-    "Doctor Wise Visits",
-    "Employer Wise",
-    "Bill Type",
-    "Visit Type",
-    "Status Wise",
-    "Pending Status Wise",
-    "Registration User Wise",
-    "Reg Date Wise (Daily)",
-]
-
-def _append_df(section_name: str, df: pd.DataFrame):
-    parts.append(f"<h3 style='margin:16px 0 8px 0'>{section_name}</h3>")
-    parts.append(df.to_html(index=False, border=0))
-
-shown = set()
-
-# 1) Priority tables first
-for key in priority_keys:
-    df = dfs.get(key)
-    if isinstance(df, pd.DataFrame) and not df.empty:
-        _append_df(key, df)
-        shown.add(key)
-
-# 2) Then include any remaining dataframes (Income / CPT-ICD / others)
-for key, df in dfs.items():
-    if key in shown or key == "KPI":
-        continue
-    if isinstance(df, pd.DataFrame) and not df.empty:
-        _append_df(str(key), df)
-        shown.add(key)
-
-for key in preferred_keys:
+    # Include a few important tables if present
+    preferred_keys = [
+        "Insurance Wise", "Employer Wise", "Doctor Wise",
+        "CashOut Summary", "Pending Summary",
+    ]
+    shown = set()
+    for key in preferred_keys:
         if key in dfs and isinstance(dfs[key], pd.DataFrame) and not dfs[key].empty:
             df = dfs[key].copy()
             parts.append(f"<h3 style='margin:16px 0 8px 0'>{key}</h3>")
@@ -811,22 +782,20 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
     if heading == "subheader":
         st.subheader(title)
     else:
+        st.header(title)
+
         # Email button (sends the currently displayed summary as HTML)
-        col_a, col_b = st.columns([1, 3])
-        with col_a:
-            if st.button("📧 Email summary", key=f"email_{label}_{str(day_ts.date())}"):
-                try:
-                    picked_label = title
-                    subject = f"Registration Summary - {picked_label}"
-                    html_body = _dfs_to_html(dfs, "Registration Summary", picked_label)
-                    _send_email_smtp(subject, html_body)
-                    st.success("Email sent ✅")
-                except Exception as e:
-                    st.error(f"Email failed: {e}")
+        if st.button("📧 Email summary", key=f"email_{label}_{str(day_ts.date())}"):
+            try:
+                picked_label = title
+                subject = f"Registration Summary - {picked_label}"
+                html_body = _dfs_to_html(dfs, "Registration Summary", picked_label)
+                _send_email_smtp(subject, html_body)
+                st.success("Email sent ✅")
+            except Exception as e:
+                st.error(f"Email failed: {e}")
 
         st.caption("Tip: Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/EMAIL_TO/EMAIL_CC in Streamlit Secrets for this app.")
-
-        st.header(title)
 
 
     def _sort_with_total(df: pd.DataFrame, label_col: str, count_col: str = "Count", total_label: str = "TOTAL") -> pd.DataFrame:
