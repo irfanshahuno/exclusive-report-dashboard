@@ -1,14 +1,3 @@
-
-        # Premium KPI cards (management-friendly)
-        subtitle = f"Generated: {fmt_dt(datetime.now())}"
-        _kpi_cards([
-            ("Total Visits", int(k.get("Total Visits", 0))),
-            ("New Patients", int(k.get("New Patients", 0))),
-            ("Established Patients", int(k.get("Established Patients", 0))),
-            ("Follow Up", int(k.get("Follow Up", 0))),
-            ("Unclassified Visits", int(k.get("Unclassified Visits", 0))),
-            ("Pending Patients", int(k.get("Pending Patients", 0))),
-        ], subtitle=subtitle)
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
