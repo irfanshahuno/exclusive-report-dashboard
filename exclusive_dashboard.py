@@ -889,7 +889,7 @@ with t2:
     # ✅ Daily Report button opens this app link (with center/year)
     base = DAILY_REPORT_BUTTON_BASE.rstrip("/")
     # keep same params for deep-linking
-    daily_url = f"{base}/?nav=daily&" + "&".join(params)
+    daily_url = DAILY_REPORT_BUTTON_BASE
 
     st.markdown(f'<a class="navlink" href="{daily_url}" target="_blank">📅 Daily Report</a>', unsafe_allow_html=True)
 with t3:
