@@ -593,36 +593,51 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             return pd.concat([d, total], ignore_index=True)
         return d
 
-    def _sort_income(df: pd.DataFrame) -> pd.DataFrame:
-        if df is None or df.empty:
-            return df
-        d = df.copy()
-        # pick best numeric column for sorting
+    
+def _sort_income(df: pd.DataFrame) -> pd.DataFrame:
+    """Sort income tables by Total_Visit (desc) when available, and keep GRAND TOTAL at bottom."""
+    if df is None or df.empty:
+        return df
+
+    d = df.copy()
+
+    # Separate any grand total rows (sometimes stored in Department/Doctor/Insurance)
+    gt_mask = pd.Series(False, index=d.index)
+    for col in ["Department", "Doctor", "Insurance"]:
+        if col in d.columns:
+            gt_mask = gt_mask | d[col].astype(str).str.upper().eq("GRAND TOTAL")
+    gt = d.loc[gt_mask].copy()
+    d = d.loc[~gt_mask].copy()
+
+    # Prefer sorting by Total_Visit if present
+    sort_col = None
+    for c in d.columns:
+        if c.lower().replace(" ", "_") in ["total_visit", "total_visits", "visits", "visit", "total_visit_count"]:
+            sort_col = c
+            break
+
+    if sort_col:
+        d[sort_col] = pd.to_numeric(d[sort_col], errors="coerce").fillna(0)
+        d = d.sort_values(sort_col, ascending=False, kind="mergesort")
+    else:
+        # fallback: pick best numeric column for sorting
         preferred = ["net_amount", "net amount", "total_amount", "total amount", "amount", "net", "paid"]
-        num_cols = []
-        for c in d.columns:
-            if pd.api.types.is_numeric_dtype(d[c]):
-                num_cols.append(c)
-        # try coerce for common money columns
-        for c in d.columns:
-            if c not in num_cols and any(c.lower() == p for p in preferred):
-                d[c] = pd.to_numeric(d[c], errors="coerce")
-                if pd.api.types.is_numeric_dtype(d[c]):
-                    num_cols.append(c)
-        sort_col = None
+        sort_col2 = None
         for p in preferred:
             for c in d.columns:
                 if c.lower() == p:
-                    sort_col = c
+                    sort_col2 = c
                     break
-            if sort_col:
+            if sort_col2:
                 break
-        if sort_col is None and num_cols:
-            sort_col = num_cols[-1]
-        if sort_col:
-            d[sort_col] = pd.to_numeric(d[sort_col], errors="coerce").fillna(0)
-            d = d.sort_values(sort_col, ascending=False, kind="mergesort")
-        return d
+        if sort_col2:
+            d[sort_col2] = pd.to_numeric(d[sort_col2], errors="coerce").fillna(0)
+            d = d.sort_values(sort_col2, ascending=False, kind="mergesort")
+
+    if not gt.empty:
+        d = pd.concat([d, gt], ignore_index=True)
+
+    return d
     kpi = dfs.get("KPI")
     if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
         k = kpi.set_index("Metric")["Value"]
