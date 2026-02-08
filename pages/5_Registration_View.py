@@ -745,7 +745,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             d = d.sort_values(sort_col, ascending=False, kind="mergesort")
         return d
     kpi = dfs.get("KPI")
-if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
+    if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
     k = kpi.set_index("Metric")["Value"]
     gen = fmt_dt(datetime.now())
     _ox_banner(center_label=f"Center: {center_name}", period_label=f"Day: {fmt_day(day_ts)}", generated_label=f"Generated: {gen}")
@@ -757,7 +757,7 @@ if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in 
         ("Unclassified", int(k.get("Unclassified Visits", 0))),
         ("Pending", int(k.get("Pending Patients", 0))),
     ])
-else:
+    else:
     st.info("KPI is not available for this day.")
 
     st.subheader(f"Pending Status Wise (Day: {fmt_day(day_ts)})")
