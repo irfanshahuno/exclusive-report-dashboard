@@ -2,8 +2,6 @@ name: Daily 9AM UAE Email (Yesterday)
 
 on:
   schedule:
-    # UAE is UTC +4
-    # 9 AM UAE = 5 AM UTC
     - cron: "0 5 * * *"
   workflow_dispatch:
 
@@ -22,6 +20,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas boto3
 
+      - name: Debug SMTP host (safe)
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+        run: |
+          python - <<'PY'
+          import os, re
+          host = (os.getenv("SMTP_HOST") or "")
+          print("SMTP_HOST set:", bool(host))
+          print("RAW repr:", repr(host))
+          host2 = host.strip()
+          print("STRIPPED repr:", repr(host2))
+          print("Looks like IP:", bool(re.fullmatch(r"\d+\.\d+\.\d+\.\d+", host2)))
+          PY
+
       - name: Send yesterday email
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
@@ -37,6 +49,5 @@ jobs:
           S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
           S3_BASE_PREFIX: ${{ secrets.S3_BASE_PREFIX }}
           CENTER_KEY: ${{ secrets.CENTER_KEY }}
-
         run: |
           python scripts/send_yesterday_email.py
