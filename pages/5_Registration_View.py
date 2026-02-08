@@ -511,6 +511,20 @@ st.markdown(
       }
       button[data-baseweb="tab"]{ font-weight: 800 !important; }
       .stCaption{color: var(--muted);}
+    
+      .page-title{
+        font-size: 2.35rem;
+        font-weight: 900;
+        color: var(--text);
+        letter-spacing:-0.03em;
+        white-space: nowrap;
+        overflow: visible;
+        line-height: 1.05;
+      }
+      @media (max-width: 1100px){
+        .page-title{font-size: 1.9rem; white-space: normal;}
+      }
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -1521,10 +1535,11 @@ qp_center = (st.query_params.get("center") or "").strip()
 _locked_center = qp_center if qp_center in CENTERS else None
 
 # Compact premium header row (title + center)
-h1, h2 = st.columns([3.6, 2.4], vertical_alignment="center")
+h1, h2 = st.columns([7, 3], vertical_alignment="center")
 with h1:
-    st.markdown("## 📅 Registration Summary — Management View")
+    st.markdown("<div class='page-title'>📅 Registration Summary — Management View</div>", unsafe_allow_html=True)
 with h2:
+    st.caption("Center")
     if _locked_center:
         center_key = st.selectbox("Center", [_locked_center], format_func=lambda k: CENTERS[k], disabled=True, key="center_locked")
     else:
