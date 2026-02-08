@@ -417,98 +417,128 @@ def fmt_range(a, b) -> str:
 
 
 st.set_page_config(page_title="Registration Summary (View Only)", layout="wide", initial_sidebar_state="collapsed")
-st.title("📅 Registration Summary — Management View")
-
+st.title("📊 Registration Dashboard — Executive View")
 
 # ---------------------------
-# Premium UI (management view)
+# Oxford Executive Theme
 # ---------------------------
 st.markdown(
     """
     <style>
-      :root{
-        --card-bg: rgba(255,255,255,0.92);
-        --card-border: rgba(16, 24, 40, 0.08);
-        --shadow2: 0 6px 18px rgba(16,24,40,0.08);
-        --text: #0f172a;
-        --muted: #64748b;
-      }
-      .block-container{padding-top: 1.2rem; padding-bottom: 2.5rem;}
+      .main{ background: linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%); }
+      .block-container{padding-top: 1.2rem; padding-bottom: 2.5rem; max-width: 1400px;}
       h1,h2,h3{letter-spacing:-0.02em;}
-      h1{font-weight:800;}
-      h2{font-weight:800;}
-      h3{font-weight:700;}
-      hr{border: none; border-top: 1px solid rgba(16,24,40,0.08); margin: 1.25rem 0;}
-      .kpi-grid{
+      h1{font-weight: 950;}
+      h2{font-weight: 900;}
+      h3{font-weight: 850;}
+      hr{border: none; border-top: 1px solid rgba(15,23,42,0.08); margin: 1.1rem 0;}
+
+      .ox-banner{
+        background: radial-gradient(1200px 300px at 10% 10%, rgba(59,130,246,0.28), transparent 55%),
+                    radial-gradient(900px 260px at 90% 0%, rgba(236,72,153,0.18), transparent 50%),
+                    linear-gradient(135deg, #0b1220 0%, #0f172a 55%, #111827 100%);
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 22px;
+        padding: 18px 22px;
+        box-shadow: 0 18px 55px rgba(2,6,23,0.28);
+        color: #ffffff;
+        margin: 0.25rem 0 1rem 0;
+      }
+      .ox-title{font-size: 26px; font-weight: 950; line-height: 1.2;}
+      .ox-sub{font-size: 13px; opacity: 0.82; margin-top: 6px;}
+      .ox-pill{
+        display:inline-block;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.10);
+        border: 1px solid rgba(255,255,255,0.12);
+        font-size: 12px;
+        font-weight: 800;
+        margin-right: 8px;
+      }
+
+      .ox-kpi-grid{
         display:grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(6, minmax(0, 1fr));
         gap: 14px;
         margin: 0.25rem 0 0.75rem 0;
       }
-      @media (max-width: 1200px){ .kpi-grid{grid-template-columns: repeat(2, minmax(0, 1fr));} }
-      @media (max-width: 700px){ .kpi-grid{grid-template-columns: repeat(1, minmax(0, 1fr));} }
+      @media (max-width: 1400px){ .ox-kpi-grid{grid-template-columns: repeat(3, minmax(0, 1fr));} }
+      @media (max-width: 800px){ .ox-kpi-grid{grid-template-columns: repeat(2, minmax(0, 1fr));} }
+      @media (max-width: 520px){ .ox-kpi-grid{grid-template-columns: repeat(1, minmax(0, 1fr));} }
 
-      .kpi-card{
-        background: var(--card-bg);
-        border: 1px solid var(--card-border);
+      .ox-kpi{
+        background: rgba(255,255,255,0.86);
+        border: 1px solid rgba(15,23,42,0.08);
         border-radius: 18px;
-        box-shadow: var(--shadow2);
         padding: 14px 16px;
+        box-shadow: 0 10px 25px rgba(15,23,42,0.08);
+        transition: transform 0.18s ease, box-shadow 0.18s ease;
       }
-      .kpi-label{
-        font-size: 13px;
-        color: var(--muted);
-        font-weight: 700;
+      .ox-kpi:hover{ transform: translateY(-3px); box-shadow: 0 18px 35px rgba(15,23,42,0.12); }
+      .ox-kpi-label{
+        font-size: 11.5px;
+        color: rgba(51,65,85,0.92);
+        font-weight: 900;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
         margin-bottom: 6px;
       }
-      .kpi-value{
-        font-size: 28px;
-        font-weight: 850;
-        color: var(--text);
-        line-height: 1.1;
-      }
-      .kpi-sub{
-        font-size: 12px;
-        color: var(--muted);
-        margin-top: 6px;
+      .ox-kpi-value{ font-size: 26px; font-weight: 950; color: #0f172a; line-height: 1.05; }
+
+      .ox-section{
+        background: rgba(255,255,255,0.80);
+        border: 1px solid rgba(15,23,42,0.08);
+        border-radius: 20px;
+        box-shadow: 0 10px 25px rgba(15,23,42,0.08);
+        padding: 12px 14px 6px 14px;
+        margin: 0.75rem 0 1rem 0;
       }
 
       div[data-testid="stDataFrame"]{
         background: rgba(255,255,255,0.92);
-        border: 1px solid rgba(16,24,40,0.08);
-        border-radius: 16px;
-        box-shadow: var(--shadow2);
+        border: 1px solid rgba(15,23,42,0.08);
+        border-radius: 18px;
+        box-shadow: 0 10px 25px rgba(15,23,42,0.08);
         padding: 8px 10px 2px 10px;
       }
+      button[data-baseweb="tab"]{ font-weight: 900 !important; }
       details{
-        border-radius: 16px;
-        border: 1px solid rgba(16,24,40,0.08);
-        box-shadow: var(--shadow2);
-        background: rgba(255,255,255,0.92);
+        border-radius: 18px;
+        border: 1px solid rgba(15,23,42,0.08);
+        box-shadow: 0 10px 25px rgba(15,23,42,0.08);
+        background: rgba(255,255,255,0.90);
         padding: 6px 10px;
       }
-      button[data-baseweb="tab"]{ font-weight: 800 !important; }
-      .stCaption{color: var(--muted);}
+      .stCaption{color: rgba(71,85,105,0.95);}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-def _kpi_cards(items, subtitle: str = ""):
-    """Render premium KPI cards. items = list of (label, value)."""
-    cards_html = []
+def _ox_banner(center_label: str, period_label: str, generated_label: str):
+    st.markdown(
+        f"""<div class="ox-banner">
+              <div>
+                <span class="ox-pill">{center_label}</span>
+                <span class="ox-pill">{period_label}</span>
+              </div>
+              <div class="ox-title">Executive Summary</div>
+              <div class="ox-sub">{generated_label}</div>
+            </div>""",
+        unsafe_allow_html=True,
+    )
+
+def _ox_kpis(items):
+    cards = []
     for label, value in items:
-        cards_html.append(
-            f"""<div class='kpi-card'>
-                  <div class='kpi-label'>{label}</div>
-                  <div class='kpi-value'>{value}</div>
-                </div>"""
+        cards.append(
+            f"""<div class="ox-kpi">
+                    <div class="ox-kpi-label">{label}</div>
+                    <div class="ox-kpi-value">{value}</div>
+                  </div>"""
         )
-    sub_html = f"<div class='kpi-sub'>{subtitle}</div>" if subtitle else ""
-    html = f"<div class='kpi-grid'>{''.join(cards_html)}</div>{sub_html}"
-    st.markdown(html, unsafe_allow_html=True)
-
-
+    st.markdown(f"<div class='ox-kpi-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
 
 
 # ---------------------------
@@ -715,20 +745,20 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             d = d.sort_values(sort_col, ascending=False, kind="mergesort")
         return d
     kpi = dfs.get("KPI")
-    if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
-        k = kpi.set_index("Metric")["Value"]
-        # Premium KPI cards (management-friendly)
-        subtitle = f"Generated: {fmt_dt(datetime.now())}"
-        _kpi_cards([
-            ("Total Visits", int(k.get("Total Visits", 0))),
-            ("New Patients", int(k.get("New Patients", 0))),
-            ("Established Patients", int(k.get("Established Patients", 0))),
-            ("Follow Up", int(k.get("Follow Up", 0))),
-            ("Unclassified Visits", int(k.get("Unclassified Visits", 0))),
-            ("Pending Patients", int(k.get("Pending Patients", 0))),
-        ], subtitle=subtitle)
-    else:
-        st.info("KPI is not available for this day.")
+if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
+    k = kpi.set_index("Metric")["Value"]
+    gen = fmt_dt(datetime.now())
+    _ox_banner(center_label=f"Center: {center_name}", period_label=f"Day: {fmt_day(day_ts)}", generated_label=f"Generated: {gen}")
+    _ox_kpis([
+        ("Total Visits", int(k.get("Total Visits", 0))),
+        ("New Patients", int(k.get("New Patients", 0))),
+        ("Established", int(k.get("Established Patients", 0))),
+        ("Follow Up", int(k.get("Follow Up", 0))),
+        ("Unclassified", int(k.get("Unclassified Visits", 0))),
+        ("Pending", int(k.get("Pending Patients", 0))),
+    ])
+else:
+    st.info("KPI is not available for this day.")
 
     st.subheader(f"Pending Status Wise (Day: {fmt_day(day_ts)})")
     st.dataframe(dfs.get("Pending Status Wise", pd.DataFrame()), use_container_width=True, hide_index=True)
