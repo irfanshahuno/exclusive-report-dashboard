@@ -1089,31 +1089,32 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                     except Exception:
                         total_sec = None
 
-                
-                # Remove any existing TOTAL/GRAND TOTAL rows (avoid duplicate totals)
-            if not sec_show.empty:
-                for _c in ["ICD", "Doctor", "Insurance"]:
-                    if _c in sec_show.columns:
-                        sec_show = sec_show[~sec_show[_c].astype(str).str.strip().str.upper().isin(["TOTAL", "GRAND TOTAL"])].copy()
+                # Remove any existing TOTAL/GRAND TOTAL rows
+                if not sec_show.empty:
+                    for _c in ["ICD", "Doctor", "Insurance"]:
+                        if _c in sec_show.columns:
+                            sec_show = sec_show[
+                                ~sec_show[_c].astype(str).str.strip().str.upper().isin(["TOTAL", "GRAND TOTAL"])
+                            ].copy()
 
-            # Sort by Count (largest → smallest)
-            if not sec_show.empty and "Count" in sec_show.columns:
-                sec_show["Count"] = pd.to_numeric(sec_show["Count"], errors="coerce").fillna(0)
-                sec_show = sec_show.sort_values("Count", ascending=False)
+                # Sort by count (largest -> smallest)
+                if not sec_show.empty and "Count" in sec_show.columns:
+                    sec_show["Count"] = pd.to_numeric(sec_show["Count"], errors="coerce").fillna(0).astype(int)
+                    sec_show = sec_show.sort_values("Count", ascending=False)
 
-            # Append ONE TOTAL row at end (secondary DX may be < visits)
-            if not sec_show.empty and total_sec is not None:
-                total_row = {c: "" for c in sec_show.columns}
-                if "ICD" in sec_show.columns:
-                    total_row["ICD"] = "TOTAL"
-                elif "Doctor" in sec_show.columns:
-                    total_row["Doctor"] = "TOTAL"
-                else:
-                    total_row[sec_show.columns[0]] = "TOTAL"
-                if "Count" in sec_show.columns:
-                    total_row["Count"] = int(total_sec)
-                sec_show = pd.concat([sec_show, pd.DataFrame([total_row])], ignore_index=True)
+                # Append ONE footer TOTAL row at the bottom (only once)
+                if not sec_show.empty and total_sec is not None:
+                    total_row = {c: "" for c in sec_show.columns}
+                    # Prefer putting TOTAL under ICD (or Doctor if ICD not present)
+                    if "ICD" in sec_show.columns:
+                        total_row["ICD"] = "TOTAL"
+                    elif "Doctor" in sec_show.columns:
+                        total_row["Doctor"] = "TOTAL"
+                    if "Count" in sec_show.columns:
+                        total_row["Count"] = total_sec
+                    sec_show = pd.concat([sec_show, pd.DataFrame([total_row])], ignore_index=True)
 
+                # Caption (Visit-level expected count is shown for reference)
                 if total_sec is not None:
                     if expected_visits is not None:
                         st.caption(f"Secondary DX TOTAL: {total_sec}  |  Visits: {expected_visits}")
