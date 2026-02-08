@@ -27,6 +27,87 @@ from typing import Dict, Optional, List, Tuple
 import pandas as pd
 import streamlit as st
 
+
+# ==========================
+# Email helpers (SMTP)
+# ==========================
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import smtplib
+
+def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
+    """Create a compact HTML email body containing KPI + key summary tables."""
+    parts = []
+    parts.append(f"<h2 style='margin:0 0 8px 0'>{title}</h2>")
+    parts.append(f"<div style='margin:0 0 16px 0;color:#555'>Scope: <b>{picked_label}</b></div>")
+
+    # KPI
+    kpi = dfs.get("KPI")
+    if isinstance(kpi, pd.DataFrame) and (not kpi.empty) and {"Metric","Value"}.issubset(kpi.columns):
+        kpi_html = kpi[["Metric","Value"]].to_html(index=False, border=0)
+        parts.append("<h3 style='margin:16px 0 8px 0'>KPIs</h3>")
+        parts.append(kpi_html)
+
+    # Include a few important tables if present
+    preferred_keys = [
+        "Insurance Wise", "Employer Wise", "Doctor Wise",
+        "CashOut Summary", "Pending Summary",
+    ]
+    shown = set()
+    for key in preferred_keys:
+        if key in dfs and isinstance(dfs[key], pd.DataFrame) and not dfs[key].empty:
+            df = dfs[key].copy()
+            parts.append(f"<h3 style='margin:16px 0 8px 0'>{key}</h3>")
+            parts.append(df.to_html(index=False, border=0))
+            shown.add(key)
+
+    # Fallback: show first 6 dataframes
+    if len(shown) == 0:
+        c = 0
+        for k, df in dfs.items():
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                parts.append(f"<h3 style='margin:16px 0 8px 0'>{k}</h3>")
+                parts.append(df.to_html(index=False, border=0))
+                c += 1
+                if c >= 6:
+                    break
+
+    style = """<style>
+    body{font-family:Arial,Helvetica,sans-serif;font-size:13px}
+    table{border-collapse:collapse;width:100%}
+    th,td{padding:6px 8px;border:1px solid #ddd;text-align:left}
+    th{background:#f5f5f5}
+    </style>"""
+    return style + "<body>" + "".join(parts) + "</body>"
+
+def _send_email_smtp(subject: str, html_body: str) -> None:
+    host = st.secrets.get("SMTP_HOST", "")
+    port = int(st.secrets.get("SMTP_PORT", 465))
+    user = st.secrets.get("SMTP_USER", "")
+    pwd  = st.secrets.get("SMTP_PASS", "")
+
+    to_addr = st.secrets.get("EMAIL_TO", "")
+    cc_addr = st.secrets.get("EMAIL_CC", "")
+
+    if not (host and user and pwd and to_addr):
+        raise ValueError("Missing SMTP secrets (SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/EMAIL_TO).")
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = user
+    msg["To"] = to_addr
+    if cc_addr:
+        msg["Cc"] = cc_addr
+
+    msg.attach(MIMEText(html_body, "html"))
+
+    recipients = [x.strip() for x in (to_addr.split(",") + (cc_addr.split(",") if cc_addr else [])) if x.strip()]
+
+    with smtplib.SMTP_SSL(host, port) as s:
+        s.login(user, pwd)
+        s.sendmail(user, recipients, msg.as_string())
+
+
 # Employer normalization map (from Employer names.csv 'check' column)
 EMPLOYER_CANON_MAP = {
     "A D C CONTRACTING": "A.D.C Energy And Contracting",
@@ -701,6 +782,20 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
     if heading == "subheader":
         st.subheader(title)
     else:
+    # Email button (sends the currently displayed summary as HTML)
+    col_a, col_b = st.columns([1, 3])
+    with col_a:
+        if st.button("📧 Email summary", key=f"email_{label}_{str(day_ts.date())}"):
+            try:
+                picked_label = title
+                subject = f"Registration Summary - {picked_label}"
+                html_body = _dfs_to_html(dfs, "Registration Summary", picked_label)
+                _send_email_smtp(subject, html_body)
+                st.success("Email sent ✅")
+            except Exception as e:
+                st.error(f"Email failed: {e}")
+    st.caption("Tip: Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/EMAIL_TO/EMAIL_CC in Streamlit Secrets for this app.")
+
         st.header(title)
 
 
@@ -1435,7 +1530,13 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         st.dataframe(sty, use_container_width=True, hide_index=True)
 
         # ---- Expiry Detail List (Step 5) + Download ----
-        with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=False):
+                # Defaults to avoid UnboundLocalError when expiry list is empty / not built
+        win = "All"
+        pick_ins = "All"
+        pick_emp = "All"
+        df_f = pd.DataFrame()
+
+with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=False):
             df_detail = df_exp_all.copy() if df_exp_all is not None else pd.DataFrame()
             if df_detail is None or df_detail.empty:
                 st.info("No expiry detail list found for this day/period.")
