@@ -417,7 +417,6 @@ def fmt_range(a, b) -> str:
 
 
 st.set_page_config(page_title="Registration Summary (View Only)", layout="wide", initial_sidebar_state="collapsed")
-st.title("📅 Registration Summary — Management View")
 
 
 # ---------------------------
@@ -433,40 +432,30 @@ st.markdown(
         --text: #0f172a;
         --muted: #64748b;
       }
-      .block-container{max-width: 100% !important; width: 100% !important; padding-top: 1.2rem; padding-bottom: 2.5rem; padding-left: 2rem; padding-right: 2rem; margin-left: 0 !important; margin-right: 0 !important;}
-      
-      /* --- TRUE FULL WIDTH (force 100vw) --- */
-      html, body{width:100%; overflow-x:hidden;}
-      .stApp{max-width:100vw !important;}
-
-      div[data-testid="stAppViewContainer"]{
-        max-width:100vw !important;
-        width:100vw !important;
-        padding:0 !important;
-        margin:0 !important;
-      }
-      section.main{
-        max-width:100vw !important;
-        width:100vw !important;
-        padding:0 !important;
-        margin:0 !important;
-      }
-
+      .block-container{max-width: 100% !important; width: 100% !important; padding-top: 0.6rem; padding-bottom: 2.5rem; padding-left: 2rem; padding-right: 2rem; margin-left: 0 !important; margin-right: 0 !important;}
+      /* --- HARD FULL-WIDTH OVERRIDE (Streamlit Cloud DOM variations) --- */
       [data-testid="stAppViewBlockContainer"],
-      div[data-testid="stAppViewBlockContainer"],
-      section.main > div.block-container,
-      .main .block-container,
-      .block-container{
-        max-width:100vw !important;
-        width:100vw !important;
-        padding-top: 1.2rem !important;
-        padding-bottom: 2.5rem !important;
-        padding-left: 1.5rem !important;
-        padding-right: 1.5rem !important;
+      div[data-testid="stAppViewBlockContainer"]{
+        max-width: 100% !important;
+        width: 100% !important;
+        padding-left: 2rem !important;
+        padding-right: 2rem !important;
         margin-left: 0 !important;
         margin-right: 0 !important;
       }
-h1,h2,h3{letter-spacing:-0.02em; line-height: 1.35 !important; overflow: visible !important; white-space: normal !important;}
+      div[data-testid="stAppViewContainer"], .stApp{
+        max-width: 100% !important;
+        width: 100% !important;
+      }
+      section.main, div[data-testid="stAppViewContainer"] > div.main{
+        max-width: 100% !important;
+        width: 100% !important;
+      }
+      .main .block-container{
+        max-width: 100% !important;
+        width: 100% !important;
+      }
+      h1,h2,h3{letter-spacing:-0.02em; line-height: 1.35 !important; overflow: visible !important; white-space: normal !important;}
       h1{font-weight:800; padding-bottom: 4px;}
       h2{font-weight:800;}
       h3{font-weight:700;}
@@ -1519,7 +1508,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
     except Exception:
         st.warning("Download is unavailable (Excel writer not found).")
 # ---------------------------
-# Center selection (LOCKED if passed in URL)
+# Top Header + Center selection (LOCKED if passed in URL)
 # ---------------------------
 CENTERS = {
     "easyhealth": "Easy Health Medical Clinic (MF8031)",
@@ -1529,20 +1518,25 @@ CENTERS = {
 
 # Streamlit new API: st.query_params is dict-like
 qp_center = (st.query_params.get("center") or "").strip()
-center_key = qp_center if qp_center in CENTERS else None
+_locked_center = qp_center if qp_center in CENTERS else None
 
-if center_key:
-    st.selectbox("Center", [center_key], format_func=lambda k: CENTERS[k], disabled=True, key="center_locked")
-else:
-    center_opts = list(CENTERS.keys())
-    default_center = "excellent" if "excellent" in center_opts else center_opts[0]
-    center_key = st.selectbox(
-        "Center",
-        options=center_opts,
-        index=center_opts.index(default_center),
-        format_func=lambda k: CENTERS[k],
-        key="center_pick",
-    )
+# Compact premium header row (title + center)
+h1, h2 = st.columns([3.6, 2.4], vertical_alignment="center")
+with h1:
+    st.markdown("## 📅 Registration Summary — Management View")
+with h2:
+    if _locked_center:
+        center_key = st.selectbox("Center", [_locked_center], format_func=lambda k: CENTERS[k], disabled=True, key="center_locked")
+    else:
+        center_opts = list(CENTERS.keys())
+        default_center = "excellent" if "excellent" in center_opts else center_opts[0]
+        center_key = st.selectbox(
+            "Center",
+            options=center_opts,
+            index=center_opts.index(default_center),
+            format_func=lambda k: CENTERS[k],
+            key="center_pick",
+        )
 
 st.caption(f"Center: **{CENTERS.get(center_key, center_key)}**")
 
@@ -1594,8 +1588,21 @@ latest_day = days[-1]
 # ---------------------------
 # View mode: Daily / Weekly / Monthly
 # ---------------------------
-st.markdown("---")
-mode = st.radio("View Mode", options=["Daily", "Weekly", "Monthly"], horizontal=True, index=0)
+st.markdown("<hr style='margin: 0.9rem 0 0.9rem 0; border: none; border-top: 1px solid rgba(16,24,40,0.10);'/>", unsafe_allow_html=True)
+
+m1, m2 = st.columns([1.6, 4.4], vertical_alignment="center")
+with m1:
+    st.markdown("**View Mode**")
+with m2:
+    mode = st.radio(
+        "View Mode",
+        options=["Daily", "Weekly", "Monthly"],
+        horizontal=True,
+        index=0,
+        label_visibility="collapsed",
+    )
+
+SS = st.session_state
 
 SS = st.session_state
 SS.setdefault("loaded_key", None)      # cache key (string) for loaded period
