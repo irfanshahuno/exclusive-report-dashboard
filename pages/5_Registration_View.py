@@ -201,13 +201,20 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     tot_dx_amt = _pick_by_names(df_dx, ["Total Amount", "Total_Amount", "TotalAmount"])
 
     def _ensure_total_service(df: pd.DataFrame, c_cons, c_lab, c_proc):
+        """Ensure a 'Total_Amount_Service' column exists (sum of Consultation+Lab+Procedure).
+        Keeps backward-compat with older files that may already have Total_Service.
+        """
         if df is None or df.empty:
             return df
-        if "Total_Service" in df.columns:
+        if "Total_Amount_Service" in df.columns:
             return df
+        if "Total_Service" in df.columns:
+            out = df.copy()
+            out["Total_Amount_Service"] = pd.to_numeric(out["Total_Service"], errors="coerce")
+            return out
         if c_cons and c_lab and c_proc:
             out = df.copy()
-            out["Total_Service"] = (
+            out["Total_Amount_Service"] = (
                 pd.to_numeric(out[c_cons], errors="coerce").fillna(0)
                 + pd.to_numeric(out[c_lab], errors="coerce").fillna(0)
                 + pd.to_numeric(out[c_proc], errors="coerce").fillna(0)
@@ -215,28 +222,44 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
             return out
         return df
 
-    # Add Total_Service if possible (user asked: show total service + total amount)
+    # Add Total_Amount_Service if possible (user asked: show total service + total amount) (user asked: show total service + total amount)
     df_doc = _ensure_total_service(df_doc, consult_doc, lab_doc_amt, proc_doc)
     df_ins = _ensure_total_service(df_ins, consult_ins, lab_ins_amt, proc_ins)
     df_dx  = _ensure_total_service(df_dx,  consult_dx,  lab_dx_amt,  proc_dx)
+    # extra amount/avg columns (service vs insurance)
+    tot_service_doc = _pick_by_names(df_doc, ["Total_Amount_Service", "Total Amount Service", "TotalAmountService"])
+    tot_ins_doc     = _pick_by_names(df_doc, ["Total_Amount_Insurance", "Total_Amount_Insuance", "Total Amount Insurance", "TotalAmountInsurance"])
+    avg_service_doc = _pick_by_names(df_doc, ["Avg_Amount_Service", "Avg Amount Service", "AvgAmountService"])
+    avg_ins_doc     = _pick_by_names(df_doc, ["Avg_Amount_Insurance", "Avg_Amount_Insuance", "Avg Amount Insurance", "AvgAmountInsurance"])
+
+    tot_service_ins = _pick_by_names(df_ins, ["Total_Amount_Service", "Total Amount Service", "TotalAmountService"])
+    tot_ins_ins     = _pick_by_names(df_ins, ["Total_Amount_Insurance", "Total_Amount_Insuance", "Total Amount Insurance", "TotalAmountInsurance"])
+    avg_service_ins = _pick_by_names(df_ins, ["Avg_Amount_Service", "Avg Amount Service", "AvgAmountService"])
+    avg_ins_ins     = _pick_by_names(df_ins, ["Avg_Amount_Insurance", "Avg_Amount_Insuance", "Avg Amount Insurance", "AvgAmountInsurance"])
+
+    tot_service_dx  = _pick_by_names(df_dx,  ["Total_Amount_Service", "Total Amount Service", "TotalAmountService"])
+    tot_ins_dx      = _pick_by_names(df_dx,  ["Total_Amount_Insurance", "Total_Amount_Insuance", "Total Amount Insurance", "TotalAmountInsurance"])
+    avg_service_dx  = _pick_by_names(df_dx,  ["Avg_Amount_Service", "Avg Amount Service", "AvgAmountService"])
+    avg_ins_dx      = _pick_by_names(df_dx,  ["Avg_Amount_Insurance", "Avg_Amount_Insuance", "Avg Amount Insurance", "AvgAmountInsurance"])
+
 
     # prefer show columns in requested style
     doc_cols = [c for c in ["Department", "Doctor"] if c in df_doc.columns]
-    for c in [consult_doc, lab_doc_amt, proc_doc, "Total_Service", visit_doc, tot_doc_amt]:
+    for c in [consult_doc, lab_doc_amt, proc_doc, visit_doc, "Total_Amount_Service", tot_service_doc, tot_doc_amt, tot_ins_doc, avg_service_doc, avg_ins_doc]:
         if c and c in df_doc.columns and c not in doc_cols:
             doc_cols.append(c)
     if avg_doc and avg_doc in df_doc.columns: doc_cols.append(avg_doc)
     if labp_doc and labp_doc in df_doc.columns: doc_cols.append(labp_doc)
 
     ins_cols = [c for c in ["Insurance"] if c in df_ins.columns]
-    for c in [consult_ins, lab_ins_amt, proc_ins, "Total_Service", visit_ins, tot_ins_amt]:
+    for c in [consult_ins, lab_ins_amt, proc_ins, visit_ins, "Total_Amount_Service", tot_service_ins, tot_ins_amt, tot_ins_ins, avg_service_ins, avg_ins_ins]:
         if c and c in df_ins.columns and c not in ins_cols:
             ins_cols.append(c)
     if avg_ins and avg_ins in df_ins.columns: ins_cols.append(avg_ins)
     if labp_ins and labp_ins in df_ins.columns: ins_cols.append(labp_ins)
 
     dx_cols = [c for c in ["Doctor", "Insurance"] if c in df_dx.columns]
-    for c in [consult_dx, lab_dx_amt, proc_dx, "Total_Service", visit_dx, tot_dx_amt]:
+    for c in [consult_dx, lab_dx_amt, proc_dx, visit_dx, "Total_Amount_Service", tot_service_dx, tot_dx_amt, tot_ins_dx, avg_service_dx, avg_ins_dx]:
         if c and c in df_dx.columns and c not in dx_cols:
             dx_cols.append(c)
     if avg_dx and avg_dx in df_dx.columns: dx_cols.append(avg_dx)
