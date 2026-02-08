@@ -231,30 +231,6 @@ EMPLOYER_CANON_MAP = {
     "ZUBLIN CONSTRUCTION LLC": "ZUBLIN CONSTRUCTION LLC"
 }
 
-# ---------------- Employer normalization helpers (mapping + cleaning) ----------------
-def _clean_employer_key(x: str) -> str:
-    s = str(x or '').strip().upper()
-    s = re.sub(r'\s+', ' ', s)            # collapse spaces
-    s = s.replace('.', '').replace(',', '')
-    s = s.replace(' L L C', ' LLC')        # normalize spaced LLC
-    s = s.replace('LLCC', 'LLC')           # common typo
-    return s
-
-def _norm_emp(x: str) -> str:
-    """Canonical key for grouping employer names."""
-    k = _clean_employer_key(x)
-    canon = EMPLOYER_CANON_MAP.get(k, mapped:=None)
-    if canon is None:
-        canon = EMPLOYER_CANON_MAP.get(k, k)
-    return _clean_employer_key(canon)
-
-def _display_emp_from_norm(norm_key: str) -> str:
-    """Display value for employer (prefer Check/canonical if any)."""
-    # Try direct map lookup first
-    v = EMPLOYER_CANON_MAP.get(norm_key, None)
-    return str(v).strip() if v else str(norm_key).strip()
-
-
 # Canon display mapping
 EMPLOYER_DISPLAY_MAP = {
     "A.D.C ENERGY AND CONTRACTING": "A.D.C Energy And Contracting",
@@ -576,68 +552,6 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
     else:
         st.header(title)
 
-
-    def _sort_with_total(df: pd.DataFrame, label_col: str, count_col: str = "Count", total_label: str = "TOTAL") -> pd.DataFrame:
-        """Sort by count desc, keep TOTAL row at bottom if present."""
-        if df is None or df.empty or count_col not in df.columns or label_col not in df.columns:
-            return df
-        d = df.copy()
-        # Separate TOTAL row (case-insensitive) if exists
-        lbl = d[label_col].astype(str).str.strip().str.upper()
-        is_total = lbl.eq(total_label.upper())
-        total = d[is_total]
-        d = d[~is_total]
-        d[count_col] = pd.to_numeric(d[count_col], errors="coerce").fillna(0)
-        d = d.sort_values(count_col, ascending=False, kind="mergesort")
-        if not total.empty:
-            return pd.concat([d, total], ignore_index=True)
-        return d
-
-    
-def _sort_income(df: pd.DataFrame) -> pd.DataFrame:
-    """Sort income tables by Total_Visit (desc) when available, and keep GRAND TOTAL at bottom."""
-    if df is None or df.empty:
-        return df
-
-    d = df.copy()
-
-    # Separate any grand total rows (sometimes stored in Department/Doctor/Insurance)
-    gt_mask = pd.Series(False, index=d.index)
-    for col in ["Department", "Doctor", "Insurance"]:
-        if col in d.columns:
-            gt_mask = gt_mask | d[col].astype(str).str.upper().eq("GRAND TOTAL")
-    gt = d.loc[gt_mask].copy()
-    d = d.loc[~gt_mask].copy()
-
-    # Prefer sorting by Total_Visit if present
-    sort_col = None
-    for c in d.columns:
-        if c.lower().replace(" ", "_") in ["total_visit", "total_visits", "visits", "visit", "total_visit_count"]:
-            sort_col = c
-            break
-
-    if sort_col:
-        d[sort_col] = pd.to_numeric(d[sort_col], errors="coerce").fillna(0)
-        d = d.sort_values(sort_col, ascending=False, kind="mergesort")
-    else:
-        # fallback: pick best numeric column for sorting
-        preferred = ["net_amount", "net amount", "total_amount", "total amount", "amount", "net", "paid"]
-        sort_col2 = None
-        for p in preferred:
-            for c in d.columns:
-                if c.lower() == p:
-                    sort_col2 = c
-                    break
-            if sort_col2:
-                break
-        if sort_col2:
-            d[sort_col2] = pd.to_numeric(d[sort_col2], errors="coerce").fillna(0)
-            d = d.sort_values(sort_col2, ascending=False, kind="mergesort")
-
-    if not gt.empty:
-        d = pd.concat([d, gt], ignore_index=True)
-
-    return d
     kpi = dfs.get("KPI")
     if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
         k = kpi.set_index("Metric")["Value"]
@@ -658,14 +572,11 @@ def _sort_income(df: pd.DataFrame) -> pd.DataFrame:
     st.dataframe(dfs.get("Pending Status Wise", pd.DataFrame()), use_container_width=True, hide_index=True)
 
     st.subheader("Insurance Wise Visits")
-    _iw = dfs.get("Insurance Wise Visits", pd.DataFrame())
-    _iw = _sort_with_total(_iw, label_col="Insurance", count_col="Count", total_label="TOTAL")
-    st.dataframe(_iw, use_container_width=True, hide_index=True)
+    st.dataframe(dfs.get("Insurance Wise Visits", pd.DataFrame()), use_container_width=True, hide_index=True)
 
     st.subheader("Doctor Wise Visits")
-    _dw = dfs.get("Doctor Wise Visits", pd.DataFrame())
-    _dw = _sort_with_total(_dw, label_col="Doctor", count_col="Count", total_label="TOTAL")
-    st.dataframe(_dw, use_container_width=True, hide_index=True)
+    st.dataframe(dfs.get("Doctor Wise Visits", pd.DataFrame()), use_container_width=True, hide_index=True)
+
 
     # -------------------- Income Analysis (Doctor Revenue) -------------------- (Doctor Revenue) --------------------
     income_keys = [k for k in dfs.keys() if str(k).startswith("Income | ")]
@@ -679,16 +590,43 @@ def _sort_income(df: pd.DataFrame) -> pd.DataFrame:
 
         tabs = st.tabs(["Doctor Wise", "Insurance Wise", "Doctor x Insurance"])
 
-        def _round_income_display(df: pd.DataFrame, do_sort: bool = False) -> pd.DataFrame:
+        def _round_income_display(df: pd.DataFrame) -> pd.DataFrame:
             if df is None or df.empty:
                 return df
             x = df.copy()
-            if do_sort:
-                x = _sort_income(x)
-            for col in ["Avg_Amount_Service", "Avg_Amount_Insuance", "Lab_%"]:
-                if col in x.columns:
-                    x[col] = pd.to_numeric(x[col], errors="coerce").round(2)
+            for c in x.columns:
+                if c in ("Doctor", "Department", "Insurance", "Dx", "CPT"):
+                    continue
+                if "total" in str(c).lower() or "amount" in str(c).lower() or "avg" in str(c).lower():
+                    x[c] = pd.to_numeric(x[c], errors="coerce").round(2)
+                if str(c).lower() in ("count", "total_visit", "visits"):
+                    x[c] = pd.to_numeric(x[c], errors="coerce").fillna(0).astype(int)
             return x
+
+        def _income_sort_and_total_bottom(df: pd.DataFrame) -> pd.DataFrame:
+            """Sort regular rows (visits desc) and move GRAND TOTAL row(s) to bottom."""
+            if df is None or df.empty:
+                return df
+            x = df.copy()
+
+            def _is_grand_total(v) -> bool:
+                return str(v).strip().upper() == "GRAND TOTAL"
+
+            mask = x.apply(lambda r: any(_is_grand_total(v) for v in r.values), axis=1)
+            totals = x[mask]
+            rest = x[~mask]
+
+            sort_col = None
+            for cand in ["Total_Visit", "Visits", "Count"]:
+                if cand in rest.columns:
+                    sort_col = cand
+                    break
+            if sort_col is not None:
+                rest = rest.copy()
+                rest[sort_col] = pd.to_numeric(rest[sort_col], errors="coerce")
+                rest = rest.sort_values(sort_col, ascending=False, kind="mergesort")
+
+            return pd.concat([rest, totals], ignore_index=True)
 
 
 
@@ -696,13 +634,13 @@ def _sort_income(df: pd.DataFrame) -> pd.DataFrame:
             if df_doc is None or df_doc.empty:
                 st.info("No Doctor Wise revenue data for this day.")
             else:
-                st.dataframe(_round_income_display(df_doc, do_sort=True), use_container_width=True, hide_index=True)
+                st.dataframe(_round_income_display(_income_sort_and_total_bottom(df_doc)), use_container_width=True, hide_index=True)
 
         with tabs[1]:
             if df_ins is None or df_ins.empty:
                 st.info("No Insurance Wise revenue data for this day.")
             else:
-                st.dataframe(_round_income_display(df_ins), use_container_width=True, hide_index=True)
+                st.dataframe(_round_income_display(_income_sort_and_total_bottom(df_ins)), use_container_width=True, hide_index=True)
 
         with tabs[2]:
             if df_dx is None or df_dx.empty:
@@ -928,6 +866,15 @@ def _sort_income(df: pd.DataFrame) -> pd.DataFrame:
 
                 pri_show = pd.concat([pri_show, pd.DataFrame([total_row])], ignore_index=True)
 
+            if not pri_show.empty and total_dx is not None:
+                total_row = {c: "" for c in pri_show.columns}
+                if "ICD" in pri_show.columns:
+                    total_row["ICD"] = "TOTAL"
+                elif "Doctor" in pri_show.columns:
+                    total_row["Doctor"] = "TOTAL"
+                if "Count" in pri_show.columns:
+                    total_row["Count"] = total_dx
+                pri_show = pd.concat([pri_show, pd.DataFrame([total_row])], ignore_index=True)
 
             c1, c2 = st.columns(2)
             with c1:
@@ -1117,30 +1064,21 @@ def _sort_income(df: pd.DataFrame) -> pd.DataFrame:
 
     # Apply employer canonicalization to avoid duplicates (QUMRA/QAMRA etc.)
     if not emp_df.empty and "Employer" in emp_df.columns:
-        def _norm_emp_local(x: object) -> str:
-            s = "" if pd.isna(x) else str(x)
-            s = re.sub(r"\s+", " ", s).strip().upper()
-            return EMPLOYER_CANON_MAP.get(s, s)
+        emp_df["Employer_norm"] = emp_df["Employer"].apply(_norm_emp)
 
-        emp_df["Employer_norm"] = emp_df["Employer"].apply(_norm_emp_local)
-        # Display using canonical label if available
-        emp_df["Employer"] = emp_df["Employer_norm"].map(EMPLOYER_DISPLAY_MAP).fillna(emp_df["Employer_norm"])
-
-        group_cols = ["Employer"]
+        group_cols = ["Employer_norm"]
         if "Insurance" in emp_df.columns:
             group_cols.append("Insurance")
 
+        # Sum counts after normalization
         if "Count" in emp_df.columns:
-            emp_df["Count"] = pd.to_numeric(emp_df["Count"], errors="coerce").fillna(0)
             emp_df = emp_df.groupby(group_cols, as_index=False)["Count"].sum()
         else:
             emp_df = emp_df.drop_duplicates(subset=group_cols).copy()
 
-        # Sort by Count desc, keep TOTAL at bottom
-        if "Count" in emp_df.columns:
-            emp_df = _sort_with_total(emp_df, label_col="Employer", count_col="Count", total_label="TOTAL")
-
+        emp_df["Employer"] = emp_df["Employer_norm"].map(EMPLOYER_DISPLAY_MAP).fillna(emp_df["Employer_norm"])
         emp_df = emp_df.drop(columns=["Employer_norm"], errors="ignore")
+
     # --- Employer expiry summary (STRICT employer from Registration, expiry from CPT/ICD) ---
     # We expect the uploader to save a tracker table that includes at least:
     #   Employer (from RegistrationList "Employer Name") + Expiry Date (from CPT/ICD file)
@@ -1345,7 +1283,7 @@ def _sort_income(df: pd.DataFrame) -> pd.DataFrame:
         if "Employer" in total_row:
             total_row["Employer"] = "TOTAL"
         total_row["Count"] = total_n
-        df_counts = pd.concat([df_counts, pd.DataFrame([total_row])], ignore_index=True)
+        df_counts = pd.concat([pd.DataFrame([total_row]), df_counts], ignore_index=True)
     
         st.caption(f"Showing summary counts for: **{win}** | Rows: {len(df_counts)-1} | TOTAL: {total_n}")
         st.dataframe(df_counts, use_container_width=True, hide_index=True)
@@ -1690,7 +1628,7 @@ if mode == "Daily":
         SS["loaded_label"] = f"Current Day ({fmt_day(picked)})"
 
     if SS.get("loaded_summary") is not None:
-        render_summary(SS["loaded_summary"], picked, heading="header", label="Current Day")
+                render_summary(SS["loaded_summary"], picked, heading="header", label="Current Day")
     else:
         st.error("summary.pkl is missing for this day.")
         st.caption(f"Expected: {s3_key(root_prefix, picked.date().isoformat(), 'summary.pkl')}")
