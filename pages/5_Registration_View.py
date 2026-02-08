@@ -27,87 +27,6 @@ from typing import Dict, Optional, List, Tuple
 import pandas as pd
 import streamlit as st
 
-
-# ==========================
-# Email helpers (SMTP)
-# ==========================
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-import smtplib
-
-def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
-    """Create a compact HTML email body containing KPI + key summary tables."""
-    parts = []
-    parts.append(f"<h2 style='margin:0 0 8px 0'>{title}</h2>")
-    parts.append(f"<div style='margin:0 0 16px 0;color:#555'>Scope: <b>{picked_label}</b></div>")
-
-    # KPI
-    kpi = dfs.get("KPI")
-    if isinstance(kpi, pd.DataFrame) and (not kpi.empty) and {"Metric","Value"}.issubset(kpi.columns):
-        kpi_html = kpi[["Metric","Value"]].to_html(index=False, border=0)
-        parts.append("<h3 style='margin:16px 0 8px 0'>KPIs</h3>")
-        parts.append(kpi_html)
-
-    # Include a few important tables if present
-    preferred_keys = [
-        "Insurance Wise", "Employer Wise", "Doctor Wise",
-        "CashOut Summary", "Pending Summary",
-    ]
-    shown = set()
-    for key in preferred_keys:
-        if key in dfs and isinstance(dfs[key], pd.DataFrame) and not dfs[key].empty:
-            df = dfs[key].copy()
-            parts.append(f"<h3 style='margin:16px 0 8px 0'>{key}</h3>")
-            parts.append(df.to_html(index=False, border=0))
-            shown.add(key)
-
-    # Fallback: show first 6 dataframes
-    if len(shown) == 0:
-        c = 0
-        for k, df in dfs.items():
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                parts.append(f"<h3 style='margin:16px 0 8px 0'>{k}</h3>")
-                parts.append(df.to_html(index=False, border=0))
-                c += 1
-                if c >= 6:
-                    break
-
-    style = """<style>
-    body{font-family:Arial,Helvetica,sans-serif;font-size:13px}
-    table{border-collapse:collapse;width:100%}
-    th,td{padding:6px 8px;border:1px solid #ddd;text-align:left}
-    th{background:#f5f5f5}
-    </style>"""
-    return style + "<body>" + "".join(parts) + "</body>"
-
-def _send_email_smtp(subject: str, html_body: str) -> None:
-    host = st.secrets.get("SMTP_HOST", "")
-    port = int(st.secrets.get("SMTP_PORT", 465))
-    user = st.secrets.get("SMTP_USER", "")
-    pwd  = st.secrets.get("SMTP_PASS", "")
-
-    to_addr = st.secrets.get("EMAIL_TO", "")
-    cc_addr = st.secrets.get("EMAIL_CC", "")
-
-    if not (host and user and pwd and to_addr):
-        raise ValueError("Missing SMTP secrets (SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/EMAIL_TO).")
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = user
-    msg["To"] = to_addr
-    if cc_addr:
-        msg["Cc"] = cc_addr
-
-    msg.attach(MIMEText(html_body, "html"))
-
-    recipients = [x.strip() for x in (to_addr.split(",") + (cc_addr.split(",") if cc_addr else [])) if x.strip()]
-
-    with smtplib.SMTP_SSL(host, port) as s:
-        s.login(user, pwd)
-        s.sendmail(user, recipients, msg.as_string())
-
-
 # Employer normalization map (from Employer names.csv 'check' column)
 EMPLOYER_CANON_MAP = {
     "A D C CONTRACTING": "A.D.C Energy And Contracting",
@@ -777,6 +696,91 @@ def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
     return h.sort_values("day", ascending=False).reset_index(drop=True)
 
 
+# ---------------------------
+# Email (SMTP) helpers
+# ---------------------------
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+
+def _df_to_html(df: pd.DataFrame, max_rows: int = 500) -> str:
+    if df is None or df.empty:
+        return "<div style='color:#666'>No data.</div>"
+    d = df.copy()
+    if len(d) > max_rows:
+        d = d.head(max_rows)
+    # Make it Outlook-friendly
+    return d.to_html(index=False, border=0, justify="left")
+
+
+def build_summary_email_html(dfs: Dict[str, pd.DataFrame], scope_title: str) -> str:
+    parts = []
+    parts.append(f"""<div style="font-family:Segoe UI,Arial,sans-serif;">
+    <h2 style="margin:0 0 8px 0;">Registration Summary</h2>
+    <div style="color:#555;margin:0 0 16px 0;">Scope: <b>{scope_title}</b></div>
+    """)
+    order = [
+        ("KPI", "KPIs"),
+        ("Pending Status Wise", "Pending Status Wise"),
+        ("Insurance Wise Visits", "Insurance Wise Visits"),
+        ("Doctor Wise Visits", "Doctor Wise Visits"),
+        ("Employer Wise Visits", "Employer Wise"),
+    ]
+    # Add any Income tables (if present)
+    income_keys = [k for k in dfs.keys() if str(k).startswith("Income | ")]
+    for k in sorted(income_keys):
+        order.append((k, str(k).replace("Income | ", "Income — ")))
+
+    # Add ICD/CPT summary tables if present (common names)
+    for k in ["ICD Principal", "ICD Secondary", "CPT Summary", "ICD/CPT Summary"]:
+        if k in dfs:
+            order.append((k, k))
+
+    for key, title in order:
+        df = dfs.get(key)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            parts.append(f"<h3 style='margin:18px 0 8px 0;'>{title}</h3>")
+            parts.append(_df_to_html(df))
+    parts.append("</div>")
+    return "\n".join(parts)
+
+
+def send_email_html(cfg: dict, subject: str, html_body: str) -> None:
+    host = cfg.get("SMTP_HOST")
+    port = int(cfg.get("SMTP_PORT", 465))
+    user = cfg.get("SMTP_USER")
+    password = cfg.get("SMTP_PASS")
+    to_addr = cfg.get("EMAIL_TO")
+    cc_addr = cfg.get("EMAIL_CC", "")
+
+    if not host or not port or not user or not password or not to_addr:
+        raise ValueError("Missing SMTP/Email secrets (SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_TO).")
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = user
+    msg["To"] = to_addr
+    if cc_addr:
+        msg["Cc"] = cc_addr
+
+    msg.attach(MIMEText(html_body, "html"))
+
+    recipients = [to_addr] + ([x.strip() for x in cc_addr.split(",") if x.strip()] if cc_addr else [])
+
+    # 465 = SSL, 587 = STARTTLS
+    if port == 465:
+        server = smtplib.SMTP_SSL(host, port, timeout=30)
+    else:
+        server = smtplib.SMTP(host, port, timeout=30)
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+
+    with server:
+        server.login(user, password)
+        server.sendmail(user, recipients, msg.as_string())
+
 def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: str = "header", label: str = "Current Day"):
     title = f"{label} ({fmt_day(day_ts)})"
     if heading == "subheader":
@@ -784,18 +788,26 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
     else:
         st.header(title)
 
-        # Email button (sends the currently displayed summary as HTML)
-        if st.button("📧 Email summary", key=f"email_{label}_{str(day_ts.date())}"):
-            try:
-                picked_label = title
-                subject = f"Registration Summary - {picked_label}"
-                html_body = _dfs_to_html(dfs, "Registration Summary", picked_label)
-                _send_email_smtp(subject, html_body)
-                st.success("Email sent ✅")
-            except Exception as e:
-                st.error(f"Email failed: {e}")
+    # Optional: Email this summary (uses Streamlit Secrets)
+    try:
+        _email_cfg = load_secrets()
+        _email_ready = bool(_email_cfg.get("SMTP_HOST") and _email_cfg.get("SMTP_USER") and _email_cfg.get("SMTP_PASS") and _email_cfg.get("EMAIL_TO"))
+    except Exception:
+        _email_cfg = {}
+        _email_ready = False
 
-        st.caption("Tip: Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/EMAIL_TO/EMAIL_CC in Streamlit Secrets for this app.")
+    if _email_ready:
+        _c1, _c2 = st.columns([7, 3], vertical_alignment="center")
+        with _c2:
+            if st.button("📧 Send Email", key=f"email_{label}_{str(day_ts.date())}"):
+                try:
+                    _html = build_summary_email_html(dfs, scope_title=title)
+                    _subj = f"Registration Summary - {label} - {day_ts.strftime('%Y-%m-%d')}"
+                    send_email_html(_email_cfg, _subj, _html)
+                    st.success("Email sent ✅")
+                except Exception as _e:
+                    st.error(f"Email failed: {_e}")
+
 
 
     def _sort_with_total(df: pd.DataFrame, label_col: str, count_col: str = "Count", total_label: str = "TOTAL") -> pd.DataFrame:
@@ -1529,22 +1541,8 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         st.dataframe(sty, use_container_width=True, hide_index=True)
 
         # ---- Expiry Detail List (Step 5) + Download ----
-        # Defaults to avoid UnboundLocalError when expiry list is empty / not built
-        win = "All"
-        pick_ins = "All"
-        pick_emp = "All"
-        df_f = pd.DataFrame()
-
         with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=False):
-            df_detail = None
-            # Prefer explicit saved expiry list/tracker from dfs
-            for _k in ("Expiry_List", "Expiry List", "Employer Expiry Tracker", "Expiry_Tracker", "Expiry"):
-                if _k in dfs and isinstance(dfs.get(_k), pd.DataFrame) and not dfs[_k].empty:
-                    df_detail = dfs[_k].copy()
-                    break
-            if df_detail is None:
-                df_detail = pd.DataFrame()
-        
+            df_detail = df_exp_all.copy() if df_exp_all is not None else pd.DataFrame()
             if df_detail is None or df_detail.empty:
                 st.info("No expiry detail list found for this day/period.")
             else:
@@ -1571,7 +1569,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                     if "Employer" in df_detail.columns:
                         emp_opts = sorted([x for x in df_detail["Employer"].dropna().unique() if str(x).strip() not in ["", "nan", "None"]])
                     pick_emp = st.selectbox("Employer", options=["All"] + emp_opts, key=f"exp_emp2_{str(day_ts)}")
-        
+
                 df_f = df_detail.copy()
                 if "Days To Expiry" in df_f.columns:
                     if win == "Expired":
@@ -1579,13 +1577,11 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                     elif win.startswith("Next"):
                         n = int(re.findall(r"\d+", win)[0])
                         df_f = df_f[(df_f["Days To Expiry"] >= 0) & (df_f["Days To Expiry"] <= n)]
-        
+
                 if pick_ins != "All" and "Insurance" in df_f.columns:
                     df_f = df_f[df_f["Insurance"] == pick_ins]
                 if pick_emp != "All" and "Employer" in df_f.columns:
                     df_f = df_f[df_f["Employer"] == pick_emp]
-        
-                
                 # ---- Summary counts (on-screen) ----
                 grp_cols = [c for c in ["Employer", "Insurance"] if c in df_f.columns]
                 if grp_cols:
@@ -1595,38 +1591,44 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                         .reset_index(name="Count")
                         .sort_values("Count", ascending=False)
                     )
+
                     # TOTAL row
                     total_n = int(df_counts["Count"].sum()) if "Count" in df_counts.columns else 0
                     total_row = {c: "" for c in df_counts.columns}
                     if "Employer" in total_row:
                         total_row["Employer"] = "TOTAL"
+                    elif "Insurance" in total_row:
+                        total_row["Insurance"] = "TOTAL"
                     total_row["Count"] = total_n
                     df_counts = pd.concat([df_counts, pd.DataFrame([total_row])], ignore_index=True)
-            
+
                     st.caption(f"Showing summary counts for: **{win}** | Rows: {len(df_counts)-1} | TOTAL: {total_n}")
                     st.dataframe(df_counts, use_container_width=True, hide_index=True)
                 else:
                     st.info("Expiry list is missing Employer/Insurance columns, so summary counts cannot be built.")
                     df_counts = pd.DataFrame()
-        
+
                 # ---- Optional detailed list (only when needed) ----
                 exp_key = f"{win}_{pick_ins}_{pick_emp}"
+
                 show_details = st.checkbox(
                     "Show detailed patient list (only if you need to review before download)",
                     value=False,
                     key=f"exp_show_details_{exp_key}",
                 )
+                show_cols = [c for c in ["Employer", "Insurance", "Name", "EMR No", "Visit ID", "Doctor", "Expiry Date", "Days To Expiry"] if c in df_f.columns]
+
                 if show_details:
-                    show_cols = [c for c in ["Employer","Insurance","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"] if c in df_f.columns]
                     st.dataframe(df_f[show_cols] if show_cols else df_f, use_container_width=True, hide_index=True)
-        
+
                 # ---- Downloads ----
-                # Download counts
                 try:
                     import io as _io
                     out_counts = _io.BytesIO()
                     with pd.ExcelWriter(out_counts, engine="openpyxl") as writer:
-                        (df_counts if isinstance(df_counts, pd.DataFrame) else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Expiry_Counts")
+                        (df_counts if isinstance(df_counts, pd.DataFrame) else pd.DataFrame()).to_excel(
+                            writer, index=False, sheet_name="Expiry_Counts"
+                        )
                     st.download_button(
                         "Download Counts (Excel)",
                         data=out_counts.getvalue(),
@@ -1636,13 +1638,14 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                     )
                 except Exception:
                     st.warning("Counts download is unavailable (Excel writer error).")
-        
-                # Download full list
+
                 try:
                     import io as _io
                     out = _io.BytesIO()
                     with pd.ExcelWriter(out, engine="openpyxl") as writer:
-                        (df_f[show_cols] if (show_details and show_cols) else df_f).to_excel(writer, index=False, sheet_name="Expiry_List")
+                        (df_f[show_cols] if (show_details and show_cols) else df_f).to_excel(
+                            writer, index=False, sheet_name="Expiry_List"
+                        )
                     st.download_button(
                         "Download Full List (Excel)",
                         data=out.getvalue(),
@@ -1652,6 +1655,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                     )
                 except Exception:
                     st.warning("Download is unavailable (Excel writer not found).")
+
 # ---------------------------
 # Top Header + Center selection (LOCKED if passed in URL)
 # ---------------------------
