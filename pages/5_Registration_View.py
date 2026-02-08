@@ -243,26 +243,65 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     avg_ins_dx      = _pick_by_names(df_dx,  ["Avg_Amount_Insurance", "Avg_Amount_Insuance", "Avg Amount Insurance", "AvgAmountInsurance"])
 
 
-    # prefer show columns in requested style
-    doc_cols = [c for c in ["Department", "Doctor"] if c in df_doc.columns]
-    for c in [consult_doc, lab_doc_amt, proc_doc, visit_doc, "Total_Amount_Service", tot_service_doc, tot_doc_amt, tot_ins_doc, avg_service_doc, avg_ins_doc]:
-        if c and c in df_doc.columns and c not in doc_cols:
-            doc_cols.append(c)
-    if avg_doc and avg_doc in df_doc.columns: doc_cols.append(avg_doc)
-    if labp_doc and labp_doc in df_doc.columns: doc_cols.append(labp_doc)
 
-    ins_cols = [c for c in ["Insurance"] if c in df_ins.columns]
-    for c in [consult_ins, lab_ins_amt, proc_ins, visit_ins, "Total_Amount_Service", tot_service_ins, tot_ins_amt, tot_ins_ins, avg_service_ins, avg_ins_ins]:
-        if c and c in df_ins.columns and c not in ins_cols:
-            ins_cols.append(c)
-    if avg_ins and avg_ins in df_ins.columns: ins_cols.append(avg_ins)
-    if labp_ins and labp_ins in df_ins.columns: ins_cols.append(labp_ins)
+    # prefer show columns in requested style (match dashboard columns)
+    def _dedupe(seq):
+        seen=set()
+        out=[]
+        for x in seq:
+            if x is None: 
+                continue
+            if x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
 
-    dx_cols = [c for c in ["Doctor", "Insurance"] if c in df_dx.columns]
-    for c in [consult_dx, lab_dx_amt, proc_dx, visit_dx, "Total_Amount_Service", tot_service_dx, tot_dx_amt, tot_ins_dx, avg_service_dx, avg_ins_dx]:
-        if c and c in df_dx.columns and c not in dx_cols:
-            dx_cols.append(c)
-    if avg_dx and avg_dx in df_dx.columns: dx_cols.append(avg_dx)
+    def _col(df, names):
+        return _pick_by_names(df, names)
+
+    # Canonical -> actual columns (Doctor Wise)
+    c_dep   = _col(df_doc, ["Department"])
+    c_doc   = _col(df_doc, ["Doctor"])
+    c_cons  = consult_doc
+    c_lab   = lab_doc_amt
+    c_proc  = proc_doc
+    c_vis   = visit_doc
+    c_tsvc  = _col(df_doc, ["Total_Amount_Service", "Total_Service", "Total Service", "TotalAmountService"])
+    c_tins  = _col(df_doc, ["Total_Amount_Insurance", "Total_Amount_Insuance", "Total Amount Insurance", "TotalAmountInsurance"])
+    c_asvc  = _col(df_doc, ["Avg_Amount_Service", "Avg Amount Service", "AvgAmountService"])
+    c_ains  = _col(df_doc, ["Avg_Amount_Insurance", "Avg_Amount_Insuance", "Avg.Amount", "Avg_Amount", "Avg Amount", "AvgAmountInsurance"])
+    c_labp  = labp_doc
+
+    doc_cols = _dedupe([c for c in [c_dep, c_doc, c_cons, c_lab, c_proc, c_vis, c_tsvc, c_tins, c_asvc, c_ains, c_labp] if c])
+
+    # Insurance Wise
+    c_ins   = _col(df_ins, ["Insurance"])
+    c_consI = consult_ins
+    c_labI  = lab_ins_amt
+    c_procI = proc_ins
+    c_visI  = visit_ins
+    c_tsvcI = _col(df_ins, ["Total_Amount_Service", "Total_Service", "Total Service", "TotalAmountService"])
+    c_tinsI = _col(df_ins, ["Total_Amount_Insurance", "Total_Amount_Insuance", "Total Amount Insurance", "TotalAmountInsurance"])
+    c_asvcI = _col(df_ins, ["Avg_Amount_Service", "Avg Amount Service", "AvgAmountService"])
+    c_ainsI = _col(df_ins, ["Avg_Amount_Insurance", "Avg_Amount_Insuance", "Avg.Amount", "Avg_Amount", "Avg Amount", "AvgAmountInsurance"])
+    c_labpI = labp_ins
+
+    ins_cols = _dedupe([c for c in [c_ins, c_consI, c_labI, c_procI, c_visI, c_tsvcI, c_tinsI, c_asvcI, c_ainsI, c_labpI] if c])
+
+    # Doctor x Insurance (grouped by Doctor then Insurance)
+    c_dx_doc = _col(df_dx, ["Doctor"])
+    c_dx_ins = _col(df_dx, ["Insurance"])
+    c_consX  = consult_dx
+    c_labX   = lab_dx_amt
+    c_procX  = proc_dx
+    c_visX   = visit_dx
+    c_tsvcX  = _col(df_dx, ["Total_Amount_Service", "Total_Service", "Total Service", "TotalAmountService"])
+    c_tinsX  = _col(df_dx, ["Total_Amount_Insurance", "Total_Amount_Insuance", "Total Amount Insurance", "TotalAmountInsurance"])
+    c_asvcX  = _col(df_dx, ["Avg_Amount_Service", "Avg Amount Service", "AvgAmountService"])
+    c_ainsX  = _col(df_dx, ["Avg_Amount_Insurance", "Avg_Amount_Insuance", "Avg.Amount", "Avg_Amount", "Avg Amount", "AvgAmountInsurance"])
+
+    dx_cols = _dedupe([c for c in [c_dx_doc, c_dx_ins, c_consX, c_labX, c_procX, c_visX, c_tsvcX, c_tinsX, c_asvcX, c_ainsX] if c])
+
 
     # ---------- HTML layout ----------
     style = """
@@ -1056,25 +1095,29 @@ def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
     return h.sort_values("day", ascending=False).reset_index(drop=True)
 
 
-def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: str = "header", label: str = "Current Day"):
-    title = f"{label} ({fmt_day(day_ts)})"
+def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: str = "header", label: str = "Current Day", picked_label_override: Optional[str] = None):
+    # NOTE: day_ts is used only for display/keying; weekly/monthly uses latest saved day.
+    title = picked_label_override or f"{label} ({fmt_day(day_ts)})"
+
     if heading == "subheader":
         st.subheader(title)
     else:
         st.header(title)
 
-        # Email button (sends the currently displayed summary as HTML)
-        if st.button("📧 Email summary", key=f"email_{label}_{str(day_ts.date())}"):
-            try:
-                picked_label = title
-                subject = f"Registration Summary - {picked_label}"
-                html_body = _dfs_to_html(dfs, "Registration Summary", picked_label)
-                _send_email_smtp(subject, html_body)
-                st.success("Email sent ✅")
-            except Exception as e:
-                st.error(f"Email failed: {e}")
+    # Email button (works for Daily / Weekly / Monthly)
+    if st.button("📧 Email summary", key=f"email_{label}_{str(day_ts.date())}"):
+        try:
+            subject = f"Registration Summary - {title}"
+            html_body = _dfs_to_html(dfs, "Registration Summary", title)
+            _send_email_smtp(subject, html_body)
+            st.success("Email sent ✅")
+        except Exception as e:
+            st.error(f"Email failed: {e}")
 
-        st.caption("Tip: Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/EMAIL_TO/EMAIL_CC in Streamlit Secrets for this app.")
+    st.caption("Tip: Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/EMAIL_TO/EMAIL_CC in Streamlit Secrets for this app.")
+
+
+("Tip: Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/EMAIL_TO/EMAIL_CC in Streamlit Secrets for this app.")
 
 
     def _sort_with_total(df: pd.DataFrame, label_col: str, count_col: str = "Count", total_label: str = "TOTAL") -> pd.DataFrame:
@@ -2275,7 +2318,7 @@ elif mode == "Weekly":
 
         if SS.get("loaded_summary") is not None:
             st.header(SS.get("loaded_label", "Weekly Summary"))
-            render_summary(SS["loaded_summary"], pd.to_datetime(max(selected)), heading="subheader", label="Latest Saved Day")
+            render_summary(SS["loaded_summary"], pd.to_datetime(max(selected)), heading="subheader", label="Latest Saved Day", picked_label_override=SS.get("loaded_label"))
         else:
             st.warning("No summary.pkl files found in this range.")
 
@@ -2306,6 +2349,6 @@ else:  # Monthly
 
         if SS.get("loaded_summary") is not None:
             st.header(SS.get("loaded_label", "Monthly Summary"))
-            render_summary(SS["loaded_summary"], pd.to_datetime(max(month_days)), heading="subheader", label="Latest Saved Day")
+            render_summary(SS["loaded_summary"], pd.to_datetime(max(month_days)), heading="subheader", label="Latest Saved Day", picked_label_override=SS.get("loaded_label"))
         else:
             st.warning("No summary.pkl files found for that month.")
