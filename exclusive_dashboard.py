@@ -145,6 +145,8 @@ DAILY_REPORT_PAGE_PATH = "pages/4_Registration_Summary.py"
 # External Daily Report (separate Streamlit app)
 DAILY_REPORT_EXTERNAL_BASE = "https://exclusive-report-dashboard-ctan8jpussjzffxz2arkgh.streamlit.app"
 DAILY_REPORT_EXTERNAL_PAGE = "/Registration_View"
+# ✅ Daily Report button target (requested)
+DAILY_REPORT_BUTTON_BASE = "https://exclusive-report-dashboard-ad74eqssyakelmpbeztqob.streamlit.app/"
 def build_balance_url(center: str, year: int) -> str:
     return f"?nav=balance&center={center}&year={year}"
 # ================================================================================
@@ -884,7 +886,11 @@ with t2:
         params.append(f"center={ck}")
     params.append(f"year={yr}")
     qp = ("?" + "&".join(params)) if params else ""
-    daily_url = f"{DAILY_REPORT_EXTERNAL_BASE}{DAILY_REPORT_EXTERNAL_PAGE}{qp}"
+    # ✅ Daily Report button opens this app link (with center/year)
+    base = DAILY_REPORT_BUTTON_BASE.rstrip("/")
+    # keep same params for deep-linking
+    daily_url = f"{base}/?nav=daily&" + "&".join(params)
+
     st.markdown(f'<a class="navlink" href="{daily_url}" target="_blank">📅 Daily Report</a>', unsafe_allow_html=True)
 with t3:
     if st.button("⬅ Change Year", use_container_width=True, key="btn_change_year"):
