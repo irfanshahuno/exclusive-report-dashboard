@@ -259,16 +259,27 @@ def _clean_employer_text(s: str) -> str:
     s = s.replace("LLCC", "LLC")         # common typo
     return s
 
-def normalize_employer(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Permanent employer normalization:
-    - Clean employer text (spaces/punctuation/LLC typos)
-    - Apply EMPLOYER_MAPPING (from your Check list)
-    - Unknown/new employers remain as-is (cleaned only)
-    IMPORTANT: Call this BEFORE any employer-wise or expiry grouping.
-    """
+
+def normalize_employer(df):
+
     if df is None or df.empty or "Employer" not in df.columns:
         return df
+
+    raw = df["Employer"].fillna("").astype(str).str.strip().str.upper()
+
+    # ---- Clean text ----
+    raw = raw.str.replace(".", "", regex=False)
+    raw = raw.str.replace(",", "", regex=False)
+    raw = raw.str.replace(" L L C", " LLC", regex=False)
+    raw = raw.str.replace("LLCC", "LLC", regex=False)
+    raw = raw.str.replace(r"\s+", " ", regex=True)
+
+    # ---- Apply Mapping ----
+    mapped = raw.map(EMPLOYER_MAPPING)
+
+    df["Employer"] = mapped.fillna(raw)
+
+    return df
 
 
 def normalize_employer_mapping(df: pd.DataFrame, col: str = "Employer") -> pd.DataFrame:
