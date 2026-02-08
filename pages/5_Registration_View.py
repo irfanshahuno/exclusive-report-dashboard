@@ -434,6 +434,26 @@ st.markdown(
         --muted: #64748b;
       }
       .block-container{max-width: 100% !important; padding-top: 1.2rem; padding-bottom: 2.5rem; padding-left: 2rem; padding-right: 2rem;}
+
+/* ---------- FORCE TRUE FULL WIDTH (Streamlit Cloud safe) ---------- */
+div[data-testid="stAppViewContainer"], .stApp, .stAppViewContainer{
+  max-width: 100% !important;
+}
+div[data-testid="stAppViewContainer"] > .main,
+section.main{
+  max-width: 100% !important;
+  width: 100% !important;
+}
+section.main > div.block-container,
+div[data-testid="stAppViewContainer"] .main .block-container{
+  max-width: 100% !important;
+  width: 100% !important;
+  padding-left: 2.2rem !important;
+  padding-right: 2.2rem !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+
       h1,h2,h3{letter-spacing:-0.02em; line-height: 1.35 !important; overflow: visible !important; white-space: normal !important;}
       h1{font-weight:800; padding-bottom: 4px;}
       h2{font-weight:800;}
