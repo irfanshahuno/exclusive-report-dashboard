@@ -663,11 +663,26 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         df_dx  = dfs.get("Income | Doctor x Insurance Revenue")
 
         tabs = st.tabs(["Doctor Wise", "Insurance Wise", "Doctor x Insurance"])
+        def _move_grand_total_bottom(df: pd.DataFrame) -> pd.DataFrame:
+            """Keep GRAND TOTAL row(s) at the bottom for management tables."""
+            if df is None or df.empty:
+                return df
+            d = df.copy()
+            mask = pd.Series(False, index=d.index)
+            for col in ["Doctor", "Insurance", "Department"]:
+                if col in d.columns:
+                    mask = mask | d[col].astype(str).str.upper().str.contains("GRAND TOTAL", na=False)
+            total = d[mask]
+            d = d[~mask]
+            return pd.concat([d, total], ignore_index=True)
+
+
 
         def _round_income_display(df: pd.DataFrame) -> pd.DataFrame:
             if df is None or df.empty:
                 return df
             x = _sort_income(df)
+        x = _move_grand_total_bottom(x)
             x = x.copy()
             for col in ["Avg_Amount_Service", "Avg_Amount_Insuance", "Lab_%"]:
                 if col in x.columns:
