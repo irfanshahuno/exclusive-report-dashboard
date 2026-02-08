@@ -48,13 +48,42 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
         parts.append("<h3 style='margin:16px 0 8px 0'>KPIs</h3>")
         parts.append(kpi_html)
 
-    # Include a few important tables if present
-    preferred_keys = [
-        "Insurance Wise", "Employer Wise", "Doctor Wise",
-        "CashOut Summary", "Pending Summary",
-    ]
-    shown = set()
-    for key in preferred_keys:
+    # Include ALL summary tables (in a friendly order)
+# NOTE: Summary page saves keys like "Insurance Wise Visits", "Doctor Wise Visits", etc.
+priority_keys = [
+    "Insurance Wise Visits",
+    "Doctor Wise Visits",
+    "Employer Wise",
+    "Bill Type",
+    "Visit Type",
+    "Status Wise",
+    "Pending Status Wise",
+    "Registration User Wise",
+    "Reg Date Wise (Daily)",
+]
+
+def _append_df(section_name: str, df: pd.DataFrame):
+    parts.append(f"<h3 style='margin:16px 0 8px 0'>{section_name}</h3>")
+    parts.append(df.to_html(index=False, border=0))
+
+shown = set()
+
+# 1) Priority tables first
+for key in priority_keys:
+    df = dfs.get(key)
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        _append_df(key, df)
+        shown.add(key)
+
+# 2) Then include any remaining dataframes (Income / CPT-ICD / others)
+for key, df in dfs.items():
+    if key in shown or key == "KPI":
+        continue
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        _append_df(str(key), df)
+        shown.add(key)
+
+for key in preferred_keys:
         if key in dfs and isinstance(dfs[key], pd.DataFrame) and not dfs[key].empty:
             df = dfs[key].copy()
             parts.append(f"<h3 style='margin:16px 0 8px 0'>{key}</h3>")
