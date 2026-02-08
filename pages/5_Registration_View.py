@@ -679,22 +679,24 @@ def _sort_income(df: pd.DataFrame) -> pd.DataFrame:
 
         tabs = st.tabs(["Doctor Wise", "Insurance Wise", "Doctor x Insurance"])
 
-        def _round_income_display(df: pd.DataFrame) -> pd.DataFrame:
+        def _round_income_display(df: pd.DataFrame, do_sort: bool = False) -> pd.DataFrame:
             if df is None or df.empty:
                 return df
-            x = _sort_income(df)
-            x = x.copy()
+            x = df.copy()
+            if do_sort:
+                x = _sort_income(x)
             for col in ["Avg_Amount_Service", "Avg_Amount_Insuance", "Lab_%"]:
                 if col in x.columns:
                     x[col] = pd.to_numeric(x[col], errors="coerce").round(2)
             return x
 
 
+
         with tabs[0]:
             if df_doc is None or df_doc.empty:
                 st.info("No Doctor Wise revenue data for this day.")
             else:
-                st.dataframe(_round_income_display(df_doc), use_container_width=True, hide_index=True)
+                st.dataframe(_round_income_display(df_doc, do_sort=True), use_container_width=True, hide_index=True)
 
         with tabs[1]:
             if df_ins is None or df_ins.empty:
