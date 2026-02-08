@@ -231,6 +231,30 @@ EMPLOYER_CANON_MAP = {
     "ZUBLIN CONSTRUCTION LLC": "ZUBLIN CONSTRUCTION LLC"
 }
 
+# ---------------- Employer normalization helpers (mapping + cleaning) ----------------
+def _clean_employer_key(x: str) -> str:
+    s = str(x or '').strip().upper()
+    s = re.sub(r'\s+', ' ', s)            # collapse spaces
+    s = s.replace('.', '').replace(',', '')
+    s = s.replace(' L L C', ' LLC')        # normalize spaced LLC
+    s = s.replace('LLCC', 'LLC')           # common typo
+    return s
+
+def _norm_emp(x: str) -> str:
+    """Canonical key for grouping employer names."""
+    k = _clean_employer_key(x)
+    canon = EMPLOYER_CANON_MAP.get(k, mapped:=None)
+    if canon is None:
+        canon = EMPLOYER_CANON_MAP.get(k, k)
+    return _clean_employer_key(canon)
+
+def _display_emp_from_norm(norm_key: str) -> str:
+    """Display value for employer (prefer Check/canonical if any)."""
+    # Try direct map lookup first
+    v = EMPLOYER_CANON_MAP.get(norm_key, None)
+    return str(v).strip() if v else str(norm_key).strip()
+
+
 # Canon display mapping
 EMPLOYER_DISPLAY_MAP = {
     "A.D.C ENERGY AND CONTRACTING": "A.D.C Energy And Contracting",
@@ -594,53 +618,23 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             if df is None or df.empty:
                 return df
             x = df.copy()
-            for c in x.columns:
-                if c in ("Doctor", "Department", "Insurance", "Dx", "CPT"):
-                    continue
-                if "total" in str(c).lower() or "amount" in str(c).lower() or "avg" in str(c).lower():
-                    x[c] = pd.to_numeric(x[c], errors="coerce").round(2)
-                if str(c).lower() in ("count", "total_visit", "visits"):
-                    x[c] = pd.to_numeric(x[c], errors="coerce").fillna(0).astype(int)
+            for col in ["Avg_Amount_Service", "Avg_Amount_Insuance", "Lab_%"]:
+                if col in x.columns:
+                    x[col] = pd.to_numeric(x[col], errors="coerce").round(2)
             return x
-
-        def _income_sort_and_total_bottom(df: pd.DataFrame) -> pd.DataFrame:
-            """Sort regular rows (visits desc) and move GRAND TOTAL row(s) to bottom."""
-            if df is None or df.empty:
-                return df
-            x = df.copy()
-
-            def _is_grand_total(v) -> bool:
-                return str(v).strip().upper() == "GRAND TOTAL"
-
-            mask = x.apply(lambda r: any(_is_grand_total(v) for v in r.values), axis=1)
-            totals = x[mask]
-            rest = x[~mask]
-
-            sort_col = None
-            for cand in ["Total_Visit", "Visits", "Count"]:
-                if cand in rest.columns:
-                    sort_col = cand
-                    break
-            if sort_col is not None:
-                rest = rest.copy()
-                rest[sort_col] = pd.to_numeric(rest[sort_col], errors="coerce")
-                rest = rest.sort_values(sort_col, ascending=False, kind="mergesort")
-
-            return pd.concat([rest, totals], ignore_index=True)
-
 
 
         with tabs[0]:
             if df_doc is None or df_doc.empty:
                 st.info("No Doctor Wise revenue data for this day.")
             else:
-                st.dataframe(_round_income_display(_income_sort_and_total_bottom(df_doc)), use_container_width=True, hide_index=True)
+                st.dataframe(_round_income_display(df_doc), use_container_width=True, hide_index=True)
 
         with tabs[1]:
             if df_ins is None or df_ins.empty:
                 st.info("No Insurance Wise revenue data for this day.")
             else:
-                st.dataframe(_round_income_display(_income_sort_and_total_bottom(df_ins)), use_container_width=True, hide_index=True)
+                st.dataframe(_round_income_display(df_ins), use_container_width=True, hide_index=True)
 
         with tabs[2]:
             if df_dx is None or df_dx.empty:
@@ -1076,7 +1070,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         else:
             emp_df = emp_df.drop_duplicates(subset=group_cols).copy()
 
-        emp_df["Employer"] = emp_df["Employer_norm"].map(EMPLOYER_DISPLAY_MAP).fillna(emp_df["Employer_norm"])
+        emp_df["Employer"] = emp_df["Employer_norm"].apply(_display_emp_from_norm)
         emp_df = emp_df.drop(columns=["Employer_norm"], errors="ignore")
 
     # --- Employer expiry summary (STRICT employer from Registration, expiry from CPT/ICD) ---
