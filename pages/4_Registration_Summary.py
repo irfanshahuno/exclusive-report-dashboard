@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Streamlit Page: Registration Summary (View Only)
+Streamlit Page: Registration Summary (Registration + CashOut + Pending)
 
-Purpose
-- Management should ONLY view results (no upload).
-- Loads the latest saved summary from S3 created by:
-    pages/4_Registration_Summary.py  (Process & Save to S3)
+Key features:
+- Step-by-step upload (1 Registration, 2 CashOut, 3 Pending) with delete buttons.
+- Minimal requirements:
+  * Registration: must contain EMRNo and VisitNo (case-insensitive).
+  * CashOut: only EMRNo required.
+  * Pending: only EMRNo required.
+- Day detection:
+  * Prefers a date column in Registration (RegDate / RegistrationDate / Date).
+  * Falls back to a manual date picker.
+- Process & Save:
+  * Saves raw uploads + processed summary (pickle) + history.csv to S3 if configured.
+  * Supports old/new secret keys:
+      S3_BUCKET_NAME or S3_BUCKET
+      AWS_REGION or AWS_DEFAULT_REGION
+      S3_BASE_PREFIX or S3_PREFIX
+- Display:
+  * CURRENT DAY summary first.
+  * ACCUMULATED section shown below CURRENT DAY.
+  * Accumulated table does NOT show internal columns.
 
-Important
-- This viewer MUST read the SAME S3 folder structure as the uploader page:
-    registration/<center>/<YYYY-MM-DD>/summary.pkl
-    registration/<center>/history.csv
-
-So we intentionally IGNORE any `year=` query param for storage paths, unless you
-also change the uploader to save year-wise.
+If your main app already sets st.session_state["center_key"], this page will use it.
+Otherwise it provides a center selector.
 """
 
 import io
@@ -22,13 +32,19 @@ import os
 import re
 import pickle
 from datetime import datetime, date
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Tuple, Optional, List
 
 import pandas as pd
 import streamlit as st
 
-# Employer normalization map (from Employer names.csv 'check' column)
-EMPLOYER_CANON_MAP = {
+
+
+# =====================================================
+# PERMANENT EMPLOYER NAME NORMALIZATION (MASTER MAPPING)
+# - Known duplicates are standardized using EMPLOYER_MAPPING
+# - Any unknown/new employer names remain unchanged
+# =====================================================
+EMPLOYER_MAPPING = {
     "A D C CONTRACTING": "A.D.C Energy And Contracting",
     "A D C ENERGY SYSTEMS LLC": "A.D.C Energy And Contracting",
     "A G FACILITIES SOLUTIONS FOR BUILDING": "AG FACILITIES SOLUTIONS",
@@ -212,6 +228,7 @@ EMPLOYER_CANON_MAP = {
     "SBK HOLDING (L.L.C)": "SBK HOLDING (L.L.C)",
     "SECURIGUARD MIDDLE EAST LLC": "SECURIGUARD MIDDLE EAST LLC",
     "SIBCA ELECTRONIC EQUIPMENT COMPANY LIMITED - SOLE PROPRIETORSHIP L.L.C": "SIBCA ELECTRONIC",
+    "SIBCA ELECTRONIC EQUIPMENT COMPANY LIMITED - SOLE PROPRIETORSHIP L.L.C. - BRANCH": "nan",
     "SILVER SCREEN GENERAL CONTRACTING L.L.C": "SILVER SCREEN GENERAL CONTRACTING L.L.C",
     "SIX SIGMA MIDDLE EAST CONSTRUCTIONS LLC": "SIX SIGMA",
     "SNIPE OIL AND GAS EQUIPMENT": "SNIPE OIL AND GAS EQUIPMENT",
@@ -228,180 +245,1210 @@ EMPLOYER_CANON_MAP = {
     "VOLTAS LIMITED": "VOLTAS LIMITED",
     "VOLTAS LIMITED ABU DHABI": "VOLTAS LIMITED",
     "WADE ADAMS CONTRACTING LLC": "WADE ADAMS CONTRACTING LLC",
-    "ZUBLIN CONSTRUCTION LLC": "ZUBLIN CONSTRUCTION LLC"
+    "ZUBLIN CONSTRUCTION LLC": "ZUBLIN CONSTRUCTION LLC",
 }
 
-# Canon display mapping
-EMPLOYER_DISPLAY_MAP = {
-    "A.D.C ENERGY AND CONTRACTING": "A.D.C Energy And Contracting",
-    "ABDULLA MOHSEN HADI HUSAIN AL HAMED": "ABDULLA MOHSEN HADI HUSAIN AL HAMED",
-    "ABUDHABI BERKELEY": "ABUDHABI BERKELEY",
-    "ADEEB ELECTRICAL AND ELECTRONICS SERVICES": "ADEEB ELECTRICAL AND ELECTRONICS SERVICES",
-    "AG FACILITIES SOLUTIONS": "AG FACILITIES SOLUTIONS",
-    "AGILITY": "AGILITY",
-    "AL BAYADER IRRIGATION AND CONTRACTING LLC": "AL BAYADER IRRIGATION AND CONTRACTING LLC",
-    "AL GEEMI": "AL GEEMI",
-    "AL NASIYA": "AL NASIYA",
-    "AL RAWAI CONTRACTING": "AL RAWAI CONTRACTING",
-    "AL SAIF GRAPHICS L.L.C": "AL SAIF GRAPHICS L.L.C",
-    "AL SHOUMOKH": "AL SHOUMOKH",
-    "ALBA TEC": "ALBA TEC",
-    "ALBA TEC EMPLOYMENT": "ALBA TEC EMPLOYMENT",
-    "ALKALINE ELECTROMECHANICAL LLC.": "ALKALINE ELECTROMECHANICAL LLC.",
-    "ALRYUM CONTRACTING": "ALRYUM CONTRACTING",
-    "ALWATHBA CEMENT INDUSTRIES -SOLE PROPRIETORSHIP": "ALWATHBA CEMENT INDUSTRIES -SOLE PROPRIETORSHIP",
-    "ARCO": "ARCO",
-    "ARCO GENERAL": "ARCO GENERAL",
-    "ARCO INTL": "ARCO INTL",
-    "BGC INTERNATIONAL GENERAL CONTRACTING- LLC": "BGC INTERNATIONAL GENERAL CONTRACTING- LLC",
-    "BHATTI GENTS SALOON": "BHATTI GENTS SALOON",
-    "CLEANPRO FACILITIES MANAGEMENT SERVICES": "CLEANPRO FACILITIES MANAGEMENT SERVICES",
-    "CYLINGAS COMPANY LLC": "CYLINGAS COMPANY LLC",
-    "DELMON AUTOCLAVED AERATED CONCRETE": "DELMON AUTOCLAVED AERATED CONCRETE",
-    "DOLPHIN OILFIELD EQUIPMENT": "DOLPHIN OILFIELD EQUIPMENT",
-    "E F S FACILITEIS": "E F S FACILITEIS",
-    "EDAN GARDREN": "EDAN GARDREN",
-    "EMARAT ALOULA INDUSTRIES SOLE PROPRITORSHIP": "EMARAT ALOULA INDUSTRIES SOLE PROPRITORSHIP",
-    "EMIRATES ELECTRICAL": "EMIRATES ELECTRICAL",
-    "EMIRATES GATEWAY": "EMIRATES GATEWAY",
-    "EXCEED PRECAST": "EXCEED PRECAST",
-    "EXCELLENT MEDICAL CENTER": "EXCELLENT MEDICAL CENTER",
-    "EXEED INDUSTRIES": "EXEED INDUSTRIES",
-    "FALCON ZINC METAL INDUSTRIES LLC": "FALCON ZINC METAL INDUSTRIES LLC",
-    "FATEMA ALI WIDOW MOHAMED K AL MANSOORI": "FATEMA ALI WIDOW MOHAMED K AL MANSOORI",
-    "FIBREX L L C": "FIBREX L L C",
-    "FOCUS SECURITY SERVICES": "FOCUS SECURITY SERVICES",
-    "FURSAN SECURITY SERVICES L.L.C": "FURSAN SECURITY SERVICES L.L.C",
-    "G4S SECURE SOLUTIONS L.L.C.": "G4S SECURE SOLUTIONS L.L.C.",
-    "GIFT ACTION TRADING": "GIFT ACTION TRADING",
-    "GISCO": "GISCO",
-    "GREAT MART GENERAL TRADING LLC.": "GREAT MART GENERAL TRADING LLC.",
-    "GULF": "GULF",
-    "GULF INDUSTRIAL": "GULF INDUSTRIAL",
-    "GULF LANDSCAPING": "GULF LANDSCAPING",
-    "GULF SNIPE": "GULF SNIPE",
-    "GULF STEEL": "GULF STEEL",
-    "HAFILAT GENERAL TRANSPORT - SOLE PROP. LLC": "HAFILAT GENERAL TRANSPORT - SOLE PROP. LLC",
-    "HAFILAT GENERAL TRANSPORT-SOLE": "HAFILAT GENERAL TRANSPORT-SOLE",
-    "HASSAN ALLAM CONTRUCTION": "HASSAN ALLAM CONTRUCTION",
-    "HEALTH FOR ALL MEDICAL CENTER": "HEALTH FOR ALL MEDICAL CENTER",
-    "HILAL BIL BADI": "HILAL BIL BADI",
-    "HYSSNA INTERNATIONAL L.L.C": "HYSSNA INTERNATIONAL L.L.C",
-    "I G G FOR MILITARY AND FORMAL GERMENTS": "I G G FOR MILITARY AND FORMAL GERMENTS",
-    "INNOVO": "INNOVO",
-    "INTERNATIONAL DECOR CO L.L.C - DUBAI BRANCH": "INTERNATIONAL DECOR CO L.L.C - DUBAI BRANCH",
-    "INTERNATIONAL DEVELOPMENT COMPANY L.L.C": "INTERNATIONAL DEVELOPMENT COMPANY L.L.C",
-    "J P M ASSOCIATES TECHNICAL SERVICES L.L.C": "J P M ASSOCIATES TECHNICAL SERVICES L.L.C",
-    "JAZAL ENGINEERING": "JAZAL ENGINEERING",
-    "JEET CONSTRUCTION LLC": "JEET CONSTRUCTION LLC",
-    "KAYAN ALMOSTQBAL CONTRACTING & GEN. MAINTENANCE": "KAYAN ALMOSTQBAL CONTRACTING & GEN. MAINTENANCE",
-    "LAITH ELECTRO": "LAITH ELECTRO",
-    "LASSI TOP CAFE": "LASSI TOP CAFE",
-    "M4 CONTRACTING": "M4 CONTRACTING",
-    "MALABAR DAWATH REASTURANT AND GRILL": "MALABAR DAWATH REASTURANT AND GRILL",
-    "MAZAYA ALMUTAHIDA CONSTRUCTIONS": "MAZAYA ALMUTAHIDA CONSTRUCTIONS",
-    "MECHANICAL & CIVIL ENG.CONTRACTORS CO(MACE)LLC": "MECHANICAL & CIVIL ENG.CONTRACTORS CO(MACE)LLC",
-    "MES SECURITY": "MES SECURITY",
-    "ML MANPOWER": "ML MANPOWER",
-    "MOBILE SOLUTIONS LLC": "MOBILE SOLUTIONS LLC",
-    "MODERN BUILDING GENERAL CONTRACTING L L C": "MODERN BUILDING GENERAL CONTRACTING L L C",
-    "MOSAYED BIN HAFEEZ CONT GEN TRANSPORT": "MOSAYED BIN HAFEEZ CONT GEN TRANSPORT",
-    "MOUNTAIN GATE PROPRTY INVESTEMENT LLC": "MOUNTAIN GATE PROPRTY INVESTEMENT LLC",
-    "MQ PEAEL ENGINEERING-L.L.C": "MQ PEAEL ENGINEERING-L.L.C",
-    "NATIONAL CATERING COMPANY": "NATIONAL CATERING COMPANY",
-    "NATIONAL INNOVATIVE": "NATIONAL INNOVATIVE",
-    "NAZIM MAINTENANC GENERAL CONTRACTING COMPANY": "NAZIM MAINTENANC GENERAL CONTRACTING COMPANY",
-    "NMDC ENERGY P.J.S.C": "NMDC ENERGY P.J.S.C",
-    "NOOR AL SAHARA": "NOOR AL SAHARA",
-    "NUROL LLC.": "NUROL LLC.",
-    "OPTIMUM ENGINEERING": "OPTIMUM ENGINEERING",
-    "PERFECT STEP GENERAL CONTRACTING & MAINTENANCE": "PERFECT STEP GENERAL CONTRACTING & MAINTENANCE",
-    "PIONEER PRECAST CONCRETE LLC": "PIONEER PRECAST CONCRETE LLC",
-    "PIONEER PRECAST CONCRETE LLCC": "PIONEER PRECAST CONCRETE LLCC",
-    "POLENSKY & ZOELLNER COMPANY ABU DHABI W L L": "POLENSKY & ZOELLNER COMPANY ABU DHABI W L L",
-    "PRINCE INTERNATIONALGENERAL TRANSPORT - L.L.C": "PRINCE INTERNATIONALGENERAL TRANSPORT - L.L.C",
-    "PROFILE RECRUITMENT": "PROFILE RECRUITMENT",
-    "QAMRA": "QAMRA",
-    "QUICK SERVICES GENERAL TRANSPORT": "QUICK SERVICES GENERAL TRANSPORT",
-    "SBK HOLDING (L.L.C)": "SBK HOLDING (L.L.C)",
-    "SECURIGUARD MIDDLE EAST LLC": "SECURIGUARD MIDDLE EAST LLC",
-    "SIBCA ELECTRONIC": "SIBCA ELECTRONIC",
-    "SILVER SCREEN GENERAL CONTRACTING L.L.C": "SILVER SCREEN GENERAL CONTRACTING L.L.C",
-    "SIX SIGMA": "SIX SIGMA",
-    "SNIPE OIL AND GAS EQUIPMENT": "SNIPE OIL AND GAS EQUIPMENT",
-    "STAR SERVICES": "STAR SERVICES",
-    "SWITCHGEAR ELECTRO MECHANICAL LLC": "SWITCHGEAR ELECTRO MECHANICAL LLC",
-    "TANZIFO": "TANZIFO",
-    "TECTON ENGINEEING & CONSTRUCTION": "TECTON ENGINEEING & CONSTRUCTION",
-    "TOOLS MAN GENERAL MAINTENANCE": "TOOLS MAN GENERAL MAINTENANCE",
-    "UNITED MAZAYA": "UNITED MAZAYA",
-    "VOLTAS LIMITED": "VOLTAS LIMITED",
-    "WADE ADAMS CONTRACTING LLC": "WADE ADAMS CONTRACTING LLC",
-    "ZUBLIN CONSTRUCTION LLC": "ZUBLIN CONSTRUCTION LLC"
-}
 
-# --------------------
-# CPT/ICD helper: safe DF pick + debug
-# --------------------
-def _pick_first_df(*candidates):
-    """Return the first candidate that is a non-empty DataFrame."""
-    for x in candidates:
-        if isinstance(x, pd.DataFrame) and not x.empty:
-            return x
-    return pd.DataFrame()
 
-def _summary_keys(dfs):
-    try:
-        return sorted(list(dfs.keys()))
-    except Exception:
-        return []
+def _clean_employer_text(s: str) -> str:
+    """Normalize employer text for stable matching (does NOT change meaning)."""
+    s = (s or "").strip().upper()
+    s = re.sub(r"\s+", " ", s)          # collapse spaces
+    s = s.replace(".", "").replace(",", "")  # remove punctuation
+    s = s.replace(" L L C", " LLC")      # L L C -> LLC
+    s = s.replace("LLCC", "LLC")         # common typo
+    return s
+
+def normalize_employer(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Permanent employer normalization:
+    - Clean employer text (spaces/punctuation/LLC typos)
+    - Apply EMPLOYER_MAPPING (from your Check list)
+    - Unknown/new employers remain as-is (cleaned only)
+    IMPORTANT: Call this BEFORE any employer-wise or expiry grouping.
+    """
+    if df is None or df.empty or "Employer" not in df.columns:
+        return df
+
+
+def normalize_employer_mapping(df: pd.DataFrame, col: str = "Employer") -> pd.DataFrame:
+    """Normalize employer names using EMPLOYER_MAPPING (fallback keeps original).
+
+    Uses uppercase matching keys; mapping values are canonical display names.
+    """
+    if df is None or df.empty or col not in df.columns:
+        return df
+    raw = df[col].fillna("").astype(str).str.strip()
+    key = raw.str.upper()
+    fixed = key.map(EMPLOYER_MAPPING)
+    df[col] = fixed.fillna(raw)
+    return df
 
 # Optional S3
 try:
     import boto3
+    from botocore.exceptions import ClientError
 except Exception:
     boto3 = None
+    ClientError = Exception
 
+st.set_page_config(page_title="Registration Summary", layout="wide", initial_sidebar_state="collapsed")
+st.title("Registration Summary (Registration + CashOut + Pending)")
+
+# Session state shortcut
+SS = st.session_state
+
+# ---------------------------
+# Admin mode (admin-only page)
+# ---------------------------
+# Viewer mode removed: this page always shows upload + processing controls.
+admin_mode = True
 
 
 # ---------------------------
-# Date formatting (management-friendly)
+# Employer alias dictionary (RCM-safe dedupe)
 # ---------------------------
-def fmt_day(ts) -> str:
-    """Friendly day label with weekday for management views."""
+# Add/adjust aliases here (left side = raw cleaned key, right side = canonical display name)
+# Keys must be LOWERCASE and already cleaned by `employer_clean_key()`.
+EMPLOYER_ALIAS = {
+    # QAMRA variations
+    "qamra": "QAMRA",
+    "qamara": "QAMRA",
+    "qumra": "QAMRA",
+    # EXCEED variations
+    "exceed": "EXCEED",
+    "excee": "EXCEED",
+    "exeed": "EXCEED",
+    # Others (examples you mentioned)
+    "alryum": "ALRYUM",
+    "noor al sahara": "NOOR AL SAHARA",
+    "noor al sahra": "NOOR AL SAHARA",
+}
+
+# Prefix-based aliases (optional). If the cleaned employer starts with the prefix -> canonical.
+# Useful for cases like ARCO where you want to keep ONLY the initial keyword.
+EMPLOYER_PREFIX_ALIAS = [
+    ("arco", "ARCO"),
+
+    # QAMRA / QUMRA / QAMARA variations
+    ("qamra", "QAMRA"),
+    ("qamara", "QAMRA"),
+    ("qumra", "QAMRA"),
+
+    # EXCEED / EXEED variations
+    ("exceed", "EXCEED"),
+    ("exeed", "EXCEED"),
+    ("excee", "EXCEED"),
+
+    # Strong merge for the specific company name
+    ("exceed precast", "EXCEED PRECAST"),
+    ("exeed precast", "EXCEED PRECAST"),
+]
+def _norm_col(c: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(c).strip().lower())
+
+def _find_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    norm_map = {_norm_col(c): c for c in df.columns}
+    for cand in candidates:
+        key = _norm_col(cand)
+        if key in norm_map:
+            return norm_map[key]
+    # fuzzy: contains
+    for cand in candidates:
+        key = _norm_col(cand)
+        for k, orig in norm_map.items():
+            if key and key in k:
+                return orig
+    return None
+
+# -------------------- Income Analysis (Doctor Revenue) helpers --------------------
+def _detect_header_row(df_raw: pd.DataFrame, must_have: List[str]) -> Optional[int]:
+    for i in range(min(50, len(df_raw))):
+        row = df_raw.iloc[i].astype(str).str.strip().str.lower().tolist()
+        if all(any(k.lower() in cell for cell in row) for k in must_have):
+            return i
+    return None
+
+def load_income_details(uploaded_file) -> Optional[pd.DataFrame]:
+    if uploaded_file is None:
+        return None
     try:
-        return pd.to_datetime(ts).strftime("%A, %d %b %Y")
+        df_raw = pd.read_excel(uploaded_file, sheet_name="Daily Collection Details", header=None)
     except Exception:
-        return str(ts)
+        df_raw = pd.read_excel(uploaded_file, sheet_name=0, header=None)
 
-def fmt_dt(ts) -> str:
+    hdr = _detect_header_row(df_raw, must_have=["doctor", "department", "insurance name", "visit no"])
+    if hdr is None:
+        return None
+
+    header = df_raw.iloc[hdr].astype(str).str.strip()
+    df = df_raw.iloc[hdr + 1:].copy()
+    df.columns = header
+
+    df = df.dropna(how="all").reset_index(drop=True)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    """Build Income Analysis tables.
+
+    Adds dual totals/averages:
+    - Total_Amount_Service / Avg_Amount_Service from Consultation+Lab+Procedure
+    - Total_Amount_Insuance / Avg_Amount_Insuance from STRICT 'Insuance' column (same spelling)
+    """
+    if df is None or df.empty:
+        return {}
+
+    col_dept = _find_col(df, ["Department"])
+    col_doc  = _find_col(df, ["Doctor"])
+    # Insurance/Payer name is OPTIONAL for grouping. (Some reports may not have it.)
+    col_payer = _find_col(df, ["Insurance Name", "Insurance", "Payer", "Payer Name"])
+    col_visit= _find_col(df, ["Visit No", "VisitNo", "Visit ID", "VisitID"])
+    col_cons = _find_col(df, ["Consultation"])
+    col_lab  = _find_col(df, ["Lab"])
+    col_proc = _find_col(df, ["Procedure"])
+
+    # STRICT amount column spelling for Insuance
+    col_insu_amt = next((c for c in df.columns if _norm_col(c) == "insuance"), None)
+
+    needed = [col_doc, col_visit, col_cons, col_lab, col_proc, col_insu_amt]
+    if any(c is None for c in needed):
+        return {}
+
+    tmp = df.copy()
+
+    # Doctor is mandatory
+    tmp[col_doc] = tmp[col_doc].astype(str).str.strip()
+    tmp = tmp[~tmp[col_doc].str.lower().isin(["", "none", "nan"])].copy()
+
+    # Optional Department
+    if col_dept:
+        tmp[col_dept] = tmp[col_dept].astype(str).str.strip()
+        tmp = tmp[~tmp[col_dept].str.lower().isin(["", "none", "nan"])].copy()
+
+    # Optional payer grouping (if missing, tables that rely on it will be skipped)
+    if col_payer:
+        tmp[col_payer] = tmp[col_payer].fillna("CASH").astype(str).str.strip().replace("", "CASH")
+
+    tmp[col_visit] = tmp[col_visit].astype(str).str.strip()
+    tmp = tmp[tmp[col_visit] != ""].copy()
+
+    for c in [col_cons, col_lab, col_proc, col_insu_amt]:
+        tmp[c] = pd.to_numeric(tmp[c], errors="coerce").fillna(0.0)
+
+    tmp["_total_service"] = tmp[col_cons] + tmp[col_lab] + tmp[col_proc]
+    tmp["_total_insuance"] = tmp[col_insu_amt]
+
+    def _agg(group_cols: List[str]) -> pd.DataFrame:
+        g = tmp.groupby(group_cols, dropna=False).agg(
+            Consultation=(col_cons, "sum"),
+            Lab=(col_lab, "sum"),
+            Procedure=(col_proc, "sum"),
+            Total_Visit=(col_visit, pd.Series.nunique),
+            Total_Amount_Service=("_total_service", "sum"),
+            Total_Amount_Insuance=("_total_insuance", "sum"),
+        ).reset_index()
+
+        g["Avg_Amount_Service"] = g["Total_Amount_Service"] / g["Total_Visit"].replace(0, pd.NA)
+        g["Avg_Amount_Insuance"] = g["Total_Amount_Insuance"] / g["Total_Visit"].replace(0, pd.NA)
+        g["Lab_%"] = (g["Lab"] / g["Total_Amount_Service"].replace(0, pd.NA)) * 100
+        return g
+
+    # Doctor wise
+    if col_dept:
+        doctor_wise = _agg([col_dept, col_doc]).rename(columns={col_dept: "Department", col_doc: "Doctor"})
+    else:
+        doctor_wise = _agg([col_doc]).rename(columns={col_doc: "Doctor"})
+
+    # Insurance wise + Doctor x Insurance only if payer column exists
+    insurance_wise = pd.DataFrame()
+    doctor_ins_wise = pd.DataFrame()
+    if col_payer:
+        insurance_wise = _agg([col_payer]).rename(columns={col_payer: "Insurance"})
+        doctor_ins_wise = _agg([col_doc, col_payer]).rename(columns={col_doc: "Doctor", col_payer: "Insurance"})
+
+    def _add_grand_total(d: pd.DataFrame, label_cols: List[str]) -> pd.DataFrame:
+        if d is None or d.empty:
+            return d
+        total_visit = int(d["Total_Visit"].sum())
+        total_service = float(d["Total_Amount_Service"].sum())
+        total_insu = float(d["Total_Amount_Insuance"].sum())
+        lab_sum = float(d["Lab"].sum())
+
+        row = {c: "" for c in d.columns}
+        for lc in label_cols:
+            if lc in row:
+                row[lc] = "GRAND TOTAL"
+                break
+
+        row["Consultation"] = float(d["Consultation"].sum())
+        row["Lab"] = lab_sum
+        row["Procedure"] = float(d["Procedure"].sum())
+        row["Total_Visit"] = total_visit
+
+        row["Total_Amount_Service"] = total_service
+        row["Total_Amount_Insuance"] = total_insu
+
+        row["Avg_Amount_Service"] = (total_service / total_visit) if total_visit else 0.0
+        row["Avg_Amount_Insuance"] = (total_insu / total_visit) if total_visit else 0.0
+        row["Lab_%"] = (lab_sum / total_service * 100) if total_service else 0.0
+
+        return pd.concat([d, pd.DataFrame([row])], ignore_index=True)
+
+    doctor_wise = _add_grand_total(doctor_wise, ["Department", "Doctor"])
+    if col_payer and not insurance_wise.empty:
+        insurance_wise = _add_grand_total(insurance_wise, ["Insurance"])
+    if col_payer and not doctor_ins_wise.empty:
+        doctor_ins_wise = _add_grand_total(doctor_ins_wise, ["Doctor"])
+
+    # Recompute averages strictly as: Total Amount ÷ Unique Visit No (Total_Visit)
+    # (Keeps display consistent even if upstream file has repeated/odd visit formats)
+    def _recalc_avg(d: pd.DataFrame) -> pd.DataFrame:
+        if d is None or d.empty:
+            return d
+        # Ensure numeric
+        d["Total_Visit"] = pd.to_numeric(d["Total_Visit"], errors="coerce").fillna(0).astype(int)
+        d["Total_Amount_Service"] = pd.to_numeric(d["Total_Amount_Service"], errors="coerce").fillna(0.0)
+        d["Total_Amount_Insuance"] = pd.to_numeric(d["Total_Amount_Insuance"], errors="coerce").fillna(0.0)
+
+        denom = d["Total_Visit"].replace(0, pd.NA)
+        d["Avg_Amount_Service"] = d["Total_Amount_Service"] / denom
+        d["Avg_Amount_Insuance"] = d["Total_Amount_Insuance"] / denom
+        # Lab_% stays based on Service total
+        d["Lab_%"] = (pd.to_numeric(d["Lab"], errors="coerce").fillna(0.0) / d["Total_Amount_Service"].replace(0, pd.NA)) * 100
+        d["Avg_Amount_Service"] = d["Avg_Amount_Service"].fillna(0.0)
+        d["Avg_Amount_Insuance"] = d["Avg_Amount_Insuance"].fillna(0.0)
+        d["Lab_%"] = d["Lab_%"].fillna(0.0)
+        return d
+
+    doctor_wise = _recalc_avg(doctor_wise)
+    if col_payer and not insurance_wise.empty:
+        insurance_wise = _recalc_avg(insurance_wise)
+    if col_payer and not doctor_ins_wise.empty:
+        doctor_ins_wise = _recalc_avg(doctor_ins_wise)
+
+    out = {"Doctor Wise Revenue": doctor_wise}
+    if col_payer and not insurance_wise.empty:
+        out["Insurance Wise Revenue"] = insurance_wise
+    if col_payer and not doctor_ins_wise.empty:
+        out["Doctor x Insurance Revenue"] = doctor_ins_wise
+    return out
+
+def _split_multi_codes(s: pd.Series) -> pd.Series:
+    """Split codes like 'A01,B02 / C03' -> list items; returns exploded series-friendly lists."""
+    s = s.fillna("").astype(str)
+    # replace common separators with comma
+    s = s.str.replace("\n", ",", regex=False)
+    s = s.str.replace("|", ",", regex=False)
+    s = s.str.replace(";", ",", regex=False)
+    s = s.str.replace("/", ",", regex=False)
+    # split
+    return s.apply(lambda x: [p.strip() for p in x.split(",") if str(p).strip() not in ["", "None", "nan"]])
+
+def _top_code_per_group(df_exp: pd.DataFrame, group_cols: List[str], code_col: str, desc_col: Optional[str] = None) -> pd.DataFrame:
+    """Return Top-1 code per group with count (+ most common description if provided)."""
+    if df_exp.empty:
+        cols = group_cols + ["Code", "Description", "Count"]
+        return pd.DataFrame(columns=cols)
+    g = df_exp.groupby(group_cols + [code_col]).size().reset_index(name="Count")
+    # attach description mode
+    if desc_col and desc_col in df_exp.columns:
+        # map (group, code) -> mode description
+        tmp = df_exp[group_cols + [code_col, desc_col]].copy()
+        tmp[desc_col] = tmp[desc_col].fillna("").astype(str).str.strip()
+        def _mode_desc(x):
+            x = x[x != ""]
+            if x.empty:
+                return ""
+            m = x.mode()
+            return m.iat[0] if not m.empty else x.iloc[0]
+        dmap = tmp.groupby(group_cols + [code_col])[desc_col].apply(_mode_desc).reset_index(name="Description")
+        g = g.merge(dmap, on=group_cols + [code_col], how="left")
+    else:
+        g["Description"] = ""
+    # rank within group
+    g["_rank"] = g.groupby(group_cols)["Count"].rank(method="first", ascending=False)
+    top = g[g["_rank"] == 1].drop(columns=["_rank"]).rename(columns={code_col: "Code"})
+    # order columns
+    top = top[group_cols + ["Code", "Description", "Count"]]
+    return top.sort_values(group_cols + ["Count"], ascending=[True]*len(group_cols) + [False])
+
+def _top_n_codes(df_exp: pd.DataFrame, group_cols: List[str], code_col: str, desc_col: Optional[str] = None, n: int = 10) -> pd.DataFrame:
+    """Return Top-N codes per group."""
+    if df_exp.empty:
+        cols = group_cols + ["Code", "Description", "Count"]
+        return pd.DataFrame(columns=cols)
+    g = df_exp.groupby(group_cols + [code_col]).size().reset_index(name="Count")
+    if desc_col and desc_col in df_exp.columns:
+        tmp = df_exp[group_cols + [code_col, desc_col]].copy()
+        tmp[desc_col] = tmp[desc_col].fillna("").astype(str).str.strip()
+        def _mode_desc(x):
+            x = x[x != ""]
+            if x.empty:
+                return ""
+            m = x.mode()
+            return m.iat[0] if not m.empty else x.iloc[0]
+        dmap = tmp.groupby(group_cols + [code_col])[desc_col].apply(_mode_desc).reset_index(name="Description")
+        g = g.merge(dmap, on=group_cols + [code_col], how="left")
+    else:
+        g["Description"] = ""
+
+    g["_rank"] = g.groupby(group_cols)["Count"].rank(method="first", ascending=False)
+    g = g[g["_rank"] <= n].drop(columns=["_rank"]).rename(columns={code_col: "Code"})
+    g = g[group_cols + ["Code", "Description", "Count"]]
+    return g.sort_values(group_cols + ["Count"], ascending=[True]*len(group_cols) + [False])
+
+
+def load_cpticd_details(file_obj):
+    """Load CPT/ICD details report (RegistrationDetailswithICDandCPTList).
+
+    Accepts a file-like object (BytesIO / UploadedFile / path). Returns a DataFrame or empty DF.
+    """
     try:
-        return pd.to_datetime(ts).strftime("%d %b %Y %H:%M")
+        # pandas can read file-like objects directly
+        df = pd.read_excel(file_obj)
     except Exception:
-        return str(ts)
-
-
-def fmt_short_day(ts) -> str:
-    """Short readable date without weekday."""
+        try:
+            # fallback: if it's an UploadedFile-like object
+            df = pd.read_excel(getattr(file_obj, "getvalue")())
+        except Exception:
+            return pd.DataFrame()
+    # Normalize column names (strip)
     try:
-        return pd.to_datetime(ts).strftime("%d %b %Y")  # 03 Feb 2026
+        df.columns = [str(c).strip() for c in df.columns]
     except Exception:
-        return str(ts)
+        pass
+    return df
 
-def fmt_range(a, b) -> str:
-    return f"{fmt_short_day(a)} → {fmt_short_day(b)}"
+def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Dict[str, pd.DataFrame]:
+    """Build CPT/ICD analytics tables.
+
+    IMPORTANT RULES (as requested):
+    - NEVER use Company column as Employer.
+    - Employer must come ONLY from Registration file 'Employer Name' via EMR + Visit match.
+    - Expiry tracker uses ONLY EMR + Visit match and Expiry Date column (does not depend on ICD/CPT content).
+    - Employer expiry summary rule (based on UNIQUE EMR):
+        * >=70% same date -> show single date
+        * <50% -> show top two dates
+        * 50-70% -> show top1 date with %
+    """
+    if df is None or df.empty:
+        return {}
+
+    # required columns from CPT/ICD report
+    col_emr = _find_col(df, ["EMR No", "EMRNo", "EMR"])
+    col_visit = _find_col(df, ["Visit ID", "VisitID", "VisitNo", "Visit No"])
+    col_doc = _find_col(df, ["Doctor"])
+    col_exp = _find_col(df, ["Expiry Date", "Expiry"])
+    col_pri = _find_col(df, ["ICD (Principal)", "Principal ICD", "Principal DX", "Primary DX", "Primary Diagnosis", "Principal Diagnosis", "Diagnosis (Principal)", "Principal Diagnosis Code", "ICD_Principal", "ICD Principal"])
+    col_pri_desc = _find_col(df, ["ICD Principal Description", "Principal ICD Description", "Principal DX Description", "Primary Diagnosis Description", "Principal Diagnosis Description", "ICD (Principal) Description", "ICD_Principal_Desc"])
+    col_sec = _find_col(df, ["ICD (Secondary)", "Secondary ICD", "Secondary DX", "Secondary Diagnosis", "Diagnosis (Secondary)", "Secondary Diagnosis Code", "ICD_Secondary", "ICD Secondary"])
+    col_sec_desc = _find_col(df, ["ICD Secondary Description", "Secondary ICD Description", "Secondary DX Description", "Secondary Diagnosis Description", "ICD (Secondary) Description", "ICD_Secondary_Desc"])
+    col_cpt = _find_col(df, ["CPT Code", "CPT", "Procedure Code", "CPT_Codes", "CPTCodes", "CPT Co"])
+    col_cpt_desc = _find_col(df, ["Procedure Description"])
+
+    must = [col_emr, col_visit, col_doc, col_exp, col_pri, col_sec, col_cpt]
+    if any(c is None for c in must):
+        return {}
+
+    base = df.copy()
+
+    # normalize core fields
+    base[col_doc] = base[col_doc].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+    base[col_emr] = base[col_emr].fillna("").astype(str).str.strip()
+    base[col_visit] = base[col_visit].fillna("").astype(str).str.strip()
+
+    # Build Employer + Insurance from Registration (STRICT Employer Name only)
+    base["Employer"] = "UNKNOWN"
+    base["Insurance"] = "UNKNOWN"
+    if reg_df is not None and isinstance(reg_df, pd.DataFrame) and not reg_df.empty:
+        try:
+            r_emr = _find_col(reg_df, ["EMRNo", "EMR No", "EMR", "MRN", "Patient ID"])
+            r_visit = _find_col(reg_df, ["VisitNo", "Visit No", "Visit ID", "VisitID", "Visit Number", "Visit#"])
+            r_emp = next((c for c in reg_df.columns if _norm_col(c) == "employername"), None)  # STRICT
+            r_ins = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName", "Insuance"])
+
+            if r_emr and r_visit and r_emp:
+                keep_cols = [r_emr, r_visit, r_emp] + ([r_ins] if r_ins else [])
+                reg_small = reg_df[keep_cols].copy()
+                reg_small[r_emr] = reg_small[r_emr].fillna("").astype(str).str.strip()
+                reg_small[r_visit] = reg_small[r_visit].fillna("").astype(str).str.strip()
+                reg_small[r_emp] = reg_small[r_emp].fillna("").astype(str).str.strip()
+                if r_ins:
+                    reg_small[r_ins] = reg_small[r_ins].fillna("").astype(str).str.strip()
+
+                reg_small = reg_small[(reg_small[r_emr] != "") & (reg_small[r_visit] != "")].drop_duplicates()
+
+                base = base.merge(
+                    reg_small,
+                    left_on=[col_emr, col_visit],
+                    right_on=[r_emr, r_visit],
+                    how="left",
+                    suffixes=("", "_reg"),
+                )
+                base["Employer"] = base[r_emp].fillna("").astype(str).str.strip().replace("", "UNKNOWN")
+                # Apply master employer mapping (keeps unknown employers as-is)
+                base = normalize_employer_mapping(base, col="Employer")
+                if r_ins:
+                    base["Insurance"] = base[r_ins].fillna("").astype(str).str.strip()
+                    base["Insurance"] = base["Insurance"].replace("", "CASH")
+                    base["Insurance"] = base["Insurance"].replace("Blank", "CASH")
+                else:
+                    base["Insurance"] = "UNKNOWN"
+        except Exception:
+            pass
+
+    # ---- Principal ICD (VISIT-LEVEL) ----
+    # Option (1): Principal DX ONLY, with totals intended to match visits.
+    # If multiple principal codes exist in one visit, we take ONLY the first one.
+    pri1_cols = [col_doc, "Insurance", col_visit, col_pri] + ([col_pri_desc] if col_pri_desc else [])
+    pri1 = base[pri1_cols].copy()
+
+    # Split to list then take first code only (visit-level)
+    pri1[col_pri] = _split_multi_codes(pri1[col_pri])
+    pri1[col_pri] = pri1[col_pri].apply(lambda x: (x[0] if isinstance(x, list) and len(x) else ""))
+    pri1[col_pri] = pri1[col_pri].fillna("").astype(str).str.strip()
+    pri1[col_visit] = pri1[col_visit].fillna("").astype(str).str.strip()
+    pri1 = pri1[(pri1[col_pri] != "") & (pri1[col_visit] != "")].copy()
+
+    # ---- Explode ICD and CPT (for other analytics tables, e.g., Top1, CPT mapping) ----
+    pri = base[[col_doc, "Insurance", col_pri] + ([col_pri_desc] if col_pri_desc else [])].copy()
+    pri[col_pri] = _split_multi_codes(pri[col_pri])
+    pri = pri.explode(col_pri)
+    pri[col_pri] = pri[col_pri].fillna("").astype(str).str.strip()
+    pri = pri[pri[col_pri] != ""].copy()
+
+    sec = base[[col_doc, "Insurance", col_sec] + ([col_sec_desc] if col_sec_desc else [])].copy()
+    sec[col_sec] = _split_multi_codes(sec[col_sec])
+    sec = sec.explode(col_sec)
+    sec[col_sec] = sec[col_sec].fillna("").astype(str).str.strip()
+    sec = sec[sec[col_sec] != ""].copy()
+
+    cpt = base[[col_doc, "Insurance", col_cpt] + ([col_cpt_desc] if col_cpt_desc else [])].copy()
+    cpt[col_cpt] = _split_multi_codes(cpt[col_cpt])
+    cpt = cpt.explode(col_cpt)
+    cpt[col_cpt] = cpt[col_cpt].fillna("").astype(str).str.strip()
+    cpt = cpt[cpt[col_cpt] != ""].copy()
+
+    
+    # ---- Visit-level counts (so totals can match visits) ----
+    # Unique visits per Doctor x Insurance (based on EMR+Visit in CPT/ICD report; Insurance enriched from Registration when possible)
+    try:
+        _vis = base[[col_doc, "Insurance", col_visit]].copy()
+        _vis[col_doc] = _vis[col_doc].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+        _vis["Insurance"] = _vis["Insurance"].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+        _vis[col_visit] = _vis[col_visit].fillna("").astype(str).str.strip()
+        _vis = _vis[_vis[col_visit] != ""].drop_duplicates()
+        visits_doc_ins = _vis.groupby([col_doc, "Insurance"], dropna=False)[col_visit].nunique().reset_index(name="Visits")
+    except Exception:
+        visits_doc_ins = pd.DataFrame(columns=[col_doc, "Insurance", "Visits"])
+
+    def _counts_table(exp_df: pd.DataFrame, code_col: str, desc_col: Optional[str], out_group_cols: List[str]) -> pd.DataFrame:
+        """Count occurrences per group (NOT top1)."""
+        if exp_df is None or exp_df.empty:
+            cols = out_group_cols + ["ICD", "Count", "ICD Description"]
+            return pd.DataFrame(columns=cols)
+
+        g = exp_df.groupby(out_group_cols + [code_col], dropna=False).size().reset_index(name="Count")
+
+        # attach description as mode (most common) for each group+code
+        if desc_col and desc_col in exp_df.columns:
+            tmp = exp_df[out_group_cols + [code_col, desc_col]].copy()
+            tmp[desc_col] = tmp[desc_col].fillna("").astype(str).str.strip()
+
+            def _mode_desc(x: pd.Series) -> str:
+                x = x[x != ""]
+                if x.empty:
+                    return ""
+                m = x.mode()
+                return m.iat[0] if not m.empty else x.iloc[0]
+
+            dmap = tmp.groupby(out_group_cols + [code_col], dropna=False)[desc_col].apply(_mode_desc).reset_index(name="ICD Description")
+            g = g.merge(dmap, on=out_group_cols + [code_col], how="left")
+        else:
+            g["ICD Description"] = ""
+
+        g = g.rename(columns={code_col: "ICD"})
+        # order + sort
+        g = g[out_group_cols + ["ICD", "Count", "ICD Description"]].sort_values(out_group_cols + ["Count"], ascending=[True]*len(out_group_cols) + [False])
+        return g
+
+    # Doctor x Insurance full counts (principal & secondary)
+    doc_ins_pri_counts = _counts_table(pri, col_pri, col_pri_desc, [col_doc, "Insurance"]).rename(columns={col_doc: "Doctor", "Insurance": "Insurance"})
+    doc_ins_sec_counts = _counts_table(sec, col_sec, col_sec_desc, [col_doc, "Insurance"]).rename(columns={col_doc: "Doctor", "Insurance": "Insurance"})
+
+    # Visits table aligned for view-side matching
+    visits_doc_ins = visits_doc_ins.rename(columns={col_doc: "Doctor", "Insurance": "Insurance"})
+
+# helpers for top1
+    def _top1(group_cols: List[str], code_col: str, desc_col: Optional[str] = None) -> pd.DataFrame:
+        gcols = group_cols + [code_col]
+        agg = pri if code_col == col_pri else (sec if code_col == col_sec else cpt)
+        out = agg.groupby(gcols, dropna=False).size().reset_index(name="Count")
+        out = out.sort_values(group_cols + ["Count"], ascending=[True]*len(group_cols) + [False])
+        out = out.drop_duplicates(group_cols, keep="first")
+        if desc_col and desc_col in agg.columns:
+            # bring description (first non-empty)
+            dmap = agg[[code_col, desc_col]].dropna().copy()
+            dmap[code_col] = dmap[code_col].astype(str).str.strip()
+            dmap[desc_col] = dmap[desc_col].astype(str).str.strip()
+            dmap = dmap[dmap[code_col] != ""].drop_duplicates(code_col)
+            out = out.merge(dmap, on=code_col, how="left")
+        return out
+
+    # helpers for Principal DX counts (visit-level; intended to match visits)
+    def _principal_counts(group_cols: List[str]) -> pd.DataFrame:
+        if pri1.empty:
+            return pd.DataFrame()
+        gcols = group_cols + [col_pri]
+        out = pri1.groupby(gcols, dropna=False)[col_visit].nunique().reset_index(name="Count")
+        out = out.sort_values(group_cols + ["Count"], ascending=[True]*len(group_cols) + [False])
+        # attach description (first non-empty)
+        if col_pri_desc and col_pri_desc in pri1.columns:
+            dmap = pri1[[col_pri, col_pri_desc]].dropna().copy()
+            dmap[col_pri] = dmap[col_pri].astype(str).str.strip()
+            dmap[col_pri_desc] = dmap[col_pri_desc].astype(str).str.strip()
+            dmap = dmap[(dmap[col_pri] != "") & (dmap[col_pri_desc] != "")].drop_duplicates(col_pri)
+            out = out.merge(dmap, on=col_pri, how="left")
+        return out
+
+    # Doctor x Insurance
+    doc_emp_pri_counts = _principal_counts([col_doc, "Insurance"]).rename(
+        columns={col_doc: "Doctor", "Insurance": "Insurance", col_pri: "ICD", (col_pri_desc or "ICD Principal Description"): "ICD Description"}
+    )
+
+    doc_emp_pri_top = _top1([col_doc, "Insurance"], col_pri, col_pri_desc).rename(
+        columns={col_doc: "Doctor", "Insurance": "Insurance", col_pri: "ICD", (col_pri_desc or "ICD Principal Description"): "ICD Description"}
+    )
+    doc_emp_sec_top = _top1([col_doc, "Insurance"], col_sec, col_sec_desc).rename(
+        columns={col_doc: "Doctor", "Insurance": "Insurance", col_sec: "ICD", (col_sec_desc or "ICD Secondary Description"): "ICD Description"}
+    )
+    doc_pri_top = _top1([col_doc], col_pri, col_pri_desc).rename(
+        columns={col_doc: "Doctor", col_pri: "ICD", (col_pri_desc or "ICD Principal Description"): "ICD Description"}
+    )
+    doc_sec_top = _top1([col_doc], col_sec, col_sec_desc).rename(
+        columns={col_doc: "Doctor", col_sec: "ICD", (col_sec_desc or "ICD Secondary Description"): "ICD Description"}
+    )
+    emp_pri_top = _top1(["Insurance"], col_pri, col_pri_desc).rename(
+        columns={"Insurance": "Insurance", col_pri: "ICD", (col_pri_desc or "ICD Principal Description"): "ICD Description"}
+    )
+    emp_sec_top = _top1(["Insurance"], col_sec, col_sec_desc).rename(
+        columns={"Insurance": "Insurance", col_sec: "ICD", (col_sec_desc or "ICD Secondary Description"): "ICD Description"}
+    )
+
+    # CPT -> Top Principal ICD mapping
+    # Build CPT -> Principal ICD mapping (best match by frequency)
+    # IMPORTANT: include Doctor + Insurance so the View page can filter like ICD.
+    pair = base[[col_doc, "Insurance", col_cpt, col_pri]].copy()
+    pair[col_cpt] = _split_multi_codes(pair[col_cpt])
+    pair[col_pri] = _split_multi_codes(pair[col_pri])
+
+    pair = pair.explode(col_cpt).explode(col_pri)
+    pair[col_doc] = pair[col_doc].fillna("").astype(str).str.strip()
+    pair["Insurance"] = pair["Insurance"].fillna("").astype(str).str.strip()
+    pair[col_cpt] = pair[col_cpt].fillna("").astype(str).str.strip()
+    pair[col_pri] = pair[col_pri].fillna("").astype(str).str.strip()
+
+    pair = pair[
+        (pair[col_doc] != "") &
+        (pair["Insurance"] != "") &
+        (pair[col_cpt] != "") &
+        (pair[col_pri] != "")
+    ].copy()
+
+    # Count (Doctor, Insurance, CPT, Principal ICD)
+    pair_top = (
+        pair.groupby([col_doc, "Insurance", col_cpt, col_pri], dropna=False)
+        .size()
+        .reset_index(name="Count")
+    )
+
+    # Pick TOP ICD per (Doctor, Insurance, CPT)
+    pair_top = pair_top.sort_values([col_doc, "Insurance", col_cpt, "Count"], ascending=[True, True, True, False])
+    pair_top = pair_top.drop_duplicates([col_doc, "Insurance", col_cpt], keep="first")
+    pair_top = pair_top.rename(columns={col_doc: "Doctor", col_cpt: "CPT", col_pri: "Top_Principal_ICD"})
 
 
-st.set_page_config(page_title="Registration Summary (View Only)", layout="wide", initial_sidebar_state="collapsed")
-st.title("📅 Registration Summary (View Only)")
+    # ---------------------------------------------------------
+    # CPT Visit Bundle Summary (Doctor + Insurance, grouped by VISIT)
+    # Goal: show common combinations like: CPTs + Principal DX + Secondary DX with visit counts
+    # Note: Visit/EMR number is used only for grouping, not required for display.
+    # ---------------------------------------------------------
+    try:
+        # Build base for visit-bundle summary.
+        # Secondary DX column might be missing in some files, so handle safely.
+        cols_needed = [col_doc, "Insurance", col_visit, col_cpt, col_pri]
+        vb = base[cols_needed].copy()
 
+        # Add Secondary column safely
+        sec_col_ok = (("col_sec" in locals()) and (col_sec is not None) and (col_sec in base.columns))
+        if sec_col_ok:
+            vb[col_sec] = base[col_sec]
+        else:
+            col_sec = "_SECONDARY_DX"
+            vb[col_sec] = ""
+
+        vb[col_doc] = vb[col_doc].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+        vb["Insurance"] = vb["Insurance"].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+        vb[col_visit] = vb[col_visit].fillna("").astype(str).str.strip()
+
+        vb = vb[vb[col_visit] != ""].copy()
+
+        vb["_cpt_list"] = _split_multi_codes(vb[col_cpt]) if col_cpt in vb.columns else [[] for _ in range(len(vb))]
+        vb["_pri_list"] = _split_multi_codes(vb[col_pri]) if col_pri in vb.columns else [[] for _ in range(len(vb))]
+        vb["_sec_list"] = _split_multi_codes(vb[col_sec]) if col_sec in vb.columns else [[] for _ in range(len(vb))]
+        def _uniq_join(series_of_lists):
+            items = []
+            for lst in series_of_lists:
+                if isinstance(lst, list):
+                    items.extend([str(x).strip() for x in lst if str(x).strip() not in ["", "None", "nan"]])
+            items = sorted(set(items))
+            return ", ".join(items)
+
+        # One row per VISIT: build bundles
+        visit_level = (
+            vb.groupby([col_doc, "Insurance", col_visit], dropna=False)
+            .agg(
+                **{
+                    "CPT Bundle": ("_cpt_list", _uniq_join),
+                    "Principal DX": ("_pri_list", _uniq_join),
+                    "Secondary DX": ("_sec_list", _uniq_join),
+                }
+            )
+            .reset_index()
+        )
+
+        # Count visits per bundle
+        cpt_visit_bundle_summary = (
+            visit_level.groupby([col_doc, "Insurance", "CPT Bundle", "Principal DX", "Secondary DX"], dropna=False)
+            .size()
+            .reset_index(name="Visits")
+            .sort_values("Visits", ascending=False)
+            .rename(columns={col_doc: "Doctor"})
+        )
+    except Exception:
+        cpt_visit_bundle_summary = pd.DataFrame()
+
+
+    # ---- Expiry Tracker (ONLY EMR+Visit + Expiry Date) ----
+    exp = base[[col_emr, col_visit, col_doc, "Employer", "Insurance", col_exp]].copy()
+    exp = exp.rename(columns={col_emr: "EMR No", col_visit: "Visit ID", col_doc: "Doctor", col_exp: "Expiry Date"})
+    exp["Expiry Date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce")
+    today = pd.Timestamp.today().normalize()
+    exp["Days To Expiry"] = (exp["Expiry Date"] - today).dt.days
+    exp = exp.dropna(subset=["Expiry Date"]).copy()
+    exp = exp.sort_values(["Days To Expiry", "Employer", "Doctor"], ascending=[True, True, True])
+
+    # ---- Employer Expiry Summary (UNIQUE EMR rule) ----
+    summ = exp.dropna(subset=["Employer", "EMR No", "Expiry Date"]).copy()
+    summ["EMR No"] = summ["EMR No"].astype(str).str.strip()
+    summ["Employer"] = summ["Employer"].astype(str).str.strip().replace("", "UNKNOWN")
+    summ["Expiry Date"] = summ["Expiry Date"].dt.date
+
+    if not summ.empty:
+        # unique EMR per employer+date
+        counts = summ.groupby(["Employer", "Expiry Date"])["EMR No"].nunique().reset_index(name="EMR_Count")
+        totals = summ.groupby("Employer")["EMR No"].nunique().reset_index(name="Total_EMR")
+        counts = counts.merge(totals, on="Employer", how="left")
+        counts["Share"] = counts["EMR_Count"] / counts["Total_EMR"].replace(0, pd.NA)
+
+        counts = counts.sort_values(["Employer", "Share", "EMR_Count", "Expiry Date"], ascending=[True, False, False, True])
+        counts["Rank"] = counts.groupby("Employer").cumcount() + 1
+
+        top1 = counts[counts["Rank"] == 1][["Employer", "Expiry Date", "Share", "Total_EMR"]].rename(
+            columns={"Expiry Date": "Top1_Expiry", "Share": "Top1_Share"}
+        )
+        top2 = counts[counts["Rank"] == 2][["Employer", "Expiry Date", "Share"]].rename(
+            columns={"Expiry Date": "Top2_Expiry", "Share": "Top2_Share"}
+        )
+        employer_expiry_summary = top1.merge(top2, on="Employer", how="left")
+
+        def _fmt_date(d):
+            try:
+                return pd.to_datetime(d).date().isoformat()
+            except Exception:
+                return ""
+
+        def _fmt_pct(x):
+            try:
+                return f"{float(x) * 100:.0f}%"
+            except Exception:
+                return ""
+
+        display = []
+        for _, r in employer_expiry_summary.iterrows():
+            top1_share = float(r.get("Top1_Share", 0) or 0)
+            t1 = _fmt_date(r.get("Top1_Expiry"))
+            t2 = _fmt_date(r.get("Top2_Expiry"))
+
+            if top1_share >= 0.70:
+                show = t1
+            elif top1_share < 0.50:
+                show = t1 if not t2 else f"{t1} | {t2}"
+            else:
+                show = f"{t1} ({_fmt_pct(top1_share)})" if t1 else ""
+
+            display.append(show)
+
+        employer_expiry_summary["Common_Expiry"] = display
+        employer_expiry_summary = employer_expiry_summary[["Employer", "Total_EMR", "Common_Expiry", "Top1_Expiry", "Top1_Share", "Top2_Expiry", "Top2_Share"]].copy()
+        employer_expiry_summary["Top1_Share"] = employer_expiry_summary["Top1_Share"].apply(_fmt_pct)
+        employer_expiry_summary["Top2_Share"] = employer_expiry_summary["Top2_Share"].apply(_fmt_pct)
+    else:
+        employer_expiry_summary = pd.DataFrame(columns=["Employer", "Total_EMR", "Common_Expiry", "Top1_Expiry", "Top1_Share", "Top2_Expiry", "Top2_Share"])
+
+    # ---- Employer Wise (for CPT/ICD section) + attach expiry date summary ----
+    try:
+        if reg_df is not None and isinstance(reg_df, pd.DataFrame) and not reg_df.empty:
+            _ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
+            _emp_col = next((c for c in reg_df.columns if _norm_col(c) == "employername"), None)  # STRICT
+            # Apply master employer mapping on Registration employer column before grouping
+            reg_df_norm = reg_df.copy()
+            if _emp_col and _emp_col in reg_df_norm.columns:
+                reg_df_norm = normalize_employer_mapping(reg_df_norm, col=_emp_col)
+            employer_wise_exp = employer_wise_with_insurance(reg_df_norm, emp_col=_emp_col, ins_col=_ins_col, n=200)
+        else:
+            employer_wise_exp = (
+                exp.groupby("Employer")["EMR No"].nunique().reset_index(name="Count").sort_values("Count", ascending=False)
+            )
+            employer_wise_exp["Insurance"] = ""
+        # attach expiry date + remaining days (like detailed list)
+        # We will show the nearest (minimum) Days To Expiry per Employer + Insurance.
+        try:
+            exp_min = exp.dropna(subset=["Employer", "Insurance", "Expiry Date"]).copy()
+            exp_min["Expiry Date"] = pd.to_datetime(exp_min["Expiry Date"], errors="coerce")
+            exp_min = exp_min.dropna(subset=["Expiry Date"])
+            exp_min["Days To Expiry"] = pd.to_numeric(exp_min["Days To Expiry"], errors="coerce")
+            exp_min = (
+                exp_min.sort_values(["Employer", "Insurance", "Days To Expiry", "Expiry Date"], ascending=[True, True, True, True])
+                .groupby(["Employer", "Insurance"], dropna=False, as_index=False)
+                .first()[["Employer", "Insurance", "Expiry Date", "Days To Expiry"]]
+            )
+            exp_min["Expiry Date"] = exp_min["Expiry Date"].dt.strftime("%Y-%m-%d")
+            exp_min["Days To Expiry"] = exp_min["Days To Expiry"].fillna(0).astype(int)
+
+            # merge into employer wise summary
+            if "Employer" in employer_wise_exp.columns and "Insurance" in employer_wise_exp.columns:
+                employer_wise_exp = employer_wise_exp.merge(exp_min, on=["Employer", "Insurance"], how="left")
+            else:
+                employer_wise_exp["Expiry Date"] = ""
+                employer_wise_exp["Days To Expiry"] = ""
+        except Exception:
+            employer_wise_exp["Expiry Date"] = ""
+            employer_wise_exp["Days To Expiry"] = ""
+
+        # (Optional) keep the 'Common_Expiry' info as an extra column for reference
+        if isinstance(employer_expiry_summary, pd.DataFrame) and not employer_expiry_summary.empty:
+            employer_wise_exp = employer_wise_exp.merge(
+                employer_expiry_summary[["Employer", "Common_Expiry"]],
+                on="Employer",
+                how="left",
+            ).rename(columns={"Common_Expiry": "Common Expiry"})
+        else:
+            employer_wise_exp["Common Expiry"] = ""
+
+    except Exception:
+        employer_wise_exp = pd.DataFrame(columns=["Employer", "Count", "Insurance", "Expiry Date", "Days To Expiry", "Common Expiry"])
+    return {
+        # Principal DX counts (VISIT-LEVEL; totals intended to match visits)
+        "Doctor x Insurance | Principal DX (Counts)": doc_emp_pri_counts[["Doctor", "Insurance", "ICD", "Count", "ICD Description"]].copy()
+            if not doc_emp_pri_counts.empty else doc_emp_pri_counts,
+
+        # Diagnosis Top-1 (by Doctor x Insurance)
+        "Doctor x Insurance | Principal DX (Top1)": doc_emp_pri_top[["Doctor", "Insurance", "ICD", "Count", "ICD Description"]].copy()
+            if not doc_emp_pri_top.empty else doc_emp_pri_top,
+        "Doctor x Insurance | Secondary DX (Top1)": doc_emp_sec_top[["Doctor", "Insurance", "ICD", "Count", "ICD Description"]].copy()
+            if not doc_emp_sec_top.empty else doc_emp_sec_top,
+
+        # Doctor-wise (Top-1)
+        "Doctor | Principal DX (Top1)": doc_pri_top[["Doctor", "ICD", "Count", "ICD Description"]].copy()
+            if not doc_pri_top.empty else doc_pri_top,
+        "Doctor | Secondary DX (Top1)": doc_sec_top[["Doctor", "ICD", "Count", "ICD Description"]].copy()
+            if not doc_sec_top.empty else doc_sec_top,
+
+        # Insurance-wise (Top-1)
+        "Insurance | Principal DX (Top1)": emp_pri_top[["Insurance", "ICD", "Count", "ICD Description"]].copy()
+            if not emp_pri_top.empty else emp_pri_top,
+        "Insurance | Secondary DX (Top1)": emp_sec_top[["Insurance", "ICD", "Count", "ICD Description"]].copy()
+            if not emp_sec_top.empty else emp_sec_top,
+
+        # CPT -> Top Principal ICD mapping
+        "CPT -> Top Principal ICD": pair_top,
+
+        # Visit bundle summary (CPT + Principal + Secondary) with visit counts
+        "CPT Visit Bundle Summary": cpt_visit_bundle_summary,
+
+        # Eligibility expiry (Employer-wise) from EMR+Visit match
+        "Employer Wise": employer_wise_exp,
+        "Employer Expiry Summary": employer_expiry_summary,
+        "Employer Expiry Tracker": exp[["Employer","Insurance","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"]],
+    }
+def read_excel_any(uploaded_file, required_hint: Optional[List[str]] = None) -> pd.DataFrame:
+    """Read an Excel report even when the real header is not on the first row.
+
+    If `required_hint` is provided (e.g., ["EMRNo"]), we first try normal read.
+    If the required columns can't be found, we fall back to scanning the first
+    ~60 rows to detect the true header row (common in hospital report exports
+    that include big titles like 'EXCELLENT MEDICAL CENTER' before the table).
+    """
+    data = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
+    bio = io.BytesIO(data)
+
+    def has_required(df: pd.DataFrame) -> bool:
+        if not required_hint:
+            return False
+        for r in required_hint:
+            if r == "EMRNo":
+                if _find_col(df, ["EMRNo", "EMR NO", "EMR", "MRN", "PatientID", "Patient Id", "FileNo"]):
+                    return True
+            elif r == "VisitNo":
+                if _find_col(df, ["VisitNo", "Visit No", "Visit#", "Visit Number", "VisitID", "EncounterNo", "Encounter No"]):
+                    return True
+            else:
+                if _find_col(df, [r]):
+                    return True
+        return False
+
+    # 1) First attempt (normal)
+    bio.seek(0)
+    try:
+        df1 = pd.read_excel(bio)
+        # If required column NOT found, do header scan fallback
+        if required_hint and not has_required(df1):
+            raise ValueError("Header likely not on first row; retrying header scan.")
+        return df1
+    except Exception:
+        pass
+
+    # 2) Header scan fallback
+    bio.seek(0)
+    raw = pd.read_excel(bio, header=None)
+
+    likely = {
+        "emrno", "emr", "mrn", "patientid", "fileno",
+        "visitno", "visit", "visitdate",
+        "billno", "doctor", "insurance"
+    }
+
+    header_idx = 0
+    for i in range(min(60, len(raw))):
+        row = raw.iloc[i].astype(str).str.lower().tolist()
+        row_keys = {_norm_col(x) for x in row}
+        if row_keys & likely:
+            header_idx = i
+            break
+
+    bio.seek(0)
+    df = pd.read_excel(bio, header=header_idx)
+    # Drop 'Unnamed' columns ONLY if they are truly empty (some EMR exports store real data under Unnamed headers)
+    unnamed_cols = [c for c in df.columns if str(c).startswith("Unnamed")]
+    if unnamed_cols:
+        keep = []
+        for c in df.columns:
+            if str(c).startswith("Unnamed"):
+                s = df[c]
+                # keep if it has any non-empty value
+                has_value = s.notna().any() and (s.astype(str).str.strip() != "").any()
+                if has_value:
+                    keep.append(c)
+            else:
+                keep.append(c)
+        df = df[keep]
+    return df
+
+def ensure_required(df: pd.DataFrame, required: List[str], label: str) -> Dict[str, str]:
+    mapping = {}
+    for r in required:
+        if r == "EMRNo":
+            col = _find_col(df, ["EMRNo", "EMR NO", "EMR", "MRN", "PatientID", "Patient Id", "FileNo"])
+        elif r == "VisitNo":
+            col = _find_col(df, ["VisitNo", "Visit No", "Visit#", "Visit Number", "VisitID", "EncounterNo", "Encounter No"])
+        else:
+            col = _find_col(df, [r])
+        if not col:
+            raise ValueError(f"{label} file must contain '{r}'. Found: {list(df.columns)}")
+        mapping[r] = col
+    return mapping
+
+def get_day_from_registration(reg_df: pd.DataFrame) -> Optional[pd.Timestamp]:
+    """Detect the report day from Registration file.
+
+    EMR exports often store dates as dd/mm/yyyy but pandas defaults to mm/dd/yyyy.
+    We therefore try BOTH parses (dayfirst False and True) and pick the one that
+    yields more valid dates. If tied, we prefer dayfirst=True (common in UAE).
+    """
+    date_col = _find_col(reg_df, ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
+    if not date_col:
+        return None
+
+    s_raw = reg_df[date_col]
+
+    # Try both date interpretations
+    s1 = pd.to_datetime(s_raw, errors="coerce", dayfirst=False)
+    s2 = pd.to_datetime(s_raw, errors="coerce", dayfirst=True)
+
+    n1 = int(s1.notna().sum())
+    n2 = int(s2.notna().sum())
+
+    s = s2 if n2 >= n1 else s1
+    s = s.dropna()
+    if s.empty:
+        return None
+
+    day = s.dt.normalize()
+    try:
+        return day.mode().iloc[0]
+    except Exception:
+        return day.min()
+
+def get_days_from_registration(reg_df: pd.DataFrame) -> List[pd.Timestamp]:
+    """Return all unique days found in Registration file (normalized).
+    Uses the same dayfirst heuristic as get_day_from_registration.
+    """
+    date_col = _find_col(reg_df, ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
+    if not date_col:
+        return []
+    s_raw = reg_df[date_col]
+    s1 = pd.to_datetime(s_raw, errors="coerce", dayfirst=False)
+    s2 = pd.to_datetime(s_raw, errors="coerce", dayfirst=True)
+    n1 = int(s1.notna().sum())
+    n2 = int(s2.notna().sum())
+    s = s2 if n2 >= n1 else s1
+    s = s.dropna()
+    if s.empty:
+        return []
+    days = sorted(pd.Series(s.dt.normalize().unique()).dropna())
+    return [pd.to_datetime(d) for d in days]
+
+def filter_df_by_day_if_possible(df: Optional[pd.DataFrame], day_ts: pd.Timestamp) -> Optional[pd.DataFrame]:
+    """If df has a recognizable date column, filter it to the given day. Otherwise return df as-is."""
+    if df is None or df.empty:
+        return df
+    date_col = _find_col(df, ["RegDate", "RegistrationDate", "Date", "VisitDate", "CreatedDate", "EntryDate", "Day"])
+    if not date_col:
+        # Try any column that contains 'date'
+        for c in df.columns:
+            if "date" in str(c).lower():
+                date_col = c
+                break
+    if not date_col:
+        return df
+
+    s_raw = df[date_col]
+    s1 = pd.to_datetime(s_raw, errors="coerce", dayfirst=False)
+    s2 = pd.to_datetime(s_raw, errors="coerce", dayfirst=True)
+    n1 = int(s1.notna().sum())
+    n2 = int(s2.notna().sum())
+    s = s2 if n2 >= n1 else s1
+    day = pd.to_datetime(day_ts).normalize()
+    mask = s.dt.normalize() == day
+    if mask.notna().sum() == 0:
+        return df
+    out = df.loc[mask.fillna(False)].copy()
+    return out
+
+def top_counts(df: pd.DataFrame, col: Optional[str], n: int = 15, label: str = "Value") -> pd.DataFrame:
+    """Return top-N counts for a column and append a TOTAL row.
+
+    - Normalizes blanks -> 'Blank' (or 'CASH' for insurance-like columns)
+    - Returns columns: <label>, Count
+    - Appends TOTAL (sum of shown rows) at the end
+    """
+    if not col or col not in df.columns:
+        return pd.DataFrame(columns=["Value", "Count"])
+
+    col_l = str(col).lower()
+    blank_label = "CASH" if any(k in col_l for k in ["insur", "payer", "tpa"]) else "Blank"
+
+    out = (
+        df[col]
+        .fillna(blank_label)
+        .astype(str)
+        .str.strip()
+        .replace("", blank_label)
+        .replace("Blank", blank_label)
+        .value_counts(dropna=False)
+        .head(n)
+        .reset_index()
+    )
+    out.columns = [label, "Count"]
+
+    # ✅ TOTAL row (sum of displayed rows)
+    total = int(out["Count"].sum()) if not out.empty else 0
+    out.loc[len(out)] = ["TOTAL", total]
+    return out
+
+def employer_clean_key(x: str) -> str:
+    """Return a normalized employer key suitable for matching (lowercase).
+
+    This is intentionally conservative: it removes punctuation/extra spaces and
+    normalizes common legal suffix formatting (WLL/LLC), but it does NOT try to
+    guess company identity beyond what you explicitly map in EMPLOYER_ALIAS.
+    """
+    if x is None:
+        return "blank"
+    s = str(x).strip().upper()
+
+    # Standardize common variants
+    s = s.replace("&", " AND ")
+    s = re.sub(r"\bW\s*L\s*L\b", "WLL", s)   # W L L -> WLL
+    s = re.sub(r"\bL\s*L\s*C\b", "LLC", s)   # L L C -> LLC
+
+    # Keep letters/numbers/spaces only
+    s = re.sub(r"[^A-Z0-9\s]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    return s.lower() if s else "blank"
+
+def employer_canonical_name(x: str) -> str:
+    """Map employer to a single canonical display name using:
+    1) prefix aliases (EMPLOYER_PREFIX_ALIAS)
+    2) exact aliases (EMPLOYER_ALIAS)
+    3) fallback to cleaned uppercase
+    """
+    key = employer_clean_key(x)
+
+    # prefix rules first (e.g., ARCO -> ARCO)
+    for pref, canon in EMPLOYER_PREFIX_ALIAS:
+        if key.startswith(str(pref).lower()):
+            return str(canon).strip()
+
+    # exact aliases next
+    if key in EMPLOYER_ALIAS:
+        return str(EMPLOYER_ALIAS[key]).strip()
+
+    # fallback
+    return key.upper() if key != "blank" else "Blank"
+
+def employer_wise_with_insurance(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 50) -> pd.DataFrame:
+    """Employer Wise counts (DEDUPED) + ONE Insurance per employer-group.
+
+    IMPORTANT:
+    - Uses EMPLOYER_MAPPING (your Check list) via normalize_employer()
+    - Cleans + maps employer BEFORE grouping, so QUMRA/QAMRA/etc becomes ONE employer.
+    """
+    if not emp_col or emp_col not in df.columns:
+        return pd.DataFrame(columns=["Employer", "Count", "Insurance"])
+
+    # Insurance cleanup
+    tmp = df.copy()
+    if ins_col and ins_col in tmp.columns:
+        tmp[ins_col] = (
+            tmp[ins_col]
+            .fillna("CASH")
+            .astype(str)
+            .str.strip()
+            .replace("", "CASH")
+            .replace("Blank", "CASH")
+        )
+    else:
+        tmp["__ins__"] = "CASH"
+        ins_col = "__ins__"
+
+    # Normalize employer to canonical (Check mapping) BEFORE grouping
+    work = pd.DataFrame({
+        "Employer": tmp[emp_col].fillna("").astype(str),
+        "Insurance": tmp[ins_col].fillna("CASH").astype(str),
+    })
+    work = normalize_employer(work)
+
+    # Count per Employer
+    counts = work.groupby("Employer").size().reset_index(name="Count")
+
+    # Dominant Insurance per Employer
+    dominant_ins = (
+        work.groupby(["Employer", "Insurance"])
+        .size()
+        .reset_index(name="cnt")
+        .sort_values(["Employer", "cnt"], ascending=[True, False])
+        .drop_duplicates(subset=["Employer"])[["Employer", "Insurance"]]
+    )
+
+    out = counts.merge(dominant_ins, on="Employer", how="left")
+    out = out[["Employer", "Count", "Insurance"]].sort_values("Count", ascending=False).reset_index(drop=True)
+
+    grand_total = int(out["Count"].sum()) if not out.empty else 0
+
+    if n and len(out) > n:
+        top = out.head(n).copy()
+        others = int(out.iloc[n:]["Count"].sum())
+        if others > 0:
+            top.loc[len(top)] = ["OTHERS", others, ""]
+        out = top.reset_index(drop=True)
+
+    out.loc[len(out)] = ["TOTAL", grand_total, ""]
+    return out
+
+
+def employer_insurance_table(df: pd.DataFrame, emp_col: Optional[str], ins_col: Optional[str], n: int = 200) -> pd.DataFrame:
+    """Employer x Insurance breakdown (top rows) with TOTAL row at end.
+    Uses EMPLOYER_MAPPING (Check list) so spelling variants merge correctly.
+    """
+    if not emp_col or emp_col not in df.columns or not ins_col or ins_col not in df.columns:
+        return pd.DataFrame(columns=["Employer", "Insurance", "Count"])
+
+    tmp = df[[emp_col, ins_col]].copy()
+    tmp[ins_col] = (
+        tmp[ins_col]
+        .fillna("CASH")
+        .astype(str)
+        .str.strip()
+        .replace("", "CASH")
+        .replace("Blank", "CASH")
+    )
+
+    work = pd.DataFrame({
+        "Employer": tmp[emp_col].fillna("").astype(str),
+        "Insurance": tmp[ins_col].fillna("CASH").astype(str),
+    })
+    work = normalize_employer(work)
+
+    out = (
+        work.groupby(["Employer", "Insurance"])
+        .size()
+        .reset_index(name="Count")
+        .sort_values("Count", ascending=False)
+        .head(n)
+    )
+
+    total = int(out["Count"].sum()) if not out.empty else 0
+    out.loc[len(out)] = ["TOTAL", "", total]
+    return out
+
+
+def excel_bytes_from_dfs(dfs: Dict[str, pd.DataFrame]) -> bytes:
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        for name, df in dfs.items():
+            df.to_excel(writer, sheet_name=str(name)[:31], index=False)
+    bio.seek(0)
+    return bio.read()
 
 # ---------------------------
-# Helpers
+# S3 helpers
 # ---------------------------
-def s3_key(*parts: str) -> str:
-    return "/".join([p.strip("/").strip() for p in parts if p is not None and str(p).strip() != ""])
 
+def _safe_filename(name: str, max_len: int = 80) -> str:
+    """Make a filename-safe chunk (no slashes/illegal chars)."""
+    name = str(name)
+    name = re.sub(r'[\\/:*?"<>|\n\r\t]+', "_", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    if len(name) > max_len:
+        name = name[:max_len].rstrip()
+    return name or "file"
+
+def download_excel_button(df: pd.DataFrame, filename: str, label: str):
+    """Download a dataframe as a single-sheet Excel file."""
+    if df is None or df.empty:
+        st.info("No data available to download.")
+        return
+    b = excel_bytes_from_dfs({"data": df})
+    st.download_button(
+        label,
+        data=b,
+        file_name=filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 def load_secrets() -> Dict[str, str]:
     def get_any(*keys):
@@ -420,19 +1467,11 @@ def load_secrets() -> Dict[str, str]:
         "AWS_SECRET_ACCESS_KEY": get_any("AWS_SECRET_ACCESS_KEY"),
         "AWS_REGION": get_any("AWS_REGION", "AWS_DEFAULT_REGION"),
         "S3_BUCKET_NAME": get_any("S3_BUCKET_NAME", "S3_BUCKET"),
-        "S3_BASE_PREFIX": get_any("S3_BASE_PREFIX", "S3_PREFIX"),  # optional (unused by default)
+        "S3_BASE_PREFIX": get_any("S3_BASE_PREFIX", "S3_PREFIX"),
     }
 
-
 def s3_enabled(cfg: Dict[str, str]) -> bool:
-    return (
-        bool(cfg.get("S3_BUCKET_NAME"))
-        and bool(cfg.get("AWS_REGION"))
-        and bool(cfg.get("AWS_ACCESS_KEY_ID"))
-        and bool(cfg.get("AWS_SECRET_ACCESS_KEY"))
-        and boto3 is not None
-    )
-
+    return bool(cfg.get("S3_BUCKET_NAME")) and bool(cfg.get("AWS_REGION")) and bool(cfg.get("AWS_ACCESS_KEY_ID")) and bool(cfg.get("AWS_SECRET_ACCESS_KEY")) and boto3 is not None
 
 @st.cache_resource(show_spinner=False)
 def s3_client_cached(cfg: Dict[str, str]):
@@ -445,6 +1484,11 @@ def s3_client_cached(cfg: Dict[str, str]):
         aws_secret_access_key=cfg["AWS_SECRET_ACCESS_KEY"],
     )
 
+def s3_key(*parts: str) -> str:
+    return "/".join([p.strip("/").strip() for p in parts if p is not None and str(p).strip() != ""])
+
+def s3_put_bytes(s3, bucket: str, key: str, b: bytes, content_type: str = "application/octet-stream"):
+    s3.put_object(Bucket=bucket, Key=key, Body=b, ContentType=content_type)
 
 def s3_get_bytes(s3, bucket: str, key: str) -> Optional[bytes]:
     try:
@@ -453,77 +1497,373 @@ def s3_get_bytes(s3, bucket: str, key: str) -> Optional[bytes]:
     except Exception:
         return None
 
-
-def s3_key_exists(s3, bucket: str, key: str) -> bool:
-    try:
-        s3.head_object(Bucket=bucket, Key=key)
-        return True
-    except Exception:
-        return False
-
-
-def candidate_base_prefixes(cfg: Dict[str, str]) -> List[str]:
-    """Try a few likely prefixes so the viewer works even if uploader/viewer prefixes differ."""
-    prefs: List[str] = []
-    p = (cfg.get("S3_BASE_PREFIX") or "").strip().strip("/")
-    if p:
-        prefs.append(p)
-    # common fallbacks
-    prefs.append("")  # root of bucket
-    if "streamlit" not in prefs:
-        prefs.append("streamlit")
-    # de-dup while preserving order
-    out: List[str] = []
-    for x in prefs:
-        x = (x or "").strip().strip("/")
-        if x not in out:
-            out.append(x)
+def s3_list_prefixes(s3, bucket: str, prefix: str) -> List[str]:
+    out = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix.rstrip("/") + "/", Delimiter="/"):
+        for cp in page.get("CommonPrefixes", []):
+            p = cp.get("Prefix", "")
+            if p:
+                out.append(p)
     return out
 
+# ---------------------------
+# Center selection
+# ---------------------------
+
+CENTERS = {
+    "easyhealth": "Easy Health Medical Clinic (MF8031)",
+    "excellent": "Excellent Medical Center (MF4777)",
+    "pharmacy": "Excellent Pharmacy (PF3205)",
+}
+
+# -------------------- Center default (Excellent) --------------------
+SS = st.session_state
+SS.setdefault("center_key", "excellent")
+
+# if URL contains ?center=..., allow it (and persist it)
+_q_center = st.query_params.get("center")
+if _q_center in CENTERS:
+    SS["center_key"] = _q_center
+
+center_key = SS.get("center_key", "excellent")
+if center_key not in CENTERS:
+    center_key = "excellent"
+    SS["center_key"] = center_key
+
+# optional selector (only if you want to change center manually)
+center_key = st.selectbox(
+    "Center",
+    options=list(CENTERS.keys()),
+    index=(list(CENTERS.keys()).index(center_key) if center_key in CENTERS else 0),
+    format_func=lambda k: CENTERS[k],
+    key="center_selector",
+)
+SS["center_key"] = center_key
+cfg = load_secrets()
+s3_ok = s3_enabled(cfg)
+s3 = s3_client_cached(cfg) if s3_ok else None
+
+with st.expander("Storage Status (S3)", expanded=False):
+    if s3_ok:
+        st.success(f"S3 is configured ✅  Bucket: {cfg['S3_BUCKET_NAME']}  Region: {cfg['AWS_REGION']}")
+        if cfg.get('S3_BASE_PREFIX'):
+            st.caption(f"Base prefix: {cfg.get('S3_BASE_PREFIX')}")
+        else:
+            st.caption("No base prefix configured - using root bucket")
+    else:
+        st.warning("S3 is NOT configured. Uploaders will work and summary will display, but files will NOT be saved to S3.")
+        st.caption("Expected secrets: S3_BUCKET_NAME (or S3_BUCKET), AWS_REGION (or AWS_DEFAULT_REGION), AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY. Optional: S3_BASE_PREFIX")
+
+with st.expander("Employer Normalization Rules", expanded=False):
+    st.caption("These rules merge employer name variations into ONE company for Employer Wise counts.")
+    st.markdown("**Exact aliases (after cleaning):**")
+    try:
+        _alias_df = pd.DataFrame(sorted(EMPLOYER_ALIAS.items()), columns=["If employer is", "Group as"])
+        st.dataframe(_alias_df, use_container_width=True, hide_index=True)
+    except Exception:
+        st.write(EMPLOYER_ALIAS)
+
+    st.markdown("**Prefix aliases (take initial only):**")
+    try:
+        _pref_df = pd.DataFrame(
+            [{"If employer starts with": a, "Group as": b} for a, b in EMPLOYER_PREFIX_ALIAS],
+        )
+        st.dataframe(_pref_df, use_container_width=True, hide_index=True)
+    except Exception:
+        st.write(EMPLOYER_PREFIX_ALIAS)
+
+    st.caption("Admin tip: Add new spelling variations by editing EMPLOYER_ALIAS / EMPLOYER_PREFIX_ALIAS in this file.")
+
+st.caption("✅ Day is read from Registration file (if it has a date column). Date picker is used only if file has no date column.")
+manual_day = st.date_input("Manual Day (fallback only)", value=date.today())
+
+SS = st.session_state
+
+# -------------------- Defaults --------------------
+DEFAULT_CENTER_KEY = "excellent"
+if "center_key" not in SS or not SS.get("center_key"):
+    SS["center_key"] = DEFAULT_CENTER_KEY
+
+SS.setdefault("reg_file", None)
+SS.setdefault("cash_file", None)
+SS.setdefault("pend_file", None)
+SS.setdefault("income_file", None)
+SS.setdefault("reg_df", None)
+SS.setdefault("cash_df", None)
+SS.setdefault("pend_df", None)
+SS.setdefault("income_df", None)
+SS.setdefault("income_tables", {})
+
+SS.setdefault("cpticd_file", None)
+SS.setdefault("cpticd_df", None)
+SS.setdefault("cpticd_tables", {})
+
+if admin_mode:
+
+    # -------------------- Processing Scope (show at TOP) --------------------
+
+    st.subheader('1) RegistrationList (.xls / .xlsx)')
+    if SS.get('reg_df') is None:
+        st.error('Step 1: Registration file not uploaded')
+    else:
+        try:
+            st.success(f"Step 1 OK ✅ ({SS.get('reg_file', {}).get('name','')})")
+        except Exception:
+            st.success('Step 1 OK ✅')
+
+    # Step 1
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        up1 = st.file_uploader("Upload Registration file", type=["xls", "xlsx"], key="uploader_reg")
+    with c2:
+        if st.button("🗑️ Delete Step 1", use_container_width=True):
+            SS["reg_file"], SS["reg_df"] = None, None
+            st.rerun()
+
+    if up1 is not None:
+        try:
+            reg_df = read_excel_any(up1, required_hint=["EMRNo", "VisitNo"])
+            SS["reg_df_cached"] = reg_df.copy()
+            ensure_required(reg_df, ["EMRNo", "VisitNo"], "Step 1 (Registration)")
+            SS["reg_file"] = {"name": up1.name, "bytes": up1.getvalue()}
+            SS["reg_df"] = reg_df
+            st.success(f"Step 1 OK ✅  ({up1.name})")
+        except Exception as e:
+            SS["reg_file"], SS["reg_df"] = None, None
+            st.error(str(e))
+
+    st.subheader('2) PatientCashOutList (.xls / .xlsx)')
+    if SS.get('cash_df') is None:
+        st.error('Step 2: CashOut file not uploaded')
+    else:
+        try:
+            st.success(f"Step 2 OK ✅ ({SS.get('cash_file', {}).get('name','')})")
+        except Exception:
+            st.success('Step 2 OK ✅')
+
+    # Step 2
+    st.markdown("### 2) PatientCashOutList (.xls / .xlsx)")
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        up2 = st.file_uploader("Upload CashOut file", type=["xls", "xlsx"], key="uploader_cash", disabled=(SS["reg_df"] is None))
+    with c2:
+        if st.button("🗑️ Delete Step 2", use_container_width=True):
+            SS["cash_file"], SS["cash_df"] = None, None
+            st.rerun()
+
+    if up2 is not None:
+        try:
+            cash_df = read_excel_any(up2, required_hint=["EMRNo"])
+            ensure_required(cash_df, ["EMRNo"], "Step 2 (CashOut)")
+            SS["cash_file"] = {"name": up2.name, "bytes": up2.getvalue()}
+            SS["cash_df"] = cash_df
+            st.success(f"Step 2 OK ✅  ({up2.name})")
+        except Exception as e:
+            SS["cash_file"], SS["cash_df"] = None, None
+            st.error(str(e))
+
+    st.subheader('3) Pending file (.xls / .xlsx)')
+    if SS.get('pend_df') is None:
+        st.error('Step 3: Pending file not uploaded')
+    else:
+        try:
+            st.success(f"Step 3 OK ✅ ({SS.get('pend_file', {}).get('name','')})")
+        except Exception:
+            st.success('Step 3 OK ✅')
+
+    # Step 3
+    st.markdown("### 3) Pending file (.xls / .xlsx)")
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        up3 = st.file_uploader("Upload Pending file", type=["xls", "xlsx"], key="uploader_pend", disabled=(SS["cash_df"] is None))
+    with c2:
+        if st.button("🗑️ Delete Step 3", use_container_width=True):
+            SS["pend_file"], SS["pend_df"] = None, None
+            st.rerun()
+
+    if up3 is not None:
+        try:
+            pend_df = read_excel_any(up3, required_hint=["EMRNo"])
+            ensure_required(pend_df, ["EMRNo"], "Step 3 (Pending)")
+            SS["pend_file"] = {"name": up3.name, "bytes": up3.getvalue()}
+            SS["pend_df"] = pend_df
+            st.success(f"Step 3 OK ✅  ({up3.name})")
+        except Exception as e:
+            SS["pend_file"], SS["pend_df"] = None, None
+            st.error(str(e))
+
+def compute_summary(reg_df: pd.DataFrame, cash_df: pd.DataFrame, pend_df: pd.DataFrame, day_ts: pd.Timestamp) -> Dict[str, pd.DataFrame]:
+    reg_map = ensure_required(reg_df, ["EMRNo", "VisitNo"], "Registration")
+    emr_col, visit_col = reg_map["EMRNo"], reg_map["VisitNo"]
+
+    doctor_col = _find_col(reg_df, ["Doctor", "DoctorName", "Physician", "Provider"])
+    ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
+    emp_col = next((c for c in reg_df.columns if _norm_col(c) == "employername"), None)  # STRICT: Employer Name only
+    bill_col = _find_col(reg_df, ["BillType", "Bill Type", "Insurance/Cash", "Cash/Insurance"])
+    visit_type_col = _find_col(reg_df, ["VisitType", "Visit Type", "VisitCategory"])
+    status_col = _find_col(reg_df, ["Status", "VisitStatus"])
+    pend_status_col = _find_col(pend_df, ["Status", "VisitStatus", "Pending Status"])
+    reg_user_col = _find_col(reg_df, ["RegUser", "RegistrationUser", "User", "CreatedBy"])
+    reg_date_col = _find_col(reg_df, ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
+
+    total_visits = int(len(reg_df))
+    unique_emr = int(pd.Series(reg_df[emr_col]).nunique(dropna=True))
+    unique_visitno = int(pd.Series(reg_df[visit_col]).nunique(dropna=True))
+
+    # Calculate New / Established / Follow Up from Visit Type
+    new_visits = 0
+    established_visits = 0
+    follow_up_visits = 0
+
+    if visit_type_col and visit_type_col in reg_df.columns:
+        vt = reg_df[visit_type_col].astype(str).str.lower().str.strip().fillna("")
+
+        follow_mask = vt.str.contains(r"\bfollow\b")  # follow up / follow-up
+        est_mask = (~follow_mask) & (vt.str.contains(r"\bestablished\b") | vt.str.contains(r"\bestd\b"))
+        new_mask = (~follow_mask) & (~est_mask) & (vt.str.len() > 0)
+
+        follow_up_visits = int(follow_mask.sum())
+        established_visits = int(est_mask.sum())
+        new_visits = int(new_mask.sum())
+
+    unclassified_visits = int(total_visits - (new_visits + established_visits + follow_up_visits))
+    if unclassified_visits < 0:
+        unclassified_visits = 0
+
+    cash_emr = ensure_required(cash_df, ["EMRNo"], "CashOut")["EMRNo"]
+    pend_emr = ensure_required(pend_df, ["EMRNo"], "Pending")["EMRNo"]
+    cash_patients = int(pd.Series(cash_df[cash_emr]).nunique(dropna=True))
+    pending_patients = int(pd.Series(pend_df[pend_emr]).nunique(dropna=True))
+
+    if reg_date_col:
+        d1 = pd.to_datetime(reg_df[reg_date_col], errors="coerce", dayfirst=False)
+        d2 = pd.to_datetime(reg_df[reg_date_col], errors="coerce", dayfirst=True)
+        d = (d2 if int(d2.notna().sum()) >= int(d1.notna().sum()) else d1).dt.date
+        reg_daywise = pd.Series(d).dropna().value_counts().sort_index().reset_index()
+        reg_daywise.columns = ["Reg Date", "Count"]
+    else:
+        reg_daywise = pd.DataFrame({"Reg Date": [day_ts.date()], "Count": [total_visits]})
+
+    # Update KPI DataFrame with new structure
+    kpi_data = [
+        {"Metric": "Day", "Value": day_ts.date().isoformat()},
+        {"Metric": "Total Visits", "Value": total_visits},
+        {"Metric": "New Patients", "Value": new_visits},
+        {"Metric": "Established Patients", "Value": established_visits},
+        {"Metric": "Follow Up", "Value": follow_up_visits},
+        {"Metric": "Unclassified Visits", "Value": unclassified_visits},
+        {"Metric": "Pending Patients", "Value": pending_patients},
+    ]
+
+    return {
+        "KPI": pd.DataFrame(kpi_data),
+        "Doctor Wise Visits": top_counts(reg_df, doctor_col, n=50, label="Doctor"),
+        "Insurance Wise Visits": top_counts(reg_df, ins_col, n=50, label="Insurance"),
+        "Employer Wise": employer_wise_with_insurance(reg_df, emp_col=emp_col, ins_col=ins_col, n=50),
+        "Bill Type": top_counts(reg_df, bill_col, n=20, label="Bill Type"),
+        "Visit Type": top_counts(reg_df, visit_type_col, n=20, label="Visit Type"),
+        "Status Wise": top_counts(reg_df, status_col, n=30, label="Status"),
+        "Pending Status Wise": top_counts(pend_df, pend_status_col, n=30, label="Status"),
+        "Registration User Wise": top_counts(reg_df, reg_user_col, n=30, label="User"),
+        "Reg Date Wise (Daily)": reg_daywise,
+    }
 
 def history_paths(center: str, base_prefix: str = "") -> Tuple[str, str]:
     """Return (root_prefix, history_csv_key) for this center.
-
-    Expected uploader layout (based on your S3 screenshots):
-      <base_prefix>/registration/<center>/history.csv
-      <base_prefix>/registration/<center>/<YYYY-MM-DD>/summary.pkl
+    
+    MODIFIED: Saves to registration/{center}/ at same level as streamlit/, rejection_cache/
     """
-    root = s3_key(base_prefix, "registration", center)
+    # Completely ignore any base_prefix to ensure we save at root level
+    # This creates: registration/{center}/
+    root = s3_key("registration", center)
     return root, s3_key(root, "history.csv")
 
+def save_run_to_s3(day_ts: pd.Timestamp, dfs: Dict[str, pd.DataFrame]):
+    # Use the modified history_paths that saves to registration/{center}/
+    root, hist_key = history_paths(center_key, cfg.get("S3_BASE_PREFIX", ""))
+    
+    day_str = day_ts.date().isoformat()
 
-def resolve_center_root_from_s3(s3, cfg: Dict[str, str], center_key: str) -> Tuple[str, str]:
-    """Return (root_prefix, history_csv_key) that actually exists in S3."""
-    bucket = cfg["S3_BUCKET_NAME"]
-    for pref in candidate_base_prefixes(cfg):
-        root, hist_key = history_paths(center_key, pref)
-        if s3_key_exists(s3, bucket, hist_key):
-            return root, hist_key
-    # default to the configured prefix path (even if missing), for clearer error messages
-    root, hist_key = history_paths(center_key, (cfg.get("S3_BASE_PREFIX") or ""))
-    return root, hist_key
+    # Save files to the new location
+    if SS["reg_file"]:
+        s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "registration.xlsx"), SS["reg_file"]["bytes"])
+    if SS["cash_file"]:
+        s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "cashout.xlsx"), SS["cash_file"]["bytes"])
+    if SS["pend_file"]:
+        s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "pending.xlsx"), SS["pend_file"]["bytes"])
 
+    if SS.get("income_file"):
+        s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "income.xlsx"), SS["income_file"]["bytes"])
+    if SS.get("cpticd_file"):
+        s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "cpticd.xlsx"), SS["cpticd_file"]["bytes"])
 
-def load_history_from_s3(s3, cfg: Dict[str, str], center_key: str) -> Tuple[pd.DataFrame, str]:
-    root, hist_key = resolve_center_root_from_s3(s3, cfg, center_key)
+    s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], s3_key(root, day_str, "summary.pkl"), pickle.dumps(dfs, protocol=pickle.HIGHEST_PROTOCOL))
+
+    # Extract KPI values safely
+    kpi = dfs.get("KPI")
+    if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
+        k = kpi.set_index("Metric")["Value"]
+        
+        # Handle numeric conversion safely
+        def safe_int(val, default=0):
+            try:
+                if isinstance(val, (int, float)):
+                    return int(val)
+                elif isinstance(val, str) and val.replace('.', '').isdigit():
+                    return int(float(val))
+                else:
+                    return default
+            except:
+                return default
+        
+        row = {
+            "day": pd.to_datetime(day_str),
+            "total_visits": safe_int(k.get("Total Visits", 0)),
+            "new_visits": safe_int(k.get("New Patients", 0)),
+            "established_visits": safe_int(k.get("Established Patients", 0)),
+            "pending_patients": safe_int(k.get("Pending Patients", 0)),
+        }
+    else:
+        # Fallback if KPI not found
+        row = {
+            "day": pd.to_datetime(day_str),
+            "total_visits": 0,
+            "new_visits": 0,
+            "established_visits": 0,
+            "pending_patients": 0,
+        }
+
+    existing = None
+    b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key)
+    if b:
+        existing = pd.read_csv(io.BytesIO(b), parse_dates=["day"])
+    if existing is None or existing.empty:
+        new_hist = pd.DataFrame([row])
+    else:
+        existing["day"] = pd.to_datetime(existing["day"]).dt.normalize()
+        new_hist = existing[existing["day"].dt.date.astype(str) != day_str].copy()
+        new_hist = pd.concat([new_hist, pd.DataFrame([row])], ignore_index=True)
+
+    new_hist = new_hist.sort_values("day").reset_index(drop=True)
+    s3_put_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key, new_hist.to_csv(index=False).encode("utf-8"), content_type="text/csv")
+
+def load_history_from_s3() -> pd.DataFrame:
+    if not s3_ok:
+        return pd.DataFrame()
+    _, hist_key = history_paths(center_key, cfg.get("S3_BASE_PREFIX", ""))
     b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], hist_key)
     if not b:
-        return pd.DataFrame(), root
-    try:
-        df = pd.read_csv(io.BytesIO(b), parse_dates=["day"])
-    except Exception:
-        df = pd.read_csv(io.BytesIO(b))
-    return df, root
+        return pd.DataFrame()
+    return pd.read_csv(io.BytesIO(b), parse_dates=["day"])
 
-
-def load_summary_from_s3(
-    s3,
-    cfg: Dict[str, str],
-    root_prefix: str,
-    day_ts: pd.Timestamp
-) -> Optional[Dict[str, pd.DataFrame]]:
+def load_summary_from_s3(day_ts: pd.Timestamp) -> Optional[Dict[str, pd.DataFrame]]:
+    """Load a previously saved summary.pkl for a given day from S3."""
+    if not s3_ok:
+        return None
+    root, _ = history_paths(center_key, cfg.get("S3_BASE_PREFIX", ""))
     day_str = pd.to_datetime(day_ts).date().isoformat()
-    key = s3_key(root_prefix, day_str, "summary.pkl")
+    key = s3_key(root, day_str, "summary.pkl")
     b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], key)
     if not b:
         return None
@@ -532,1134 +1872,533 @@ def load_summary_from_s3(
     except Exception:
         return None
 
+def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp):
+    """Render the Current Day + Accumulated sections."""
+    st.header(f"Current Day ({day_ts.date().isoformat()})")
+
+    # KPI cards
+    kpi = dfs.get("KPI")
+    if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
+        k = kpi.set_index("Metric")["Value"]
+        a, b, c, d = st.columns(4)
+        a.metric("Total Visits", int(k.get("Total Visits", 0)))
+        new_val = k.get("New Patients", 0)
+        b.metric("New Patients", 
+                int(new_val) if isinstance(new_val, (int, float)) else new_val)
+        est_val = k.get("Established Patients", 0)
+        c.metric("Established Patients", 
+                int(est_val) if isinstance(est_val, (int, float)) else est_val)
+        d.metric("Pending Patients", int(k.get("Pending Patients", 0)))
+    else:
+        st.info("KPI is not available for this summary.")
+
+    # Pending Status Wise (before Insurance)
+    st.subheader("Pending Status Wise")
+    if "Pending Status Wise" in dfs:
+        st.dataframe(dfs["Pending Status Wise"], use_container_width=True, hide_index=True)
+    else:
+        st.info("Pending Status Wise is not available for this saved summary. Please re-process today's files to generate it.")
+
+    # Insurance Wise
+    st.subheader("Insurance Wise Visits")
+    if "Insurance Wise Visits" in dfs:
+        st.dataframe(dfs["Insurance Wise Visits"], use_container_width=True, hide_index=True)
+    else:
+        st.info("Insurance Wise Visits is not available.")
+
+    # Employer Wise
+    st.subheader("Employer Wise")
+    if "Employer Wise" in dfs:
+        st.dataframe(dfs["Employer Wise"], use_container_width=True, hide_index=True)
+    else:
+        st.info("Employer Wise is not available for this saved summary. Please re-process today's files to generate it.")
+
+    # Doctor Wise
+    st.subheader("Doctor Wise Visits")
+    if "Doctor Wise Visits" in dfs:
+        st.dataframe(dfs["Doctor Wise Visits"], use_container_width=True, hide_index=True)
+    else:
+        st.info("Doctor Wise Visits is not available.")
+
+    # Row-level Downloads
+    st.markdown("---")
+    st.subheader("Download Details (Row-level)")
+
+    with st.expander("Download Pending Details (by Status)", expanded=False):
+        pend_df = SS.get("pend_df")
+        if pend_df is None:
+            st.info("Pending file is not loaded in this session. Upload/Process today's files to enable row-level download.")
+        else:
+            pend_status_col = _find_col(pend_df, ["Status", "VisitStatus", "Pending Status"])
+            if not pend_status_col:
+                st.warning("Pending file has no Status column (Status / VisitStatus).")
+            else:
+                tmp = pend_df.copy()
+                tmp[pend_status_col] = tmp[pend_status_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
+                statuses = sorted(tmp[pend_status_col].unique())
+                pick_status = st.selectbox("Select Pending Status", options=statuses, key="dl_pending_status")
+                detail = tmp[tmp[pend_status_col] == pick_status].copy()
+                fn = f"Pending_{_safe_filename(pick_status)}_{day_ts.date().isoformat()}.xlsx"
+                download_excel_button(detail, fn, "⬇️ Download Pending Rows (Excel)")
+
+    with st.expander("Download Registration Details (by Insurance)", expanded=False):
+        reg_df = SS.get("reg_df")
+        if reg_df is None:
+            st.info("Registration file is not loaded in this session. Upload/Process today's files to enable row-level download.")
+        else:
+            ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
+            if not ins_col:
+                st.warning("Registration file has no Insurance/Payer column.")
+            else:
+                tmp = reg_df.copy()
+                tmp[ins_col] = tmp[ins_col].fillna("CASH").astype(str).str.strip().replace("", "CASH").replace("Blank", "CASH")
+                ins_list = sorted(tmp[ins_col].unique())
+                pick_ins = st.selectbox("Select Insurance", options=ins_list, key="dl_insurance")
+                detail = tmp[tmp[ins_col] == pick_ins].copy()
+                fn = f"Registration_Insurance_{_safe_filename(pick_ins)}_{day_ts.date().isoformat()}.xlsx"
+                download_excel_button(detail, fn, "⬇️ Download Insurance Rows (Excel)")
+
+    with st.expander("Download Registration Details (by Employer)", expanded=False):
+        reg_df = SS.get("reg_df")
+        if reg_df is None:
+            st.info("Registration file is not loaded in this session. Upload/Process today's files to enable row-level download.")
+        else:
+            emp_col = next((c for c in reg_df.columns if _norm_col(c) == "employername"), None)  # STRICT: Employer Name only
+            if not emp_col:
+                st.warning("Registration file has no Employer/Company column.")
+            else:
+                tmp = reg_df.copy()
+                tmp[emp_col] = tmp[emp_col].fillna("Blank").astype(str).str.strip().replace("", "Blank")
+                tmp["__emp_key__"] = tmp[emp_col].apply(employer_canonical_name)
+
+                # display name = most frequent original in each normalized group
+                disp = (
+                    tmp.groupby(["__emp_key__", emp_col]).size().reset_index(name="cnt")
+                    .sort_values(["__emp_key__", "cnt"], ascending=[True, False])
+                    .drop_duplicates(subset=["__emp_key__"])
+                )
+                # build select options: "Display Name (count)"
+                counts = tmp.groupby("__emp_key__").size().reset_index(name="Count")
+                disp = disp.merge(counts, on="__emp_key__", how="left")
+                disp = disp.sort_values("Count", ascending=False)
+
+                options = disp["__emp_key__"].tolist()
+                labels = {r["__emp_key__"]: f"{r[emp_col]} ({int(r['Count'])})" for _, r in disp.iterrows()}
+
+                pick_key = st.selectbox(
+                    "Select Employer (deduped)",
+                    options=options,
+                    format_func=lambda k: labels.get(k, k),
+                    key="dl_employer_key",
+                )
+                detail = tmp[tmp["__emp_key__"] == pick_key].drop(columns=["__emp_key__"], errors="ignore").copy()
+                fn = f"Registration_Employer_{_safe_filename(labels.get(pick_key, pick_key))}_{day_ts.date().isoformat()}.xlsx"
+                download_excel_button(detail, fn, "⬇️ Download Employer Rows (Excel)")
+
+    with st.expander("Download Eligibility Expiry (Step 5) — by Insurance / Employer", expanded=False):
+        reg_df = SS.get("reg_df")
+        cpticd_df = SS.get("cpticd_df")
+        if reg_df is None or cpticd_df is None:
+            st.info("Upload/Process Step 1 and Step 5 in this session to enable eligibility expiry download.")
+        else:
+            # --- STRICT columns ---
+            reg_emr_col = _find_col(reg_df, ["EMRNo", "EMR No", "MRN", "Patient ID"])
+            reg_visit_col = _find_col(reg_df, ["VisitNo", "Visit No", "Visit Number", "Visit#"])
+            reg_emp_col = next((c for c in reg_df.columns if _norm_col(c) == "employername"), None)  # STRICT
+            # Apply master employer mapping on Registration employer column before grouping
+            reg_df_norm = reg_df.copy()
+            if _emp_col and _emp_col in reg_df_norm.columns:
+                reg_df_norm = normalize_employer_mapping(reg_df_norm, col=_emp_col)
+            reg_ins_col = _find_col(reg_df, ["Insurance", "InsuranceName", "Payer", "PayerName"])
+
+            c_emr_col = _find_col(cpticd_df, ["EMR No", "EMRNo", "MRN", "Patient ID"])
+            c_visit_col = _find_col(cpticd_df, ["Visit ID", "VisitID", "Visit No", "VisitNo"])
+            c_exp_col = _find_col(cpticd_df, ["Expiry Date", "Expiry", "Eligibility Expiry", "EligibilityExpiry", "Card Expiry", "CardExpiry"])
+            c_name_col = _find_col(cpticd_df, ["Name", "Patient Name", "PatientName"])
+            c_doc_col = _find_col(cpticd_df, ["Doctor", "Physician", "Clinician"])
+
+            missing = []
+            for k, v in {
+                "Registration EMRNo": reg_emr_col,
+                "Registration VisitNo": reg_visit_col,
+                "Registration Employer Name": reg_emp_col,
+                "Registration Insurance": reg_ins_col,
+                "CPT/ICD EMR No": c_emr_col,
+                "CPT/ICD Visit ID": c_visit_col,
+                "CPT/ICD Expiry Date": c_exp_col,
+            }.items():
+                if not v:
+                    missing.append(k)
+
+            if missing:
+                st.error("Missing required columns: " + ", ".join(missing))
+            else:
+                # normalize merge keys
+                r = reg_df[[reg_emr_col, reg_visit_col, reg_emp_col, reg_ins_col]].copy()
+                r.columns = ["EMR No", "Visit ID", "Employer", "Insurance"]
+                r["EMR No"] = r["EMR No"].astype(str).str.strip()
+                r["Visit ID"] = r["Visit ID"].astype(str).str.strip()
+
+                ccols = [c_emr_col, c_visit_col, c_exp_col]
+                if c_name_col: ccols.append(c_name_col)
+                if c_doc_col: ccols.append(c_doc_col)
+                c = cpticd_df[ccols].copy()
+                rename_map = {c_emr_col: "EMR No", c_visit_col: "Visit ID", c_exp_col: "Expiry Date"}
+                if c_name_col: rename_map[c_name_col] = "Name"
+                if c_doc_col: rename_map[c_doc_col] = "Doctor"
+                c = c.rename(columns=rename_map)
+                c["EMR No"] = c["EMR No"].astype(str).str.strip()
+                c["Visit ID"] = c["Visit ID"].astype(str).str.strip()
+                c["Expiry Date"] = pd.to_datetime(c["Expiry Date"], errors="coerce")
+
+                merged = r.merge(c, on=["EMR No", "Visit ID"], how="inner")
+                if merged.empty:
+                    st.warning("No matches found between Registration (EMR+VisitNo) and CPT/ICD (EMR+VisitID). Check Visit format / leading zeros.")
+                else:
+                    # Days to expiry
+                    today = pd.Timestamp.today().normalize()
+                    merged["Days To Expiry"] = (merged["Expiry Date"] - today).dt.days
+                    merged["Expiry Date"] = merged["Expiry Date"].dt.date.astype(str)
+
+                    # filters
+                    merged["Insurance"] = merged["Insurance"].fillna("CASH").astype(str).str.strip().replace("", "CASH")
+                    merged["Employer"] = merged["Employer"].fillna("Blank").astype(str).str.strip().replace("", "Blank")
+
+                    ins_pick = st.selectbox("Filter by Insurance", ["(All)"] + sorted(merged["Insurance"].unique()), key="dl_exp_ins")
+                    view = merged.copy()
+                    if ins_pick != "(All)":
+                        view = view[view["Insurance"] == ins_pick]
+
+                    emp_pick = st.selectbox("Filter by Employer", ["(All)"] + sorted(view["Employer"].unique()), key="dl_exp_emp")
+                    if emp_pick != "(All)":
+                        view = view[view["Employer"] == emp_pick]
+
+                    st.dataframe(view, use_container_width=True, hide_index=True)
+
+                    fn = f"Eligibility_Expiry_{_safe_filename(ins_pick)}_{_safe_filename(emp_pick)}_{day_ts.date().isoformat()}.xlsx"
+                    download_excel_button(view, fn, "⬇️ Download Eligibility Expiry (Excel)")
+
+    # Whole Summary Excel
+    export_dfs = {k: dfs[k] for k in dfs.keys()}
+    st.download_button(
+        "⬇️ Download Summary Excel",
+        data=excel_bytes_from_dfs(export_dfs),
+        file_name=f"Registration_Summary_{center_key}_{day_ts.date().isoformat()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    # Accumulated
+    st.header("Accumulated (All Saved Days)")
+    hist = load_history_from_s3() if s3_ok else pd.DataFrame()
+    if hist.empty:
+        st.info("No saved history found yet.")
+    else:
+        acc = add_cumulative(hist)
+        latest = acc.sort_values("day").iloc[-1]
+        a, b, c, d = st.columns(4)
+        a.metric("Cumulative Visits", int(latest.get("cum_total_visits", 0)))
+        b.metric("Cumulative New Patients", int(latest.get("cum_new_visits", 0)))
+        c.metric("Cumulative Established Patients", int(latest.get("cum_established_visits", 0)))
+        d.metric("Cumulative Pending", int(latest.get("cum_pending_patients", 0)))
+        st.dataframe(acc, use_container_width=True, hide_index=True)
 
 def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
     if hist is None or hist.empty:
         return pd.DataFrame()
     h = hist.sort_values("day").copy()
-    for c in ["total_visits", "unique_emr", "unique_visitno", "cash_patients", "pending_patients"]:
+    for c in ["total_visits", "new_visits", "established_visits", "pending_patients"]:
         if c in h.columns:
             h[c] = h[c].fillna(0).astype(int)
             h[f"cum_{c}"] = h[c].cumsum()
-    # show latest first
-    return h.sort_values("day", ascending=False).reset_index(drop=True)
 
+    cols = [
+        "day", "total_visits", "new_visits", "established_visits", "pending_patients",
+        "cum_total_visits", "cum_new_visits", "cum_established_visits", "cum_pending_patients"
+    ]
+    cols = [c for c in cols if c in h.columns]
+    return h[cols].sort_values("day", ascending=False).reset_index(drop=True)
 
-def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: str = "header", label: str = "Current Day"):
-    title = f"{label} ({fmt_day(day_ts)})"
-    if heading == "subheader":
-        st.subheader(title)
-    else:
-        st.header(title)
+# ---------------------------
+# Process & display
+# ---------------------------
 
-    kpi = dfs.get("KPI")
-    if kpi is not None and not kpi.empty and "Metric" in kpi.columns and "Value" in kpi.columns:
-        k = kpi.set_index("Metric")["Value"]
-        a, b, c = st.columns(3)
-        a.metric("Total Visits", int(k.get("Total Visits", 0)))
-        b.metric("New Patients", int(k.get("New Patients", 0)))
-        c.metric("Established Patients", int(k.get("Established Patients", 0)))
+can_process = SS["reg_df"] is not None and SS["cash_df"] is not None and SS["pend_df"] is not None
 
-        d, e, f = st.columns(3)
-        d.metric("Follow Up", int(k.get("Follow Up", 0)))
-        e.metric("Unclassified Visits", int(k.get("Unclassified Visits", 0)))
-        f.metric("Pending Patients", int(k.get("Pending Patients", 0)))
-        st.caption(f"Generated: **{fmt_dt(datetime.now())}**")
-    else:
-        st.info("KPI is not available for this day.")
+# Persist last result in-session (so it doesn't disappear on rerun)
+SS.setdefault("last_saved_day", None)
+SS.setdefault("last_saved_center", None)
 
-    st.subheader(f"Pending Status Wise (Day: {fmt_day(day_ts)})")
-    st.dataframe(dfs.get("Pending Status Wise", pd.DataFrame()), use_container_width=True, hide_index=True)
+if admin_mode:
+    # Day selection (prefer detected from Registration file; fallback to manual picker)
+    detected = get_day_from_registration(SS["reg_df"]) if SS["reg_df"] is not None else None
+    day_ts = detected if detected is not None else pd.to_datetime(manual_day)
 
-    st.subheader("Insurance Wise Visits")
-    st.dataframe(dfs.get("Insurance Wise Visits", pd.DataFrame()), use_container_width=True, hide_index=True)
-
-    st.subheader("Doctor Wise Visits")
-    st.dataframe(dfs.get("Doctor Wise Visits", pd.DataFrame()), use_container_width=True, hide_index=True)
-
-
-    # -------------------- Income Analysis (Doctor Revenue) -------------------- (Doctor Revenue) --------------------
-    income_keys = [k for k in dfs.keys() if str(k).startswith("Income | ")]
-    if income_keys:
-        st.markdown("---")
-        st.header("Income Analysis (Doctor Revenue)")
-
-        df_doc = dfs.get("Income | Doctor Wise Revenue")
-        df_ins = dfs.get("Income | Insurance Wise Revenue")
-        df_dx  = dfs.get("Income | Doctor x Insurance Revenue")
-
-        tabs = st.tabs(["Doctor Wise", "Insurance Wise", "Doctor x Insurance"])
-
-        def _round_income_display(df: pd.DataFrame) -> pd.DataFrame:
-            if df is None or df.empty:
-                return df
-            x = df.copy()
-            for col in ["Avg_Amount_Service", "Avg_Amount_Insuance", "Lab_%"]:
-                if col in x.columns:
-                    x[col] = pd.to_numeric(x[col], errors="coerce").round(2)
-            return x
-
-
-        with tabs[0]:
-            if df_doc is None or df_doc.empty:
-                st.info("No Doctor Wise revenue data for this day.")
-            else:
-                st.dataframe(_round_income_display(df_doc), use_container_width=True, hide_index=True)
-
-        with tabs[1]:
-            if df_ins is None or df_ins.empty:
-                st.info("No Insurance Wise revenue data for this day.")
-            else:
-                st.dataframe(_round_income_display(df_ins), use_container_width=True, hide_index=True)
-
-        with tabs[2]:
-            if df_dx is None or df_dx.empty:
-                st.info("No Doctor x Insurance revenue data for this day.")
-            else:
-                df_f = df_dx.copy()
-
-                # Filter: pick doctor first
-                if "Doctor" in df_f.columns:
-                    doctors = sorted([
-                        d for d in df_f["Doctor"].dropna().unique()
-                        if str(d).strip().lower() not in ["", "none", "nan"]
-                        and str(d).strip().upper() != "GRAND TOTAL"
-                    ])
-                    if doctors:
-                        pick_doc = st.selectbox("Select Doctor", options=doctors, key=f"income_pick_doc_{str(day_ts)}")
-                        df_f = df_f[df_f["Doctor"] == pick_doc].copy()
-
-                # Filter: pick insurance (optional)
-                if "Insurance" in df_f.columns:
-                    ins_list = sorted([
-                        i for i in df_f["Insurance"].dropna().unique()
-                        if str(i).strip().lower() not in ["", "none", "nan"] and str(i).strip().upper() != "GRAND TOTAL"
-                    ])
-                    pick_ins = st.selectbox("Select Insurance", options=["All"] + ins_list, key=f"income_pick_ins_{str(day_ts)}")
-                    if pick_ins != "All":
-                        df_f = df_f[df_f["Insurance"] == pick_ins].copy()
-
-                st.dataframe(_round_income_display(df_f), use_container_width=True, hide_index=True)
-
-
-
-    
-
-    # -------------------- CPT / ICD Analysis --------------------
-    # NOTE: Never use `or` between DataFrames (pandas raises: "truth value of a DataFrame is ambiguous").
-    # We support BOTH key styles:
-    #   New (viewer-style): "CPTICD | ..."
-    #   Old (uploader-style): "Doctor x Company | ..." / "CPT -> Top Principal ICD" / "Employer Expiry Tracker"
-    def _pick_first_df(keys: List[str]) -> Optional[pd.DataFrame]:
-        first_any: Optional[pd.DataFrame] = None
-        for kk in keys:
-            v = dfs.get(kk)
-            if isinstance(v, pd.DataFrame):
-                if first_any is None:
-                    first_any = v
-                if not v.empty:
-                    return v
-        return first_any
-
-    has_cpticd = any(str(k).startswith("CPTICD | ") for k in dfs.keys()) or any(
-        k in dfs for k in [
-            "Doctor x Company | Principal DX (Top1)",
-            "Doctor x Company | Secondary DX (Top1)",
-            "Doctor x Insurance | Principal DX (Counts)",
-            "Doctor x Insurance | Secondary DX (Counts)",
-            "Doctor x Insurance | Visits",
-            "Doctor x Insurance | Principal DX (Top1)",
-            "Doctor x Insurance | Secondary DX (Top1)",
-            "CPT -> Top Principal ICD",
-            "Employer Expiry Tracker",
-        ]
+    if detected is None and SS["reg_df"] is not None:
+        st.warning("Registration file has no readable date column. Using Manual Day.")
+    elif detected is not None:
+        st.success(f"Detected Day from Registration file: {day_ts.date().isoformat()}")
+    st.markdown("---")
+    st.subheader("Processing Scope")
+    scope = st.radio(
+        "Select how you want to process the uploaded files:",
+        options=["Daily (single date)", "Weekly", "Monthly", "Bulk (split & save all dates found in Registration)"],
+        index=0,
+        horizontal=True,
+        help="Daily saves one selected/detected day. Bulk will split the Registration file by date and save each day to S3 (best for full-year uploads). Weekly/Monthly are for display in View page (no special save needed).",
     )
+    bulk_mode = (scope == "Bulk (split & save all dates found in Registration)")
 
-    if has_cpticd:
-        st.markdown("---")
-        st.header("CPT / ICD Analysis")
-
-        # Simplified display (Doctor + Insurance only)
-        # Prefer VISIT-LEVEL Principal DX counts (totals intended to match visits)
-        df_pri = _pick_first_df([
-            "CPTICD | Doctor x Insurance | Principal DX (Counts)",
-            "Doctor x Insurance | Principal DX (Counts)",
-            # fallback: old Top1 keys
-            "CPTICD | Doctor x Insurance | Principal DX (Top1)",
-            "CPTICD | Doctor x Company | Principal DX (Top1)",
-            "Doctor x Insurance | Principal DX (Top1)",
-            "Doctor x Company | Principal DX (Top1)",
-        ])
-        df_sec = _pick_first_df([
-            "CPTICD | Doctor x Insurance | Secondary DX (Counts)",
-            "Doctor x Insurance | Secondary DX (Counts)",
-            # fallback: old Top1 keys
-            "CPTICD | Doctor x Insurance | Secondary DX (Top1)",
-            "CPTICD | Doctor x Company | Secondary DX (Top1)",
-            "Doctor x Insurance | Secondary DX (Top1)",
-            "Doctor x Company | Secondary DX (Top1)",
-        ])
-        df_cpt_map = _pick_first_df([
-            "CPTICD | CPT -> Top Principal ICD",
-            "CPT -> Top Principal ICD",
-        ])
-
-        tabs = st.tabs(["Doctor x Insurance", "CPT Mapping"])
-
-        def _clean_diag(df: Optional[pd.DataFrame]) -> pd.DataFrame:
-            if df is None or df.empty:
-                return pd.DataFrame()
-            out = df.copy()
-
-            # Drop unnamed/blank columns (common after Excel export)
-            bad_cols = []
-            for c in list(out.columns):
-                sc = str(c).strip()
-                if sc == "" or sc.lower().startswith("unnamed"):
-                    bad_cols.append(c)
-            if bad_cols:
-                out = out.drop(columns=bad_cols, errors="ignore")
-
-            # Drop employer/company columns if present
-            for drop_c in ["Employer", "Company"]:
-                if drop_c in out.columns:
-                    out = out.drop(columns=[drop_c])
-
-            # Fix common typo
-            if "Insuance" in out.columns and "Insurance" not in out.columns:
-                out = out.rename(columns={"Insuance": "Insurance"})
-
-            # Keep only requested columns where available (Doctor/Insurance/ICD/Count/Desc)
-            keep = [c for c in ["Doctor", "Insurance", "ICD", "Count", "ICD Description"] if c in out.columns]
-            return out[keep] if keep else out
-
-        with tabs[0]:
-            st.subheader("Top Diagnosis (Doctor x Insurance)")
-
-            pri_clean = _clean_diag(df_pri)
-            sec_clean = _clean_diag(df_sec)
-
-            # --- Filters (Doctor + Insurance) ---
-            doctors = []
-            ins_list = []
-            for _d in [pri_clean, sec_clean]:
-                if isinstance(_d, pd.DataFrame) and not _d.empty:
-                    if "Doctor" in _d.columns:
-                        doctors += _d["Doctor"].dropna().astype(str).tolist()
-                    if "Insurance" in _d.columns:
-                        ins_list += _d["Insurance"].dropna().astype(str).tolist()
-
-            doctors = sorted({d.strip() for d in doctors if str(d).strip() != ""})
-            ins_list = sorted({i.strip() for i in ins_list if str(i).strip() != ""})
-
-            f1, f2 = st.columns(2)
-            with f1:
-                pick_doc = st.selectbox("Select Doctor", ["All"] + doctors, index=0, key="cpticd_pick_doc")
-            with f2:
-                pick_ins = st.selectbox("Select Insurance", ["All"] + ins_list, index=0, key="cpticd_pick_ins")
-
-            def _filter_diag(df: pd.DataFrame) -> pd.DataFrame:
-                if df is None or df.empty:
-                    return pd.DataFrame()
-                out = df.copy()
-                if pick_doc != "All" and "Doctor" in out.columns:
-                    out = out[out["Doctor"].astype(str) == str(pick_doc)]
-                if pick_ins != "All" and "Insurance" in out.columns:
-                    out = out[out["Insurance"].astype(str) == str(pick_ins)]
-                return out
-
-            # --- Principal DX (Counts) with TOTAL + match with visits ---
-            pri_show = _filter_diag(pri_clean)
-
-            # Detect if this is visit-level counts table
-            is_counts_view = False
-            if isinstance(df_pri, pd.DataFrame):
-                is_counts_view = any(
-                    str(k).strip() in ["CPTICD | Doctor x Insurance | Principal DX (Counts)", "Doctor x Insurance | Principal DX (Counts)"]
-                    for k in dfs.keys()
-                )
-
-            total_dx = None
-            if not pri_show.empty and "Count" in pri_show.columns:
-                try:
-                    total_dx = int(pd.to_numeric(pri_show["Count"], errors="coerce").fillna(0).sum())
-                except Exception:
-                    total_dx = None
-
-            # Expected visits from Income Doctor x Insurance table (if available)
-            # Expected visits (prefer CPT/ICD visit table; fallback to Income Doctor x Insurance)
-            expected_visits = None
-
-            df_vis = dfs.get("Doctor x Insurance | Visits")
-            if isinstance(df_vis, pd.DataFrame) and not df_vis.empty and "Visits" in df_vis.columns:
-                tmpv = df_vis.copy()
-                if pick_doc != "All" and "Doctor" in tmpv.columns:
-                    tmpv = tmpv[tmpv["Doctor"].astype(str) == str(pick_doc)]
-                if pick_ins != "All" and "Insurance" in tmpv.columns:
-                    tmpv = tmpv[tmpv["Insurance"].astype(str) == str(pick_ins)]
-                try:
-                    expected_visits = int(pd.to_numeric(tmpv["Visits"], errors="coerce").fillna(0).sum())
-                except Exception:
-                    expected_visits = None
-
-            if expected_visits is None:
-                df_income_dx = dfs.get("Income | Doctor x Insurance Revenue")
-                if isinstance(df_income_dx, pd.DataFrame) and not df_income_dx.empty and "Total_Visit" in df_income_dx.columns:
-                    tmp = df_income_dx.copy()
-                    if pick_doc != "All" and "Doctor" in tmp.columns:
-                        tmp = tmp[tmp["Doctor"].astype(str) == str(pick_doc)]
-                    if pick_ins != "All" and "Insurance" in tmp.columns:
-                        tmp = tmp[tmp["Insurance"].astype(str) == str(pick_ins)]
-                    # Exclude GRAND TOTAL rows if present
-                    for coln in ["Doctor", "Insurance"]:
-                        if coln in tmp.columns:
-                            tmp = tmp[tmp[coln].astype(str).str.upper() != "GRAND TOTAL"]
-                    try:
-                        expected_visits = int(pd.to_numeric(tmp["Total_Visit"], errors="coerce").fillna(0).sum())
-                    except Exception:
-                        expected_visits = None
-
-            # Sort by Count (largest → smallest)
-            if not pri_show.empty and "Count" in pri_show.columns:
-                pri_show["Count"] = pd.to_numeric(pri_show["Count"], errors="coerce").fillna(0)
-                pri_show = pri_show.sort_values("Count", ascending=False)
-
-            # Append TOTAL row at end
-            if not pri_show.empty and total_dx is not None:
-                total_row = {c: "" for c in pri_show.columns}
-                if "ICD" in pri_show.columns:
-                    total_row["ICD"] = "TOTAL"
-                elif "Doctor" in pri_show.columns:
-                    total_row["Doctor"] = "TOTAL"
-                if "Count" in pri_show.columns:
-                    total_row["Count"] = total_dx
-
-                pri_show = pd.concat([pri_show, pd.DataFrame([total_row])], ignore_index=True)
-
-            if not pri_show.empty and total_dx is not None:
-                total_row = {c: "" for c in pri_show.columns}
-                if "ICD" in pri_show.columns:
-                    total_row["ICD"] = "TOTAL"
-                elif "Doctor" in pri_show.columns:
-                    total_row["Doctor"] = "TOTAL"
-                if "Count" in pri_show.columns:
-                    total_row["Count"] = total_dx
-                pri_show = pd.concat([pri_show, pd.DataFrame([total_row])], ignore_index=True)
-
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("**Principal DX (Visit-level Counts)**" if is_counts_view else "**Principal DX**")
-                # Summary line
-                if total_dx is not None:
-                    if expected_visits is not None:
-                        st.caption(f"Principal DX TOTAL: {total_dx}  |  Visits: {expected_visits}")
-                    else:
-                        st.caption(f"Principal DX TOTAL: {total_dx}")
-                st.dataframe(pri_show, use_container_width=True, hide_index=True)
-
-            with c2:
-                st.markdown("**Secondary DX (Counts)**")
-                sec_show = _filter_diag(sec_clean)
-
-                total_sec = None
-                if not sec_show.empty and "Count" in sec_show.columns:
-                    try:
-                        total_sec = int(pd.to_numeric(sec_show["Count"], errors="coerce").fillna(0).sum())
-                    except Exception:
-                        total_sec = None
-
-                
-                # Sort by Count (largest → smallest)
-                if not sec_show.empty and "Count" in sec_show.columns:
-                    sec_show["Count"] = pd.to_numeric(sec_show["Count"], errors="coerce").fillna(0)
-                    sec_show = sec_show.sort_values("Count", ascending=False)
-
-                # Append TOTAL row
-                if not sec_show.empty and total_sec is not None:
-
-                    total_row = {c: "" for c in sec_show.columns}
-                    if "Insurance" in sec_show.columns:
-                        total_row["Insurance"] = "TOTAL"
-                    if "Count" in sec_show.columns:
-                        total_row["Count"] = total_sec
-                    sec_show = pd.concat([sec_show, pd.DataFrame([total_row])], ignore_index=True)
-
-                if total_sec is not None:
-                    if expected_visits is not None:
-                        st.caption(f"Secondary DX TOTAL: {total_sec}  |  Visits: {expected_visits}")
-                    else:
-                        st.caption(f"Secondary DX TOTAL: {total_sec}")
-
-                st.dataframe(sec_show, use_container_width=True, hide_index=True)
-        with tabs[1]:
-            # Prefer new visit-bundle summary (saved by Summary page)
-            df_bundle = dfs.get("CPT Visit Bundle", pd.DataFrame())
-            if isinstance(df_bundle, pd.DataFrame) and not df_bundle.empty:
-                st.subheader("CPT Visit Bundle Summary")
-
-                df_show = df_bundle.copy()
-
-                # Filters (Doctor + Insurance) like ICD
-                f1, f2 = st.columns(2)
-                with f1:
-                    doc_list = sorted([
-                        x for x in df_show.get("Doctor", pd.Series([], dtype=str)).dropna().astype(str).unique().tolist()
-                        if str(x).strip() not in ["", "nan", "None"] and str(x).strip().upper() != "GRAND TOTAL"
-                    ])
-                    pick_doc2 = st.selectbox("Select Doctor", ["All"] + doc_list, index=0, key="cptbundle_pick_doc")
-
-                with f2:
-                    ins_list2 = sorted([
-                        x for x in df_show.get("Insurance", pd.Series([], dtype=str)).dropna().astype(str).unique().tolist()
-                        if str(x).strip() not in ["", "nan", "None"] and str(x).strip().upper() != "GRAND TOTAL"
-                    ])
-                    pick_ins2 = st.selectbox("Select Insurance", ["All"] + ins_list2, index=0, key="cptbundle_pick_ins")
-
-                if pick_doc2 != "All" and "Doctor" in df_show.columns:
-                    df_show = df_show[df_show["Doctor"].astype(str) == str(pick_doc2)].copy()
-                if pick_ins2 != "All" and "Insurance" in df_show.columns:
-                    df_show = df_show[df_show["Insurance"].astype(str) == str(pick_ins2)].copy()
-
-                # Sort by Visits desc
-                if "Visits" in df_show.columns:
-                    df_show["Visits"] = pd.to_numeric(df_show["Visits"], errors="coerce").fillna(0).astype(int)
-                    df_show = df_show.sort_values("Visits", ascending=False)
-
-                # Caption like ICD: CPT TOTAL VISITS + Day
-                total_visits_cpt = None
-                if "Visits" in df_show.columns and not df_show.empty:
-                    try:
-                        total_visits_cpt = int(df_show["Visits"].sum())
-                    except Exception:
-                        total_visits_cpt = None
-
-                if total_visits_cpt is not None:
-                    st.caption(f"CPT TOTAL VISITS: {total_visits_cpt}  |  Day: {fmt_day(day_ts)}")
-
-                # Display only key columns first (if they exist)
-                prefer_cols = [c for c in ["Doctor", "Insurance", "CPT Bundle", "Principal DX", "Secondary DX", "Visits"] if c in df_show.columns]
-                st.dataframe(df_show[prefer_cols] if prefer_cols else df_show, use_container_width=True, hide_index=True)
-
-            else:
-                # Fallback: old CPT -> Top Principal ICD mapping
-                st.subheader("CPT → Most Common Principal ICD")
-
-                df_cpt = df_cpt_map if isinstance(df_cpt_map, pd.DataFrame) else pd.DataFrame()
-                if df_cpt is None or df_cpt.empty:
-                    st.info("No CPT mapping data for this day.")
-                else:
-                    df_show = df_cpt.copy()
-
-                    # --- Optional filters (like ICD tab): Doctor + Insurance + CPT ---
-                    f1, f2, f3 = st.columns(3)
-
-                    with f1:
-                        if "Doctor" in df_show.columns:
-                            doc_list = sorted([x for x in df_show["Doctor"].dropna().astype(str).unique().tolist() if str(x).strip() not in ["", "nan", "None"]])
-                            pick_doc2 = st.selectbox("Select Doctor", ["All"] + doc_list, index=0, key="cptmap_pick_doc")
-                        else:
-                            pick_doc2 = "All"
-
-                    with f2:
-                        if "Insurance" in df_show.columns:
-                            ins_list2 = sorted([x for x in df_show["Insurance"].dropna().astype(str).unique().tolist() if str(x).strip() not in ["", "nan", "None"]])
-                            pick_ins2 = st.selectbox("Select Insurance", ["All"] + ins_list2, index=0, key="cptmap_pick_ins")
-                        else:
-                            pick_ins2 = "All"
-
-                    with f3:
-                        if "CPT" in df_show.columns:
-                            cpt_list = sorted([x for x in df_show["CPT"].dropna().astype(str).unique().tolist() if str(x).strip() not in ["", "nan", "None"]])
-                            pick_cpt = st.selectbox("Select CPT", ["All"] + cpt_list, index=0, key="cpticd_pick_cpt")
-                        else:
-                            pick_cpt = "All"
-
-                    # Apply filters
-                    if pick_doc2 != "All" and "Doctor" in df_show.columns:
-                        df_show = df_show[df_show["Doctor"].astype(str) == str(pick_doc2)].copy()
-
-                    if pick_ins2 != "All" and "Insurance" in df_show.columns:
-                        df_show = df_show[df_show["Insurance"].astype(str) == str(pick_ins2)].copy()
-
-                    if pick_cpt != "All" and "CPT" in df_show.columns:
-                        df_show = df_show[df_show["CPT"].astype(str) == str(pick_cpt)].copy()
-
-                    # Sort by Count (largest → smallest) if available
-                    if "Count" in df_show.columns:
-                        df_show["Count"] = pd.to_numeric(df_show["Count"], errors="coerce").fillna(0)
-                        df_show = df_show.sort_values("Count", ascending=False)
-
-                    # TOTAL row at end (Count)
-                    if not df_show.empty and "Count" in df_show.columns:
-                        total_c = int(df_show["Count"].sum())
-                        total_row = {c: "" for c in df_show.columns}
-                        # Put TOTAL label in CPT if present, else first column
-                        if "CPT" in df_show.columns:
-                            total_row["CPT"] = "TOTAL"
-                        else:
-                            total_row[df_show.columns[0]] = "TOTAL"
-                        total_row["Count"] = total_c
-                        df_show = pd.concat([df_show, pd.DataFrame([total_row])], ignore_index=True)
-                    else:
-                        total_c = None
-
-                    # Caption like ICD: CPT TOTAL + Visits (+ Day)
-                    try:
-                        _vis = expected_visits if "expected_visits" in locals() else None
-                    except Exception:
-                        _vis = None
-                    try:
-                        _day_label = fmt_day(day_ts) if "day_ts" in locals() else None
-                    except Exception:
-                        _day_label = None
-
-                    if total_c is not None:
-                        if _vis is not None and _day_label:
-                            st.caption(f"CPT TOTAL: {int(total_c)}  |  Visits: {_vis}  |  Day: {_day_label}")
-                        elif _vis is not None:
-                            st.caption(f"CPT TOTAL: {int(total_c)}  |  Visits: {_vis}")
-                        elif _day_label:
-                            st.caption(f"CPT TOTAL: {int(total_c)}  |  Day: {_day_label}")
-                        else:
-                            st.caption(f"CPT TOTAL: {int(total_c)}")
-
-                    st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-                    # Note for you (in UI) if Doctor/Insurance are missing in saved table
-                    if "Doctor" not in df_cpt.columns or "Insurance" not in df_cpt.columns:
-                        st.caption("Note: Doctor/Insurance filters will appear only if the saved CPT mapping table contains Doctor and Insurance columns.")
-
-    st.subheader("Employer Wise")
-    emp_df = dfs.get("Employer Wise", pd.DataFrame()).copy()
-
-    # Apply employer canonicalization to avoid duplicates (QUMRA/QAMRA etc.)
-    if not emp_df.empty and "Employer" in emp_df.columns:
-        emp_df["Employer_norm"] = emp_df["Employer"].apply(_norm_emp)
-
-        group_cols = ["Employer_norm"]
-        if "Insurance" in emp_df.columns:
-            group_cols.append("Insurance")
-
-        # Sum counts after normalization
-        if "Count" in emp_df.columns:
-            emp_df = emp_df.groupby(group_cols, as_index=False)["Count"].sum()
-        else:
-            emp_df = emp_df.drop_duplicates(subset=group_cols).copy()
-
-        emp_df["Employer"] = emp_df["Employer_norm"].map(EMPLOYER_DISPLAY_MAP).fillna(emp_df["Employer_norm"])
-        emp_df = emp_df.drop(columns=["Employer_norm"], errors="ignore")
-
-    # --- Employer expiry summary (STRICT employer from Registration, expiry from CPT/ICD) ---
-    # We expect the uploader to save a tracker table that includes at least:
-    #   Employer (from RegistrationList "Employer Name") + Expiry Date (from CPT/ICD file)
-    # But to be robust, we also fall back to any table that contains an Employer-like column and an Expiry column.
-    def _pick_expiry_df(dfs_dict: dict) -> pd.DataFrame | None:
-        # 1) Prefer explicit tracker key
-        for k, v in dfs_dict.items():
-            if isinstance(v, pd.DataFrame) and "expiry" in str(k).lower() and "tracker" in str(k).lower():
-                return v
-        # 2) Any key mentioning expiry
-        for k, v in dfs_dict.items():
-            if isinstance(v, pd.DataFrame) and "expiry" in str(k).lower():
-                return v
-        # 3) Any DF that has expiry+employer columns
-        for _, v in dfs_dict.items():
-            if not isinstance(v, pd.DataFrame) or v.empty:
-                continue
-            cols = [c.lower().strip() for c in v.columns]
-            if any("expiry" in c for c in cols) and any(c in ("employer", "employer name") or "employer" in c for c in cols):
-                return v
-        return None
-
-    df_exp_all = _pick_expiry_df(dfs)
-
-    exp_display_map: dict[str, str] = {}
-    exp_top_date_map: dict[str, date | None] = {}
-    today = date.today()
-
-    def _norm_emp(x: str) -> str:
-        """Normalize employer for grouping (uses canon map if present)."""
-        s = str(x or "").strip().upper()
-        s = re.sub(r"\s+", " ", s)
-        canon = EMPLOYER_CANON_MAP.get(s, s)
-        canon = str(canon or "").strip()
-        canon_u = canon.upper()
-        canon_u = re.sub(r"\s+", " ", canon_u)
-        return canon_u
-
-    if df_exp_all is not None and not df_exp_all.empty and not emp_df.empty and "Employer" in emp_df.columns:
-        exp = df_exp_all.copy()
-
-        # Detect employer column in tracker (STRICT: should already be Employer from RegistrationList)
-        emp_col = None
-        for c in exp.columns:
-            cl = str(c).strip().lower()
-            if cl == "employer" or cl == "employer name" or "employer" in cl:
-                emp_col = c
-                break
-
-        # Detect expiry column
-        exp_col = None
-        for c in exp.columns:
-            cl = str(c).strip().lower()
-            if "expiry" in cl and ("date" in cl or cl == "expiry"):
-                exp_col = c
-                break
-        if exp_col is None:
-            # fallback: any column containing 'expiry'
-            for c in exp.columns:
-                if "expiry" in str(c).strip().lower():
-                    exp_col = c
-                    break
-
-        if emp_col and exp_col:
-            exp[emp_col] = exp[emp_col].astype(str).map(_norm_emp)
-            exp["_expiry_date"] = pd.to_datetime(exp[exp_col], errors="coerce").dt.date
-
-            # Option B: base % only on valid (non-null) expiry dates
-            for emp in emp_df["Employer"].dropna().astype(str).unique().tolist():
-                emp_key = _norm_emp(emp)
-                sub = exp.loc[exp[emp_col] == emp_key, "_expiry_date"].dropna()
-                if sub.empty:
-                    exp_display_map[emp_key] = ""
-                    exp_top_date_map[emp_key] = None
-                    continue
-
-                vc = sub.value_counts()
-                top_date = vc.index[0]
-                top_count = int(vc.iloc[0])
-                total_valid = int(vc.sum())
-                pct = (top_count / total_valid) * 100.0 if total_valid else 0.0
-
-                if pct >= 70.0:
-                    display = top_date.strftime("%Y-%m-%d")
-                else:
-                    display = f"Mixed (Top: {top_date.strftime('%Y-%m-%d')} – {int(round(pct))}%)"
-
-                exp_display_map[emp_key] = display
-                exp_top_date_map[emp_key] = top_date
-        else:
-            # missing columns
-            pass
-
-    if emp_df is None or emp_df.empty:
-        st.dataframe(emp_df if emp_df is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
-    else:
-        # Attach Expiry Date / Days To Expiry (prefer saved columns if present)
-        if "Expiry Date" not in emp_df.columns or emp_df["Expiry Date"].fillna("").astype(str).str.strip().eq("").all():
-            if "Employer" in emp_df.columns:
-                emp_df["Expiry Date"] = emp_df["Employer"].map(lambda e: exp_display_map.get(_norm_emp(e), ""))
-            else:
-                emp_df["Expiry Date"] = ""
-
-        # Days To Expiry (prefer saved)
-        if "Days To Expiry" not in emp_df.columns or emp_df["Days To Expiry"].isna().all():
-            if "Employer" in emp_df.columns:
-                def _days_from_emp(e):
-                    d = exp_top_date_map.get(_norm_emp(e))
-                    if d is None:
-                        return ""
-                    try:
-                        return (d - today).days
-                    except Exception:
-                        return ""
-                emp_df["Days To Expiry"] = emp_df["Employer"].map(_days_from_emp)
-            else:
-                emp_df["Days To Expiry"] = ""
-
-        # Styling bands (today-based):
-        #   expired (<0) -> dark red
-        #   <=30 -> red
-        #   31-60 -> yellow
-        #   >60 -> normal
-        def _style_exp_cell(emp_val, disp_val):
-            if not disp_val:
-                return ""
-            top_date = exp_top_date_map.get(_norm_emp(emp_val))
-            if not top_date:
-                return ""
-            diff = (top_date - today).days
-            if diff < 0:
-                return "background-color:#8B0000;color:white;font-weight:700;"
-            if diff <= 30:
-                return "background-color:red;color:white;font-weight:700;"
-            if diff <= 60:
-                return "background-color:yellow;color:black;font-weight:700;"
-            return ""
-
-        show_df = emp_df.copy()
-        sty = show_df.style.apply(
-            lambda row: [""] * (len(row) - 1) + [_style_exp_cell(row.get("Employer", ""), row.get("Expiry Date", ""))],
-            axis=1,
-        )
-        st.dataframe(sty, use_container_width=True, hide_index=True)
-
-        # ---- Expiry Detail List (Step 5) + Download ----
-        with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=False):
-            df_detail = df_exp_all.copy() if df_exp_all is not None else pd.DataFrame()
-            if df_detail is None or df_detail.empty:
-                st.info("No expiry detail list found for this day/period.")
-            else:
-                # Normalize column names
-                if "Insuance" in df_detail.columns and "Insurance" not in df_detail.columns:
-                    df_detail = df_detail.rename(columns={"Insuance": "Insurance"})
-                # Expected columns
-                # Employer, Insurance, Name, EMR No, Visit ID, Doctor, Expiry Date, Days To Expiry
-                # Filters
-                f1, f2, f3 = st.columns([2, 2, 2])
-                with f1:
-                    win = st.selectbox(
-                        "Expiry Window",
-                        options=["All", "Expired", "Next 30 days", "Next 60 days", "Next 90 days"],
-                        key=f"exp_win2_{str(day_ts)}",
-                    )
-                with f2:
-                    ins_opts = []
-                    if "Insurance" in df_detail.columns:
-                        ins_opts = sorted([x for x in df_detail["Insurance"].dropna().unique() if str(x).strip() not in ["", "nan", "None"]])
-                    pick_ins = st.selectbox("Insurance", options=["All"] + ins_opts, key=f"exp_ins2_{str(day_ts)}")
-                with f3:
-                    emp_opts = []
-                    if "Employer" in df_detail.columns:
-                        emp_opts = sorted([x for x in df_detail["Employer"].dropna().unique() if str(x).strip() not in ["", "nan", "None"]])
-                    pick_emp = st.selectbox("Employer", options=["All"] + emp_opts, key=f"exp_emp2_{str(day_ts)}")
-
-                df_f = df_detail.copy()
-                if "Days To Expiry" in df_f.columns:
-                    if win == "Expired":
-                        df_f = df_f[df_f["Days To Expiry"] < 0]
-                    elif win.startswith("Next"):
-                        n = int(re.findall(r"\d+", win)[0])
-                        df_f = df_f[(df_f["Days To Expiry"] >= 0) & (df_f["Days To Expiry"] <= n)]
-
-                if pick_ins != "All" and "Insurance" in df_f.columns:
-                    df_f = df_f[df_f["Insurance"] == pick_ins]
-                if pick_emp != "All" and "Employer" in df_f.columns:
-                    df_f = df_f[df_f["Employer"] == pick_emp]
-
-                
-    # ---- Summary counts (on-screen) ----
-    grp_cols = [c for c in ["Employer", "Insurance"] if c in df_f.columns]
-    if grp_cols:
-        df_counts = (
-            df_f.groupby(grp_cols, dropna=False)
-            .size()
-            .reset_index(name="Count")
-            .sort_values("Count", ascending=False)
-        )
-        # TOTAL row
-        total_n = int(df_counts["Count"].sum()) if "Count" in df_counts.columns else 0
-        total_row = {c: "" for c in df_counts.columns}
-        if "Employer" in total_row:
-            total_row["Employer"] = "TOTAL"
-        total_row["Count"] = total_n
-        df_counts = pd.concat([pd.DataFrame([total_row]), df_counts], ignore_index=True)
-    
-        st.caption(f"Showing summary counts for: **{win}** | Rows: {len(df_counts)-1} | TOTAL: {total_n}")
-        st.dataframe(df_counts, use_container_width=True, hide_index=True)
-    else:
-        st.info("Expiry list is missing Employer/Insurance columns, so summary counts cannot be built.")
-        df_counts = pd.DataFrame()
-
-    # ---- Optional detailed list (only when needed) ----
-    exp_key = f"{win}_{pick_ins}_{pick_emp}"
-    show_details = st.checkbox(
-        "Show detailed patient list (only if you need to review before download)",
-        value=False,
-        key=f"exp_show_details_{exp_key}",
-    )
-    if show_details:
-        show_cols = [c for c in ["Employer","Insurance","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"] if c in df_f.columns]
-        st.dataframe(df_f[show_cols] if show_cols else df_f, use_container_width=True, hide_index=True)
-
-    # ---- Downloads ----
-    # Download counts
-    try:
-        import io as _io
-        out_counts = _io.BytesIO()
-        with pd.ExcelWriter(out_counts, engine="openpyxl") as writer:
-            (df_counts if isinstance(df_counts, pd.DataFrame) else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Expiry_Counts")
-        st.download_button(
-            "Download Counts (Excel)",
-            data=out_counts.getvalue(),
-            file_name="expiry_counts.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"dl_exp_counts_{exp_key}",
-        )
-    except Exception:
-        st.warning("Counts download is unavailable (Excel writer error).")
-
-    # Download full list
-    try:
-        import io as _io
-        out = _io.BytesIO()
-        with pd.ExcelWriter(out, engine="openpyxl") as writer:
-            (df_f[show_cols] if (show_details and show_cols) else df_f).to_excel(writer, index=False, sheet_name="Expiry_List")
-        st.download_button(
-            "Download Full List (Excel)",
-            data=out.getvalue(),
-            file_name="expiry_list.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"dl_exp_full_{exp_key}",
-        )
-    except Exception:
-        st.warning("Download is unavailable (Excel writer not found).")
-# ---------------------------
-# Center selection (LOCKED if passed in URL)
-# ---------------------------
-CENTERS = {
-    "easyhealth": "Easy Health Medical Clinic (MF8031)",
-    "excellent": "Excellent Medical Center (MF4777)",
-    "pharmacy": "Excellent Pharmacy (PF3205)",
-}
-
-# Streamlit new API: st.query_params is dict-like
-qp_center = (st.query_params.get("center") or "").strip()
-center_key = qp_center if qp_center in CENTERS else None
-
-if center_key:
-    st.selectbox("Center", [center_key], format_func=lambda k: CENTERS[k], disabled=True, key="center_locked")
-else:
-    center_opts = list(CENTERS.keys())
-    default_center = "excellent" if "excellent" in center_opts else center_opts[0]
-    center_key = st.selectbox(
-        "Center",
-        options=center_opts,
-        index=center_opts.index(default_center),
-        format_func=lambda k: CENTERS[k],
-        key="center_pick",
-    )
-
-st.caption(f"Center: **{CENTERS.get(center_key, center_key)}**")
-
-# ---------------------------
-# S3 status
-# ---------------------------
-cfg = load_secrets()
-s3_ok = s3_enabled(cfg)
-s3 = s3_client_cached(cfg) if s3_ok else None
-
-with st.expander("Storage Status (S3)", expanded=False):
-    if s3_ok:
-        st.success(f"S3 is configured ✅  Bucket: {cfg['S3_BUCKET_NAME']}  Region: {cfg['AWS_REGION']}")
-        prefs = candidate_base_prefixes(cfg)
-        st.caption('Viewer will look for: ' + '  |  '.join([((p + '/') if p else '') + 'registration/<center>/history.csv' for p in prefs]))
-    else:
-        st.error("S3 is NOT configured on this app, so View page cannot load saved results.")
-        st.caption("Expected secrets: S3_BUCKET_NAME (or S3_BUCKET), AWS_REGION (or AWS_DEFAULT_REGION), AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
-
-if not s3_ok:
-    st.stop()
-
-# ---------------------------
-# Load history and auto-show latest result
-# ---------------------------
-hist, root_prefix = load_history_from_s3(s3, cfg, center_key)
-
-if hist.empty or "day" not in hist.columns:
-    hist_key = s3_key(root_prefix, 'history.csv')
-    st.warning("No saved Daily Report found for this center yet.")
-    st.write("✅ To fix:")
-    st.markdown(
-        "- Open **Registration Summary (Upload)** page\n"
-        "- Upload Step 1/2/3\n"
-        "- Click **Process & Save to S3**\n"
-        "- Then come back here"
-    )
-    st.caption(f"Expected S3 key: {hist_key}")
-    st.stop()
-
-# normalize day
-hist["day"] = pd.to_datetime(hist["day"], errors="coerce").dt.normalize()
-hist = hist.dropna(subset=["day"]).sort_values("day")
-
-days = list(hist["day"].unique())
-latest_day = days[-1]
-
-
-# ---------------------------
-# View mode: Daily / Weekly / Monthly
-# ---------------------------
-st.markdown("---")
-mode = st.radio("View Mode", options=["Daily", "Weekly", "Monthly"], horizontal=True, index=0)
-
-SS = st.session_state
-SS.setdefault("loaded_key", None)      # cache key (string) for loaded period
-SS.setdefault("loaded_summary", None)  # dict of dfs
-SS.setdefault("loaded_label", None)    # title label
-
-def days_in_week(any_day: pd.Timestamp) -> List[pd.Timestamp]:
-    d = pd.to_datetime(any_day).normalize()
-    start = d - pd.Timedelta(days=int(d.weekday()))  # Monday
-    end = start + pd.Timedelta(days=6)
-    return [x for x in days if (x >= start) and (x <= end)]
-
-def days_in_month(any_day: pd.Timestamp) -> List[pd.Timestamp]:
-    d = pd.to_datetime(any_day).normalize()
-    start = d.replace(day=1)
-    # next month
-    if start.month == 12:
-        nxt = start.replace(year=start.year+1, month=1, day=1)
-    else:
-        nxt = start.replace(month=start.month+1, day=1)
-    end = nxt - pd.Timedelta(days=1)
-    return [x for x in days if (x >= start) and (x <= end)]
-
-def aggregate_tables(frames: List[pd.DataFrame]) -> pd.DataFrame:
-    frames = [f for f in frames if f is not None and not f.empty]
-    if not frames:
-        return pd.DataFrame()
-    df = pd.concat(frames, ignore_index=True)
-
-    # Keep only real rows (drop total/grand total rows; we'll rebuild totals)
-    def _is_total_row(x):
-        s = str(x).strip().upper()
-        return s in ["TOTAL", "GRAND TOTAL"]
-    first_col = df.columns[0] if len(df.columns) else None
-    if first_col:
-        df = df[~df[first_col].astype(str).map(_is_total_row)].copy()
-
-    # Group by non-numeric columns, sum numeric
-    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    grp_cols = [c for c in df.columns if c not in num_cols]
-    if num_cols and grp_cols:
-        out = df.groupby(grp_cols, dropna=False, as_index=False)[num_cols].sum()
-    elif "Count" in df.columns:
-        grp_cols = [c for c in df.columns if c != "Count"]
-        out = df.groupby(grp_cols, dropna=False, as_index=False)["Count"].sum()
-    else:
-        out = df
-
-    # Re-add TOTAL / GRAND TOTAL
-    if "Count" in out.columns and first_col:
-        total = int(out["Count"].sum()) if not out.empty else 0
-        out.loc[len(out)] = {first_col: "TOTAL", "Count": total}
-    else:
-        # If there is any numeric column, add GRAND TOTAL
-        if num_cols and first_col:
-            row = {c: "" for c in out.columns}
-            row[first_col] = "GRAND TOTAL"
-            for c in num_cols:
-                row[c] = float(out[c].sum()) if not out.empty else 0.0
-            out.loc[len(out)] = row
-
-    return out
-
-
-def aggregate_income(frames: List[pd.DataFrame]) -> pd.DataFrame:
-    """Aggregate Income tables across many days.
-
-    Rule:
-    - Sum Consultation/Lab/Procedure/Total_Visit/Total_Amount_* across days (grouped by non-numeric columns)
-    - Recompute Avg_Amount_* = Total_Amount_* / Total_Visit
-    - Recompute Lab_% = (Lab / Total_Amount_Service) * 100
-    - Rebuild GRAND TOTAL row
-    """
-    frames = [f for f in frames if f is not None and not f.empty]
-    if not frames:
-        return pd.DataFrame()
-
-    df = pd.concat(frames, ignore_index=True)
-
-    # Remove any TOTAL rows; we rebuild totals after aggregation
-    first_col = df.columns[0] if len(df.columns) else None
-    if first_col:
-        df = df[~df[first_col].astype(str).str.strip().str.upper().isin(["TOTAL", "GRAND TOTAL"])].copy()
-
-    # Identify columns
-    avg_cols = [c for c in df.columns if str(c).strip().lower().startswith("avg_") or str(c).strip().lower().startswith("avg ")]
-    lab_pct_cols = [c for c in df.columns if str(c).strip().lower() in ["lab_%", "lab%", "lab pct", "lab_pct"]]
-    ignore_sum = set(avg_cols + lab_pct_cols)
-
-    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    sum_cols = [c for c in num_cols if c not in ignore_sum]
-
-    grp_cols = [c for c in df.columns if c not in num_cols]
-    if grp_cols and sum_cols:
-        out = df.groupby(grp_cols, dropna=False, as_index=False)[sum_cols].sum()
-    else:
-        out = df.copy()
-
-    # Normalize expected column names
-    # (support both Total_Amount_Insurance and Total_Amount_Insuance)
-    if "Total_Amount_Insurance" in out.columns and "Total_Amount_Insuance" not in out.columns:
-        out["Total_Amount_Insuance"] = out["Total_Amount_Insurance"]
-    if "Avg_Amount_Insurance" in out.columns and "Avg_Amount_Insuance" not in out.columns:
-        out["Avg_Amount_Insuance"] = out["Avg_Amount_Insurance"]
-
-    # Recompute averages (strictly by Total_Visit)
-    if "Total_Visit" in out.columns:
-        denom = out["Total_Visit"].replace(0, pd.NA)
-        if "Total_Amount_Service" in out.columns:
-            out["Avg_Amount_Service"] = out["Total_Amount_Service"] / denom
-        if "Total_Amount_Insuance" in out.columns:
-            out["Avg_Amount_Insuance"] = out["Total_Amount_Insuance"] / denom
-
-    # Recompute Lab_% (service basis)
-    if "Lab" in out.columns and "Total_Amount_Service" in out.columns:
-        denom2 = out["Total_Amount_Service"].replace(0, pd.NA)
-        out["Lab_%"] = (out["Lab"] / denom2) * 100
-
-    # Rebuild GRAND TOTAL
-    if first_col and any(c in out.columns for c in sum_cols):
-        row = {c: "" for c in out.columns}
-        row[first_col] = "GRAND TOTAL"
-        for c in sum_cols:
-            row[c] = float(out[c].sum()) if not out.empty else 0.0
-        # Averages for grand total
-        if "Total_Visit" in out.columns and row.get("Total_Visit", 0):
-            tv = row["Total_Visit"] if row["Total_Visit"] else 0
-            try:
-                tv = float(tv)
-            except Exception:
-                tv = 0
-            if tv:
-                if "Total_Amount_Service" in out.columns:
-                    row["Avg_Amount_Service"] = float(row.get("Total_Amount_Service", 0)) / tv
-                if "Total_Amount_Insuance" in out.columns:
-                    row["Avg_Amount_Insuance"] = float(row.get("Total_Amount_Insuance", 0)) / tv
-                if "Lab" in out.columns and "Total_Amount_Service" in out.columns and float(row.get("Total_Amount_Service", 0)) != 0:
-                    row["Lab_%"] = (float(row.get("Lab", 0)) / float(row.get("Total_Amount_Service", 0))) * 100
-        out.loc[len(out)] = row
-
-    return out
-
-def load_and_aggregate(day_list: List[pd.Timestamp]) -> Optional[Dict[str, pd.DataFrame]]:
-    if not day_list:
-        return None
-    loaded = []
-    for d in day_list:
-        dfs = load_summary_from_s3(s3, cfg, root_prefix, d)
-        if dfs is not None:
-            loaded.append(dfs)
-
-    if not loaded:
-        return None
-
-    keys = sorted(set().union(*[set(x.keys()) for x in loaded]))
-    agg: Dict[str, pd.DataFrame] = {}
-
-    # KPI: sum across days (note: unique patients across a period is approximate because we only have daily aggregates)
-    kpi_rows = []
-    for d in loaded:
-        k = d.get("KPI")
-        if k is not None and not k.empty and "Metric" in k.columns and "Value" in k.columns:
-            kpi_rows.append(k)
-    if kpi_rows:
-        kk = pd.concat(kpi_rows, ignore_index=True)
-        kk["Value"] = pd.to_numeric(kk["Value"], errors="coerce").fillna(0)
-        kpi_sum = kk.groupby("Metric", as_index=False)["Value"].sum()
-        agg["KPI"] = kpi_sum
-
-    for k in keys:
-        if k == "KPI":
-            continue
-        frames = [d.get(k) for d in loaded if isinstance(d.get(k), pd.DataFrame)]
-        if str(k).startswith("Income | "):
-            agg[k] = aggregate_income(frames)
-        else:
-            agg[k] = aggregate_tables(frames)
-
-    return agg
-
-
-def _snap_to_saved(chosen: pd.Timestamp, saved: List[pd.Timestamp]) -> Tuple[pd.Timestamp, bool]:
-    """Return (snapped_day, was_snapped). Picks the nearest saved day <= chosen, else the earliest."""
-    if not saved:
-        return chosen, False
-    chosen = pd.to_datetime(chosen).normalize()
-    saved_sorted = sorted(pd.to_datetime(saved).tolist())
-    if chosen in saved_sorted:
-        return chosen, False
-    earlier = [d for d in saved_sorted if d <= chosen]
-    if earlier:
-        return earlier[-1], True
-    return saved_sorted[0], True
-
-
-min_day = pd.to_datetime(min(days)).normalize()
-max_day = pd.to_datetime(max(days)).normalize()
-
-if mode == "Daily":
-    chosen = st.date_input(
-        "Select day",
-        value=max_day.date(),
-        min_value=min_day.date(),
-        max_value=max_day.date(),
-    )
-    picked, snapped = _snap_to_saved(pd.to_datetime(chosen), days)
-    if snapped:
-        st.info(f"No saved data for **{pd.to_datetime(chosen).strftime('%d %b %Y')}**. Showing nearest saved day: **{fmt_day(picked)}**")
-
-    cache_key = f"daily:{picked.date().isoformat()}"
-    if SS.get("loaded_key") != cache_key:
-        SS["loaded_summary"] = load_summary_from_s3(s3, cfg, root_prefix, picked)
-        SS["loaded_key"] = cache_key
-        SS["loaded_label"] = f"Current Day ({fmt_day(picked)})"
-
-    if SS.get("loaded_summary") is not None:
-                render_summary(SS["loaded_summary"], picked, heading="header", label="Current Day")
-    else:
-        st.error("summary.pkl is missing for this day.")
-        st.caption(f"Expected: {s3_key(root_prefix, picked.date().isoformat(), 'summary.pkl')}")
-
-elif mode == "Weekly":
-    c1, c2 = st.columns(2)
+    # -------------------- Step 4 (Income / Doctor Revenue) - optional --------------------
+    c1, c2 = st.columns([3, 1])
     with c1:
-        s_in = st.date_input("Week Start", value=max_day.date(), min_value=min_day.date(), max_value=max_day.date(), key="wk_start")
+        st.subheader("4) Income Analysis Report (Doctor Revenue)")
+        income_up = st.file_uploader(
+            "Upload Daily Collection Details (.xls / .xlsx)",
+            type=["xls", "xlsx"],
+            key="income_uploader",
+        )
+        if income_up is not None:
+            SS["income_file"] = {"name": income_up.name, "bytes": income_up.getvalue()}
     with c2:
-        e_in = st.date_input("Week End", value=max_day.date(), min_value=min_day.date(), max_value=max_day.date(), key="wk_end")
+        if st.button("🗑️ Delete Step 4", use_container_width=True):
+            SS["income_file"] = None
+            SS["income_df"] = None
+            SS["income_tables"] = {}
+            st.rerun()
 
-    start_d, s_snap = _snap_to_saved(pd.to_datetime(s_in), days)
-    end_d, e_snap = _snap_to_saved(pd.to_datetime(e_in), days)
-    if start_d > end_d:
-        start_d, end_d = end_d, start_d
-
-    selected = [d for d in days if (d >= start_d) and (d <= end_d)]
-    st.caption(f"Selected range: **{fmt_range(start_d, end_d)}**  (saved days: {len(selected)})")
-
-    if not selected:
-        st.warning("No saved days found in this range.")
+    if SS.get("income_file") is not None:
+        st.success(f"Step 4 OK ✅ ({SS['income_file']['name']})")
     else:
-        cache_key = f"range:{start_d.date().isoformat()}:{end_d.date().isoformat()}"
-        if SS.get("loaded_key") != cache_key:
-            SS["loaded_summary"] = load_and_aggregate(selected)
-            SS["loaded_key"] = cache_key
-            SS["loaded_label"] = f"Weekly Summary ({fmt_range(start_d, end_d)})"
+        st.info("Step 4 optional: upload your Daily Collection Details export to generate Doctor/Insurance revenue tables.")
 
-        if SS.get("loaded_summary") is not None:
-            st.header(SS.get("loaded_label", "Weekly Summary"))
-            render_summary(SS["loaded_summary"], pd.to_datetime(max(selected)), heading="subheader", label="Latest Saved Day")
+    # -------------------- Step 5 (CPT / ICD Analysis) - optional --------------------
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        st.subheader("5) CPT ICD Analysis (Doctor / Company / CPT Mapping)")
+        cpticd_up = st.file_uploader(
+            "Upload RegistrationDetailswithICDandCPTList (.xls / .xlsx)",
+            type=["xls", "xlsx"],
+            key="cpticd_uploader",
+        )
+        if cpticd_up is not None:
+            SS["cpticd_file"] = {"name": cpticd_up.name, "bytes": cpticd_up.getvalue()}
+    with c2:
+        if st.button("🗑️ Delete Step 5", use_container_width=True):
+            SS["cpticd_file"] = None
+            SS["cpticd_df"] = None
+            SS["cpticd_tables"] = {}
+            st.rerun()
+
+    if SS.get("cpticd_file") is not None:
+        st.success(f"Step 5 OK ✅ ({SS['cpticd_file']['name']})")
+    else:
+        st.info("Step 5 optional: upload your RegistrationDetailswithICDandCPTList export to generate CPT/ICD analytics + Employer expiry tracking.")
+
+    # -------------------- Process & Save --------------------
+    process_label = "✅ Process & Save to S3" if s3_ok else "✅ Process (S3 not configured)"
+    if st.button(process_label, type="primary", disabled=not can_process):
+        # defaults (avoid NameError in any edge-case)
+        day_ts = pd.to_datetime(manual_day)
+        _income_df = None
+
+        # re-evaluate day_ts inside click (safe)
+        detected = get_day_from_registration(SS['reg_df']) if SS['reg_df'] is not None else None
+        if detected is not None:
+            day_ts = detected
+
+        # -------------------------
+        # Daily vs Bulk processing
+        # -------------------------
+        if bulk_mode:
+            days = get_days_from_registration(SS["reg_df"]) if SS["reg_df"] is not None else []
+            if not days:
+                st.error("Bulk mode selected, but no readable date column was found in Registration file. Please use Daily mode or upload a file with RegDate/Date.")
+                st.stop()
+
+            st.info(f"Bulk mode: found {len(days)} day(s) in Registration. Saving each day to S3...")
+
+            # Optional income analysis file (applied as-is; if it contains multiple days, we will NOT split it)
+            _income_df = None
+            income_tbls = {}
+            income_raw_df = None
+            income_dt = None
+            if SS.get('income_file') is not None:
+                _income_df = load_income_details(io.BytesIO(SS.get('income_file', {}).get('bytes', b'')))
+                if _income_df is None or _income_df.empty:
+                    st.warning("Income Analysis file loaded, but header could not be detected. Skipping Income tables in bulk save.")
+                else:
+                    income_raw_df = _income_df.copy()
+
+                    # Try to detect a date column for day-wise filtering (so Daily/Weekly/Monthly view works correctly)
+                    income_date_col = _find_col(
+                        income_raw_df,
+                        ["Date", "Visit Date", "Service Date", "Invoice Date", "Posting Date", "Bill Date", "Transaction Date", "Created Date"]
+                    )
+                    if income_date_col:
+                        s_raw = income_raw_df[income_date_col]
+                        s1 = pd.to_datetime(s_raw, errors="coerce", dayfirst=False)
+                        s2 = pd.to_datetime(s_raw, errors="coerce", dayfirst=True)
+                        n1 = int(s1.notna().sum())
+                        n2 = int(s2.notna().sum())
+                        income_dt = (s2 if n2 >= n1 else s1)
+                        income_raw_df["_DT_"] = income_dt
+                    else:
+                        income_dt = None
+
+                    # Default tables (whole file) – will be overridden per-day inside the loop when possible
+                    income_tbls = income_tables(income_raw_df)
+
+            # Optional CPT/ICD analysis file
+            # We will save the original uploaded CPT/ICD file once, but tables will be filtered DAY-WISE
+            # using EMR No + Visit ID pairs from each day’s Registration slice.
+            cpticd_tbls = {}
+            _cpticd_df_full = None
+            c_emr_col = None
+            c_visit_col = None
+            if SS.get("cpticd_file") is not None:
+                _cpticd_df = load_cpticd_details(io.BytesIO(SS.get("cpticd_file", {}).get("bytes", b"")))
+                if _cpticd_df is None or _cpticd_df.empty:
+                    st.warning("CPT/ICD file loaded, but no data was found. Skipping CPT/ICD tables in bulk save.")
+                else:
+                    _cpticd_df_full = _cpticd_df.copy()
+                    # Detect columns used for day-wise filtering
+                    c_emr_col = _find_col(_cpticd_df_full, ["EMR No", "EMRNo", "MRN", "Patient ID", "PatientID", "File No", "FileNo"])
+                    c_visit_col = _find_col(_cpticd_df_full, ["Visit ID", "VisitID", "Visit No", "VisitNo", "Visit Number", "Visit#"])
+                    cpticd_tbls = cpticd_tables(_cpticd_df_full, reg_df=SS.get("reg_df"))
+                    if not cpticd_tbls:
+                        st.warning("CPT/ICD file loaded, but required columns were not detected. Skipping CPT/ICD tables in bulk save.")
+            progress = st.progress(0.0)
+            saved = 0
+
+            # Detect Registration date col once for filtering
+            reg_date_col = _find_col(SS["reg_df"], ["RegDate", "RegistrationDate", "Date", "VisitDate", "Reg Date", "Registration Date"])
+            s_raw = SS["reg_df"][reg_date_col] if reg_date_col else None
+            s1 = pd.to_datetime(s_raw, errors="coerce", dayfirst=False) if s_raw is not None else None
+            s2 = pd.to_datetime(s_raw, errors="coerce", dayfirst=True) if s_raw is not None else None
+            n1 = int(s1.notna().sum()) if s1 is not None else 0
+            n2 = int(s2.notna().sum()) if s2 is not None else 0
+            s_reg = (s2 if n2 >= n1 else s1) if s1 is not None else None
+
+            for idx, d in enumerate(days, start=1):
+                d_norm = pd.to_datetime(d).normalize()
+                if s_reg is None:
+                    reg_day = SS["reg_df"].copy()
+                else:
+                    mask = s_reg.dt.normalize() == d_norm
+                    reg_day = SS["reg_df"].loc[mask.fillna(False)].copy()
+
+                cash_day = filter_df_by_day_if_possible(SS["cash_df"], d_norm)
+                pend_day = filter_df_by_day_if_possible(SS["pend_df"], d_norm)
+
+                dfs = compute_summary(reg_day, cash_day, pend_day, d_norm)
+
+                # Attach income tables (day-wise when possible)
+                if income_raw_df is not None and isinstance(income_raw_df, pd.DataFrame) and not income_raw_df.empty:
+                    if "_DT_" in income_raw_df.columns:
+                        _inc_day = income_raw_df.loc[income_raw_df["_DT_"].dt.normalize() == d_norm].copy()
+                    else:
+                        _inc_day = income_raw_df.copy()
+
+                    _inc_tbls = income_tables(_inc_day) if _inc_day is not None and not _inc_day.empty else {}
+                    for _k, _v in _inc_tbls.items():
+                        dfs[f"Income | {_k}"] = _v
+                else:
+                    for _k, _v in income_tbls.items():
+                        dfs[f"Income | {_k}"] = _v
+
+                # Attach CPT/ICD tables (DAY-WISE so ICD/CPT changes with selected day)
+                if cpticd_tbls:
+                    try:
+                        _cpticd_df_day = None
+
+                        # Filter CPT/ICD rows to the exact visits of this day (EMR No + Visit ID)
+                        if isinstance(_cpticd_df_full, pd.DataFrame) and not _cpticd_df_full.empty and c_emr_col and c_visit_col:
+                            r_emr = _find_col(reg_day, ["EMRNo", "EMR No", "EMR", "MRN", "Patient ID", "PatientID", "FileNo", "File No"])
+                            r_visit = _find_col(reg_day, ["VisitNo", "Visit No", "Visit ID", "VisitID", "Visit Number", "Visit#"])
+                            if r_emr and r_visit:
+                                pairs = reg_day[[r_emr, r_visit]].copy()
+                                pairs[r_emr] = pairs[r_emr].fillna("").astype(str).str.strip()
+                                pairs[r_visit] = pairs[r_visit].fillna("").astype(str).str.strip()
+                                pairs = pairs[(pairs[r_emr] != "") & (pairs[r_visit] != "")].drop_duplicates()
+
+                                ctmp = _cpticd_df_full.copy()
+                                ctmp[c_emr_col] = ctmp[c_emr_col].fillna("").astype(str).str.strip()
+                                ctmp[c_visit_col] = ctmp[c_visit_col].fillna("").astype(str).str.strip()
+
+                                _cpticd_df_day = ctmp.merge(
+                                    pairs,
+                                    left_on=[c_emr_col, c_visit_col],
+                                    right_on=[r_emr, r_visit],
+                                    how="inner",
+                                )
+
+                        # Build day-wise tables (fallback to full tables if filtering not possible)
+                        _day_tbls = cpticd_tables(_cpticd_df_day, reg_df=reg_day) if (_cpticd_df_day is not None and not _cpticd_df_day.empty) else cpticd_tbls
+
+                        for _k, _v in _day_tbls.items():
+                            dfs[f"CPTICD | {_k}"] = _v
+                    except Exception:
+                        for _k, _v in cpticd_tbls.items():
+                            dfs[f"CPTICD | {_k}"] = _v
+
+                if s3_ok:
+                    save_run_to_s3(d_norm, dfs)
+
+                saved += 1
+                progress.progress(saved / max(1, len(days)))
+
+            SS["last_saved_day"] = max(days)
+            SS["last_saved_center"] = center_key
+            st.success(f"Bulk save completed ✅  Days saved: {saved}")
+
         else:
-            st.warning("No summary.pkl files found in this range.")
+            dfs = compute_summary(SS["reg_df"], SS["cash_df"], SS["pend_df"], day_ts)
 
-else:  # Monthly
-    chosen = st.date_input(
-        "Select any date in the month",
-        value=max_day.date(),
-        min_value=min_day.date(),
-        max_value=max_day.date(),
-        key="mo_pick",
+            # ---- Step 4: Income analysis (optional) ----
+            SS['income_df'] = None
+            SS['income_tables'] = {}
+            if SS.get('income_file') is not None:
+                _income_df = load_income_details(io.BytesIO(SS.get('income_file', {}).get('bytes', b'')))
+                if _income_df is None or _income_df.empty:
+                    st.warning("Income Analysis file loaded, but table header could not be detected. Please upload the correct 'Daily Collection Details' export.")
+                else:
+                    SS['income_df'] = _income_df
+                    SS['income_tables'] = income_tables(_income_df)
+                    for _k, _v in SS['income_tables'].items():
+                        dfs[f"Income | {_k}"] = _v
+
+            # ---- Step 5: CPT/ICD analysis (optional) ----
+            SS["cpticd_df"] = None
+            SS["cpticd_tables"] = {}
+            if SS.get("cpticd_file") is not None:
+                _cpticd_df = load_cpticd_details(io.BytesIO(SS.get("cpticd_file", {}).get("bytes", b"")))
+                if _cpticd_df is None or _cpticd_df.empty:
+                    st.warning("CPT/ICD file loaded, but no data was found. Please upload the correct RegistrationDetailswithICDandCPTList export.")
+                else:
+                    SS["cpticd_df"] = _cpticd_df
+                    SS["cpticd_tables"] = cpticd_tables(_cpticd_df, reg_df=SS.get("reg_df"))
+                    if not SS["cpticd_tables"]:
+                        st.warning("CPT/ICD file loaded, but required columns were not detected. Please check the template/headers.")
+                    else:
+                        for _k, _v in SS["cpticd_tables"].items():
+                            dfs[f"CPTICD | {_k}"] = _v
+
+            if s3_ok:
+                try:
+                    save_run_to_s3(day_ts, dfs)
+                    st.success("Saved to S3 ✅")
+                except Exception as e:
+                    st.error(f"Failed to save to S3: {e}")
+
+            SS["last_saved_day"] = day_ts
+            SS["last_saved_center"] = center_key
+
+# Confirmation (this admin upload page does not display KPI/details)
+if SS.get("last_saved_day") is not None and SS.get("last_saved_center") is not None:
+    st.success(
+        f"✅ Uploaded & saved for {pd.to_datetime(SS['last_saved_day']).date().isoformat()}  |  "
+        f"Center: {CENTERS.get(SS['last_saved_center'], SS['last_saved_center'])}"
     )
-    d0 = pd.to_datetime(chosen).normalize()
-    month_days = days_in_month(d0)
-
-    if not month_days:
-        st.warning("No saved days found for that month.")
-    else:
-        sel_month = d0.strftime("%Y-%m")
-        start_m = min(month_days).date().isoformat()
-        end_m = max(month_days).date().isoformat()
-        st.caption(f"Month range: **{fmt_range(min(month_days), max(month_days))}**  (saved days: {len(month_days)})")
-
-        cache_key = f"month:{sel_month}"
-        if SS.get("loaded_key") != cache_key:
-            SS["loaded_summary"] = load_and_aggregate(month_days)
-            SS["loaded_key"] = cache_key
-            SS["loaded_label"] = f"Monthly Summary ({pd.to_datetime(d0).strftime('%B %Y')})"
-
-        if SS.get("loaded_summary") is not None:
-            st.header(SS.get("loaded_label", "Monthly Summary"))
-            render_summary(SS["loaded_summary"], pd.to_datetime(max(month_days)), heading="subheader", label="Latest Saved Day")
-        else:
-            st.warning("No summary.pkl files found for that month.")
+    st.caption("Open **Registration View** page to see the summary results.")
+elif SS.get("reg_df") is not None:
+    st.info("Upload Step 2 and Step 3, then click **Process & Save**.")
