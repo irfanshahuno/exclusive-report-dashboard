@@ -1690,7 +1690,7 @@ if mode == "Daily":
         SS["loaded_label"] = f"Current Day ({fmt_day(picked)})"
 
     if SS.get("loaded_summary") is not None:
-                render_summary(SS["loaded_summary"], picked, heading="header", label="Current Day")
+        render_summary(SS["loaded_summary"], picked, heading="header", label="Current Day")
     else:
         st.error("summary.pkl is missing for this day.")
         st.caption(f"Expected: {s3_key(root_prefix, picked.date().isoformat(), 'summary.pkl')}")
