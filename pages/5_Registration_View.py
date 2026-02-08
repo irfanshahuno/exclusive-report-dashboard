@@ -35,50 +35,207 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import smtplib
 
+
 def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
-    """Create a compact HTML email body containing KPI + key summary tables."""
+    """Premium HTML email body:
+    - KPI cards on top (Total Visits, New Patients, etc.)
+    - Income Analysis tables (Doctor Wise / Insurance Wise / Doctor x Insurance)
+    Falls back gracefully if some tables are missing.
+    """
+    def _num(x, default=0):
+        try:
+            return float(pd.to_numeric(x, errors="coerce"))
+        except Exception:
+            return default
+
+    def _kpi_value(metric: str, default=0):
+        kpi = dfs.get("KPI")
+        if isinstance(kpi, pd.DataFrame) and (not kpi.empty) and {"Metric","Value"}.issubset(kpi.columns):
+            try:
+                s = kpi.set_index("Metric")["Value"]
+                return s.get(metric, default)
+            except Exception:
+                return default
+        return default
+
+    def _pick_avg_col(df: pd.DataFrame):
+        if df is None or df.empty:
+            return None
+        cols = list(df.columns)
+        # prefer exact/common names
+        preferred = [
+            "Avg.Amount", "Avg_Amount", "Avg Amount",
+            "Avg_Amount_Insuance", "Avg_Amount_Insurance",
+            "Avg_Amount_Service", "AvgAmount", "Avg",
+        ]
+        for p in preferred:
+            for c in cols:
+                if str(c).strip().lower() == str(p).strip().lower():
+                    return c
+        # heuristic
+        for c in cols:
+            cl = str(c).lower()
+            if "avg" in cl and "amount" in cl:
+                return c
+        return None
+
+    def _pick_lab_col(df: pd.DataFrame):
+        if df is None or df.empty:
+            return None
+        cols = list(df.columns)
+        preferred = ["Lab %", "Lab_%", "Lab%", "Lab Percent", "Lab_Percent"]
+        for p in preferred:
+            for c in cols:
+                if str(c).strip().lower() == str(p).strip().lower():
+                    return c
+        for c in cols:
+            cl = str(c).lower()
+            if "lab" in cl and ("%" in cl or "percent" in cl):
+                return c
+        return None
+
+    def _safe_df(df):
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return pd.DataFrame()
+        out = df.copy()
+        # drop unnamed cols
+        bad = [c for c in out.columns if str(c).strip()=="" or str(c).strip().lower().startswith("unnamed")]
+        if bad:
+            out = out.drop(columns=bad, errors="ignore")
+        return out
+
+    def _html_table(df: pd.DataFrame, cols, header_bg="#111827", title_text=None):
+        df = _safe_df(df)
+        if df.empty:
+            return ""
+        # keep only existing cols
+        cols = [c for c in cols if c in df.columns]
+        if not cols:
+            cols = list(df.columns)[:6]
+        show = df[cols].copy()
+
+        # coerce numeric + round
+        for c in show.columns:
+            if c in cols and c not in ["Doctor","Insurance","Department"]:
+                show[c] = pd.to_numeric(show[c], errors="coerce")
+        for c in show.columns:
+            if pd.api.types.is_numeric_dtype(show[c]):
+                show[c] = show[c].round(2)
+
+        # build table html manually for consistent styling
+        ths = "".join([f"<th style='padding:8px 10px;text-align:left;border:1px solid #e5e7eb;'>{c}</th>" for c in show.columns])
+        rows = []
+        for i, r in enumerate(show.itertuples(index=False, name=None)):
+            bg = "#ffffff" if i % 2 == 0 else "#f8fafc"
+            tds = []
+            for v in r:
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    v = ""
+                tds.append(f"<td style='padding:8px 10px;border:1px solid #e5e7eb;'>{v}</td>")
+            rows.append(f"<tr style='background:{bg};'>" + "".join(tds) + "</tr>")
+        caption = f"<div style='font-size:13px;font-weight:800;color:#334155;margin:10px 0 6px 0;'>{title_text}</div>" if title_text else ""
+        return (
+            caption
+            + f"<table style='width:100%;border-collapse:collapse;font-size:13px;'>"
+              f"<tr style='background:{header_bg};color:#fff;'>{ths}</tr>"
+              + "".join(rows)
+              + "</table>"
+        )
+
+    # ---------- KPI values ----------
+    total_visits = int(_num(_kpi_value("Total Visits", 0), 0) or 0)
+    new_patients = int(_num(_kpi_value("New Patients", 0), 0) or 0)
+    established = int(_num(_kpi_value("Established Patients", 0), 0) or 0)
+    follow_up = int(_num(_kpi_value("Follow Up", 0), 0) or 0)
+    unclassified = int(_num(_kpi_value("Unclassified Visits", 0), 0) or 0)
+    pending_patients = int(_num(_kpi_value("Pending Patients", 0), 0) or 0)
+
+    # ---------- Income tables ----------
+    df_doc = _safe_df(dfs.get("Income | Doctor Wise Revenue"))
+    df_ins = _safe_df(dfs.get("Income | Insurance Wise Revenue"))
+    df_dx  = _safe_df(dfs.get("Income | Doctor x Insurance Revenue"))
+
+    avg_doc = _pick_avg_col(df_doc)
+    lab_doc = _pick_lab_col(df_doc)
+    avg_ins = _pick_avg_col(df_ins)
+    lab_ins = _pick_lab_col(df_ins)
+    avg_dx  = _pick_avg_col(df_dx)
+
+    # prefer show columns in requested style
+    doc_cols = [c for c in ["Department", "Doctor"] if c in df_doc.columns]
+    if avg_doc: doc_cols.append(avg_doc)
+    if lab_doc: doc_cols.append(lab_doc)
+
+    ins_cols = [c for c in ["Insurance"] if c in df_ins.columns]
+    if avg_ins: ins_cols.append(avg_ins)
+    if lab_ins: ins_cols.append(lab_ins)
+
+    dx_cols = [c for c in ["Doctor", "Insurance"] if c in df_dx.columns]
+    if avg_dx: dx_cols.append(avg_dx)
+
+    # ---------- HTML layout ----------
+    style = """
+    <style>
+      body{font-family:Segoe UI,Arial,sans-serif;background:#f4f6f9;margin:0;padding:0;}
+      .wrap{padding:18px;}
+      .card{background:#ffffff;border-radius:14px;padding:18px;box-shadow:0 6px 18px rgba(15,23,42,0.10);}
+      .top{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;}
+      .title{font-size:18px;font-weight:900;color:#0f172a;}
+      .sub{margin-top:4px;color:#64748b;font-size:13px;}
+      .muted{color:#94a3b8;font-size:12px;text-align:right;}
+      .kpi-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:12px;}
+      .kpi{border:1px solid #e2e8f0;border-radius:14px;padding:12px;background:#f8fafc;}
+      .kpi-l{color:#64748b;font-size:12px;font-weight:800;}
+      .kpi-v{color:#0f172a;font-size:26px;font-weight:900;margin-top:3px;}
+      hr{border:none;border-top:1px solid #e2e8f0;margin:16px 0;}
+      .sec-h{font-size:16px;font-weight:900;color:#0f172a;margin:0 0 8px 0;}
+      .note{color:#94a3b8;font-size:12px;margin-top:14px;}
+    </style>
+    """
+
     parts = []
-    parts.append(f"<h2 style='margin:0 0 8px 0'>{title}</h2>")
-    parts.append(f"<div style='margin:0 0 16px 0;color:#555'>Scope: <b>{picked_label}</b></div>")
+    parts.append(style)
+    parts.append("<div class='wrap'><div class='card'>")
 
-    # KPI
-    kpi = dfs.get("KPI")
-    if isinstance(kpi, pd.DataFrame) and (not kpi.empty) and {"Metric","Value"}.issubset(kpi.columns):
-        kpi_html = kpi[["Metric","Value"]].to_html(index=False, border=0)
-        parts.append("<h3 style='margin:16px 0 8px 0'>KPIs</h3>")
-        parts.append(kpi_html)
+    parts.append(
+        "<div class='top'>"
+        f"<div><div class='title'>📌 EMC Management Summary</div>"
+        f"<div class='sub'>Scope: <b>{picked_label}</b></div></div>"
+        f"<div class='muted'>Generated: {pd.Timestamp.now().strftime('%d %b %Y %H:%M')}</div>"
+        "</div>"
+    )
 
-    # Include a few important tables if present
-    preferred_keys = [
-        "Insurance Wise", "Employer Wise", "Doctor Wise",
-        "CashOut Summary", "Pending Summary",
-    ]
-    shown = set()
-    for key in preferred_keys:
-        if key in dfs and isinstance(dfs[key], pd.DataFrame) and not dfs[key].empty:
-            df = dfs[key].copy()
-            parts.append(f"<h3 style='margin:16px 0 8px 0'>{key}</h3>")
-            parts.append(df.to_html(index=False, border=0))
-            shown.add(key)
+    # KPI cards
+    parts.append("<div class='kpi-grid'>")
+    def _kpi_box(label, val):
+        return f"<div class='kpi'><div class='kpi-l'>{label}</div><div class='kpi-v'>{val}</div></div>"
+    parts.append(_kpi_box("Total Visits", total_visits))
+    parts.append(_kpi_box("New Patients", new_patients))
+    parts.append(_kpi_box("Established Patients", established))
+    parts.append(_kpi_box("Follow Up", follow_up))
+    parts.append(_kpi_box("Unclassified Visits", unclassified))
+    parts.append(_kpi_box("Pending Patients", pending_patients))
+    parts.append("</div>")
 
-    # Fallback: show first 6 dataframes
-    if len(shown) == 0:
-        c = 0
-        for k, df in dfs.items():
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                parts.append(f"<h3 style='margin:16px 0 8px 0'>{k}</h3>")
-                parts.append(df.to_html(index=False, border=0))
-                c += 1
-                if c >= 6:
-                    break
+    # Income Analysis section
+    parts.append("<hr>")
+    parts.append(f"<div class='sec-h'>📊 {title}</div>")
 
-    style = """<style>
-    body{font-family:Arial,Helvetica,sans-serif;font-size:13px}
-    table{border-collapse:collapse;width:100%}
-    th,td{padding:6px 8px;border:1px solid #ddd;text-align:left}
-    th{background:#f5f5f5}
-    </style>"""
-    return style + "<body>" + "".join(parts) + "</body>"
+    # Doctor Wise
+    if not df_doc.empty:
+        parts.append(_html_table(df_doc, doc_cols, header_bg="#6366f1", title_text="Doctor Wise (Avg.Amount | Lab %)"))
+    # Insurance Wise
+    if not df_ins.empty:
+        parts.append("<div style='height:12px'></div>")
+        parts.append(_html_table(df_ins, ins_cols, header_bg="#f59e0b", title_text="Insurance Wise (Avg.Amount | Lab %)"))
+    # Doctor x Insurance
+    if not df_dx.empty:
+        parts.append("<div style='height:12px'></div>")
+        parts.append(_html_table(df_dx, dx_cols, header_bg="#10b981", title_text="Doctor x Insurance (Avg.Amount)"))
+
+    parts.append("<div class='note'>This is an automated report generated by the EMC dashboard.</div>")
+    parts.append("</div></div>")
+    return "".join(parts)
 
 def _send_email_smtp(subject: str, html_body: str) -> None:
     host = st.secrets.get("SMTP_HOST", "")
