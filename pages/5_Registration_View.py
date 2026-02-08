@@ -1531,13 +1531,13 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         st.dataframe(sty, use_container_width=True, hide_index=True)
 
         # ---- Expiry Detail List (Step 5) + Download ----
-                # Defaults to avoid UnboundLocalError when expiry list is empty / not built
+        # Defaults to avoid UnboundLocalError when expiry list is empty / not built
         win = "All"
         pick_ins = "All"
         pick_emp = "All"
         df_f = pd.DataFrame()
 
-with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=False):
+        with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=False):
             df_detail = None
             # Prefer explicit saved expiry list/tracker from dfs
             for _k in ("Expiry_List", "Expiry List", "Employer Expiry Tracker", "Expiry_Tracker", "Expiry"):
@@ -1546,7 +1546,7 @@ with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=F
                     break
             if df_detail is None:
                 df_detail = pd.DataFrame()
-
+        
             if df_detail is None or df_detail.empty:
                 st.info("No expiry detail list found for this day/period.")
             else:
@@ -1573,7 +1573,7 @@ with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=F
                     if "Employer" in df_detail.columns:
                         emp_opts = sorted([x for x in df_detail["Employer"].dropna().unique() if str(x).strip() not in ["", "nan", "None"]])
                     pick_emp = st.selectbox("Employer", options=["All"] + emp_opts, key=f"exp_emp2_{str(day_ts)}")
-
+        
                 df_f = df_detail.copy()
                 if "Days To Expiry" in df_f.columns:
                     if win == "Expired":
@@ -1581,12 +1581,12 @@ with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=F
                     elif win.startswith("Next"):
                         n = int(re.findall(r"\d+", win)[0])
                         df_f = df_f[(df_f["Days To Expiry"] >= 0) & (df_f["Days To Expiry"] <= n)]
-
+        
                 if pick_ins != "All" and "Insurance" in df_f.columns:
                     df_f = df_f[df_f["Insurance"] == pick_ins]
                 if pick_emp != "All" and "Employer" in df_f.columns:
                     df_f = df_f[df_f["Employer"] == pick_emp]
-
+        
                 
                 # ---- Summary counts (on-screen) ----
                 grp_cols = [c for c in ["Employer", "Insurance"] if c in df_f.columns]
@@ -1604,13 +1604,13 @@ with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=F
                         total_row["Employer"] = "TOTAL"
                     total_row["Count"] = total_n
                     df_counts = pd.concat([df_counts, pd.DataFrame([total_row])], ignore_index=True)
-    
+            
                     st.caption(f"Showing summary counts for: **{win}** | Rows: {len(df_counts)-1} | TOTAL: {total_n}")
                     st.dataframe(df_counts, use_container_width=True, hide_index=True)
                 else:
                     st.info("Expiry list is missing Employer/Insurance columns, so summary counts cannot be built.")
                     df_counts = pd.DataFrame()
-
+        
                 # ---- Optional detailed list (only when needed) ----
                 exp_key = f"{win}_{pick_ins}_{pick_emp}"
                 show_details = st.checkbox(
@@ -1621,7 +1621,7 @@ with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=F
                 if show_details:
                     show_cols = [c for c in ["Employer","Insurance","Name","EMR No","Visit ID","Doctor","Expiry Date","Days To Expiry"] if c in df_f.columns]
                     st.dataframe(df_f[show_cols] if show_cols else df_f, use_container_width=True, hide_index=True)
-
+        
                 # ---- Downloads ----
                 # Download counts
                 try:
@@ -1638,7 +1638,7 @@ with st.expander("Expiry Detail List (Step 5) — filter & download", expanded=F
                     )
                 except Exception:
                     st.warning("Counts download is unavailable (Excel writer error).")
-
+        
                 # Download full list
                 try:
                     import io as _io
