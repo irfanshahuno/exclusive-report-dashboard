@@ -155,23 +155,91 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     df_ins = _safe_df(dfs.get("Income | Insurance Wise Revenue"))
     df_dx  = _safe_df(dfs.get("Income | Doctor x Insurance Revenue"))
 
+    def _pick_by_names(df: pd.DataFrame, names):
+        if df is None or df.empty:
+            return None
+        cols = list(df.columns)
+        for n in names:
+            for c in cols:
+                if str(c).strip().lower() == str(n).strip().lower():
+                    return c
+        # heuristic match (ignore non-alnum)
+        def _norm(s):
+            return re.sub(r"[^a-z0-9]+", "", str(s).lower())
+        nset = {_norm(n) for n in names}
+        for c in cols:
+            if _norm(c) in nset:
+                return c
+        return None
+
+    # Pick columns from Income tables (names vary by file/version)
     avg_doc = _pick_avg_col(df_doc)
-    lab_doc = _pick_lab_col(df_doc)
+    labp_doc = _pick_lab_col(df_doc)
+
     avg_ins = _pick_avg_col(df_ins)
-    lab_ins = _pick_lab_col(df_ins)
+    labp_ins = _pick_lab_col(df_ins)
+
     avg_dx  = _pick_avg_col(df_dx)
+
+    # common service columns
+    consult_doc = _pick_by_names(df_doc, ["Consultation", "Consult", "Consult Amount"])
+    lab_doc_amt = _pick_by_names(df_doc, ["Lab", "Lab Amount"])
+    proc_doc    = _pick_by_names(df_doc, ["Procedure", "Procedures"])
+    visit_doc   = _pick_by_names(df_doc, ["Total Visit", "Total Visits", "Total_Visit"])
+    tot_doc_amt = _pick_by_names(df_doc, ["Total Amount", "Total_Amount", "TotalAmount"])
+
+    consult_ins = _pick_by_names(df_ins, ["Consultation", "Consult", "Consult Amount"])
+    lab_ins_amt = _pick_by_names(df_ins, ["Lab", "Lab Amount"])
+    proc_ins    = _pick_by_names(df_ins, ["Procedure", "Procedures"])
+    visit_ins   = _pick_by_names(df_ins, ["Total Visit", "Total Visits", "Total_Visit"])
+    tot_ins_amt = _pick_by_names(df_ins, ["Total Amount", "Total_Amount", "TotalAmount"])
+
+    consult_dx = _pick_by_names(df_dx, ["Consultation", "Consult", "Consult Amount"])
+    lab_dx_amt = _pick_by_names(df_dx, ["Lab", "Lab Amount"])
+    proc_dx    = _pick_by_names(df_dx, ["Procedure", "Procedures"])
+    visit_dx   = _pick_by_names(df_dx, ["Total Visit", "Total Visits", "Total_Visit"])
+    tot_dx_amt = _pick_by_names(df_dx, ["Total Amount", "Total_Amount", "TotalAmount"])
+
+    def _ensure_total_service(df: pd.DataFrame, c_cons, c_lab, c_proc):
+        if df is None or df.empty:
+            return df
+        if "Total_Service" in df.columns:
+            return df
+        if c_cons and c_lab and c_proc:
+            out = df.copy()
+            out["Total_Service"] = (
+                pd.to_numeric(out[c_cons], errors="coerce").fillna(0)
+                + pd.to_numeric(out[c_lab], errors="coerce").fillna(0)
+                + pd.to_numeric(out[c_proc], errors="coerce").fillna(0)
+            )
+            return out
+        return df
+
+    # Add Total_Service if possible (user asked: show total service + total amount)
+    df_doc = _ensure_total_service(df_doc, consult_doc, lab_doc_amt, proc_doc)
+    df_ins = _ensure_total_service(df_ins, consult_ins, lab_ins_amt, proc_ins)
+    df_dx  = _ensure_total_service(df_dx,  consult_dx,  lab_dx_amt,  proc_dx)
 
     # prefer show columns in requested style
     doc_cols = [c for c in ["Department", "Doctor"] if c in df_doc.columns]
-    if avg_doc: doc_cols.append(avg_doc)
-    if lab_doc: doc_cols.append(lab_doc)
+    for c in [consult_doc, lab_doc_amt, proc_doc, "Total_Service", visit_doc, tot_doc_amt]:
+        if c and c in df_doc.columns and c not in doc_cols:
+            doc_cols.append(c)
+    if avg_doc and avg_doc in df_doc.columns: doc_cols.append(avg_doc)
+    if labp_doc and labp_doc in df_doc.columns: doc_cols.append(labp_doc)
 
     ins_cols = [c for c in ["Insurance"] if c in df_ins.columns]
-    if avg_ins: ins_cols.append(avg_ins)
-    if lab_ins: ins_cols.append(lab_ins)
+    for c in [consult_ins, lab_ins_amt, proc_ins, "Total_Service", visit_ins, tot_ins_amt]:
+        if c and c in df_ins.columns and c not in ins_cols:
+            ins_cols.append(c)
+    if avg_ins and avg_ins in df_ins.columns: ins_cols.append(avg_ins)
+    if labp_ins and labp_ins in df_ins.columns: ins_cols.append(labp_ins)
 
     dx_cols = [c for c in ["Doctor", "Insurance"] if c in df_dx.columns]
-    if avg_dx: dx_cols.append(avg_dx)
+    for c in [consult_dx, lab_dx_amt, proc_dx, "Total_Service", visit_dx, tot_dx_amt]:
+        if c and c in df_dx.columns and c not in dx_cols:
+            dx_cols.append(c)
+    if avg_dx and avg_dx in df_dx.columns: dx_cols.append(avg_dx)
 
     # ---------- HTML layout ----------
     style = """
@@ -228,10 +296,41 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     if not df_ins.empty:
         parts.append("<div style='height:12px'></div>")
         parts.append(_html_table(df_ins, ins_cols, header_bg="#f59e0b", title_text="Insurance Wise (Avg.Amount | Lab %)"))
-    # Doctor x Insurance
-    if not df_dx.empty:
+    # Doctor x Insurance (grouped by Doctor)
+    if not df_dx.empty and ("Doctor" in df_dx.columns):
         parts.append("<div style='height:12px'></div>")
-        parts.append(_html_table(df_dx, dx_cols, header_bg="#10b981", title_text="Doctor x Insurance (Avg.Amount)"))
+        parts.append("<div style='font-size:13px;font-weight:800;color:#334155;margin:10px 0 6px 0;'>Doctor x Insurance</div>")
+
+        # Ensure stable ordering: by Doctor then Total Amount desc (if available) else Avg desc
+        _dx = df_dx.copy()
+        sort_cols = []
+        if "Doctor" in _dx.columns:
+            sort_cols.append("Doctor")
+        if tot_dx_amt and tot_dx_amt in _dx.columns:
+            _dx[tot_dx_amt] = pd.to_numeric(_dx[tot_dx_amt], errors="coerce")
+            sort_cols.append(tot_dx_amt)
+        elif avg_dx and avg_dx in _dx.columns:
+            _dx[avg_dx] = pd.to_numeric(_dx[avg_dx], errors="coerce")
+            sort_cols.append(avg_dx)
+
+        if len(sort_cols) >= 2:
+            _dx = _dx.sort_values(by=sort_cols, ascending=[True, False], na_position="last")
+        else:
+            _dx = _dx.sort_values(by=["Doctor"], ascending=True, na_position="last")
+
+        # Render each doctor as its own mini-table
+        for doc_name, g in _dx.groupby("Doctor", dropna=False):
+            doc_label = "" if (doc_name is None or (isinstance(doc_name, float) and pd.isna(doc_name))) else str(doc_name)
+            parts.append(
+                f"<div style='margin-top:12px;padding:10px 12px;border-radius:12px;background:#ecfeff;border:1px solid #a5f3fc;'>"
+                f"<div style='font-size:13px;font-weight:900;color:#0f172a;'>👨‍⚕️ {doc_label}</div>"
+                f"</div>"
+            )
+            parts.append(_html_table(g, [c for c in dx_cols if c != 'Doctor'], header_bg="#10b981", title_text=None))
+    elif not df_dx.empty:
+        # fallback
+        parts.append("<div style='height:12px'></div>")
+        parts.append(_html_table(df_dx, dx_cols, header_bg="#10b981", title_text="Doctor x Insurance"))
 
     parts.append("<div class='note'>This is an automated report generated by the EMC dashboard.</div>")
     parts.append("</div></div>")
