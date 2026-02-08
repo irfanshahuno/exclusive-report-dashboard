@@ -419,33 +419,48 @@ def fmt_range(a, b) -> str:
 st.set_page_config(page_title="Registration Summary (View Only)", layout="wide", initial_sidebar_state="collapsed")
 st.title("📊 Registration Dashboard — Executive View")
 
-# ---------------------------
-# Oxford Executive Theme (SAFE)
-# ---------------------------
+# ===========================
+# Oxford Premium UI (SAFE)
+# - CSS + static banner only
+# - No logic edits, no function injections
+# ===========================
 st.markdown(
     """
     <style>
-      .main{ background: linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%); }
-      .block-container{padding-top: 1.2rem; padding-bottom: 2.5rem; max-width: 1400px;}
-      h1,h2,h3{letter-spacing:-0.02em;}
-      h1{font-weight: 950;}
-      h2{font-weight: 900;}
-      h3{font-weight: 850;}
-      hr{border:none; border-top:1px solid rgba(15,23,42,0.08); margin: 1.0rem 0;}
+      /* Canvas */
+      .main{
+        background: radial-gradient(900px 300px at 15% 0%, rgba(59,130,246,0.10), transparent 55%),
+                    radial-gradient(900px 300px at 85% 0%, rgba(236,72,153,0.08), transparent 55%),
+                    linear-gradient(180deg,#f8fafc 0%,#eef2f7 100%);
+      }
+      .block-container{
+        max-width: 1480px;
+        padding-top: 1.1rem;
+        padding-bottom: 2.6rem;
+      }
 
+      /* Typography */
+      h1,h2,h3{ letter-spacing: -0.02em; }
+      h1{ font-weight: 950; }
+      h2{ font-weight: 900; }
+      h3{ font-weight: 850; }
+      p,li{ color: rgba(15,23,42,0.92); }
+
+      /* Executive Banner */
       .ox-banner{
-        background: radial-gradient(1200px 300px at 10% 10%, rgba(59,130,246,0.28), transparent 55%),
-                    radial-gradient(900px 260px at 90% 0%, rgba(236,72,153,0.18), transparent 50%),
-                    linear-gradient(135deg, #0b1220 0%, #0f172a 55%, #111827 100%);
+        background:
+          radial-gradient(1200px 320px at 10% 10%, rgba(59,130,246,0.28), transparent 55%),
+          radial-gradient(900px 260px at 90% 0%, rgba(236,72,153,0.18), transparent 50%),
+          linear-gradient(135deg,#0b1220 0%,#0f172a 62%,#111827 100%);
         border: 1px solid rgba(255,255,255,0.10);
         border-radius: 22px;
         padding: 18px 22px;
-        box-shadow: 0 18px 55px rgba(2,6,23,0.28);
+        box-shadow: 0 18px 55px rgba(2,6,23,0.26);
         color: #ffffff;
-        margin: 0.25rem 0 1rem 0;
+        margin: 0.35rem 0 1.05rem 0;
       }
-      .ox-title{font-size: 26px; font-weight: 950; line-height: 1.2;}
-      .ox-sub{font-size: 13px; opacity: 0.82; margin-top: 6px;}
+      .ox-title{ font-size: 26px; font-weight: 950; line-height: 1.15; }
+      .ox-sub{ font-size: 13px; opacity: 0.84; margin-top: 6px; }
       .ox-pill{
         display:inline-block;
         padding: 6px 10px;
@@ -453,10 +468,20 @@ st.markdown(
         background: rgba(255,255,255,0.10);
         border: 1px solid rgba(255,255,255,0.12);
         font-size: 12px;
-        font-weight: 800;
+        font-weight: 850;
         margin-right: 8px;
       }
 
+      /* Cards (metrics area) — subtle elevation */
+      div[data-testid="stMetric"]{
+        background: rgba(255,255,255,0.92);
+        border: 1px solid rgba(15,23,42,0.08);
+        border-radius: 18px;
+        padding: 14px 14px 10px 14px;
+        box-shadow: 0 10px 25px rgba(15,23,42,0.08);
+      }
+
+      /* Dataframes (tables) */
       div[data-testid="stDataFrame"]{
         background: rgba(255,255,255,0.94);
         border: 1px solid rgba(15,23,42,0.08);
@@ -464,32 +489,46 @@ st.markdown(
         box-shadow: 0 10px 25px rgba(15,23,42,0.08);
         padding: 8px 10px 2px 10px;
       }
+
+      /* Tabs */
+      button[data-baseweb="tab"]{
+        font-weight: 900 !important;
+      }
+
+      /* Expanders */
       details{
         border-radius: 18px;
         border: 1px solid rgba(15,23,42,0.08);
         box-shadow: 0 10px 25px rgba(15,23,42,0.08);
-        background: rgba(255,255,255,0.92);
+        background: rgba(255,255,255,0.94);
         padding: 6px 10px;
       }
-      button[data-baseweb="tab"]{ font-weight: 900 !important; }
-      .stCaption{color: rgba(71,85,105,0.95);}
+
+      /* Sidebar (even if collapsed) */
+      section[data-testid="stSidebar"]{
+        background: linear-gradient(180deg,#0b1220 0%, #0f172a 100%);
+      }
+      section[data-testid="stSidebar"] *{
+        color: rgba(255,255,255,0.92) !important;
+      }
+
+      /* Small tweaks */
+      .stCaption{ color: rgba(71,85,105,0.95) !important; }
+      hr{ border:none; border-top: 1px solid rgba(15,23,42,0.08); margin: 1.0rem 0; }
     </style>
+
+    <div class="ox-banner">
+      <div>
+        <span class="ox-pill">Oxford Executive Theme</span>
+        <span class="ox-pill">View Only</span>
+        <span class="ox-pill">RCM • Registration</span>
+      </div>
+      <div class="ox-title">Management Dashboard</div>
+      <div class="ox-sub">Premium executive styling applied (visual layer only). Data & logic remain unchanged.</div>
+    </div>
     """,
     unsafe_allow_html=True,
 )
-
-def _ox_banner_safe(center_label: str, period_label: str, generated_label: str):
-    st.markdown(
-        f"""<div class="ox-banner">
-              <div>
-                <span class="ox-pill">{center_label}</span>
-                <span class="ox-pill">{period_label}</span>
-              </div>
-              <div class="ox-title">Executive Summary</div>
-              <div class="ox-sub">{generated_label}</div>
-            </div>""",
-        unsafe_allow_html=True,
-    )
 
 
 # ---------------------------
@@ -647,19 +686,6 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         st.subheader(title)
     else:
         st.header(title)
-
-
-# Oxford executive banner (safe visual layer)
-try:
-    _center_label = CENTERS.get(center_key, str(center_key))
-except Exception:
-    _center_label = str(globals().get("center_key", "Center"))
-_ox_banner_safe(
-    center_label=f"Center: {_center_label}",
-    period_label=f"Day: {fmt_day(day_ts)}",
-    generated_label=f"Generated: {fmt_dt(datetime.now())}",
-)
-
 
 
     def _sort_with_total(df: pd.DataFrame, label_col: str, count_col: str = "Count", total_label: str = "TOTAL") -> pd.DataFrame:
