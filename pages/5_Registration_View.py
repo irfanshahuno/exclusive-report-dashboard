@@ -433,11 +433,12 @@ st.markdown(
         --text: #0f172a;
         --muted: #64748b;
       }
-      .block-container{padding-top: 1.2rem; padding-bottom: 2.5rem;}
-      h1,h2,h3{letter-spacing:-0.02em;}
-      h1{font-weight:800;}
+      .block-container{max-width: 100% !important; padding-top: 1.2rem; padding-bottom: 2.5rem; padding-left: 2rem; padding-right: 2rem;}
+      h1,h2,h3{letter-spacing:-0.02em; line-height: 1.35 !important; overflow: visible !important; white-space: normal !important;}
+      h1{font-weight:800; padding-bottom: 4px;}
       h2{font-weight:800;}
       h3{font-weight:700;}
+      div[data-baseweb="select"] span { line-height: 1.4 !important; }
       hr{border: none; border-top: 1px solid rgba(16,24,40,0.08); margin: 1.25rem 0;}
       .kpi-grid{
         display:grid;
