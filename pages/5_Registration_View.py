@@ -1115,11 +1115,6 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             st.error(f"Email failed: {e}")
 
     st.caption("Tip: Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/EMAIL_TO/EMAIL_CC in Streamlit Secrets for this app.")
-
-
-("Tip: Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/EMAIL_TO/EMAIL_CC in Streamlit Secrets for this app.")
-
-
     def _sort_with_total(df: pd.DataFrame, label_col: str, count_col: str = "Count", total_label: str = "TOTAL") -> pd.DataFrame:
         """Sort by count desc, keep TOTAL row at bottom if present."""
         if df is None or df.empty or count_col not in df.columns or label_col not in df.columns:
