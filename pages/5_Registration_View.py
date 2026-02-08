@@ -682,7 +682,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             if df is None or df.empty:
                 return df
             x = _sort_income(df)
-        x = _move_grand_total_bottom(x)
+            x = _move_grand_total_bottom(x)
             x = x.copy()
             for col in ["Avg_Amount_Service", "Avg_Amount_Insuance", "Lab_%"]:
                 if col in x.columns:
