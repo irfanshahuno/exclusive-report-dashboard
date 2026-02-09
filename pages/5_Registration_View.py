@@ -1145,25 +1145,49 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         return d
 
     def _sort_income(df: pd.DataFrame) -> pd.DataFrame:
+        """Sort Income Analysis tables largest→smallest by visits (Total_Visit) when available.
+        Falls back to amount-based sorting if visit column is missing.
+        """
         if df is None or df.empty:
             return df
         d = df.copy()
-        # pick best numeric column for sorting
+
+        # 1) Prefer visit-based sorting (requested by user)
+        def _norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]+", "", str(s).lower())
+
+        visit_col = None
+        visit_norms = {
+            "totalvisit", "totalvisits", "total_visit", "total_visits", "visits", "visit"
+        }
+        for c in d.columns:
+            if _norm(c) in visit_norms:
+                visit_col = c
+                break
+        # common exact header in your tables
+        if visit_col is None and "Total_Visit" in d.columns:
+            visit_col = "Total_Visit"
+
+        if visit_col is not None:
+            d[visit_col] = pd.to_numeric(d[visit_col], errors="coerce").fillna(0)
+            return d.sort_values(visit_col, ascending=False, kind="mergesort")
+
+        # 2) Fallback: amount-based sorting
         preferred = ["net_amount", "net amount", "total_amount", "total amount", "amount", "net", "paid"]
         num_cols = []
         for c in d.columns:
             if pd.api.types.is_numeric_dtype(d[c]):
                 num_cols.append(c)
-        # try coerce for common money columns
         for c in d.columns:
-            if c not in num_cols and any(c.lower() == p for p in preferred):
+            if c not in num_cols and any(str(c).lower() == p for p in preferred):
                 d[c] = pd.to_numeric(d[c], errors="coerce")
                 if pd.api.types.is_numeric_dtype(d[c]):
                     num_cols.append(c)
+
         sort_col = None
         for p in preferred:
             for c in d.columns:
-                if c.lower() == p:
+                if str(c).lower() == p:
                     sort_col = c
                     break
             if sort_col:
