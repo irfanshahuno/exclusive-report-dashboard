@@ -1237,6 +1237,46 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         df_ins = dfs.get("Income | Insurance Wise Revenue")
         df_dx  = dfs.get("Income | Doctor x Insurance Revenue")
 
+        def _add_proc_rad_per_visit(df: pd.DataFrame) -> pd.DataFrame:
+            """Override Procedure/Radiology per-visit values for display (Procedure/Visits, Radiology/Visits).
+            Keeps GRAND TOTAL intact and avoids misleading % columns.
+            """
+            if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+                return df
+            out = df.copy()
+
+            # Identify visit column (usually Total_Visit)
+            visit_col = "Total_Visit" if "Total_Visit" in out.columns else None
+            if visit_col is None:
+                for c in out.columns:
+                    if str(c).strip().lower() in ["total visit", "total visits", "visits", "visit", "total_visit", "total_visits"]:
+                        visit_col = c
+                        break
+            if visit_col is None:
+                return out
+
+            denom = pd.to_numeric(out[visit_col], errors="coerce").replace(0, pd.NA)
+
+            # Procedure per visit
+            if "Procedure" in out.columns:
+                out["Procedure_Per_Visit"] = (pd.to_numeric(out["Procedure"], errors="coerce") / denom).fillna(0)
+
+            # Radiology per visit
+            if "Radiology" in out.columns:
+                out["Radiology_Per_Visit"] = (pd.to_numeric(out["Radiology"], errors="coerce") / denom).fillna(0)
+
+            # Remove misleading percentage columns if present
+            for c in ["Procedure_%", "Radiology_%"]:
+                if c in out.columns:
+                    out = out.drop(columns=[c], errors="ignore")
+
+            return out
+
+        # Apply per-visit override for display
+        df_doc = _add_proc_rad_per_visit(df_doc)
+        df_ins = _add_proc_rad_per_visit(df_ins)
+        df_dx  = _add_proc_rad_per_visit(df_dx)
+
         tabs = st.tabs(["Doctor Wise", "Insurance Wise", "Doctor x Insurance"])
         def _move_grand_total_bottom(df: pd.DataFrame) -> pd.DataFrame:
             """Keep GRAND TOTAL row(s) at the bottom for management tables."""
@@ -1259,7 +1299,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             x = _sort_income(df)
             x = _move_grand_total_bottom(x)
             x = x.copy()
-            for col in ["Avg_Amount_Service", "Avg_Amount_Insuance", "Lab_%", "Procedure_%", "Radiology_%"]:
+            for col in ["Avg_Amount_Service", "Avg_Amount_Insuance", "Lab_%", "Procedure_Per_Visit", "Radiology_Per_Visit"]:
                 if col in x.columns:
                     x[col] = pd.to_numeric(x[col], errors="coerce").round(2)
             return x
