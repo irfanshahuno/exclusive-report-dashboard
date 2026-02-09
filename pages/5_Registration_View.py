@@ -1874,6 +1874,17 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                     break
             if df_detail is None:
                 df_detail = pd.DataFrame()
+
+            # Fallback: pick any dataframe that has Expiry + Employer columns (in case key name differs)
+            if df_detail is None or df_detail.empty:
+                for _k, _v in (dfs or {}).items():
+                    if not isinstance(_v, pd.DataFrame) or _v.empty:
+                        continue
+                    _cols = [str(c).strip().lower() for c in _v.columns]
+                    if any("expiry" in c for c in _cols) and any("employer" in c for c in _cols):
+                        df_detail = _v.copy()
+                        break
+
         
             if df_detail is None or df_detail.empty:
                 st.info("No expiry detail list found for this day/period.")
