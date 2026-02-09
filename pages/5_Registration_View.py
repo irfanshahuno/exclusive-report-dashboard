@@ -1299,9 +1299,17 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             x = _sort_income(df)
             x = _move_grand_total_bottom(x)
             x = x.copy()
+            # round key numeric display columns
             for col in ["Avg_Amount_Service", "Avg_Amount_Insuance", "Lab_%", "Procedure_Per_Visit", "Radiology_Per_Visit"]:
                 if col in x.columns:
                     x[col] = pd.to_numeric(x[col], errors="coerce").round(2)
+
+            # Rename for UI (user requested)
+            x = x.rename(columns={
+                "Procedure_Per_Visit": "Procedure %",
+                "Radiology_Per_Visit": "Radiology %",
+            })
+
             return x
 
 
