@@ -184,23 +184,32 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     # common service columns
     consult_doc = _pick_by_names(df_doc, ["Consultation", "Consult", "Consult Amount"])
     lab_doc_amt = _pick_by_names(df_doc, ["Lab", "Lab Amount"])
-        rad_doc_amt = _pick_by_names(df_doc, [\"Radiology\", \"Radiology Amount\", \"Radiology Amt\", \"Imaging\", \"Imaging Amount\"])
-proc_doc    = _pick_by_names(df_doc, ["Procedure", "Procedures"])
-    visit_doc   = _pick_by_names(df_doc, ["Total Visit", "Total Visits", "Total_Visit"])
+    rad_doc_amt = _pick_by_names(
+        df_doc,
+        ["Radiology", "Radiology Amount", "Radiology Amt", "Imaging", "Imaging Amount"]
+    )
+    proc_doc = _pick_by_names(df_doc, ["Procedure", "Procedures"])
+    visit_doc = _pick_by_names(df_doc, ["Total Visit", "Total Visits", "Total_Visit"])
     tot_doc_amt = _pick_by_names(df_doc, ["Total Amount", "Total_Amount", "TotalAmount"])
 
     consult_ins = _pick_by_names(df_ins, ["Consultation", "Consult", "Consult Amount"])
     lab_ins_amt = _pick_by_names(df_ins, ["Lab", "Lab Amount"])
-        rad_ins_amt = _pick_by_names(df_ins, [\"Radiology\", \"Radiology Amount\", \"Radiology Amt\", \"Imaging\", \"Imaging Amount\"])
-proc_ins    = _pick_by_names(df_ins, ["Procedure", "Procedures"])
-    visit_ins   = _pick_by_names(df_ins, ["Total Visit", "Total Visits", "Total_Visit"])
+    rad_ins_amt = _pick_by_names(
+        df_ins,
+        ["Radiology", "Radiology Amount", "Radiology Amt", "Imaging", "Imaging Amount"]
+    )
+    proc_ins = _pick_by_names(df_ins, ["Procedure", "Procedures"])
+    visit_ins = _pick_by_names(df_ins, ["Total Visit", "Total Visits", "Total_Visit"])
     tot_ins_amt = _pick_by_names(df_ins, ["Total Amount", "Total_Amount", "TotalAmount"])
 
     consult_dx = _pick_by_names(df_dx, ["Consultation", "Consult", "Consult Amount"])
     lab_dx_amt = _pick_by_names(df_dx, ["Lab", "Lab Amount"])
-        rad_dx_amt = _pick_by_names(df_dx, [\"Radiology\", \"Radiology Amount\", \"Radiology Amt\", \"Imaging\", \"Imaging Amount\"])
-proc_dx    = _pick_by_names(df_dx, ["Procedure", "Procedures"])
-    visit_dx   = _pick_by_names(df_dx, ["Total Visit", "Total Visits", "Total_Visit"])
+    rad_dx_amt = _pick_by_names(
+        df_dx,
+        ["Radiology", "Radiology Amount", "Radiology Amt", "Imaging", "Imaging Amount"]
+    )
+    proc_dx = _pick_by_names(df_dx, ["Procedure", "Procedures"])
+    visit_dx = _pick_by_names(df_dx, ["Total Visit", "Total Visits", "Total_Visit"])
     tot_dx_amt = _pick_by_names(df_dx, ["Total Amount", "Total_Amount", "TotalAmount"])
 
     def _ensure_total_service(df: pd.DataFrame, c_cons, c_lab, c_rad, c_proc):
