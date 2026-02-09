@@ -184,24 +184,27 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     # common service columns
     consult_doc = _pick_by_names(df_doc, ["Consultation", "Consult", "Consult Amount"])
     lab_doc_amt = _pick_by_names(df_doc, ["Lab", "Lab Amount"])
-    proc_doc    = _pick_by_names(df_doc, ["Procedure", "Procedures"])
+        rad_doc_amt = _pick_by_names(df_doc, [\"Radiology\", \"Radiology Amount\", \"Radiology Amt\", \"Imaging\", \"Imaging Amount\"])
+proc_doc    = _pick_by_names(df_doc, ["Procedure", "Procedures"])
     visit_doc   = _pick_by_names(df_doc, ["Total Visit", "Total Visits", "Total_Visit"])
     tot_doc_amt = _pick_by_names(df_doc, ["Total Amount", "Total_Amount", "TotalAmount"])
 
     consult_ins = _pick_by_names(df_ins, ["Consultation", "Consult", "Consult Amount"])
     lab_ins_amt = _pick_by_names(df_ins, ["Lab", "Lab Amount"])
-    proc_ins    = _pick_by_names(df_ins, ["Procedure", "Procedures"])
+        rad_ins_amt = _pick_by_names(df_ins, [\"Radiology\", \"Radiology Amount\", \"Radiology Amt\", \"Imaging\", \"Imaging Amount\"])
+proc_ins    = _pick_by_names(df_ins, ["Procedure", "Procedures"])
     visit_ins   = _pick_by_names(df_ins, ["Total Visit", "Total Visits", "Total_Visit"])
     tot_ins_amt = _pick_by_names(df_ins, ["Total Amount", "Total_Amount", "TotalAmount"])
 
     consult_dx = _pick_by_names(df_dx, ["Consultation", "Consult", "Consult Amount"])
     lab_dx_amt = _pick_by_names(df_dx, ["Lab", "Lab Amount"])
-    proc_dx    = _pick_by_names(df_dx, ["Procedure", "Procedures"])
+        rad_dx_amt = _pick_by_names(df_dx, [\"Radiology\", \"Radiology Amount\", \"Radiology Amt\", \"Imaging\", \"Imaging Amount\"])
+proc_dx    = _pick_by_names(df_dx, ["Procedure", "Procedures"])
     visit_dx   = _pick_by_names(df_dx, ["Total Visit", "Total Visits", "Total_Visit"])
     tot_dx_amt = _pick_by_names(df_dx, ["Total Amount", "Total_Amount", "TotalAmount"])
 
-    def _ensure_total_service(df: pd.DataFrame, c_cons, c_lab, c_proc):
-        """Ensure a 'Total_Amount_Service' column exists (sum of Consultation+Lab+Procedure).
+    def _ensure_total_service(df: pd.DataFrame, c_cons, c_lab, c_rad, c_proc):
+        """Ensure a 'Total_Amount_Service' column exists (sum of Consultation+Lab+Radiology+Procedure).
         Keeps backward-compat with older files that may already have Total_Service.
         """
         if df is None or df.empty:
@@ -212,20 +215,21 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
             out = df.copy()
             out["Total_Amount_Service"] = pd.to_numeric(out["Total_Service"], errors="coerce")
             return out
-        if c_cons and c_lab and c_proc:
+        if c_cons and c_lab and c_rad and c_proc:
             out = df.copy()
             out["Total_Amount_Service"] = (
                 pd.to_numeric(out[c_cons], errors="coerce").fillna(0)
                 + pd.to_numeric(out[c_lab], errors="coerce").fillna(0)
+                + pd.to_numeric(out[c_rad], errors="coerce").fillna(0)
                 + pd.to_numeric(out[c_proc], errors="coerce").fillna(0)
             )
             return out
         return df
 
     # Add Total_Amount_Service if possible (user asked: show total service + total amount) (user asked: show total service + total amount)
-    df_doc = _ensure_total_service(df_doc, consult_doc, lab_doc_amt, proc_doc)
-    df_ins = _ensure_total_service(df_ins, consult_ins, lab_ins_amt, proc_ins)
-    df_dx  = _ensure_total_service(df_dx,  consult_dx,  lab_dx_amt,  proc_dx)
+    df_doc = _ensure_total_service(df_doc, consult_doc, lab_doc_amt, rad_doc_amt, proc_doc)
+    df_ins = _ensure_total_service(df_ins, consult_ins, lab_ins_amt, rad_ins_amt, proc_ins)
+    df_dx  = _ensure_total_service(df_dx,  consult_dx,  lab_dx_amt,  rad_dx_amt,  proc_dx)
     # extra amount/avg columns (service vs insurance)
     tot_service_doc = _pick_by_names(df_doc, ["Total_Amount_Service", "Total Amount Service", "TotalAmountService"])
     tot_ins_doc     = _pick_by_names(df_doc, ["Total_Amount_Insurance", "Total_Amount_Insuance", "Total Amount Insurance", "TotalAmountInsurance"])
@@ -1222,7 +1226,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             x = _sort_income(df)
             x = _move_grand_total_bottom(x)
             x = x.copy()
-            for col in ["Avg_Amount_Service", "Avg_Amount_Insuance", "Lab_%"]:
+            for col in ["Avg_Amount_Service", "Avg_Amount_Insuance", "Lab_%", "Procedure_%", "Radiology_%"]:
                 if col in x.columns:
                     x[col] = pd.to_numeric(x[col], errors="coerce").round(2)
             return x
@@ -1868,6 +1872,20 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                 # Normalize column names
                 if "Insuance" in df_detail.columns and "Insurance" not in df_detail.columns:
                     df_detail = df_detail.rename(columns={"Insuance": "Insurance"})
+
+                # --- Fix Expiry Date parsing & Days To Expiry (robust) ---
+                if "Expiry Date" in df_detail.columns:
+                    _exp_raw = df_detail["Expiry Date"]
+                    _exp_dt = pd.to_datetime(_exp_raw, errors="coerce")
+                    # fallback for dd/mm/yyyy style
+                    if _exp_dt.notna().sum() == 0:
+                        _exp_dt = pd.to_datetime(_exp_raw, errors="coerce", dayfirst=True)
+                    df_detail["Expiry Date"] = _exp_dt
+
+                    # Ensure Days To Expiry exists (or recompute if blank)
+                    if "Days To Expiry" not in df_detail.columns or pd.to_numeric(df_detail.get("Days To Expiry"), errors="coerce").isna().all():
+                        _today = pd.Timestamp.today().normalize()
+                        df_detail["Days To Expiry"] = (df_detail["Expiry Date"] - _today).dt.days
                 # Expected columns
                 # Employer, Insurance, Name, EMR No, Visit ID, Doctor, Expiry Date, Days To Expiry
                 # Filters
@@ -1891,6 +1909,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         
                 df_f = df_detail.copy()
                 if "Days To Expiry" in df_f.columns:
+                    df_f["Days To Expiry"] = pd.to_numeric(df_f["Days To Expiry"], errors="coerce")
                     if win == "Expired":
                         df_f = df_f[df_f["Days To Expiry"] < 0]
                     elif win.startswith("Next"):
