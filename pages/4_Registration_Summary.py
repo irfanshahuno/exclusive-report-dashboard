@@ -404,8 +404,10 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     """Build Income Analysis tables.
 
     Adds dual totals/averages:
-    - Total_Amount_Service / Avg_Amount_Service from Consultation+Lab+Procedure
+    - Total_Amount_Service / Avg_Amount_Service from Consultation+Lab+Radiology+Procedure
     - Total_Amount_Insuance / Avg_Amount_Insuance from STRICT 'Insuance' column (same spelling)
+    Also adds percentages of service total:
+    - Lab_% / Radiology_% / Procedure_%
     """
     if df is None or df.empty:
         return {}
@@ -414,9 +416,11 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     col_doc  = _find_col(df, ["Doctor"])
     # Insurance/Payer name is OPTIONAL for grouping. (Some reports may not have it.)
     col_payer = _find_col(df, ["Insurance Name", "Insurance", "Payer", "Payer Name"])
-    col_visit= _find_col(df, ["Visit No", "VisitNo", "Visit ID", "VisitID"])
+    col_visit = _find_col(df, ["Visit No", "VisitNo", "Visit ID", "VisitID"])
+
     col_cons = _find_col(df, ["Consultation"])
     col_lab  = _find_col(df, ["Lab"])
+    col_rad  = _find_col(df, ["Radiology", "Radiology Amount", "X-Ray", "Xray", "XRAY", "Ultrasound", "USG"])
     col_proc = _find_col(df, ["Procedure"])
 
     # STRICT amount column spelling for Insuance
@@ -444,25 +448,39 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     tmp[col_visit] = tmp[col_visit].astype(str).str.strip()
     tmp = tmp[tmp[col_visit] != ""].copy()
 
+    # Ensure numeric
     for c in [col_cons, col_lab, col_proc, col_insu_amt]:
         tmp[c] = pd.to_numeric(tmp[c], errors="coerce").fillna(0.0)
 
-    tmp["_total_service"] = tmp[col_cons] + tmp[col_lab] + tmp[col_proc]
+    # Radiology is optional (some reports don't have it)
+    if col_rad:
+        tmp[col_rad] = pd.to_numeric(tmp[col_rad], errors="coerce").fillna(0.0)
+    else:
+        tmp["_radiology"] = 0.0
+        col_rad = "_radiology"
+
+    tmp["_total_service"] = tmp[col_cons] + tmp[col_lab] + tmp[col_rad] + tmp[col_proc]
     tmp["_total_insuance"] = tmp[col_insu_amt]
 
     def _agg(group_cols: List[str]) -> pd.DataFrame:
         g = tmp.groupby(group_cols, dropna=False).agg(
             Consultation=(col_cons, "sum"),
             Lab=(col_lab, "sum"),
+            Radiology=(col_rad, "sum"),
             Procedure=(col_proc, "sum"),
             Total_Visit=(col_visit, pd.Series.nunique),
             Total_Amount_Service=("_total_service", "sum"),
             Total_Amount_Insuance=("_total_insuance", "sum"),
         ).reset_index()
 
-        g["Avg_Amount_Service"] = g["Total_Amount_Service"] / g["Total_Visit"].replace(0, pd.NA)
-        g["Avg_Amount_Insuance"] = g["Total_Amount_Insuance"] / g["Total_Visit"].replace(0, pd.NA)
-        g["Lab_%"] = (g["Lab"] / g["Total_Amount_Service"].replace(0, pd.NA)) * 100
+        denom = g["Total_Visit"].replace(0, pd.NA)
+        g["Avg_Amount_Service"] = g["Total_Amount_Service"] / denom
+        g["Avg_Amount_Insuance"] = g["Total_Amount_Insuance"] / denom
+
+        svc = g["Total_Amount_Service"].replace(0, pd.NA)
+        g["Lab_%"] = (g["Lab"] / svc) * 100
+        g["Radiology_%"] = (g["Radiology"] / svc) * 100
+        g["Procedure_%"] = (g["Procedure"] / svc) * 100
         return g
 
     # Doctor wise
@@ -481,10 +499,15 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     def _add_grand_total(d: pd.DataFrame, label_cols: List[str]) -> pd.DataFrame:
         if d is None or d.empty:
             return d
-        total_visit = int(d["Total_Visit"].sum())
-        total_service = float(d["Total_Amount_Service"].sum())
-        total_insu = float(d["Total_Amount_Insuance"].sum())
-        lab_sum = float(d["Lab"].sum())
+
+        total_visit = int(pd.to_numeric(d["Total_Visit"], errors="coerce").fillna(0).sum())
+        total_service = float(pd.to_numeric(d["Total_Amount_Service"], errors="coerce").fillna(0.0).sum())
+        total_insu = float(pd.to_numeric(d["Total_Amount_Insuance"], errors="coerce").fillna(0.0).sum())
+
+        cons_sum = float(pd.to_numeric(d["Consultation"], errors="coerce").fillna(0.0).sum())
+        lab_sum = float(pd.to_numeric(d["Lab"], errors="coerce").fillna(0.0).sum())
+        rad_sum = float(pd.to_numeric(d.get("Radiology", 0.0), errors="coerce").fillna(0.0).sum()) if "Radiology" in d.columns else 0.0
+        proc_sum = float(pd.to_numeric(d["Procedure"], errors="coerce").fillna(0.0).sum())
 
         row = {c: "" for c in d.columns}
         for lc in label_cols:
@@ -492,9 +515,11 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
                 row[lc] = "GRAND TOTAL"
                 break
 
-        row["Consultation"] = float(d["Consultation"].sum())
+        row["Consultation"] = cons_sum
         row["Lab"] = lab_sum
-        row["Procedure"] = float(d["Procedure"].sum())
+        if "Radiology" in row:
+            row["Radiology"] = rad_sum
+        row["Procedure"] = proc_sum
         row["Total_Visit"] = total_visit
 
         row["Total_Amount_Service"] = total_service
@@ -502,7 +527,12 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 
         row["Avg_Amount_Service"] = (total_service / total_visit) if total_visit else 0.0
         row["Avg_Amount_Insuance"] = (total_insu / total_visit) if total_visit else 0.0
+
         row["Lab_%"] = (lab_sum / total_service * 100) if total_service else 0.0
+        if "Radiology_%" in row:
+            row["Radiology_%"] = (rad_sum / total_service * 100) if total_service else 0.0
+        if "Procedure_%" in row:
+            row["Procedure_%"] = (proc_sum / total_service * 100) if total_service else 0.0
 
         return pd.concat([d, pd.DataFrame([row])], ignore_index=True)
 
@@ -513,23 +543,25 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         doctor_ins_wise = _add_grand_total(doctor_ins_wise, ["Doctor"])
 
     # Recompute averages strictly as: Total Amount ÷ Unique Visit No (Total_Visit)
-    # (Keeps display consistent even if upstream file has repeated/odd visit formats)
     def _recalc_avg(d: pd.DataFrame) -> pd.DataFrame:
         if d is None or d.empty:
             return d
-        # Ensure numeric
+
         d["Total_Visit"] = pd.to_numeric(d["Total_Visit"], errors="coerce").fillna(0).astype(int)
         d["Total_Amount_Service"] = pd.to_numeric(d["Total_Amount_Service"], errors="coerce").fillna(0.0)
         d["Total_Amount_Insuance"] = pd.to_numeric(d["Total_Amount_Insuance"], errors="coerce").fillna(0.0)
 
         denom = d["Total_Visit"].replace(0, pd.NA)
-        d["Avg_Amount_Service"] = d["Total_Amount_Service"] / denom
-        d["Avg_Amount_Insuance"] = d["Total_Amount_Insuance"] / denom
-        # Lab_% stays based on Service total
-        d["Lab_%"] = (pd.to_numeric(d["Lab"], errors="coerce").fillna(0.0) / d["Total_Amount_Service"].replace(0, pd.NA)) * 100
-        d["Avg_Amount_Service"] = d["Avg_Amount_Service"].fillna(0.0)
-        d["Avg_Amount_Insuance"] = d["Avg_Amount_Insuance"].fillna(0.0)
-        d["Lab_%"] = d["Lab_%"].fillna(0.0)
+        d["Avg_Amount_Service"] = (d["Total_Amount_Service"] / denom).fillna(0.0)
+        d["Avg_Amount_Insuance"] = (d["Total_Amount_Insuance"] / denom).fillna(0.0)
+
+        svc = d["Total_Amount_Service"].replace(0, pd.NA)
+        d["Lab_%"] = (pd.to_numeric(d.get("Lab", 0.0), errors="coerce").fillna(0.0) / svc * 100).fillna(0.0)
+        if "Radiology" in d.columns:
+            d["Radiology_%"] = (pd.to_numeric(d.get("Radiology", 0.0), errors="coerce").fillna(0.0) / svc * 100).fillna(0.0)
+        if "Procedure" in d.columns:
+            d["Procedure_%"] = (pd.to_numeric(d.get("Procedure", 0.0), errors="coerce").fillna(0.0) / svc * 100).fillna(0.0)
+
         return d
 
     doctor_wise = _recalc_avg(doctor_wise)
@@ -944,7 +976,12 @@ def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Di
     # ---- Expiry Tracker (ONLY EMR+Visit + Expiry Date) ----
     exp = base[[col_emr, col_visit, col_doc, "Employer", "Insurance", col_exp]].copy()
     exp = exp.rename(columns={col_emr: "EMR No", col_visit: "Visit ID", col_doc: "Doctor", col_exp: "Expiry Date"})
-    exp["Expiry Date"] = pd.to_datetime(exp["Expiry Date"], errors="coerce")
+    # robust expiry parsing (some files are dd/mm/yyyy or mixed)
+    _raw_exp = exp["Expiry Date"].copy()
+    exp["Expiry Date"] = pd.to_datetime(_raw_exp, errors="coerce")
+    if exp["Expiry Date"].notna().sum() == 0 and _raw_exp.astype(str).str.strip().ne("").any():
+        exp["Expiry Date"] = pd.to_datetime(_raw_exp, errors="coerce", dayfirst=True)
+
     today = pd.Timestamp.today().normalize()
     exp["Days To Expiry"] = (exp["Expiry Date"] - today).dt.days
     exp = exp.dropna(subset=["Expiry Date"]).copy()
