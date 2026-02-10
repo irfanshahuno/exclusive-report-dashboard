@@ -11,13 +11,14 @@ def quarter_dates(year, quarter):
         return pd.Timestamp(year, 7, 1), pd.Timestamp(year, 9, 30)
     if quarter == "Q4":
         return pd.Timestamp(year, 10, 1), pd.Timestamp(year, 12, 31)
+    raise ValueError("Invalid quarter")
 
 def make_patient_key(df):
-    emr = df["EMR No"].astype(str).str.strip()
-    eid = df["Emirates ID"].astype(str).str.strip()
-    return emr.where(emr != "", eid)
+    # Prefer EMR No, fallback to Emirates ID
+    emr = df.get("EMR No", "").astype(str).str.strip()
+    eid = df.get("Emirates ID", "").astype(str).str.strip()
+    return emr.where(emr.notna() & (emr != "") & (emr.str.lower() != "nan"), eid)
 
-def clean_result_value(series):
-    series = series.astype(str).str.replace("%", "", regex=False).str.strip()
-    return pd.to_numeric(series, errors="coerce")
-
+def clean_numeric(series):
+    s = series.astype(str).str.replace("%", "", regex=False).str.strip()
+    return pd.to_numeric(s, errors="coerce")
