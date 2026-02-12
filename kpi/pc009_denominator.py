@@ -1,8 +1,6 @@
 import pandas as pd
 from dateutil.relativedelta import relativedelta
 
-PRIMARY_CARE_DEPTS = {"General Medicine", "Family Medicine"}
-
 # Diabetes prefixes (matches guideline: E10/E11/E13 and O24 series)
 DIAB_PREFIXES = ("E10", "E11", "E13", "O24")
 
@@ -71,16 +69,23 @@ def compute_denominator(visits_df: pd.DataFrame, year: int, quarter: str):
     prior_9m_start = q_start - relativedelta(months=9)
 
     v = visits_df.copy()
-    v["Visit Date"] = pd.to_datetime(v["Visit Date"], errors="coerce")
-    v["Birth Date"] = pd.to_datetime(v["Birth Date"], errors="coerce")
-    v["Department"] = v["Department"].astype(str).str.strip()
+    # IMPORTANT: your dates are day-first (01-01-2025)
+    v["Visit Date"] = pd.to_datetime(v["Visit Date"], errors="coerce", dayfirst=True)
+    v["Birth Date"] = pd.to_datetime(v["Birth Date"], errors="coerce", dayfirst=True)
 
+    v["Department"] = v["Department"].astype(str).str.strip()
     v["patient_key"] = make_patient_key(v)
 
-    # Primary Care only
-    v = v[v["Department"].isin(PRIMARY_CARE_DEPTS)].copy()
+    # ✅ Department filter fixed for your data:
+    # Your data shows "GENERAL PRACTICE DEPARTMENT"
+    dept = v["Department"].astype(str).str.upper().str.strip()
+    v = v[
+        dept.str.contains("GENERAL", na=False) |
+        dept.str.contains("FAMILY", na=False) |
+        dept.str.contains("PRACTICE", na=False)
+    ].copy()
 
-    # Age at quarter start
+    # Age at quarter start (we trust your Age column is text; so we compute from Birth Date)
     v["Age_at_qstart"] = (q_start - v["Birth Date"]).dt.days / 365.25
 
     # Flags
@@ -110,15 +115,10 @@ def compute_denominator(visits_df: pd.DataFrame, year: int, quarter: str):
     # Exclusions anywhere in (prior 9 months + quarter)
     denom_window = v[v["Visit Date"].between(prior_9m_start, q_end)]
     excl_patients = set(denom_window.loc[denom_window["is_excl"], "patient_key"].dropna().astype(str))
-
     denom_patients = denom_patients - excl_patients
 
     # Detail: pick first quarter record per patient
-    detail = (
-        q_vis.sort_values("Visit Date")
-            .drop_duplicates("patient_key")
-            .copy()
-    )
+    detail = q_vis.sort_values("Visit Date").drop_duplicates("patient_key").copy()
 
     # Optional columns if exist
     for col in ["Name", "Doctor"]:
@@ -128,7 +128,8 @@ def compute_denominator(visits_df: pd.DataFrame, year: int, quarter: str):
     detail["prior_9m_diab_visits"] = detail["patient_key"].map(prior_counts).fillna(0).astype(int)
     detail = detail[detail["patient_key"].astype(str).isin(denom_patients)]
 
-    keep_cols = ["patient_key", "EMR No", "Emirates ID", "Name", "Doctor", "Department", "Age_at_qstart", "prior_9m_diab_visits"]
+    keep_cols = ["patient_key", "EMR No", "Emirates ID", "Name", "Doctor",
+                 "Department", "Age_at_qstart", "prior_9m_diab_visits"]
     detail = detail[keep_cols].sort_values(["prior_9m_diab_visits", "Name"], ascending=[False, True])
 
     return denom_patients, detail
