@@ -28,6 +28,12 @@ import streamlit as st
 
 import streamlit.components.v1 as components  # used only for the home-card link
 
+import base64
+import time
+import json
+import hmac
+import hashlib
+
 # ====================== ✅ NEEDFUL S3 IMPORTS (NEW) ======================
 import boto3
 from botocore.exceptions import ClientError
@@ -497,24 +503,6 @@ if nav == "balance":
     st.switch_page(BALANCE_PAGE_PATH)
 # ================================================================================
 
-# ====================== ✅ NEEDFUL: NAV HANDLER for Daily Report ======================
-if nav == "daily":
-    y = st.query_params.get("year")
-    try:
-        if y:
-            y_int = int(y)
-            st.session_state.year = y_int
-            st.session_state.rcm_year = y_int
-    except Exception:
-        pass
-
-    try:
-        del st.query_params["nav"]
-    except Exception:
-        pass
-
-    st.switch_page(DAILY_REPORT_PAGE_PATH)
-# ==============================================================================
 
 
 # ====================== ✅ NEEDFUL S3 HELPERS (NEW) ======================
@@ -548,13 +536,18 @@ def _get_s3_cfg():
     }
 
 
-def _s3_client(cfg):
+@st.cache_resource(show_spinner=False)
+def _s3_client_cached(access_key: str, secret_key: str, region: str):
+    # Cache the boto3 client per-credential set to avoid recreating it on every rerun
     return boto3.client(
         "s3",
-        aws_access_key_id=cfg["access_key"],
-        aws_secret_access_key=cfg["secret_key"],
-        region_name=cfg["region"],
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name=region,
     )
+
+def _s3_client(cfg):
+    return _s3_client_cached(cfg["access_key"], cfg["secret_key"], cfg["region"])
 
 
 def s3_key_for(center_key: str, year: int, filename: str) -> str:
@@ -715,11 +708,18 @@ def get_report_bytes(path: str) -> bytes:
 
 @st.cache_data(show_spinner=True)
 def load_core_sheets(path: str, _token: float):
+    """Load the two core sheets efficiently.
+
+    Notes:
+    - Uses ExcelFile once to avoid reopening the workbook multiple times.
+    - _token (mtime) is included to invalidate cache when the file changes.
+    """
     ext = Path(path).suffix.lower()
     engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
     try:
-        df_ins = pd.read_excel(path, sheet_name=SHEET_INS_TOT, engine=engine)
-        df_sum = pd.read_excel(path, sheet_name=SHEET_SUMMARY, engine=engine)
+        xls = pd.ExcelFile(path, engine=engine)
+        df_ins = pd.read_excel(xls, sheet_name=SHEET_INS_TOT)
+        df_sum = pd.read_excel(xls, sheet_name=SHEET_SUMMARY)
         return df_ins, df_sum, [SHEET_INS_TOT, SHEET_SUMMARY]
     except Exception as e:
         try:
@@ -730,6 +730,7 @@ def load_core_sheets(path: str, _token: float):
             f"Required sheets not found or failed to load. "
             f"Available: {', '.join(names) if names else '(none)'}\nOriginal error: {e}"
         )
+
 
 
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
