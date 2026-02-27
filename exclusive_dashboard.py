@@ -1456,7 +1456,6 @@ try:
                 use_container_width=True,
                 key=f"dl_csv_plan_view_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
             )
-
     with t3:
         st.markdown("### Report Download")
 
@@ -1469,10 +1468,10 @@ try:
             key=f"dl_xlsx_full_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
-        
-        # 1B) Insurance Totals Exclusive Report (management-ready)
-        st.markdown("### Insurance Totals Exclusive Report")
+        st.markdown("---")
 
+        # 2) Insurance Totals Exclusive Report (management-ready)
+        st.markdown("### Insurance Totals Exclusive Report")
         ins_totals_name = f"{cfg['key']}_{st.session_state.get('year')}_Insurance_Totals_Exclusive_Report.xlsx"
         st.download_button(
             "⬇️ Download Insurance Totals Exclusive Report (.xlsx)",
@@ -1482,10 +1481,12 @@ try:
             key=f"dl_xlsx_ins_totals_exclusive_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
-st.markdown("---")
+        st.markdown("---")
+
+        # 3) Download by Insurance (single payer) — filtered Excel (keeps ALL sheets)
         st.markdown("### Download by Insurance (single payer)")
 
-        # Build insurance list from totals (preferred) else from available sheets
+        # Build insurance list from totals
         insurers = []
         try:
             if "Insurance" in totals.columns:
@@ -1508,11 +1509,11 @@ st.markdown("---")
             key=f"dl_ins_select_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
-        # 2) Filtered Excel download (keeps ALL sheets, filters rows where possible)
         filtered_name = (
             f"{cfg['key']}_{st.session_state.get('year')}_"
             f"{_safe_name(insurance_choice)}_Report.xlsx"
         )
+
         st.download_button(
             "⬇️ Download filtered report (.xlsx)",
             build_filtered_report_bytes(str(out_path), token, insurance_choice),
