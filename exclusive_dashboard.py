@@ -1295,6 +1295,13 @@ try:
     except Exception:
         plan_df = None
 
+    try:
+        detail_df = pd.read_excel(str(out_path), sheet_name=SHEET_DETAIL, engine=engine)
+        detail_df = trim_empty_rows(detail_df)
+    except Exception:
+        detail_df = None
+
+
     totals_no_gt = drop_gt(totals)
 
     net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
@@ -1310,6 +1317,8 @@ try:
     st.markdown("---")
 
     tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
+    if detail_df is not None:
+        tab_labels.append(SHEET_DETAIL)
     if insgroup_df is not None:
         tab_labels.append(SHEET_INGROUP)
     if plan_df is not None:
@@ -1327,6 +1336,7 @@ try:
     t3 = tab_map["Downloads"]
     tIG = tab_map.get(SHEET_INGROUP)
     tPL = tab_map.get(SHEET_IPLAN)
+    tDT = tab_map.get(SHEET_DETAIL)
 
     def _display_df(df: pd.DataFrame) -> pd.DataFrame:
         d = df.drop(columns=["S.No"], errors="ignore").reset_index(drop=True)
@@ -1362,6 +1372,25 @@ try:
             key=f"dl_csv_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
+
+    # ====================== Detail (Claim-level) ======================
+    if tDT is not None and detail_df is not None:
+        with tDT:
+            st.caption("Claim-level detail (includes all Claim IDs available in the report).")
+            # Use a capped height because detail can be very large
+            st.dataframe(
+                _display_df(move_grand_total_last(detail_df)),
+                use_container_width=True,
+                height=min(full_height(detail_df), 800),
+            )
+
+            st.download_button(
+                "⬇️ Export Detail (CSV) — all claims",
+                detail_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"{cfg['key']}_{st.session_state.get('year')}_exclusive_detail_all_claims.csv",
+                use_container_width=True,
+                key=f"dl_csv_detail_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+            )
     if tIG is not None and insgroup_df is not None:
         with tIG:
             insurers = (
@@ -1480,6 +1509,25 @@ try:
             use_container_width=True,
             key=f"dl_xlsx_ins_totals_exclusive_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
+
+        # 1C) Exclusive Detail (Claim IDs) download (if sheet exists)
+        if detail_df is not None:
+            st.markdown("### Exclusive Report Detail (All Claim IDs)")
+            detail_xlsx_name = f"{cfg['key']}_{st.session_state.get('year')}_Exclusive_Detail_All_Claims.xlsx"
+            # Build a tiny workbook containing only the detail sheet
+            detail_bytes = io.BytesIO()
+            with pd.ExcelWriter(detail_bytes, engine="openpyxl") as writer:
+                detail_df.to_excel(writer, sheet_name=SHEET_DETAIL[:31], index=False)
+            detail_bytes.seek(0)
+
+            st.download_button(
+                "⬇️ Download Exclusive Detail (All Claim IDs) (.xlsx)",
+                detail_bytes.read(),
+                file_name=detail_xlsx_name,
+                use_container_width=True,
+                key=f"dl_xlsx_detail_all_claims_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+            )
+
 
         st.markdown("---")
 
