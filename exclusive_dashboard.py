@@ -1045,6 +1045,32 @@ def build_detail_month_workbook_bytes(detail: pd.DataFrame, month_ser: pd.Series
 # ============================================================================
 
 
+
+@st.cache_data(show_spinner=False)
+def build_monthly_insurance_workbook_bytes(monthly_df: pd.DataFrame) -> bytes:
+    """Create an .xlsx with one sheet per month for month-wise insurance totals."""
+    out = io.BytesIO()
+    if monthly_df is None or monthly_df.empty or "Month" not in monthly_df.columns:
+        return b""
+
+    months = (
+        monthly_df["Month"].fillna("").astype(str).str.strip()
+        .loc[lambda s: s.ne("")]
+        .unique()
+        .tolist()
+    )
+    months = sorted(months, key=month_sort_key)
+
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        for m in months:
+            mdf = monthly_df.loc[monthly_df["Month"].astype(str) == str(m)].copy()
+            sh = str(m)[:31]
+            mdf.to_excel(writer, sheet_name=sh, index=False)
+
+    out.seek(0)
+    return out.read()
+
+# ============================================================================
 # ====================== (Home KPIs helper) ======================
 def load_center_kpis(center_key: str, year: int):
     """
@@ -1445,7 +1471,7 @@ try:
 
     tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
     if detail_df is not None:
-        tab_labels.append(SHEET_DETAIL)
+        tab_labels.append("Monthly Insurance Totals")
     if insgroup_df is not None:
         tab_labels.append(SHEET_INGROUP)
     if plan_df is not None:
@@ -1463,7 +1489,7 @@ try:
     t3 = tab_map["Downloads"]
     tIG = tab_map.get(SHEET_INGROUP)
     tPL = tab_map.get(SHEET_IPLAN)
-    tDT = tab_map.get(SHEET_DETAIL)
+    tMI = tab_map.get("Monthly Insurance Totals")
 
     def _display_df(df: pd.DataFrame) -> pd.DataFrame:
         d = df.drop(columns=["S.No"], errors="ignore").reset_index(drop=True)
@@ -1499,62 +1525,116 @@ try:
             key=f"dl_csv_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
+    # ====================== Monthly Insurance Totals (from Detail) ======================
+    def compute_monthly_insurance_totals(detail: pd.DataFrame) -> tuple[pd.DataFrame | None, list[str], pd.Series | None, str | None]:
+        """Return (monthly_df, month_options, month_ser, month_src_col).
+        monthly_df columns: Month, Insurance, <numeric sums...> with Grand Total per month.
+        """
+        if detail is None or detail.empty:
+            return None, [], None, None
 
-    # ====================== Detail (Claim-level) ======================
-    if tDT is not None and detail_df is not None:
-        with tDT:
-            st.caption("Claim-level detail (includes all Claim IDs available in the report).")
+        # Ensure Insurance column exists
+        d = detail.copy()
+        if "Insurance" not in d.columns and len(d.columns) > 0:
+            # try common variants
+            for c in d.columns:
+                if isinstance(c, str) and c.strip().lower() == "insurance":
+                    d = d.rename(columns={c: "Insurance"})
+                    break
 
-            # ✅ NEW: Month split (auto-detect month from Month/Date columns)
-            month_ser, month_src_col = extract_month_labels(detail_df)
-            month_options = []
-            if month_ser is not None:
-                month_options = (
-                    month_ser.fillna("").astype(str).str.strip()
-                    .loc[lambda s: s.ne("")]
-                    .unique()
-                    .tolist()
-                )
-                month_options = sorted(month_options, key=month_sort_key)
+        if "Insurance" not in d.columns:
+            return None, [], None, None
 
-            month_choice = "All"
-            if month_options:
+        month_ser, month_src_col = extract_month_labels(d)
+        if month_ser is None:
+            return None, [], None, None
+
+        month_ser = month_ser.astype(str).str.strip()
+        d = d.loc[month_ser.ne("")].copy()
+        d["Month"] = month_ser.loc[d.index]
+
+        # Choose numeric columns to sum (prefer standard financial columns if present)
+        preferred = [c for c in ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"] if c in d.columns]
+        if preferred:
+            num_cols = preferred
+        else:
+            num_cols = [c for c in d.columns if pd.api.types.is_numeric_dtype(d[c])]
+
+        if not num_cols:
+            return None, sorted(d["Month"].unique().tolist(), key=month_sort_key), month_ser, month_src_col
+
+        grouped = (
+            d.groupby(["Month", "Insurance"], dropna=False)[num_cols]
+            .sum(numeric_only=True)
+            .reset_index()
+        )
+
+        # Add Grand Total row per Month
+        out_rows = []
+        for m in sorted(grouped["Month"].astype(str).unique().tolist(), key=month_sort_key):
+            sub = grouped.loc[grouped["Month"].astype(str) == str(m)].copy()
+            # ensure GT row for this month
+            if not sub.empty:
+                gt = {c: pd.to_numeric(sub[c], errors="coerce").sum() for c in num_cols}
+                gt_row = {"Month": m, "Insurance": "Grand Total", **gt}
+                out_rows.append(sub)
+                out_rows.append(pd.DataFrame([gt_row]))
+        monthly_df = pd.concat(out_rows, ignore_index=True) if out_rows else grouped
+
+        month_options = sorted(d["Month"].astype(str).unique().tolist(), key=month_sort_key)
+        return monthly_df, month_options, month_ser, month_src_col
+
+    if tMI is not None and detail_df is not None:
+        with tMI:
+            st.caption("Month-wise Insurance Totals (generated from the Detail sheet).")
+
+            monthly_df, month_options, _ms, month_src_col = compute_monthly_insurance_totals(detail_df)
+
+            if monthly_df is None or monthly_df.empty:
+                st.warning("Monthly totals could not be generated. Please ensure the Detail sheet contains an Insurance column and a Month/Date column.")
+            else:
                 st.info(f"Month detected from: **{month_src_col}**")
+
                 month_choice = st.selectbox(
                     "Select Month",
                     ["All"] + month_options,
                     index=0,
-                    key=f"detail_month_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                    key=f"mi_month_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
                 )
 
-            view_detail = detail_df.copy()
-            if month_options and month_choice != "All" and month_ser is not None:
-                view_detail = view_detail.loc[month_ser.astype(str) == str(month_choice)].copy()
+                view_mi = monthly_df.copy()
+                if month_choice != "All":
+                    view_mi = view_mi.loc[view_mi["Month"].astype(str) == str(month_choice)].copy()
 
-            # Use a capped height because detail can be very large
-            st.dataframe(
-                _display_df(view_detail),
-                use_container_width=True,
-                height=min(full_height(view_detail), 800),
-            )
+                # Put Grand Total rows last within each month view
+                if "Insurance" in view_mi.columns:
+                    view_mi = move_grand_total_last(view_mi)
 
-            st.download_button(
-                "⬇️ Export Detail (CSV) — current view",
-                view_detail.to_csv(index=False).encode("utf-8"),
-                file_name=f"{cfg['key']}_{st.session_state.get('year')}_exclusive_detail_{_safe_name(month_choice)}.csv",
-                use_container_width=True,
-                key=f"dl_csv_detail_{st.session_state.get('center_key')}_{st.session_state.get('year')}_{_safe_name(month_choice)}",
-            )
-
-            if month_options and month_ser is not None:
-                st.download_button(
-                    "⬇️ Download Detail by Month (xlsx — one sheet per month)",
-                    build_detail_month_workbook_bytes(detail_df, month_ser),
-                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_Exclusive_Detail_By_Month.xlsx",
+                st.dataframe(
+                    _display_df(view_mi),
                     use_container_width=True,
-                    key=f"dl_xlsx_detail_month_sheets_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                    height=min(full_height(view_mi), 800),
                 )
+
+                st.download_button(
+                    "⬇️ Export Month-wise Insurance Totals (CSV) — current view",
+                    view_mi.to_csv(index=False).encode("utf-8"),
+                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_monthwise_insurance_totals_{_safe_name(month_choice)}.csv",
+                    use_container_width=True,
+                    key=f"dl_csv_mi_{st.session_state.get('center_key')}_{st.session_state.get('year')}_{_safe_name(month_choice)}",
+                )
+
+                # Workbook: one sheet per month
+                st.download_button(
+                    "⬇️ Download Month-wise Insurance Totals (xlsx — one sheet per month)",
+                    build_monthly_insurance_workbook_bytes(monthly_df),
+                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_Monthwise_Insurance_Totals_By_Month.xlsx",
+                    use_container_width=True,
+                    key=f"dl_xlsx_mi_month_sheets_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                )
+
     if tIG is not None and insgroup_df is not None:
+
         with tIG:
             insurers = (
                 insgroup_df["Insurance"]
@@ -1673,66 +1753,70 @@ try:
             key=f"dl_xlsx_ins_totals_exclusive_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
-        # 1C) Exclusive Detail (Claim IDs) download (if sheet exists)
+        # 1C) Month-wise Insurance Totals (from Detail) — download
         if detail_df is not None:
-            st.markdown("### Exclusive Report Detail (All Claim IDs)")
-            # Month detection for detail
-            month_ser, _month_src = extract_month_labels(detail_df)
-            month_options = []
-            if month_ser is not None:
-                month_options = (
-                    month_ser.fillna("").astype(str).str.strip()
-                    .loc[lambda s: s.ne("")]
-                    .unique()
-                    .tolist()
-                )
-                month_options = sorted(month_options, key=month_sort_key)
+            st.markdown("### Month-wise Insurance Totals (from Detail)")
 
-            # (A) Full detail
-            detail_xlsx_name = f"{cfg['key']}_{st.session_state.get('year')}_Exclusive_Detail_All_Claims.xlsx"
-            detail_bytes = io.BytesIO()
-            with pd.ExcelWriter(detail_bytes, engine="openpyxl") as writer:
-                detail_df.to_excel(writer, sheet_name=SHEET_DETAIL[:31], index=False)
-            detail_bytes.seek(0)
-            st.download_button(
-                "⬇️ Download Exclusive Detail (All Claim IDs) (.xlsx)",
-                detail_bytes.read(),
-                file_name=detail_xlsx_name,
-                use_container_width=True,
-                key=f"dl_xlsx_detail_all_claims_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-            )
+            month_ser, month_src = extract_month_labels(detail_df)
+            if month_ser is None:
+                st.warning("Month-wise totals are not available: no Month/Date column detected in Detail sheet.")
+            elif "Insurance" not in detail_df.columns:
+                st.warning("Month-wise totals are not available: **Insurance** column not found in Detail sheet.")
+            else:
+                d = detail_df.copy()
+                d["Month"] = month_ser.astype(str).str.strip()
+                d = d.loc[d["Month"].ne("")].copy()
 
-            # (B) Detail per month
-            if month_options and month_ser is not None:
-                st.markdown("#### Detail by Month")
-                month_choice_dl = st.selectbox(
-                    "Select Month for Detail Download",
-                    month_options,
-                    index=0,
-                    key=f"dl_detail_month_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-                )
-                month_df = detail_df.loc[month_ser.astype(str) == str(month_choice_dl)].copy()
-                month_xlsx_name = f"{cfg['key']}_{st.session_state.get('year')}_Exclusive_Detail_{_safe_name(month_choice_dl)}.xlsx"
-                month_bytes = io.BytesIO()
-                with pd.ExcelWriter(month_bytes, engine="openpyxl") as writer:
-                    month_df.to_excel(writer, sheet_name=str(month_choice_dl)[:31], index=False)
-                month_bytes.seek(0)
-                st.download_button(
-                    "⬇️ Download Detail for Selected Month (.xlsx)",
-                    month_bytes.read(),
-                    file_name=month_xlsx_name,
-                    use_container_width=True,
-                    key=f"dl_xlsx_detail_one_month_{st.session_state.get('center_key')}_{st.session_state.get('year')}_{_safe_name(month_choice_dl)}",
-                )
+                preferred = [c for c in ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"] if c in d.columns]
+                num_cols = preferred if preferred else [c for c in d.columns if pd.api.types.is_numeric_dtype(d[c])]
+                if not num_cols:
+                    st.warning("No numeric columns found in Detail sheet to sum month-wise totals.")
+                else:
+                    monthly_df = (
+                        d.groupby(["Month", "Insurance"], dropna=False)[num_cols]
+                        .sum(numeric_only=True)
+                        .reset_index()
+                    )
 
-                st.download_button(
-                    "⬇️ Download Detail by Month (xlsx — one sheet per month)",
-                    build_detail_month_workbook_bytes(detail_df, month_ser),
-                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_Exclusive_Detail_By_Month.xlsx",
-                    use_container_width=True,
-                    key=f"dl_xlsx_detail_month_sheets2_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-                )
+                    # Add Grand Total row per month
+                    out_rows = []
+                    months = sorted(monthly_df["Month"].astype(str).unique().tolist(), key=month_sort_key)
+                    for mth in months:
+                        sub = monthly_df.loc[monthly_df["Month"].astype(str) == str(mth)].copy()
+                        gt = {c: pd.to_numeric(sub[c], errors="coerce").sum() for c in num_cols}
+                        gt_row = {"Month": mth, "Insurance": "Grand Total", **gt}
+                        out_rows.append(sub)
+                        out_rows.append(pd.DataFrame([gt_row]))
+                    monthly_df2 = pd.concat(out_rows, ignore_index=True) if out_rows else monthly_df
 
+                    st.caption(f"Month detected from: **{month_src}**")
+
+                    st.download_button(
+                        "⬇️ Download Month-wise Insurance Totals (xlsx — one sheet per month)",
+                        build_monthly_insurance_workbook_bytes(monthly_df2),
+                        file_name=f"{cfg['key']}_{st.session_state.get('year')}_Monthwise_Insurance_Totals_By_Month.xlsx",
+                        use_container_width=True,
+                        key=f"dl_xlsx_mi_by_month_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                    )
+
+                    month_choice_dl = st.selectbox(
+                        "Select Month for Download",
+                        months,
+                        index=0,
+                        key=f"dl_mi_month_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                    )
+                    one = monthly_df2.loc[monthly_df2["Month"].astype(str) == str(month_choice_dl)].copy()
+                    one_bytes = io.BytesIO()
+                    with pd.ExcelWriter(one_bytes, engine="openpyxl") as writer:
+                        one.to_excel(writer, sheet_name=str(month_choice_dl)[:31], index=False)
+                    one_bytes.seek(0)
+                    st.download_button(
+                        "⬇️ Download selected month totals (.xlsx)",
+                        one_bytes.read(),
+                        file_name=f"{cfg['key']}_{st.session_state.get('year')}_Monthwise_Insurance_Totals_{_safe_name(month_choice_dl)}.xlsx",
+                        use_container_width=True,
+                        key=f"dl_xlsx_mi_one_{st.session_state.get('center_key')}_{st.session_state.get('year')}_{_safe_name(month_choice_dl)}",
+                    )
 
         st.markdown("---")
 
