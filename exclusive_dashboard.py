@@ -918,6 +918,133 @@ def is_admin_mode() -> bool:
         return st.toggle("Admin mode", value=st.session_state.get("is_admin", False))
 
 
+# ====================== ✅ DETAIL MONTH HELPERS (NEW) ======================
+MONTH_COL_CANDIDATES = [
+    "Month",
+    "Service Month",
+    "Visit Month",
+    "Invoice Month",
+    "Submission Month",
+    "Posting Month",
+]
+
+DATE_COL_CANDIDATES = [
+    "Visit Date",
+    "Service Date",
+    "Invoice Date",
+    "Submission Date",
+    "Posted Date",
+    "Date",
+]
+
+def _normalize_month_value(x):
+    """Return month label like '2026-01' when possible, else ''."""
+    if pd.isna(x):
+        return ""
+    s = str(x).strip()
+    if not s:
+        return ""
+    # If already YYYY-MM or YYYY/MM
+    m = re.match(r"^(\d{4})[-/](\d{1,2})$", s)
+    if m:
+        y, mo = int(m.group(1)), int(m.group(2))
+        if 1 <= mo <= 12:
+            return f"{y:04d}-{mo:02d}"
+    # If parseable date
+    try:
+        dt = pd.to_datetime(s, errors="coerce")
+        if pd.notna(dt):
+            return f"{dt.year:04d}-{dt.month:02d}"
+    except Exception:
+        pass
+    # If numeric month only
+    try:
+        mo = int(float(s))
+        if 1 <= mo <= 12:
+            return f"{mo:02d}"
+    except Exception:
+        pass
+    return s
+
+
+def extract_month_labels(df: pd.DataFrame) -> tuple[pd.Series | None, str | None]:
+    """Try to extract a month label series from a detail dataframe.
+
+    Returns (series, source_column_name) or (None, None).
+    """
+    if df is None or df.empty:
+        return None, None
+
+    # 1) Direct month column
+    for c in MONTH_COL_CANDIDATES:
+        if c in df.columns:
+            ser = df[c].map(_normalize_month_value)
+            return ser, c
+
+    # 2) Any column containing 'month'
+    for c in df.columns:
+        if isinstance(c, str) and "month" in c.lower():
+            ser = df[c].map(_normalize_month_value)
+            if ser.fillna("").astype(str).str.strip().ne("").any():
+                return ser, c
+
+    # 3) Date column -> month
+    for c in DATE_COL_CANDIDATES:
+        if c in df.columns:
+            dt = pd.to_datetime(df[c], errors="coerce")
+            if pd.notna(dt).any():
+                ser = dt.dt.strftime("%Y-%m")
+                return ser, c
+
+    # 4) Any column containing 'date'
+    for c in df.columns:
+        if isinstance(c, str) and "date" in c.lower():
+            dt = pd.to_datetime(df[c], errors="coerce")
+            if pd.notna(dt).any():
+                ser = dt.dt.strftime("%Y-%m")
+                return ser, c
+
+    return None, None
+
+
+def month_sort_key(label: str):
+    """Sort month labels: YYYY-MM first, then MM, then other."""
+    s = str(label)
+    m = re.match(r"^(\d{4})-(\d{2})$", s)
+    if m:
+        return (0, int(m.group(1)), int(m.group(2)), s)
+    m2 = re.match(r"^(\d{2})$", s)
+    if m2:
+        return (1, 0, int(m2.group(1)), s)
+    return (2, 0, 0, s)
+
+
+@st.cache_data(show_spinner=False)
+def build_detail_month_workbook_bytes(detail: pd.DataFrame, month_ser: pd.Series) -> bytes:
+    """Create an .xlsx with one sheet per month for claim-level detail."""
+    out = io.BytesIO()
+    df = detail.copy()
+    df["__MonthLabel__"] = month_ser
+    months = (
+        df["__MonthLabel__"].fillna("").astype(str).str.strip()
+        .loc[lambda s: s.ne("")]
+        .unique()
+        .tolist()
+    )
+    months = sorted(months, key=month_sort_key)
+
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        for m in months:
+            mdf = df.loc[df["__MonthLabel__"].astype(str) == str(m)].drop(columns=["__MonthLabel__"], errors="ignore")
+            sh = str(m)[:31]
+            mdf.to_excel(writer, sheet_name=sh, index=False)
+
+    out.seek(0)
+    return out.read()
+
+# ============================================================================
+
+
 # ====================== (Home KPIs helper) ======================
 def load_center_kpis(center_key: str, year: int):
     """
@@ -1377,20 +1504,56 @@ try:
     if tDT is not None and detail_df is not None:
         with tDT:
             st.caption("Claim-level detail (includes all Claim IDs available in the report).")
+
+            # ✅ NEW: Month split (auto-detect month from Month/Date columns)
+            month_ser, month_src_col = extract_month_labels(detail_df)
+            month_options = []
+            if month_ser is not None:
+                month_options = (
+                    month_ser.fillna("").astype(str).str.strip()
+                    .loc[lambda s: s.ne("")]
+                    .unique()
+                    .tolist()
+                )
+                month_options = sorted(month_options, key=month_sort_key)
+
+            month_choice = "All"
+            if month_options:
+                st.info(f"Month detected from: **{month_src_col}**")
+                month_choice = st.selectbox(
+                    "Select Month",
+                    ["All"] + month_options,
+                    index=0,
+                    key=f"detail_month_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                )
+
+            view_detail = detail_df.copy()
+            if month_options and month_choice != "All" and month_ser is not None:
+                view_detail = view_detail.loc[month_ser.astype(str) == str(month_choice)].copy()
+
             # Use a capped height because detail can be very large
             st.dataframe(
-                _display_df(move_grand_total_last(detail_df)),
+                _display_df(view_detail),
                 use_container_width=True,
-                height=min(full_height(detail_df), 800),
+                height=min(full_height(view_detail), 800),
             )
 
             st.download_button(
-                "⬇️ Export Detail (CSV) — all claims",
-                detail_df.to_csv(index=False).encode("utf-8"),
-                file_name=f"{cfg['key']}_{st.session_state.get('year')}_exclusive_detail_all_claims.csv",
+                "⬇️ Export Detail (CSV) — current view",
+                view_detail.to_csv(index=False).encode("utf-8"),
+                file_name=f"{cfg['key']}_{st.session_state.get('year')}_exclusive_detail_{_safe_name(month_choice)}.csv",
                 use_container_width=True,
-                key=f"dl_csv_detail_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                key=f"dl_csv_detail_{st.session_state.get('center_key')}_{st.session_state.get('year')}_{_safe_name(month_choice)}",
             )
+
+            if month_options and month_ser is not None:
+                st.download_button(
+                    "⬇️ Download Detail by Month (xlsx — one sheet per month)",
+                    build_detail_month_workbook_bytes(detail_df, month_ser),
+                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_Exclusive_Detail_By_Month.xlsx",
+                    use_container_width=True,
+                    key=f"dl_xlsx_detail_month_sheets_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                )
     if tIG is not None and insgroup_df is not None:
         with tIG:
             insurers = (
@@ -1513,13 +1676,24 @@ try:
         # 1C) Exclusive Detail (Claim IDs) download (if sheet exists)
         if detail_df is not None:
             st.markdown("### Exclusive Report Detail (All Claim IDs)")
+            # Month detection for detail
+            month_ser, _month_src = extract_month_labels(detail_df)
+            month_options = []
+            if month_ser is not None:
+                month_options = (
+                    month_ser.fillna("").astype(str).str.strip()
+                    .loc[lambda s: s.ne("")]
+                    .unique()
+                    .tolist()
+                )
+                month_options = sorted(month_options, key=month_sort_key)
+
+            # (A) Full detail
             detail_xlsx_name = f"{cfg['key']}_{st.session_state.get('year')}_Exclusive_Detail_All_Claims.xlsx"
-            # Build a tiny workbook containing only the detail sheet
             detail_bytes = io.BytesIO()
             with pd.ExcelWriter(detail_bytes, engine="openpyxl") as writer:
                 detail_df.to_excel(writer, sheet_name=SHEET_DETAIL[:31], index=False)
             detail_bytes.seek(0)
-
             st.download_button(
                 "⬇️ Download Exclusive Detail (All Claim IDs) (.xlsx)",
                 detail_bytes.read(),
@@ -1527,6 +1701,37 @@ try:
                 use_container_width=True,
                 key=f"dl_xlsx_detail_all_claims_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
             )
+
+            # (B) Detail per month
+            if month_options and month_ser is not None:
+                st.markdown("#### Detail by Month")
+                month_choice_dl = st.selectbox(
+                    "Select Month for Detail Download",
+                    month_options,
+                    index=0,
+                    key=f"dl_detail_month_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                )
+                month_df = detail_df.loc[month_ser.astype(str) == str(month_choice_dl)].copy()
+                month_xlsx_name = f"{cfg['key']}_{st.session_state.get('year')}_Exclusive_Detail_{_safe_name(month_choice_dl)}.xlsx"
+                month_bytes = io.BytesIO()
+                with pd.ExcelWriter(month_bytes, engine="openpyxl") as writer:
+                    month_df.to_excel(writer, sheet_name=str(month_choice_dl)[:31], index=False)
+                month_bytes.seek(0)
+                st.download_button(
+                    "⬇️ Download Detail for Selected Month (.xlsx)",
+                    month_bytes.read(),
+                    file_name=month_xlsx_name,
+                    use_container_width=True,
+                    key=f"dl_xlsx_detail_one_month_{st.session_state.get('center_key')}_{st.session_state.get('year')}_{_safe_name(month_choice_dl)}",
+                )
+
+                st.download_button(
+                    "⬇️ Download Detail by Month (xlsx — one sheet per month)",
+                    build_detail_month_workbook_bytes(detail_df, month_ser),
+                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_Exclusive_Detail_By_Month.xlsx",
+                    use_container_width=True,
+                    key=f"dl_xlsx_detail_month_sheets2_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                )
 
 
         st.markdown("---")
