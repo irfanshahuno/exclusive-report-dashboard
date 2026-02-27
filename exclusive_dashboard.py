@@ -800,6 +800,105 @@ def build_insurance_totals_exclusive_bytes(totals_df: pd.DataFrame, summary_df: 
 
 
 
+
+# ====================== ✅ MONTHLY INSURANCE TOTALS (FROM SOURCE) ======================
+DATE_COL_CANDIDATES = ["Visit Date", "VisitDate", "visit_date", "VISIT DATE", "Date", "Visit_Date"]
+INS_COL_CANDIDATES = ["Insurance", "Payer", "Payer Name", "Insurance Name", "InsuranceName", "PAYER", "INSURANCE"]
+# Amount column candidates mapped to standard names
+AMT_MAP = {
+    "Net Amount": ["Net Amount", "NetAmount", "Net", "Net Amt", "NET AMOUNT", "Net_Amount", "actNetAmount", "actNet"],
+    "Paid": ["Paid", "Paid Amount", "Payment", "Payment Amount", "PAID", "actRemitInsShare", "actPaid"],
+    "Balance": ["Balance", "BALANCE", "Outstanding", "Outstanding Amount", "actRemBalance", "actBalance"],
+    "Rejected": ["Rejected", "Rejection", "REJECTED", "Rejected Amount", "actRejected"],
+    "Accepted": ["Accepted", "ACCEPTED", "Approved", "Approved Amount", "actAccepted"],
+}
+
+def _find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    cols = list(df.columns)
+    lower = {str(c).strip().lower(): c for c in cols}
+    for cand in candidates:
+        key = str(cand).strip().lower()
+        if key in lower:
+            return lower[key]
+    return None
+
+def _standardize_amount_cols(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for std, cands in AMT_MAP.items():
+        col = _find_col(out, cands)
+        if col and col != std:
+            out = out.rename(columns={col: std})
+    return out
+
+@st.cache_data(show_spinner=False)
+def load_source_df(path: str, _token: float) -> pd.DataFrame:
+    ext = Path(path).suffix.lower()
+    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+    return pd.read_excel(path, engine=engine)
+
+def build_monthly_insurance_tables_from_source(src_path: Path):
+    """Returns (monthly_df, available_months, err_msg). monthly_df includes YearMonth column."""
+    if not src_path.exists():
+        return None, [], "Source file not found."
+    tok = mtime_token(src_path)
+    if tok == 0.0:
+        return None, [], "Source file is empty or missing."
+    try:
+        df = load_source_df(str(src_path), tok)
+    except Exception as e:
+        return None, [], f"Failed to read source: {e}"
+
+    if df is None or df.empty:
+        return None, [], "Source file has no rows."
+
+    df = df.copy()
+    df = _standardize_amount_cols(df)
+
+    date_col = _find_col(df, DATE_COL_CANDIDATES)
+    ins_col = _find_col(df, INS_COL_CANDIDATES)
+
+    if not date_col:
+        return None, [], "Visit Date column not found in source."
+    if not ins_col:
+        return None, [], "Insurance column not found in source."
+
+    # Parse date
+    dt = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
+    df = df.loc[dt.notna()].copy()
+    df["YearMonth"] = dt.loc[dt.notna()].dt.to_period("M").astype(str)  # YYYY-MM
+
+    # Keep only needed cols
+    keep_cols = [ins_col, "YearMonth"] + [c for c in ["Net Amount","Paid","Balance","Rejected","Accepted"] if c in df.columns]
+    df = df[keep_cols].copy()
+    df = df.rename(columns={ins_col: "Insurance"})
+
+    # Ensure numeric
+    for c in ["Net Amount","Paid","Balance","Rejected","Accepted"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    # Group
+    grp = df.groupby(["YearMonth","Insurance"], as_index=False)
+    agg_dict = {c:"sum" for c in ["Net Amount","Paid","Balance","Rejected","Accepted"] if c in df.columns}
+    monthly = grp.agg(agg_dict)
+
+    # Add grand total per month
+    months = sorted(monthly["YearMonth"].unique().tolist())
+    frames = []
+    for m in months:
+        sub = monthly.loc[monthly["YearMonth"]==m].copy()
+        # build GT row
+        gt = { "YearMonth": m, "Insurance":"Grand Total" }
+        for c in agg_dict.keys():
+            gt[c] = float(pd.to_numeric(sub[c], errors="coerce").sum())
+        sub = pd.concat([sub, pd.DataFrame([gt])], ignore_index=True)
+        frames.append(sub)
+    monthly2 = pd.concat(frames, ignore_index=True) if frames else monthly
+
+    return monthly2, months, ""
+
+# ================================================================================
+
 @st.cache_data(show_spinner=True)
 def load_core_sheets(path: str, _token: float):
     """Load the two core sheets efficiently.
@@ -1485,7 +1584,8 @@ try:
     st.markdown("---")
 
     tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
-    if detail_df is not None:
+    monthly_df, monthly_months, monthly_err = build_monthly_insurance_tables_from_source(src_path)
+    if monthly_df is not None and not monthly_df.empty:
         tab_labels.append("Monthly Insurance Totals")
     if insgroup_df is not None:
         tab_labels.append(SHEET_INGROUP)
@@ -1599,32 +1699,27 @@ try:
         month_options = sorted(d["Month"].astype(str).unique().tolist(), key=month_sort_key)
         return monthly_df, month_options, month_ser, month_src_col
 
-    if tMI is not None and detail_df is not None:
+    
+    if tMI is not None:
         with tMI:
-            st.caption("Month-wise Insurance Totals (generated from the Detail sheet).")
-
-            monthly_df, month_options, _ms, month_src_col = compute_monthly_insurance_totals(detail_df)
-
             if monthly_df is None or monthly_df.empty:
-                st.warning("Monthly totals could not be generated. Please ensure the Detail sheet contains an Insurance column and a Month/Date column.")
+                st.warning(f"Monthly Insurance Totals not available. {monthly_err or ''}")
             else:
-                st.info(f"Month detected from: **{month_src_col}**")
+                st.caption("Month-wise Insurance Totals (from Source using Visit Date).")
 
                 month_choice = st.selectbox(
-                    "Select Month",
-                    ["All"] + month_options,
+                    "Select Month (Year-Month)",
+                    ["All"] + monthly_months,
                     index=0,
                     key=f"mi_month_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
                 )
 
                 view_mi = monthly_df.copy()
                 if month_choice != "All":
-                    view_mi = view_mi.loc[view_mi["Month"].astype(str) == str(month_choice)].copy()
-                    st.markdown(f"#### {pretty_month_label(month_choice)} — Insurance Totals")
-                    # Sheet is already month-specific; hide Month column for a clean table (like your screenshot)
-                    view_mi = view_mi.drop(columns=["Month"], errors="ignore")
+                    view_mi = view_mi.loc[view_mi["YearMonth"].astype(str) == str(month_choice)].copy()
+                    st.markdown(f"#### {month_choice} — Insurance Totals")
+                    view_mi = view_mi.drop(columns=["YearMonth"], errors="ignore")
 
-                # Put Grand Total rows last within each month view
                 if "Insurance" in view_mi.columns:
                     view_mi = move_grand_total_last(view_mi)
 
@@ -1642,15 +1737,26 @@ try:
                     key=f"dl_csv_mi_{st.session_state.get('center_key')}_{st.session_state.get('year')}_{_safe_name(month_choice)}",
                 )
 
-                # Workbook: one sheet per month
+                # Workbook: one sheet per month (YYYY-MM)
+                def _monthly_workbook_bytes(df_all: pd.DataFrame) -> bytes:
+                    out = io.BytesIO()
+                    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+                        for ym in monthly_months:
+                            sub = df_all.loc[df_all["YearMonth"].astype(str) == str(ym)].copy()
+                            sub = sub.drop(columns=["YearMonth"], errors="ignore")
+                            if "Insurance" in sub.columns:
+                                sub = move_grand_total_last(sub)
+                            sub.to_excel(writer, sheet_name=str(ym)[:31], index=False)
+                    out.seek(0)
+                    return out.read()
+
                 st.download_button(
                     "⬇️ Download Month-wise Insurance Totals (xlsx — one sheet per month)",
-                    build_monthly_insurance_workbook_bytes(monthly_df),
+                    _monthly_workbook_bytes(monthly_df),
                     file_name=f"{cfg['key']}_{st.session_state.get('year')}_Monthwise_Insurance_Totals_By_Month.xlsx",
                     use_container_width=True,
                     key=f"dl_xlsx_mi_month_sheets_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
                 )
-
     if tIG is not None and insgroup_df is not None:
 
         with tIG:
