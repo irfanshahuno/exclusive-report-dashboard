@@ -29,6 +29,7 @@ import streamlit as st
 import streamlit.components.v1 as components  # used only for the home-card link
 
 import base64
+import io
 import time
 import json
 import hmac
@@ -705,6 +706,64 @@ def save_uploaded_source(folder: Path, upload) -> Path:
 def get_report_bytes(path: str) -> bytes:
     return Path(path).read_bytes()
 
+# ====================== ✅ NEEDFUL: DOWNLOAD FILTERED EXCEL (NEW) ======================
+def _safe_name(s: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9_\-]+", "_", str(s).strip())
+    return s.strip("_")[:80] or "All"
+
+def _is_gt_value(x) -> bool:
+    try:
+        return bool(GT_PAT.match(str(x)))
+    except Exception:
+        return False
+
+@st.cache_data(show_spinner=True)
+def build_filtered_report_bytes(path: str, _token: float, insurance: str) -> bytes:
+    """Create a filtered .xlsx (bytes) containing ALL sheets, filtered by Insurance when possible.
+    - If a sheet has an 'Insurance' column -> filter to that insurance + keep Grand Total/Total rows.
+    - If no Insurance column -> keep sheet as-is.
+    """
+    p = Path(path)
+    ext = p.suffix.lower()
+    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+
+    xls = pd.ExcelFile(path, engine=engine)
+    out = io.BytesIO()
+
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        for sh in xls.sheet_names:
+            try:
+                df = pd.read_excel(xls, sheet_name=sh)
+            except Exception:
+                continue
+
+            if isinstance(df, pd.DataFrame) and not df.empty and insurance and insurance != "All":
+                # Prefer exact Insurance column
+                if "Insurance" in df.columns:
+                    col = "Insurance"
+                    series = df[col].astype(str)
+                    mask_gt = series.apply(_is_gt_value)
+                    mask_keep = (series == insurance) | mask_gt
+                    df = df.loc[mask_keep].copy()
+                else:
+                    # Some sheets may have Insurance in first column name
+                    first = df.columns[0] if len(df.columns) else None
+                    if first and str(first).strip().lower() == "insurance":
+                        series = df[first].astype(str)
+                        mask_gt = series.apply(_is_gt_value)
+                        mask_keep = (series == insurance) | mask_gt
+                        df = df.loc[mask_keep].copy()
+
+            # Write (limit sheet name length)
+            safe_sh = str(sh)[:31]
+            df.to_excel(writer, sheet_name=safe_sh, index=False)
+
+    out.seek(0)
+    return out.read()
+# ================================================================================
+
+
+
 
 @st.cache_data(show_spinner=True)
 def load_core_sheets(path: str, _token: float):
@@ -1365,7 +1424,8 @@ try:
 
     with t3:
         st.markdown("### Report Download")
-        st.write("Open the XLSX locally to inspect **Balance_Aging_Detail** if needed.")
+
+        # 1) Full report download (ALL sheets)
         st.download_button(
             "⬇️ Download full report (.xlsx)",
             get_report_bytes(str(out_path)),
@@ -1373,6 +1433,47 @@ try:
             use_container_width=True,
             key=f"dl_xlsx_full_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
+
+        st.markdown("---")
+        st.markdown("### Download by Insurance (single payer)")
+
+        # Build insurance list from totals (preferred) else from available sheets
+        insurers = []
+        try:
+            if "Insurance" in totals.columns:
+                insurers = (
+                    totals["Insurance"]
+                    .dropna()
+                    .astype(str)
+                    .loc[lambda s: ~s.str.match(GT_PAT)]
+                    .sort_values()
+                    .unique()
+                    .tolist()
+                )
+        except Exception:
+            insurers = []
+
+        insurance_choice = st.selectbox(
+            "Select Insurance",
+            ["All"] + insurers,
+            index=0,
+            key=f"dl_ins_select_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+        )
+
+        # 2) Filtered Excel download (keeps ALL sheets, filters rows where possible)
+        filtered_name = (
+            f"{cfg['key']}_{st.session_state.get('year')}_"
+            f"{_safe_name(insurance_choice)}_Report.xlsx"
+        )
+        st.download_button(
+            "⬇️ Download filtered report (.xlsx)",
+            build_filtered_report_bytes(str(out_path), token, insurance_choice),
+            file_name=filtered_name,
+            use_container_width=True,
+            key=f"dl_xlsx_filtered_{st.session_state.get('center_key')}_{st.session_state.get('year')}_{_safe_name(insurance_choice)}",
+        )
+
+        st.caption("Note: Filtering applies only to sheets that contain an **Insurance** column. Other sheets are kept as-is.")
 
 except Exception as e:
     try:
