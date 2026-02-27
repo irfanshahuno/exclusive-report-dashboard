@@ -762,6 +762,41 @@ def build_filtered_report_bytes(path: str, _token: float, insurance: str) -> byt
     return out.read()
 # ================================================================================
 
+# ====================== ✅ NEW: INSURANCE TOTALS EXCLUSIVE REPORT (XLSX) ======================
+@st.cache_data(show_spinner=False)
+def build_insurance_totals_exclusive_bytes(totals_df: pd.DataFrame, summary_df: pd.DataFrame | None = None) -> bytes:
+    """Create a management-ready Insurance Totals Exclusive Report (bytes).
+    - Writes Insurance_Totals sheet (Grand Total kept last).
+    - Optionally writes Balance_Aging_Summary sheet if provided.
+    """
+    out = io.BytesIO()
+
+    tot = totals_df.copy() if totals_df is not None else pd.DataFrame()
+    tot = trim_empty_rows(tot)
+    if not tot.empty:
+        if "Insurance" not in tot.columns and len(tot.columns) > 0:
+            tot = tot.rename(columns={tot.columns[0]: "Insurance"})
+        tot = drop_empty_insurance(tot, "Insurance")
+        tot = ensure_grand_total(tot, "Insurance")
+        tot = move_grand_total_last(tot)
+
+    summ = None
+    if summary_df is not None and isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
+        summ = trim_empty_rows(summary_df.copy())
+        if not summ.empty:
+            summ = ensure_grand_total(summ, summ.columns[0])
+            summ = move_grand_total_last(summ)
+
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        tot.to_excel(writer, sheet_name=SHEET_INS_TOT, index=False)
+        if summ is not None:
+            summ.to_excel(writer, sheet_name=SHEET_SUMMARY, index=False)
+
+    out.seek(0)
+    return out.read()
+# ================================================================================
+
+
 
 
 
@@ -1434,7 +1469,20 @@ try:
             key=f"dl_xlsx_full_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
-        st.markdown("---")
+        
+        # 1B) Insurance Totals Exclusive Report (management-ready)
+        st.markdown("### Insurance Totals Exclusive Report")
+
+        ins_totals_name = f"{cfg['key']}_{st.session_state.get('year')}_Insurance_Totals_Exclusive_Report.xlsx"
+        st.download_button(
+            "⬇️ Download Insurance Totals Exclusive Report (.xlsx)",
+            build_insurance_totals_exclusive_bytes(totals, summary),
+            file_name=ins_totals_name,
+            use_container_width=True,
+            key=f"dl_xlsx_ins_totals_exclusive_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+        )
+
+st.markdown("---")
         st.markdown("### Download by Insurance (single payer)")
 
         # Build insurance list from totals (preferred) else from available sheets
