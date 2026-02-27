@@ -1007,6 +1007,19 @@ def extract_month_labels(df: pd.DataFrame) -> tuple[pd.Series | None, str | None
     return None, None
 
 
+
+def pretty_month_label(label: str) -> str:
+    """Convert YYYY-MM to 'YYYY MonthName' for display."""
+    s = str(label)
+    m = re.match(r"^(\d{4})-(\d{2})$", s)
+    if not m:
+        return s
+    y = int(m.group(1)); mo = int(m.group(2))
+    month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    name = month_names[mo-1] if 1 <= mo <= 12 else f"{mo:02d}"
+    return f"{y} {name}"
+
+
 def month_sort_key(label: str):
     """Sort month labels: YYYY-MM first, then MM, then other."""
     s = str(label)
@@ -1064,6 +1077,8 @@ def build_monthly_insurance_workbook_bytes(monthly_df: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         for m in months:
             mdf = monthly_df.loc[monthly_df["Month"].astype(str) == str(m)].copy()
+            # Sheet name already indicates month; hide Month column for clean view
+            mdf = mdf.drop(columns=["Month"], errors="ignore")
             sh = str(m)[:31]
             mdf.to_excel(writer, sheet_name=sh, index=False)
 
@@ -1605,6 +1620,9 @@ try:
                 view_mi = monthly_df.copy()
                 if month_choice != "All":
                     view_mi = view_mi.loc[view_mi["Month"].astype(str) == str(month_choice)].copy()
+                    st.markdown(f"#### {pretty_month_label(month_choice)} — Insurance Totals")
+                    # Sheet is already month-specific; hide Month column for a clean table (like your screenshot)
+                    view_mi = view_mi.drop(columns=["Month"], errors="ignore")
 
                 # Put Grand Total rows last within each month view
                 if "Insurance" in view_mi.columns:
