@@ -1398,29 +1398,161 @@ try:
                 st.info("Monthly_Totals sheet not found. Please rebuild the report.")
             else:
                 import io
+                from openpyxl import Workbook
+                from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+                from openpyxl.utils import get_column_letter
+
+                # Month color palette (one per month, soft colors)
+                _MONTH_COLORS = [
+                    "DDEEFF", "D5F5E3", "FFF3CD", "F9EBEA", "E8DAEF",
+                    "D6EAF8", "FDEBD0", "D0ECE7", "FDEDEC", "EBF5FB",
+                    "F4ECF7", "E8F8F5",
+                ]
+                _HEADER_COLOR  = "2E4057"   # dark navy
+                _GT_COLOR      = "FCE4D6"   # soft orange for Grand Total
+                _MONTH_HDR_CLR = "1A5276"   # deep blue for month header row
+
+                def _thin_border():
+                    s = Side(style="thin", color="BBBBBB")
+                    return Border(left=s, right=s, top=s, bottom=s)
+
+                def _col_widths(ws):
+                    for col in ws.columns:
+                        max_len = 0
+                        col_letter = get_column_letter(col[0].column)
+                        for cell in col:
+                            try:
+                                max_len = max(max_len, len(str(cell.value or "")))
+                            except Exception:
+                                pass
+                        ws.column_dimensions[col_letter].width = min(max_len + 4, 40)
+
+                wb = Workbook()
+
+                # ── Sheet 1: Monthly_Totals ──────────────────────────────
+                ws1 = wb.active
+                ws1.title = "Monthly_Totals"
+
+                # Sort months chronologically
+                _month_order = ["January","February","March","April","May","June",
+                                "July","August","September","October","November","December"]
+                def _month_sort_key(val):
+                    for i, m in enumerate(_month_order):
+                        if str(val).startswith(m):
+                            # extract year
+                            parts = str(val).split()
+                            yr = int(parts[1]) if len(parts) > 1 else 0
+                            return (yr, i)
+                    return (9999, 99)
+
+                _monthly_sorted = _monthly[_monthly.iloc[:,0] != "Grand Total"].copy()
+                _monthly_sorted = _monthly_sorted.sort_values(
+                    by=_monthly_sorted.columns[0],
+                    key=lambda s: s.map(_month_sort_key)
+                ).reset_index(drop=True)
+                _gt_row = _monthly[_monthly.iloc[:,0] == "Grand Total"]
+                _monthly_sorted = pd.concat([_monthly_sorted, _gt_row], ignore_index=True)
+
+                # Write header
+                headers1 = list(_monthly_sorted.columns)
+                for ci, h in enumerate(headers1, 1):
+                    cell = ws1.cell(row=1, column=ci, value=h)
+                    cell.fill = PatternFill("solid", fgColor=_HEADER_COLOR)
+                    cell.font = Font(bold=True, color="FFFFFF", size=11)
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                    cell.border = _thin_border()
+                ws1.row_dimensions[1].height = 22
+
+                # Write data rows
+                for ri, row in _monthly_sorted.iterrows():
+                    is_gt = str(row.iloc[0]) == "Grand Total"
+                    color = _GT_COLOR if is_gt else _MONTH_COLORS[ri % len(_MONTH_COLORS)]
+                    for ci, val in enumerate(row, 1):
+                        cell = ws1.cell(row=ri+2, column=ci, value=val)
+                        cell.fill = PatternFill("solid", fgColor=color)
+                        cell.font = Font(bold=is_gt, size=10)
+                        cell.alignment = Alignment(horizontal="right" if ci > 1 else "left", vertical="center")
+                        cell.border = _thin_border()
+                        if ci > 1 and not is_gt:
+                            try:
+                                cell.number_format = "#,##0.00"
+                            except Exception:
+                                pass
+                        if is_gt:
+                            cell.font = Font(bold=True, size=11, color="8B0000")
+
+                ws1.freeze_panes = "A2"
+                _col_widths(ws1)
+
+                # ── Sheet 2: Monthly_Insurance_Detail ───────────────────
+                if _mid is not None and not _mid.empty:
+                    ws2 = wb.create_sheet("Monthly_Insurance_Detail")
+
+                    # Sort months
+                    _all_months = sorted(
+                        _mid["Month"].dropna().unique().tolist(),
+                        key=_month_sort_key
+                    )
+
+                    # Write header row
+                    _detail_cols = list(_mid.columns)  # Month, Insurance, Net Amount, ...
+                    for ci, h in enumerate(_detail_cols, 1):
+                        cell = ws2.cell(row=1, column=ci, value=h)
+                        cell.fill = PatternFill("solid", fgColor=_HEADER_COLOR)
+                        cell.font = Font(bold=True, color="FFFFFF", size=11)
+                        cell.alignment = Alignment(horizontal="center", vertical="center")
+                        cell.border = _thin_border()
+                    ws2.row_dimensions[1].height = 22
+                    ws2.freeze_panes = "A2"
+
+                    cur_row = 2
+                    for m_idx, _mon in enumerate(_all_months):
+                        _df_mon = _mid[_mid["Month"] == _mon].drop(columns=["Month"]).copy()
+                        _color = _MONTH_COLORS[m_idx % len(_MONTH_COLORS)]
+                        _num_c = [c for c in _df_mon.columns if c != "Insurance"]
+
+                        # Grand total row
+                        _gt = {"Insurance": "Grand Total"}
+                        for _nc in _num_c:
+                            _gt[_nc] = pd.to_numeric(_df_mon[_nc], errors="coerce").sum()
+                        _df_mon = pd.concat([_df_mon, pd.DataFrame([_gt])], ignore_index=True)
+
+                        first_row_of_month = cur_row
+
+                        for r_idx, row in _df_mon.iterrows():
+                            is_gt = str(row.get("Insurance","")) == "Grand Total"
+                            row_color = _GT_COLOR if is_gt else _color
+
+                            # Col A: Month — only write on first data row, blank for rest
+                            month_val = _mon if r_idx == 0 else ""
+                            cell_a = ws2.cell(row=cur_row, column=1, value=month_val)
+                            cell_a.fill = PatternFill("solid", fgColor=row_color)
+                            cell_a.font = Font(bold=(r_idx == 0 or is_gt), size=10,
+                                               color=("1A5276" if r_idx == 0 else ("8B0000" if is_gt else "000000")))
+                            cell_a.alignment = Alignment(horizontal="left", vertical="center")
+                            cell_a.border = _thin_border()
+
+                            # Remaining cols
+                            row_vals = [row.get(c, "") for c in _df_mon.columns]
+                            for ci, val in enumerate(row_vals, 2):
+                                cell = ws2.cell(row=cur_row, column=ci, value=val)
+                                cell.fill = PatternFill("solid", fgColor=row_color)
+                                cell.font = Font(bold=is_gt, size=10,
+                                                 color=("8B0000" if is_gt else "000000"))
+                                cell.alignment = Alignment(horizontal="right" if ci > 2 else "left",
+                                                           vertical="center")
+                                cell.border = _thin_border()
+                                try:
+                                    cell.number_format = "#,##0.00"
+                                except Exception:
+                                    pass
+
+                            cur_row += 1
+
+                    _col_widths(ws2)
+
                 _buf = io.BytesIO()
-                with pd.ExcelWriter(_buf, engine="openpyxl") as _writer:
-
-                    # Sheet 1: Monthly Totals summary
-                    _monthly.to_excel(_writer, sheet_name="Monthly_Totals", index=False)
-
-                    # Sheet 2: All months + insurance breakdown in one table
-                    if _mid is not None and not _mid.empty:
-                        # Add Grand Total per month
-                        _rows = []
-                        for _mon in _mid["Month"].dropna().unique():
-                            _df_mon = _mid[_mid["Month"] == _mon].copy()
-                            _rows.append(_df_mon)
-                            # Grand total row for this month
-                            _num_c = [c for c in _df_mon.columns if c not in ("Month", "Insurance")]
-                            _gt = {"Month": _mon, "Insurance": "Grand Total"}
-                            for _nc in _num_c:
-                                _gt[_nc] = pd.to_numeric(_df_mon[_nc], errors="coerce").sum()
-                            _rows.append(pd.DataFrame([_gt]))
-
-                        _all_detail = pd.concat(_rows, ignore_index=True)
-                        _all_detail.to_excel(_writer, sheet_name="Monthly_Insurance_Detail", index=False)
-
+                wb.save(_buf)
                 _buf.seek(0)
 
                 st.download_button(
