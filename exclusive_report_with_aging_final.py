@@ -733,93 +733,6 @@ def load_core_sheets(path: str, _token: float):
 
 
 
-
-@st.cache_data(show_spinner=True)
-def load_monthly_summary(path: str, _token: float):
-    """Build month-wise Net/Paid/Balance/Rejected/Accepted from Balance_Aging_Detail.
-
-    Uses 'Month' column if present; otherwise derives from 'Visit Date'.
-    """
-    ext = Path(path).suffix.lower()
-    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
-
-    detail = pd.read_excel(path, sheet_name="Balance_Aging_Detail", engine=engine)
-    detail = trim_empty_rows(detail)
-
-    # Normalize column names (safe)
-    detail = detail.rename(columns={c: str(c).strip() for c in detail.columns})
-
-    # Determine month column
-    month_col = None
-    for c in ["Month", "MONTH", "month"]:
-        if c in detail.columns:
-            month_col = c
-            break
-
-    if month_col is None:
-        if "Visit Date" not in detail.columns:
-            raise RuntimeError("Neither 'Month' nor 'Visit Date' found in Balance_Aging_Detail.")
-        dt = pd.to_datetime(detail["Visit Date"], errors="coerce")
-        detail["Month"] = dt.dt.to_period("M").astype(str)  # YYYY-MM
-        month_col = "Month"
-    else:
-        # Try to normalize Month values into YYYY-MM when possible
-        m = detail[month_col].astype(str).str.strip()
-        parsed = pd.to_datetime(m, errors="coerce", dayfirst=True)
-        detail["Month"] = parsed.dt.to_period("M").astype(str)
-        # If parsing fails for many rows, keep original Month strings
-        if detail["Month"].eq("NaT").mean() > 0.5:
-            detail["Month"] = m
-        month_col = "Month"
-
-    def num(colname: str):
-        if colname not in detail.columns:
-            detail[colname] = 0
-        return pd.to_numeric(detail[colname], errors="coerce").fillna(0)
-
-    # Net Amount variants
-    net_col = None
-    for c in ["Net Amount", "NetAmount", "Net amount", "Net"]:
-        if c in detail.columns:
-            net_col = c
-            break
-    if net_col is None:
-        raise RuntimeError("Net Amount column not found in Balance_Aging_Detail (expected 'Net Amount'/'NetAmount'/'Net').")
-
-    detail["Net Amount"] = num(net_col)
-    detail["Paid"] = num("Paid")
-    detail["Balance"] = num("Balance")
-
-    rej_col = "Rejected" if "Rejected" in detail.columns else ("Rejection" if "Rejection" in detail.columns else None)
-    acc_col = "Accepted" if "Accepted" in detail.columns else None
-
-    detail["Rejected"] = num(rej_col) if rej_col else 0
-    detail["Accepted"] = num(acc_col) if acc_col else 0
-
-    monthly = (
-        detail.groupby(month_col, dropna=False)[["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
-        .sum()
-        .reset_index()
-        .rename(columns={month_col: "Month"})
-    )
-
-    # Sort month if looks like YYYY-MM
-    try:
-        monthly["_m"] = pd.to_datetime(monthly["Month"] + "-01", errors="coerce")
-        monthly = monthly.sort_values("_m").drop(columns=["_m"])
-    except Exception:
-        pass
-
-    # Grand Total row
-    gt = monthly[["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]].sum(numeric_only=True)
-    gt_row = {"Month": "Grand Total"}
-    gt_row.update({k: float(v) for k, v in gt.items()})
-    monthly = pd.concat([monthly, pd.DataFrame([gt_row])], ignore_index=True)
-
-    return monthly
-
-
-
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -1302,14 +1215,11 @@ try:
                  rejection_url=build_rejection_url(st.session_state.get("center_key"), st.session_state.get("year")))
     st.markdown("---")
 
-    
     tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
     if insgroup_df is not None:
         tab_labels.append(SHEET_INGROUP)
     if plan_df is not None:
         tab_labels.append(SHEET_IPLAN)
-
-    tab_labels.append("Monthly Summary")  # ✅ NEW
     tab_labels.append("Downloads")
 
     if insgroup_df is not None and st.session_state.pop("_stay_on_ig", False):
@@ -1320,7 +1230,6 @@ try:
 
     t1 = tab_map[SHEET_INS_TOT]
     t2 = tab_map[SHEET_SUMMARY]
-    tMS = tab_map["Monthly Summary"]  # ✅ NEW
     t3 = tab_map["Downloads"]
     tIG = tab_map.get(SHEET_INGROUP)
     tPL = tab_map.get(SHEET_IPLAN)
@@ -1359,31 +1268,6 @@ try:
             key=f"dl_csv_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
-
-    with tMS:
-        st.markdown("### Month-wise Summary (Net / Paid / Balance / Rejected / Accepted)")
-    
-        try:
-            monthly_df = load_monthly_summary(str(out_path), token)
-    
-            st.dataframe(
-                _display_df(monthly_df),
-                use_container_width=True,
-                height=full_height(monthly_df),
-            )
-    
-            st.download_button(
-                "⬇️ Export Monthly Summary (CSV)",
-                monthly_df.to_csv(index=False).encode("utf-8"),
-                file_name=f"{cfg['key']}_{st.session_state.get('year')}_monthly_summary.csv",
-                use_container_width=True,
-                key=f"dl_csv_monthly_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-            )
-    
-        except Exception as e:
-            st.warning(f"Monthly summary could not be generated: {e}")
-            st.info("Check that 'Balance_Aging_Detail' has Month or Visit Date and amount columns.")
-    
     if tIG is not None and insgroup_df is not None:
         with tIG:
             insurers = (
@@ -1490,6 +1374,110 @@ try:
             key=f"dl_xlsx_full_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
+        # ====================== MONTHLY BREAKDOWN (DOWNLOAD ONLY) ======================
+        st.markdown("---")
+        st.markdown("### 📅 Monthly Breakdown")
+
+        try:
+            # Load the RAW SOURCE FILE (source.xlsx/xlsb) — contains VisitDate, ActivityIns, Paid, etc.
+            _src_local = resolve_source_path(folder)
+            if not _src_local.exists():
+                st.info("Source file not found. Please upload source file to generate monthly breakdown.")
+            else:
+                _eng_s = "pyxlsb" if _src_local.suffix.lower() == ".xlsb" else "openpyxl"
+                _src_df = pd.read_excel(str(_src_local), sheet_name=0, engine=_eng_s)
+                _src_df.columns = _src_df.columns.str.strip()
+                _src_df = trim_empty_rows(_src_df)
+
+                # --- Date column: VisitDate / SubmissionDate / ClaimDate ---
+                _date_col = next(
+                    (c for c in _src_df.columns if re.search(r'VisitDate', str(c), re.I)),
+                    next(
+                        (c for c in _src_df.columns if re.search(r'SubmissionDate|ClaimDate', str(c), re.I)),
+                        next((c for c in _src_df.columns if re.search(r'date', str(c), re.I)), None)
+                    )
+                )
+
+                if _date_col is None:
+                    st.info(f"No date column found in source file. Columns: {', '.join(str(c) for c in _src_df.columns[:25])}")
+                else:
+                    _src_df[_date_col] = pd.to_datetime(_src_df[_date_col], errors="coerce", dayfirst=True)
+                    _src_df = _src_df.dropna(subset=[_date_col])
+                    _src_df["_Month"] = _src_df[_date_col].dt.to_period("M")
+
+                    # --- Compute Paid from raw remit columns (same logic as generator) ---
+                    _remit_cols = [c for c in [
+                        "actRemitInsShare", "actResub1RemitInsShare",
+                        "actResub2RemitInsShare", "actResub3RemitInsShare",
+                        "TKBKAmountAct"
+                    ] if c in _src_df.columns]
+                    if _remit_cols:
+                        for _rc in _remit_cols:
+                            _src_df[_rc] = pd.to_numeric(_src_df[_rc], errors="coerce").fillna(0)
+                        _src_df["_Paid"] = _src_df[_remit_cols].sum(axis=1)
+                    elif "Paid" in _src_df.columns:
+                        _src_df["_Paid"] = pd.to_numeric(_src_df["Paid"], errors="coerce").fillna(0)
+                    else:
+                        _src_df["_Paid"] = 0.0
+
+                    # --- Net Amount = ActivityIns ---
+                    if "ActivityIns" in _src_df.columns:
+                        _src_df["_NetAmount"] = pd.to_numeric(_src_df["ActivityIns"], errors="coerce").fillna(0)
+                    else:
+                        _src_df["_NetAmount"] = 0.0
+
+                    # --- Rejection, Accepted, Balance (recompute same as generator) ---
+                    _src_df["_Rejection"] = 0.0
+                    _src_df["_Accepted"]  = 0.0
+                    _src_df["_Balance"]   = 0.0
+
+                    if "ActivityStatus" in _src_df.columns and "DenialCode" in _src_df.columns:
+                        _lower_st  = _src_df["ActivityStatus"].astype(str).str.lower()
+                        _mask_paid = _src_df["_Paid"] > 0
+                        _mask_rej  = (_src_df["_Paid"] == 0) & (_lower_st == "rejected") & (_src_df["DenialCode"].notna())
+                        _mask_bal  = (_src_df["_Paid"] == 0) & ~_mask_rej
+                        _src_df.loc[_mask_paid, "_Accepted"]  = _src_df["_NetAmount"] - _src_df["_Paid"]
+                        _src_df.loc[_mask_rej,  "_Rejection"] = _src_df["_NetAmount"]
+                        _src_df.loc[_mask_bal,  "_Balance"]   = _src_df["_NetAmount"]
+                    else:
+                        # Fallback: use existing columns if present
+                        for _raw, _calc in [("Balance","_Balance"),("Rejection","_Rejection"),("Accepted","_Accepted")]:
+                            if _raw in _src_df.columns:
+                                _src_df[_calc] = pd.to_numeric(_src_df[_raw], errors="coerce").fillna(0)
+
+                    # --- Group by month ---
+                    _monthly = (
+                        _src_df.groupby("_Month")
+                        .agg(
+                            **{"Net Amount": pd.NamedAgg(column="_NetAmount",  aggfunc="sum"),
+                               "Paid":       pd.NamedAgg(column="_Paid",       aggfunc="sum"),
+                               "Balance":    pd.NamedAgg(column="_Balance",    aggfunc="sum"),
+                               "Rejected":   pd.NamedAgg(column="_Rejection",  aggfunc="sum"),
+                               "Accepted":   pd.NamedAgg(column="_Accepted",   aggfunc="sum")}
+                        )
+                        .reset_index()
+                    )
+                    _monthly["_Month"] = _monthly["_Month"].dt.strftime("%B %Y")
+                    _monthly = _monthly.rename(columns={"_Month": "Month"})
+
+                    # Grand Total row
+                    _gt = {"Month": "Grand Total"}
+                    for _lbl in ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]:
+                        _gt[_lbl] = pd.to_numeric(_monthly[_lbl], errors="coerce").sum()
+                    _monthly = pd.concat([_monthly, pd.DataFrame([_gt])], ignore_index=True)
+
+                    # Download only — no table display
+                    st.download_button(
+                        "⬇️ Download Monthly Breakdown (CSV)",
+                        _monthly.to_csv(index=False).encode("utf-8"),
+                        file_name=f"{cfg['key']}_{st.session_state.get('year')}_monthly_breakdown.csv",
+                        use_container_width=True,
+                        key=f"dl_monthly_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                    )
+
+        except Exception as _me:
+            st.warning(f"Monthly breakdown could not be generated: {_me}")
+
 except Exception as e:
     try:
         ext = Path(str(out_path)).suffix.lower()
@@ -1498,6 +1486,8 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
+
 
 
 
