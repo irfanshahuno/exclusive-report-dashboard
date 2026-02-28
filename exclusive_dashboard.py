@@ -1374,6 +1374,111 @@ try:
             key=f"dl_xlsx_full_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
+        # ====================== MONTHLY BREAKDOWN ======================
+        st.markdown("---")
+        st.markdown("### 📅 Monthly Breakdown — Net Amount | Paid | Balance | Rejected | Accepted")
+
+        try:
+            # Read from the MAIN SOURCE FILE (source.xlsx / source.xlsb)
+            _src = resolve_source_path(folder)
+            if not _src.exists():
+                st.info("Source file not found. Please upload the source file to see monthly breakdown.")
+            else:
+                _ext = _src.suffix.lower()
+                _eng = "pyxlsb" if _ext == ".xlsb" else "openpyxl"
+
+                # Load first sheet of source file
+                _src_df = pd.read_excel(str(_src), sheet_name=0, engine=_eng)
+                _src_df = trim_empty_rows(_src_df)
+
+                # Find Visit Date column
+                _date_col = None
+                for _c in _src_df.columns:
+                    if re.search(r'visit\s*date', str(_c), re.I):
+                        _date_col = _c
+                        break
+                if _date_col is None:
+                    for _c in _src_df.columns:
+                        if re.search(r'date', str(_c), re.I):
+                            _date_col = _c
+                            break
+
+                if _date_col is None:
+                    st.info(f"No 'Visit Date' column found in source file. Available columns: {', '.join(str(c) for c in _src_df.columns[:15])}")
+                else:
+                    _src_df[_date_col] = pd.to_datetime(_src_df[_date_col], errors="coerce")
+                    _src_df = _src_df.dropna(subset=[_date_col])
+                    _src_df["_Month"] = _src_df[_date_col].dt.to_period("M")
+
+                    # Detect Net Amount, Paid, Balance, Rejected, Accepted columns
+                    _search = {
+                        "Net Amount": [r"net\s*amount", r"netamount", r"^net$"],
+                        "Paid":       [r"^paid$", r"paid\s*amount", r"amount\s*paid"],
+                        "Balance":    [r"^balance$", r"^bal$"],
+                        "Rejected":   [r"reject", r"rejection"],
+                        "Accepted":   [r"^accepted$", r"accept"],
+                    }
+                    _col_map = {}
+                    for _label, _patterns in _search.items():
+                        for _col in _src_df.columns:
+                            for _pat in _patterns:
+                                if re.search(_pat, str(_col), re.I):
+                                    _col_map[_label] = _col
+                                    break
+                            if _label in _col_map:
+                                break
+
+                    if not _col_map:
+                        st.info(f"Could not match Net Amount / Paid / Balance / Rejected / Accepted in source file. Columns found: {', '.join(str(c) for c in _src_df.columns[:20])}")
+                    else:
+                        # Group by month and sum
+                        _monthly = (
+                            _src_df.groupby("_Month")
+                            .agg(**{
+                                _label: pd.NamedAgg(
+                                    column=_col,
+                                    aggfunc=lambda x: pd.to_numeric(x, errors="coerce").sum()
+                                )
+                                for _label, _col in _col_map.items()
+                            })
+                            .reset_index()
+                        )
+                        _monthly["_Month"] = _monthly["_Month"].dt.strftime("%B %Y")
+                        _monthly = _monthly.rename(columns={"_Month": "Month"})
+
+                        # Grand Total row
+                        _gt = {"Month": "Grand Total"}
+                        for _lbl in _col_map:
+                            _gt[_lbl] = pd.to_numeric(_monthly[_lbl], errors="coerce").sum()
+                        _monthly = pd.concat([_monthly, pd.DataFrame([_gt])], ignore_index=True)
+
+                        # Format numeric cols
+                        for _nc in [c for c in _monthly.columns if c != "Month"]:
+                            _monthly[_nc] = pd.to_numeric(_monthly[_nc], errors="coerce")
+
+                        _monthly.index = range(1, len(_monthly) + 1)
+                        _monthly.index.name = None
+
+                        st.dataframe(
+                            _monthly.style.format({
+                                c: "{:,.2f}" for c in _monthly.columns if c != "Month"
+                            }),
+                            use_container_width=True,
+                            height=full_height(_monthly),
+                        )
+
+                        # Export monthly breakdown as CSV
+                        st.download_button(
+                            "⬇️ Export Monthly Breakdown (CSV)",
+                            _monthly.to_csv(index=False).encode("utf-8"),
+                            file_name=f"{cfg['key']}_{st.session_state.get('year')}_monthly_breakdown.csv",
+                            use_container_width=True,
+                            key=f"dl_monthly_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                        )
+
+        except Exception as _me:
+            st.warning(f"Monthly breakdown could not be generated: {_me}")
+
 except Exception as e:
     try:
         ext = Path(str(out_path)).suffix.lower()
