@@ -1379,18 +1379,42 @@ try:
         st.markdown("### 📅 Monthly Breakdown — Net Amount | Paid | Balance | Rejected | Accepted")
 
         try:
-            # Read from the MAIN SOURCE FILE (source.xlsx / source.xlsb)
-            _src = resolve_source_path(folder)
-            if not _src.exists():
-                st.info("Source file not found. Please upload the source file to see monthly breakdown.")
-            else:
-                _ext = _src.suffix.lower()
-                _eng = "pyxlsb" if _ext == ".xlsb" else "openpyxl"
+            _ext2 = Path(str(out_path)).suffix.lower()
+            _eng2 = "pyxlsb" if _ext2 == ".xlsb" else "openpyxl"
 
-                # Load first sheet of source file
-                _src_df = pd.read_excel(str(_src), sheet_name=0, engine=_eng)
+            # Try Balance_Aging_Detail sheet first, then fallback to sheet index 0 of source
+            _src_df = None
+
+            # 1) Try Balance_Aging_Detail in the report file
+            try:
+                _src_df = pd.read_excel(str(out_path), sheet_name=SHEET_DETAIL, engine=_eng2)
                 _src_df = trim_empty_rows(_src_df)
+            except Exception:
+                _src_df = None
 
+            # 2) Fallback: first sheet of the local source file
+            if _src_df is None or _src_df.empty:
+                _src_local = resolve_source_path(folder)
+                if _src_local.exists():
+                    _ext_s = _src_local.suffix.lower()
+                    _eng_s = "pyxlsb" if _ext_s == ".xlsb" else "openpyxl"
+                    try:
+                        _src_df = pd.read_excel(str(_src_local), sheet_name=0, engine=_eng_s)
+                        _src_df = trim_empty_rows(_src_df)
+                    except Exception:
+                        _src_df = None
+
+            # 3) Last fallback: first sheet of report file
+            if _src_df is None or _src_df.empty:
+                try:
+                    _src_df = pd.read_excel(str(out_path), sheet_name=0, engine=_eng2)
+                    _src_df = trim_empty_rows(_src_df)
+                except Exception:
+                    _src_df = None
+
+            if _src_df is None or _src_df.empty:
+                st.info("No data found to build monthly breakdown. Please upload/rebuild the report.")
+            else:
                 # Find Visit Date column
                 _date_col = None
                 for _c in _src_df.columns:
@@ -1404,7 +1428,7 @@ try:
                             break
 
                 if _date_col is None:
-                    st.info(f"No 'Visit Date' column found in source file. Available columns: {', '.join(str(c) for c in _src_df.columns[:15])}")
+                    st.info(f"No 'Visit Date' column found. Available columns: {', '.join(str(c) for c in _src_df.columns[:20])}")
                 else:
                     _src_df[_date_col] = pd.to_datetime(_src_df[_date_col], errors="coerce")
                     _src_df = _src_df.dropna(subset=[_date_col])
@@ -1429,7 +1453,7 @@ try:
                                 break
 
                     if not _col_map:
-                        st.info(f"Could not match Net Amount / Paid / Balance / Rejected / Accepted in source file. Columns found: {', '.join(str(c) for c in _src_df.columns[:20])}")
+                        st.info(f"Could not find required columns. Columns in data: {', '.join(str(c) for c in _src_df.columns[:25])}")
                     else:
                         # Group by month and sum
                         _monthly = (
