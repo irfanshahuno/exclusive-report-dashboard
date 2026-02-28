@@ -137,6 +137,45 @@ def build_insurance_totals(df: pd.DataFrame) -> pd.DataFrame:
     insurance_totals = pd.concat([insurance_totals, pd.DataFrame([total_row])], ignore_index=True)
     return insurance_totals
 
+def build_monthly_totals(df: pd.DataFrame) -> pd.DataFrame:
+    """Same structure as Insurance_Totals but grouped by VisitDate month."""
+    # Find date column
+    date_col = next(
+        (c for c in ["VisitDate", "SubmissionDate", "ClaimDate"] if c in df.columns), None
+    )
+    if date_col is None:
+        return pd.DataFrame()
+
+    df = df.copy()
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
+    df = df.dropna(subset=[date_col])
+    df["_Month"] = df[date_col].dt.to_period("M")
+
+    monthly = (
+        df.groupby("_Month", observed=True)[["ActivityIns", "Paid", "Rejection", "Accepted", "Balance"]]
+        .sum()
+        .reset_index()
+    )
+    monthly["_Month"] = monthly["_Month"].dt.strftime("%B %Y")
+    monthly = monthly.rename(columns={
+        "_Month": "Month",
+        "ActivityIns": "Net Amount",
+        "Rejection": "Rejected",
+    })
+    monthly = monthly[["Month", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
+
+    total_row = {
+        "Month":      "Grand Total",
+        "Net Amount": monthly["Net Amount"].sum(),
+        "Paid":       monthly["Paid"].sum(),
+        "Balance":    monthly["Balance"].sum(),
+        "Rejected":   monthly["Rejected"].sum(),
+        "Accepted":   monthly["Accepted"].sum(),
+    }
+    monthly = pd.concat([monthly, pd.DataFrame([total_row])], ignore_index=True)
+    return monthly
+
+
 # -------------------- styling --------------------
 HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
 TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
@@ -165,7 +204,7 @@ def apply_styling(output_file: str):
                 cell.fill = TOTAL_FILL
                 cell.font = Font(bold=True)
 
-        if ws.title == "Insurance_Totals":
+        if ws.title in ("Insurance_Totals", "Monthly_Totals"):
             for r in range(2, ws.max_row + 1):
                 if ws.cell(row=r, column=1).value == "Grand Total":
                     for c in range(1, ws.max_column + 1):
@@ -193,12 +232,15 @@ def main():
     balance_df = df.loc[df["Balance"] > 0].copy()
     pivot_summary = build_balance_aging_summary(balance_df)
     insurance_totals = build_insurance_totals(df)
+    monthly_totals = build_monthly_totals(df)
 
     # Write sheets (skip "Exclusive_Report" if disabled)
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
         if WRITE_EXCLUSIVE_SHEET:
             df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
         insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
+        if not monthly_totals.empty:
+            monthly_totals.to_excel(writer, sheet_name="Monthly_Totals", index=False)
         pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
         balance_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
 
