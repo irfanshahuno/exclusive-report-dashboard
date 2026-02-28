@@ -1382,14 +1382,12 @@ try:
             _ext2 = Path(str(out_path)).suffix.lower()
             _eng2 = "pyxlsb" if _ext2 == ".xlsb" else "openpyxl"
 
-            # Load Monthly_Totals sheet
             try:
                 _monthly = pd.read_excel(str(out_path), sheet_name="Monthly_Totals", engine=_eng2)
                 _monthly = trim_empty_rows(_monthly)
             except Exception:
                 _monthly = None
 
-            # Load Monthly_Insurance_Detail sheet
             try:
                 _mid = pd.read_excel(str(out_path), sheet_name="Monthly_Insurance_Detail", engine=_eng2)
                 _mid = trim_empty_rows(_mid)
@@ -1399,27 +1397,29 @@ try:
             if _monthly is None or _monthly.empty:
                 st.info("Monthly_Totals sheet not found. Please rebuild the report.")
             else:
-                # Build Excel in memory: Sheet1=Monthly_Totals, then one sheet per month
                 import io
                 _buf = io.BytesIO()
                 with pd.ExcelWriter(_buf, engine="openpyxl") as _writer:
-                    # Sheet 1: Monthly summary
+
+                    # Sheet 1: Monthly Totals summary
                     _monthly.to_excel(_writer, sheet_name="Monthly_Totals", index=False)
 
-                    # One sheet per month with insurance breakdown
+                    # Sheet 2: All months + insurance breakdown in one table
                     if _mid is not None and not _mid.empty:
-                        _months_list = _mid["Month"].dropna().unique().tolist()
-                        for _mon in _months_list:
-                            _df_mon = _mid[_mid["Month"] == _mon].drop(columns=["Month"], errors="ignore").copy()
-                            # Grand Total row
-                            _num_c = [c for c in _df_mon.columns if c != "Insurance"]
-                            _gt = {"Insurance": "Grand Total"}
+                        # Add Grand Total per month
+                        _rows = []
+                        for _mon in _mid["Month"].dropna().unique():
+                            _df_mon = _mid[_mid["Month"] == _mon].copy()
+                            _rows.append(_df_mon)
+                            # Grand total row for this month
+                            _num_c = [c for c in _df_mon.columns if c not in ("Month", "Insurance")]
+                            _gt = {"Month": _mon, "Insurance": "Grand Total"}
                             for _nc in _num_c:
                                 _gt[_nc] = pd.to_numeric(_df_mon[_nc], errors="coerce").sum()
-                            _df_mon = pd.concat([_df_mon, pd.DataFrame([_gt])], ignore_index=True)
-                            # Sheet name max 31 chars
-                            _sheet_name = str(_mon)[:31]
-                            _df_mon.to_excel(_writer, sheet_name=_sheet_name, index=False)
+                            _rows.append(pd.DataFrame([_gt]))
+
+                        _all_detail = pd.concat(_rows, ignore_index=True)
+                        _all_detail.to_excel(_writer, sheet_name="Monthly_Insurance_Detail", index=False)
 
                 _buf.seek(0)
 
