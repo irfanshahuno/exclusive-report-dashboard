@@ -202,86 +202,93 @@ def build_balance_url(center: str, year: int) -> str:
 st.markdown(
     """
 <style>
-/* ---------- Page background (soothing) ---------- */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+
+/* ---------- Page background (premium deep gradient) ---------- */
 .stApp{
-  background: linear-gradient(180deg, #F7FAFF 0%, #FFFFFF 45%) !important;
+  background: linear-gradient(145deg, #EDF2FB 0%, #F8FAFF 40%, #FAFCFF 100%) !important;
+  font-family: 'Inter', sans-serif !important;
 }
 
 /* Reduce harsh separators */
-hr{ border: none !important; height:1px !important; background:#E6EEF8 !important; }
+hr{ border: none !important; height:1px !important; background: linear-gradient(90deg, transparent, #C8D9F0, transparent) !important; }
 
-/* ---------- Premium Buttons (Light-blue) ---------- */
-/* ---------- Link buttons (open new tab) ---------- */
+/* ---------- Premium Buttons ---------- */
 a.navlink{
   display: inline-block;
   width: 100%;
   text-align: center;
   min-height: 58px;
   padding: 14px 22px;
-  font-size: 18px;
-  font-weight: 800;
-  background: #EEF6FF;
-  color: #0B2D5C;
-  border: 1.8px solid #B6D4FF;
+  font-size: 17px;
+  font-weight: 700;
+  font-family: 'Inter', sans-serif;
+  background: linear-gradient(160deg, #FFFFFF 0%, #EEF4FF 100%);
+  color: #0A2647;
+  border: 1.5px solid #C5D8F5;
   border-radius: 14px;
-  box-shadow: 0 3px 10px rgba(11, 45, 92, 0.10);
+  box-shadow: 0 2px 8px rgba(10, 38, 71, 0.08), inset 0 1px 0 rgba(255,255,255,0.9);
   text-decoration: none !important;
   line-height: 28px;
+  transition: all 0.2s ease;
 }
 a.navlink:hover{
-  background: #DCEBFF;
-  border-color: #6FA4FF;
-  box-shadow: 0 6px 16px rgba(11, 45, 92, 0.14);
+  background: linear-gradient(160deg, #E8F1FF 0%, #D6E8FF 100%);
+  border-color: #7DAAEE;
+  box-shadow: 0 6px 20px rgba(10, 38, 71, 0.15), inset 0 1px 0 rgba(255,255,255,0.9);
+  transform: translateY(-1px);
+  color: #0A2647;
 }
 a.navlink:active, a.navlink:focus, a.navlink:focus-visible{
-  background: #0B2D5C;
+  background: linear-gradient(160deg, #0A2647 0%, #154B8A 100%);
   color: #ffffff;
-  border-color: #0B2D5C;
+  border-color: #0A2647;
   outline: none;
-  box-shadow: none;
+  box-shadow: 0 4px 12px rgba(10, 38, 71, 0.3);
+  transform: translateY(0px);
 }
 
 div.stButton > button{
   width: 100% !important;
   min-height: 58px !important;
   padding: 14px 22px !important;
-  font-size: 18px !important;
-  font-weight: 800 !important;
-
-  background: #EEF6FF !important;              /* premium light blue */
-  color: #0B2D5C !important;                   /* navy text */
-  border: 1.8px solid #B6D4FF !important;      /* soft border */
+  font-size: 17px !important;
+  font-weight: 700 !important;
+  font-family: 'Inter', sans-serif !important;
+  background: linear-gradient(160deg, #FFFFFF 0%, #EEF4FF 100%) !important;
+  color: #0A2647 !important;
+  border: 1.5px solid #C5D8F5 !important;
   border-radius: 14px !important;
-
-  box-shadow: 0 3px 10px rgba(11, 45, 92, 0.10) !important;
+  box-shadow: 0 2px 8px rgba(10, 38, 71, 0.08), inset 0 1px 0 rgba(255,255,255,0.9) !important;
+  transition: all 0.2s ease !important;
+  letter-spacing: 0.1px !important;
 }
-
-/* Hover */
 div.stButton > button:hover{
-  background: #DCEBFF !important;
-  border-color: #6FA4FF !important;
-  box-shadow: 0 6px 16px rgba(11, 45, 92, 0.14) !important;
+  background: linear-gradient(160deg, #E8F1FF 0%, #D6E8FF 100%) !important;
+  border-color: #7DAAEE !important;
+  box-shadow: 0 6px 20px rgba(10, 38, 71, 0.15) !important;
+  transform: translateY(-1px) !important;
 }
-
-/* Active/Selected feel */
 div.stButton > button:active,
 div.stButton > button:focus,
 div.stButton > button:focus-visible{
-  background: #0B2D5C !important;              /* navy active */
+  background: linear-gradient(160deg, #0A2647 0%, #154B8A 100%) !important;
   color: #ffffff !important;
-  border-color: #0B2D5C !important;
+  border-color: #0A2647 !important;
   outline: none !important;
-  box-shadow: none !important;
+  box-shadow: 0 4px 12px rgba(10, 38, 71, 0.3) !important;
 }
 
 /* Center titles */
 .center-title{
-  color: #0B2D5C !important;
+  color: #0A2647 !important;
   font-weight: 900 !important;
+  font-family: 'Inter', sans-serif !important;
+  letter-spacing: -0.5px !important;
   margin-bottom: 0 !important;
 }
 
-/* ---------- KPI Cards (premium + soothing) ---------- */
+/* ---------- KPI Cards (glassmorphism premium) ---------- */
 .kpi-grid{
   display:grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -290,39 +297,49 @@ div.stButton > button:focus-visible{
   margin-bottom: 10px;
 }
 .kpi-card{
-  background: rgba(255,255,255,0.92);
-  border: 1.4px solid #E3ECFA;
-  border-radius: 16px;
-  padding: 14px 16px;
-  box-shadow: 0 8px 18px rgba(11,45,92,0.06);
-  min-width: 0; /* important for overflow handling inside grid */
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1.5px solid rgba(197, 216, 245, 0.7);
+  border-radius: 18px;
+  padding: 16px 18px;
+  box-shadow: 0 4px 16px rgba(10, 38, 71, 0.07), 0 1px 3px rgba(10, 38, 71, 0.05), inset 0 1px 0 rgba(255,255,255,0.95);
+  min-width: 0;
+  transition: all 0.2s ease;
 }
 .kpi-label{
-  font-size: 13px;
-  color: #64748B;
-  font-weight: 750;
-  margin-bottom: 6px;
+  font-size: 12px;
+  color: #8A9BB5;
+  font-weight: 600;
+  font-family: 'Inter', sans-serif;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  margin-bottom: 8px;
 }
 
 /* ✅ AUTO-FIT number inside card */
 .kpi-value{
-  font-size: clamp(18px, 2.2vw, 30px);  /* auto fit based on screen */
-  font-weight: 900;
-  color: #111827;
-  letter-spacing: 0.2px;
-
-  white-space: nowrap;                  /* keep number in one line */
-  overflow: hidden;                     /* hide overflow */
-  text-overflow: ellipsis;              /* show ... if too long */
+  font-size: clamp(17px, 2.1vw, 28px);
+  font-weight: 800;
+  color: #0D1B2E;
+  letter-spacing: -0.5px;
+  font-family: 'Inter', sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* Balance featured: same bold, slight different color */
+/* Balance card — gold accent premium */
 .kpi-card.balance{
-  background: linear-gradient(180deg, #F1F7FF 0%, #FFFFFF 100%);
-  border-color: #CFE3FF;
+  background: linear-gradient(145deg, rgba(10,38,71,0.96) 0%, rgba(15,56,110,0.96) 100%);
+  border-color: rgba(180, 210, 255, 0.25);
+  box-shadow: 0 6px 24px rgba(10, 38, 71, 0.25), 0 1px 3px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.08);
+}
+.kpi-card.balance .kpi-label{
+  color: rgba(180, 205, 255, 0.75);
 }
 .kpi-card.balance .kpi-value{
-  color:#0B2D5C; /* slight different premium navy */
+  color: #FFFFFF;
 }
 
 /* Links inside cards look clean */
@@ -332,8 +349,13 @@ div.stButton > button:focus-visible{
   display:block !important;
 }
 .kpi-link:hover .kpi-card{
-  border-color:#6FA4FF;
-  box-shadow: 0 10px 22px rgba(11,45,92,0.10);
+  border-color: #7DAAEE;
+  box-shadow: 0 8px 28px rgba(10, 38, 71, 0.14), inset 0 1px 0 rgba(255,255,255,0.95);
+  transform: translateY(-2px);
+}
+.kpi-link:hover .kpi-card.balance{
+  box-shadow: 0 10px 32px rgba(10, 38, 71, 0.35), inset 0 1px 0 rgba(255,255,255,0.08);
+  transform: translateY(-2px);
 }
 
 /* Mobile */
