@@ -110,9 +110,18 @@ auto_auth_from_token()
 # center/year.  We need to restore rcm_year/center_key BEFORE require_year_selection() runs,
 # otherwise that gate fires again and looks like a fresh session.
 def _restore_session_from_query_params():
-    nav_param = st.query_params.get("nav")
-    y_param   = st.query_params.get("year")
-    c_param   = st.query_params.get("center")
+    y_param = st.query_params.get("year")
+    c_param = st.query_params.get("center")
+    # ✅ FIX: carry auth across navigation (Balance link opens in same tab but new rerun loses session)
+    # We include a simple HMAC of the password in the URL so the new session can re-auth silently.
+    auth_param = st.query_params.get("auth")
+
+    if auth_param:
+        # Verify: auth = HMAC-SHA256(secret, "view_auth")
+        _secret = st.secrets.get("TOKEN_SECRET", VIEW_PASSWORD)
+        expected = hmac.new(_secret.encode("utf-8"), b"view_auth", hashlib.sha256).hexdigest()[:16]
+        if auth_param == expected:
+            st.session_state.is_view_auth = True
 
     if y_param and not st.session_state.get("rcm_year"):
         try:
@@ -176,8 +185,14 @@ DAILY_REPORT_EXTERNAL_BASE = "https://exclusive-report-dashboard-ctan8jpussjzffx
 DAILY_REPORT_EXTERNAL_PAGE = "/Registration_View"
 # ✅ Daily Report button target (requested)
 DAILY_REPORT_BUTTON_BASE = "https://exclusive-report-dashboard-ad74eqssyakelmpbeztqob.streamlit.app/"
+def _make_auth_param() -> str:
+    """Generate a short HMAC token to carry view-auth across URL navigation."""
+    _secret = st.secrets.get("TOKEN_SECRET", VIEW_PASSWORD)
+    return hmac.new(_secret.encode("utf-8"), b"view_auth", hashlib.sha256).hexdigest()[:16]
+
 def build_balance_url(center: str, year: int) -> str:
-    return f"?nav=balance&center={center}&year={year}"
+    auth = _make_auth_param()
+    return f"?nav=balance&center={center}&year={year}&auth={auth}"
 # ================================================================================
 
 
