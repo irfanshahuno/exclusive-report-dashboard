@@ -137,6 +137,35 @@ def build_insurance_totals(df: pd.DataFrame) -> pd.DataFrame:
     insurance_totals = pd.concat([insurance_totals, pd.DataFrame([total_row])], ignore_index=True)
     return insurance_totals
 
+def build_monthly_insurance_detail(df: pd.DataFrame) -> pd.DataFrame:
+    """For each month, insurance-wise breakdown: Net Amount, Paid, Balance, Rejected, Accepted."""
+    date_col = next(
+        (c for c in ["VisitDate", "SubmissionDate", "ClaimDate"] if c in df.columns), None
+    )
+    if date_col is None:
+        return pd.DataFrame()
+
+    df = df.copy()
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
+    df = df.dropna(subset=[date_col])
+    df["_Month"] = df[date_col].dt.to_period("M").dt.strftime("%B %Y")
+
+    result = (
+        df.groupby(["_Month", "Insurance"], observed=True)[
+            ["ActivityIns", "Paid", "Rejection", "Accepted", "Balance"]
+        ]
+        .sum()
+        .reset_index()
+    )
+    result = result.rename(columns={
+        "_Month": "Month",
+        "ActivityIns": "Net Amount",
+        "Rejection": "Rejected",
+    })
+    result = result[["Month", "Insurance", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
+    return result
+
+
 def build_monthly_totals(df: pd.DataFrame) -> pd.DataFrame:
     """Same structure as Insurance_Totals but grouped by VisitDate month."""
     # Find date column
@@ -233,6 +262,7 @@ def main():
     pivot_summary = build_balance_aging_summary(balance_df)
     insurance_totals = build_insurance_totals(df)
     monthly_totals = build_monthly_totals(df)
+    monthly_insurance_detail = build_monthly_insurance_detail(df)
 
     # Write sheets (skip "Exclusive_Report" if disabled)
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
@@ -241,6 +271,8 @@ def main():
         insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
         if not monthly_totals.empty:
             monthly_totals.to_excel(writer, sheet_name="Monthly_Totals", index=False)
+        if not monthly_insurance_detail.empty:
+            monthly_insurance_detail.to_excel(writer, sheet_name="Monthly_Insurance_Detail", index=False)
         pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
         balance_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
 
