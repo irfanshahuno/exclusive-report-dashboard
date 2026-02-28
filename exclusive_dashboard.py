@@ -1382,93 +1382,80 @@ try:
             _ext2 = Path(str(out_path)).suffix.lower()
             _eng2 = "pyxlsb" if _ext2 == ".xlsb" else "openpyxl"
 
-            # Load Balance_Aging_Detail from report file
-            _src_df = None
+            # Load Monthly_Totals sheet
             try:
-                _src_df = pd.read_excel(str(out_path), sheet_name=SHEET_DETAIL, engine=_eng2)
-                _src_df = trim_empty_rows(_src_df)
+                _monthly = pd.read_excel(str(out_path), sheet_name="Monthly_Totals", engine=_eng2)
+                _monthly = trim_empty_rows(_monthly)
             except Exception:
-                _src_df = None
+                _monthly = None
 
-            # Fallback: local source file first sheet
-            if _src_df is None or _src_df.empty:
-                _src_local = resolve_source_path(folder)
-                if _src_local.exists():
-                    _eng_s = "pyxlsb" if _src_local.suffix.lower() == ".xlsb" else "openpyxl"
-                    try:
-                        _src_df = pd.read_excel(str(_src_local), sheet_name=0, engine=_eng_s)
-                        _src_df = trim_empty_rows(_src_df)
-                    except Exception:
-                        _src_df = None
+            # Load Monthly_Insurance_Detail sheet
+            try:
+                _mid = pd.read_excel(str(out_path), sheet_name="Monthly_Insurance_Detail", engine=_eng2)
+                _mid = trim_empty_rows(_mid)
+            except Exception:
+                _mid = None
 
-            if _src_df is None or _src_df.empty:
-                st.info("No data found to build monthly breakdown.")
+            if _monthly is None or _monthly.empty:
+                st.info("Monthly_Totals sheet not found. Please rebuild the report.")
             else:
-                # Show actual columns to help debug if needed
-                _all_cols = [str(c) for c in _src_df.columns]
-
-                # Find Visit Date column
-                _date_col = next(
-                    (c for c in _src_df.columns if re.search(r'visit\s*date', str(c), re.I)),
-                    next((c for c in _src_df.columns if re.search(r'date', str(c), re.I)), None)
+                # Download button
+                st.download_button(
+                    "⬇️ Download Monthly Breakdown (CSV)",
+                    _monthly.to_csv(index=False).encode("utf-8"),
+                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_monthly_breakdown.csv",
+                    use_container_width=True,
+                    key=f"dl_monthly_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
                 )
 
-                if _date_col is None:
-                    st.info(f"No date column found. Columns available: {', '.join(_all_cols[:25])}")
-                else:
-                    _src_df[_date_col] = pd.to_datetime(_src_df[_date_col], errors="coerce")
-                    _src_df = _src_df.dropna(subset=[_date_col])
-                    _src_df["_Month"] = _src_df[_date_col].dt.to_period("M")
+                # Interactive pivot: click a month to see insurance breakdown
+                if _mid is not None and not _mid.empty:
+                    st.markdown("#### 🔍 Insurance Breakdown by Month")
+                    st.caption("Select a month to see insurance-wise breakdown")
 
-                    # Match columns — try exact first, then fuzzy
-                    def _find_col(df, *patterns):
-                        for pat in patterns:
-                            for c in df.columns:
-                                if re.search(pat, str(c), re.I):
-                                    return c
-                        return None
+                    # Get months excluding Grand Total
+                    _months_list = _monthly[_monthly.iloc[:, 0] != "Grand Total"].iloc[:, 0].tolist()
 
-                    _col_map = {
-                        "Net Amount": _find_col(_src_df, r"net\s*amount", r"netamount", r"net_amount", r"^net$"),
-                        "Paid":       _find_col(_src_df, r"^paid$", r"paid\s*amount", r"amount\s*paid", r"paid_amount"),
-                        "Balance":    _find_col(_src_df, r"^balance$", r"^bal$", r"balance\s*amount"),
-                        "Rejected":   _find_col(_src_df, r"reject", r"rejection"),
-                        "Accepted":   _find_col(_src_df, r"^accepted$", r"accept"),
-                    }
-                    # Remove unmatched
-                    _col_map = {k: v for k, v in _col_map.items() if v is not None}
+                    _sel_key = f"month_sel_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
+                    _selected_month = st.selectbox(
+                        "Select Month",
+                        options=_months_list,
+                        key=_sel_key,
+                    )
 
-                    if not _col_map:
-                        st.info(f"Could not match any required columns. Columns in file: {', '.join(_all_cols[:30])}")
-                    else:
-                        # Group by month
-                        _monthly = (
-                            _src_df.groupby("_Month")
-                            .agg(**{
-                                _label: pd.NamedAgg(
-                                    column=_col,
-                                    aggfunc=lambda x: pd.to_numeric(x, errors="coerce").sum()
-                                )
-                                for _label, _col in _col_map.items()
-                            })
-                            .reset_index()
-                        )
-                        _monthly["_Month"] = _monthly["_Month"].dt.strftime("%B %Y")
-                        _monthly = _monthly.rename(columns={"_Month": "Month"})
+                    if _selected_month:
+                        _filtered = _mid[_mid["Month"] == _selected_month].drop(columns=["Month"], errors="ignore")
 
-                        # Grand Total row
-                        _gt = {"Month": "Grand Total"}
-                        for _lbl in _col_map:
-                            _gt[_lbl] = pd.to_numeric(_monthly[_lbl], errors="coerce").sum()
-                        _monthly = pd.concat([_monthly, pd.DataFrame([_gt])], ignore_index=True)
+                        # Grand Total row for this month
+                        _num_cols = [c for c in _filtered.columns if c != "Insurance"]
+                        _gt_row = {"Insurance": "Grand Total"}
+                        for _nc in _num_cols:
+                            _gt_row[_nc] = pd.to_numeric(_filtered[_nc], errors="coerce").sum()
+                        _filtered = pd.concat([_filtered, pd.DataFrame([_gt_row])], ignore_index=True)
 
-                        # Download only — no table display
-                        st.download_button(
-                            "⬇️ Download Monthly Breakdown (CSV)",
-                            _monthly.to_csv(index=False).encode("utf-8"),
-                            file_name=f"{cfg['key']}_{st.session_state.get('year')}_monthly_breakdown.csv",
+                        # Format numbers
+                        for _nc in _num_cols:
+                            _filtered[_nc] = pd.to_numeric(_filtered[_nc], errors="coerce")
+
+                        _filtered = move_grand_total_last(_filtered) if "Insurance" in _filtered.columns else _filtered
+                        _filtered.index = range(1, len(_filtered) + 1)
+                        _filtered.index.name = None
+
+                        st.dataframe(
+                            _filtered.style.format({
+                                c: "{:,.2f}" for c in _num_cols
+                            }),
                             use_container_width=True,
-                            key=f"dl_monthly_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                            height=full_height(_filtered),
+                        )
+
+                        # Download this month's breakdown
+                        st.download_button(
+                            f"⬇️ Download {_selected_month} Insurance Breakdown (CSV)",
+                            _filtered.to_csv(index=False).encode("utf-8"),
+                            file_name=f"{cfg['key']}_{st.session_state.get('year')}_{_selected_month.replace(' ', '_')}_insurance.csv",
+                            use_container_width=True,
+                            key=f"dl_month_ins_{st.session_state.get('center_key')}_{st.session_state.get('year')}_{_selected_month}",
                         )
 
         except Exception as _me:
