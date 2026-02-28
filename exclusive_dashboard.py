@@ -105,6 +105,29 @@ def auto_auth_from_token():
 # ✅ attempt auto-auth BEFORE showing password screen
 auto_auth_from_token()
 
+# ====================== ✅ FIX: Restore session from query params (nav=balance) ======================
+# When the Balance card link is clicked in the same session (same tab), query params carry
+# center/year.  We need to restore rcm_year/center_key BEFORE require_year_selection() runs,
+# otherwise that gate fires again and looks like a fresh session.
+def _restore_session_from_query_params():
+    nav_param = st.query_params.get("nav")
+    y_param   = st.query_params.get("year")
+    c_param   = st.query_params.get("center")
+
+    if y_param and not st.session_state.get("rcm_year"):
+        try:
+            y_int = int(y_param)
+            st.session_state.rcm_year = y_int
+            st.session_state.year = y_int
+        except Exception:
+            pass
+
+    if c_param and not st.session_state.get("center_key"):
+        st.session_state.center_key = c_param
+
+_restore_session_from_query_params()
+# ======================================================================================================
+
 
 def require_view_access() -> None:
     """
