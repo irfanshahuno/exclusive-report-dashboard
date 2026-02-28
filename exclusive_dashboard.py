@@ -1399,64 +1399,38 @@ try:
             if _monthly is None or _monthly.empty:
                 st.info("Monthly_Totals sheet not found. Please rebuild the report.")
             else:
-                # Download button
+                # Build Excel in memory: Sheet1=Monthly_Totals, then one sheet per month
+                import io
+                _buf = io.BytesIO()
+                with pd.ExcelWriter(_buf, engine="openpyxl") as _writer:
+                    # Sheet 1: Monthly summary
+                    _monthly.to_excel(_writer, sheet_name="Monthly_Totals", index=False)
+
+                    # One sheet per month with insurance breakdown
+                    if _mid is not None and not _mid.empty:
+                        _months_list = _mid["Month"].dropna().unique().tolist()
+                        for _mon in _months_list:
+                            _df_mon = _mid[_mid["Month"] == _mon].drop(columns=["Month"], errors="ignore").copy()
+                            # Grand Total row
+                            _num_c = [c for c in _df_mon.columns if c != "Insurance"]
+                            _gt = {"Insurance": "Grand Total"}
+                            for _nc in _num_c:
+                                _gt[_nc] = pd.to_numeric(_df_mon[_nc], errors="coerce").sum()
+                            _df_mon = pd.concat([_df_mon, pd.DataFrame([_gt])], ignore_index=True)
+                            # Sheet name max 31 chars
+                            _sheet_name = str(_mon)[:31]
+                            _df_mon.to_excel(_writer, sheet_name=_sheet_name, index=False)
+
+                _buf.seek(0)
+
                 st.download_button(
-                    "⬇️ Download Monthly Breakdown (CSV)",
-                    _monthly.to_csv(index=False).encode("utf-8"),
-                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_monthly_breakdown.csv",
+                    "⬇️ Download Monthly Breakdown (Excel)",
+                    _buf.read(),
+                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_monthly_breakdown.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                     key=f"dl_monthly_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
                 )
-
-                # Interactive pivot: click a month to see insurance breakdown
-                if _mid is not None and not _mid.empty:
-                    st.markdown("#### 🔍 Insurance Breakdown by Month")
-                    st.caption("Select a month to see insurance-wise breakdown")
-
-                    # Get months excluding Grand Total
-                    _months_list = _monthly[_monthly.iloc[:, 0] != "Grand Total"].iloc[:, 0].tolist()
-
-                    _sel_key = f"month_sel_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
-                    _selected_month = st.selectbox(
-                        "Select Month",
-                        options=_months_list,
-                        key=_sel_key,
-                    )
-
-                    if _selected_month:
-                        _filtered = _mid[_mid["Month"] == _selected_month].drop(columns=["Month"], errors="ignore")
-
-                        # Grand Total row for this month
-                        _num_cols = [c for c in _filtered.columns if c != "Insurance"]
-                        _gt_row = {"Insurance": "Grand Total"}
-                        for _nc in _num_cols:
-                            _gt_row[_nc] = pd.to_numeric(_filtered[_nc], errors="coerce").sum()
-                        _filtered = pd.concat([_filtered, pd.DataFrame([_gt_row])], ignore_index=True)
-
-                        # Format numbers
-                        for _nc in _num_cols:
-                            _filtered[_nc] = pd.to_numeric(_filtered[_nc], errors="coerce")
-
-                        _filtered = move_grand_total_last(_filtered) if "Insurance" in _filtered.columns else _filtered
-                        _filtered.index = range(1, len(_filtered) + 1)
-                        _filtered.index.name = None
-
-                        st.dataframe(
-                            _filtered.style.format({
-                                c: "{:,.2f}" for c in _num_cols
-                            }),
-                            use_container_width=True,
-                            height=full_height(_filtered),
-                        )
-
-                        # Download this month's breakdown
-                        st.download_button(
-                            f"⬇️ Download {_selected_month} Insurance Breakdown (CSV)",
-                            _filtered.to_csv(index=False).encode("utf-8"),
-                            file_name=f"{cfg['key']}_{st.session_state.get('year')}_{_selected_month.replace(' ', '_')}_insurance.csv",
-                            use_container_width=True,
-                            key=f"dl_month_ins_{st.session_state.get('center_key')}_{st.session_state.get('year')}_{_selected_month}",
-                        )
 
         except Exception as _me:
             st.warning(f"Monthly breakdown could not be generated: {_me}")
