@@ -1220,8 +1220,9 @@ function buildDonut(c,r=64,sw=13){{
   vals.forEach((v,i)=>{{
     const pct=total>0?v/total:0;
     const dash=pct*circ,gap=circ-dash;
+    const negOff=(-off*circ);
     paths+=`<circle cx="75" cy="75" r="${{r}}" fill="none" stroke="${{colors[i]}}" stroke-width="${{sw}}"
-      stroke-dasharray="${{dash}} ${{gap}}" stroke-dashoffset="${{{-off*circ}}}"
+      stroke-dasharray="${{dash}} ${{gap}}" stroke-dashoffset="${{negOff}}"
       style="filter:drop-shadow(0 0 5px ${{glows[i]}});transition:stroke-dasharray 1.2s cubic-bezier(.16,1,.3,1) ${{i*0.08}}s;"/>`;
     off+=pct;
   }});
