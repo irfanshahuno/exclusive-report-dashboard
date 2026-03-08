@@ -1310,12 +1310,18 @@ def load_kpis_only(path_str: str, token: float, center_key: str, _v: int = 9):
     sold_over60 = float(pd.to_numeric(balance_df.loc[sold_mask & over60_mask, "Balance"], errors="coerce").fillna(0).sum())
     current_over60 = float(pd.to_numeric(balance_df.loc[(~sold_mask) & over60_mask, "Balance"], errors="coerce").fillna(0).sum())
 
+    # ffill Status on the full df (needs all rows for correct gap-filling),
+    # then attach the filled status back so balance_df inherits it correctly.
+    if "Status" in df.columns:
+        df["Status"] = df["Status"].replace("", pd.NA).ffill()
+        balance_df["Status"] = df.loc[balance_df.index, "Status"]
+
     # ── Submission attempt breakdown ─────────────────────
-    # Use full df so Status ffill works on original row order, then filter Balance > 0 inside
-    submission_breakdown = compute_submission_breakdown(df)
+    # Use balance_df (Balance>0, AgingBucket!="Unknown") so all KPIs are consistent
+    submission_breakdown = compute_submission_breakdown(balance_df)
 
     # ── Per-stage Insurance × Aging breakdown ────────────
-    stages = compute_stages(df, keywords=keywords)
+    stages = compute_stages(balance_df, keywords=keywords)
 
     return (
         total_balance, sold_to_klaim_balance, current_balance,
