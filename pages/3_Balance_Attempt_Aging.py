@@ -669,11 +669,12 @@ def render_insurance_aging_tables(pivot, aging_summary):
     pass
 
 
-def render_stages_section(stages: list[dict]):
+def render_stages_section(stages: list[dict], canonical_total: float = 0.0):
     """
     Renders one collapsible expander per submission stage, each containing:
       - a coloured header with total balance
       - Insurance × Aging pivot table  |  Aging Summary side by side
+    canonical_total: the authoritative total from submission_breakdown (used for % calc).
     """
     if not stages:
         return
@@ -681,7 +682,7 @@ def render_stages_section(stages: list[dict]):
     st.markdown('<div class="sub-section-title">Aging Breakdown by Submission Stage</div>',
                 unsafe_allow_html=True)
 
-    grand_total = sum(s["total"] for s in stages)
+    grand_total = canonical_total if canonical_total > 0 else sum(s["total"] for s in stages)
 
     for stage in stages:
         label   = stage["label"]
@@ -728,27 +729,7 @@ def render_stages_section(stages: list[dict]):
                 else:
                     st.info("No data.")
 
-    # ── Grand Total footer across all stages ─────────────────────────
-    st.markdown(
-        f'''<div style="
-            margin-top:18px;
-            padding:14px 20px;
-            background:linear-gradient(90deg,#EEF6FF,#F8FBFF);
-            border:1.5px solid #CFE3FF;
-            border-radius:14px;
-            display:flex;
-            align-items:center;
-            gap:16px;
-        ">
-          <span style="font-size:13px;font-weight:800;color:#64748B;letter-spacing:0.6px;text-transform:uppercase;">
-            Grand Total (All Stages)
-          </span>
-          <span style="font-size:26px;font-weight:900;color:#0B2D5C;letter-spacing:0.3px;">
-            {grand_total:,.2f}
-          </span>
-        </div>''',
-        unsafe_allow_html=True,
-    )
+
 
 
 # =========================================================
@@ -1279,8 +1260,9 @@ def render_center_kpis_only(center_key: str, year: int):
     render_balance_kpi_cards(total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60)
     st.caption(f"Sold-to-Klaim keywords: {', '.join(keywords_used)}")
 
+    canonical_total = sum(b["balance"] for b in submission_breakdown)
     render_submission_breakdown(submission_breakdown)
-    render_stages_section(stages)
+    render_stages_section(stages, canonical_total=canonical_total)
     st.markdown("---")
 
 
