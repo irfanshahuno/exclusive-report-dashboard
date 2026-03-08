@@ -1038,14 +1038,114 @@ if ck not in CENTERS:
     y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent", sel_year)
     y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy", sel_year)
 
+    # ── small donut helper ──────────────────────────────────────────
+    def render_mini_donut(net, paid, bal, rej, acc, net_label: str):
+        """Renders a small donut circle using components.html, matching KPI card colors."""
+        total = paid + max(bal, 0) + max(rej, 0) + max(acc, 0)
+        if total <= 0:
+            total = 1
+
+        def pct(v):
+            return max(v, 0) / total
+
+        import math
+        R = 54          # circle radius
+        SW = 14         # stroke width
+        CX = CY = 74    # centre (svg is 148x148)
+        circ = 2 * math.pi * R
+
+        # Colours matching KPI card palette (paid=green, bal=blue, rej=red, acc=amber)
+        segments = [
+            (paid,       "#3DD9A0", "rgba(61,217,160,.55)"),
+            (max(bal,0), "#4F9EFF", "rgba(79,158,255,.55)"),
+            (max(rej,0), "#FF6B8A", "rgba(255,107,138,.55)"),
+            (max(acc,0), "#FFD166", "rgba(255,209,102,.55)"),
+        ]
+
+        def fmt_short(v):
+            av = abs(v)
+            if av >= 1_000_000: return f"{v/1_000_000:.2f}M"
+            if av >= 1_000:     return f"{v/1_000:.1f}K"
+            return f"{v:,.0f}"
+
+        arcs = ""
+        offset = 0.0
+        for val, color, glow in segments:
+            p = pct(val)
+            dash = p * circ
+            gap  = circ - dash
+            neg_off = -(offset * circ)
+            arcs += (
+                f'<circle cx="{CX}" cy="{CY}" r="{R}" fill="none" '
+                f'stroke="{color}" stroke-width="{SW}" '
+                f'stroke-dasharray="{dash:.4f} {gap:.4f}" '
+                f'stroke-dashoffset="{neg_off:.4f}" '
+                f'style="filter:drop-shadow(0 0 5px {glow});"/>'
+            )
+            offset += p
+
+        legend_items = zip(
+            ["Paid", "Balance", "Rejected", "Accepted"],
+            [paid, bal, rej, acc],
+            ["#3DD9A0", "#4F9EFF", "#FF6B8A", "#FFD166"],
+        )
+        legend_html = "".join(
+            f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">'
+            f'<div style="width:11px;height:11px;border-radius:3px;background:{c};'
+            f'box-shadow:0 0 6px {c}88;flex-shrink:0;"></div>'
+            f'<span style="font-size:13px;color:#8A9BB5;flex:1;">{lbl}</span>'
+            f'<span style="font-size:14px;font-weight:700;color:#0D1B2E;">{fmt_short(v)}</span>'
+            f'</div>'
+            for lbl, v, c in legend_items
+        )
+
+        html = f"""
+        <div style="
+            display:flex; align-items:center; gap:28px;
+            background:rgba(255,255,255,0.7);
+            backdrop-filter:blur(10px);
+            border:1.5px solid rgba(197,216,245,0.6);
+            border-radius:20px;
+            padding:18px 24px;
+            box-shadow:0 4px 18px rgba(10,38,71,0.07);
+            margin-bottom:10px;
+            font-family:'Inter',sans-serif;
+        ">
+          <!-- Donut -->
+          <div style="position:relative;width:148px;height:148px;flex-shrink:0;">
+            <svg width="148" height="148" viewBox="0 0 148 148"
+                 style="transform:rotate(-90deg);display:block;">
+              <circle cx="{CX}" cy="{CY}" r="{R}" fill="none"
+                      stroke="rgba(10,38,71,0.07)" stroke-width="{SW}"/>
+              {arcs}
+            </svg>
+            <div style="
+                position:absolute;inset:0;display:flex;flex-direction:column;
+                align-items:center;justify-content:center;text-align:center;
+                pointer-events:none;
+            ">
+              <span style="font-size:10px;color:#8A9BB5;letter-spacing:.08em;text-transform:uppercase;margin-bottom:2px;">NET</span>
+              <span style="font-size:17px;font-weight:800;color:#0A2647;letter-spacing:-.5px;">{fmt_short(net)}</span>
+              <span style="font-size:10px;color:#8A9BB5;margin-top:1px;">AED</span>
+            </div>
+          </div>
+          <!-- Legend -->
+          <div style="flex:1;">{legend_html}</div>
+        </div>
+        """
+        components.html(html, height=190, scrolling=False)
+    # ── end helper ──────────────────────────────────────────────────
+
     st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
+    render_mini_donut(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, "NET")
     render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, build_balance_url("excellent", sel_year),
                  rejection_url=build_rejection_url("excellent", sel_year))
     st.markdown("---")
 
     st.markdown('<h3 class="center-title">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
+    render_mini_donut(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, "NET")
     render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, build_balance_url("pharmacy", sel_year),
                  rejection_url=build_rejection_url("pharmacy", sel_year))
     st.markdown("---")
@@ -1056,6 +1156,7 @@ if ck not in CENTERS:
 
         st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
         st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
+        render_mini_donut(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, "NET")
         render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, build_balance_url("easyhealth", sel_year),
                  rejection_url=build_rejection_url("easyhealth", sel_year))
 
