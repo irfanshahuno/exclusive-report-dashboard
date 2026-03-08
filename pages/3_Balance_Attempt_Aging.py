@@ -447,10 +447,18 @@ def _stage_key(status: str) -> str:
 
 def _make_pivot(dfc: pd.DataFrame):
     """Build Insurance × AgingBucket pivot with Grand Total row.
-    Unknown aging rows are included in a separate 'No Date' column."""
+    Unknown aging rows are included in a separate 'No Date' column.
+    Rows where Insurance == 'Not Available' are excluded from the per-insurer
+    rows (they have no insurer info) but their amounts are still captured in
+    the Grand Total row so the total remains accurate."""
     if dfc.empty:
         return None
-    pivot = dfc.pivot_table(
+    # Exclude "Not Available" from the per-insurer breakdown rows.
+    # Their balances are still summed into the Grand Total below.
+    dfc_display = dfc[dfc["Insurance"] != "Not Available"].copy()
+    if dfc_display.empty:
+        dfc_display = dfc.copy()  # fallback: show all if everything is Not Available
+    pivot = dfc_display.pivot_table(
         index="Insurance", columns="AgingBucket",
         values="Balance", aggfunc="sum", fill_value=0,
     )
@@ -463,7 +471,21 @@ def _make_pivot(dfc: pd.DataFrame):
     pivot = pivot[ordered_cols]
     pivot["Total"] = pivot.sum(axis=1)
     pivot = pivot.sort_index(ascending=True)
-    grand = pivot.sum(numeric_only=True).rename("Grand Total")
+    # Grand Total uses the FULL dfc (including "Not Available" rows) so the
+    # bottom-row total always matches the KPI cards and no amounts are hidden.
+    full_pivot_for_gt = dfc.pivot_table(
+        index="Insurance", columns="AgingBucket",
+        values="Balance", aggfunc="sum", fill_value=0,
+    )
+    if "Unknown" in full_pivot_for_gt.columns:
+        full_pivot_for_gt = full_pivot_for_gt.rename(columns={"Unknown": "No Date"})
+    for col in ordered_cols:
+        if col not in full_pivot_for_gt.columns:
+            full_pivot_for_gt[col] = 0
+    full_pivot_for_gt["Total"] = full_pivot_for_gt[
+        [c for c in ordered_cols if c in full_pivot_for_gt.columns]
+    ].sum(axis=1)
+    grand = full_pivot_for_gt[[c for c in ordered_cols + ["Total"] if c in full_pivot_for_gt.columns]].sum(numeric_only=True).rename("Grand Total")
     pivot = pd.concat([pivot, grand.to_frame().T])
     return pivot
 
