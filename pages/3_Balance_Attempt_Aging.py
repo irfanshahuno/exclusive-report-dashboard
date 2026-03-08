@@ -612,6 +612,16 @@ ACTIVITY_STATUS_COLS = ["ActivityStatus"]
 DENIAL_COLS = ["DenialCode", "Denial Code"]
 DATE_COLS = ["SubmissionDate", "ClaimDate", "VisitDate", "ServiceDate", "InvoiceDate", "EncounterDate"]
 
+# Submission-attempt date columns (used in smart aging)
+# Maps resub number → date column name.  0 = initial submission.
+RESUB_DATE_COLS = {
+    0: "SubDate",
+    1: "Resub1Date",
+    2: "Resub2Date",
+    3: "Resub3Date",
+}
+SUBDATE_COL = "SubDate"   # fallback / approved / rejected
+
 
 def pick(df, candidates):
     for c in candidates:
@@ -671,23 +681,76 @@ def compute_measures(df, net_col, paid_cols):
     return df
 
 
-def add_aging(df):
-    existing = [c for c in DATE_COLS if c in df.columns]
-    for c in existing:
-        df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
+def _resub_number_from_status(status: str) -> int | None:
+    """Extract resub number from a status string. Returns None if not a resub."""
+    m = re.search(r"resub[-\s]*(\d+)", str(status).lower())
+    return int(m.group(1)) if m else None
 
-    if existing:
-        df["RefDate"] = df[existing].bfill(axis=1).iloc[:, 0]
-    else:
-        df["RefDate"] = pd.NaT
 
+def add_aging(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Smart aging: picks the correct date column per row based on the Status column.
+      - Initial Submission (no resub tag)  → SubDate
+      - Resub 1                            → Resub1Date
+      - Resub 2                            → Resub2Date
+      - Resub 3                            → Resub3Date
+      - Approved / Rejected / anything else → SubDate
+    Falls back to generic DATE_COLS if none of the resub columns exist.
+    """
     today = pd.Timestamp(dt.today().date())
-    df["DaysDiff"] = (today - df["RefDate"]).dt.days
-
-    bins = [-1, 30, 45, 60, 90, 120, float("inf")]
+    bins   = [-1, 30, 45, 60, 90, 120, float("inf")]
     labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", "91–120 Days", ">120 Days"]
-    df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
 
+    # ── Check whether the smart date columns are present ────────────────
+    has_smart = any(c in df.columns for c in RESUB_DATE_COLS.values())
+
+    if not has_smart:
+        # ── Fallback: original generic logic ────────────────────────────
+        existing = [c for c in DATE_COLS if c in df.columns]
+        for c in existing:
+            df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
+        df["RefDate"] = df[existing].bfill(axis=1).iloc[:, 0] if existing else pd.NaT
+        df["DaysDiff"] = (today - df["RefDate"]).dt.days
+        df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
+        df["AgingBucket"] = df["AgingBucket"].astype(str).replace("nan", "Unknown")
+        return df
+
+    # ── Parse all resub date columns that exist ──────────────────────────
+    for resub_n, col in RESUB_DATE_COLS.items():
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+
+    # ── Forward-fill Status so blank rows inherit their parent status ────
+    status_filled = (
+        df["Status"].replace("", pd.NA).ffill()
+        if "Status" in df.columns
+        else pd.Series("", index=df.index)
+    )
+
+    # ── Assign RefDate per row based on the status ───────────────────────
+    def _pick_date(idx):
+        s = str(status_filled.iloc[idx])
+        resub_n = _resub_number_from_status(s)
+        if resub_n is not None:
+            col = RESUB_DATE_COLS.get(resub_n, SUBDATE_COL)
+        else:
+            col = SUBDATE_COL          # initial / approved / rejected → SubDate
+        if col in df.columns:
+            return df[col].iloc[idx]
+        # If that specific date col is missing, cascade down to any available
+        for fallback_col in RESUB_DATE_COLS.values():
+            if fallback_col in df.columns:
+                v = df[fallback_col].iloc[idx]
+                if pd.notna(v):
+                    return v
+        return pd.NaT
+
+    df["RefDate"] = pd.to_datetime(
+        [_pick_date(i) for i in range(len(df))], errors="coerce"
+    )
+
+    df["DaysDiff"] = (today - df["RefDate"]).dt.days
+    df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
     df["AgingBucket"] = df["AgingBucket"].astype(str).replace("nan", "Unknown")
     return df
 
