@@ -1256,7 +1256,7 @@ if forced_center in centers_to_show:
 # ✅ LOAD KPI (detail sheet first) — FIXED
 # =========================================================
 @st.cache_data(show_spinner=True)
-def load_kpis_only(path_str: str, token: float, center_key: str):
+def load_kpis_only(path_str: str, token: float, center_key: str, _v: int = 4):
     xls = pd.ExcelFile(path_str, engine="openpyxl")
 
     # ✅ NEEDFUL: pick correct sheet (detail first)
