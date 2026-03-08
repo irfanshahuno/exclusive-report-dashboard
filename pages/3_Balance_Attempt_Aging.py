@@ -64,7 +64,7 @@ CENTERS = {
 }
 
 # Your required order: start from 0–30
-AGING_ORDER = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
+AGING_ORDER = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days", "No Date"]
 
 # Default sold-to-klaim keywords (for medical centers)
 SOLD_TO_KLAIM_KEYWORDS_DEFAULT = ["NextCare", "Sukoon", "Almadallah", "Daman", "FMC"]
@@ -460,12 +460,10 @@ def _make_pivot(dfc: pd.DataFrame):
         index="Insurance", columns="AgingBucket",
         values="Balance", aggfunc="sum", fill_value=0,
     )
-    # Known buckets first, then Unknown last as "No Date"
-    ordered_cols = [c for c in AGING_ORDER if c in pivot.columns]
+    # Rename Unknown → No Date, then order via AGING_ORDER (No Date is last)
     if "Unknown" in pivot.columns:
-        ordered_cols = ordered_cols + ["Unknown"]
         pivot = pivot.rename(columns={"Unknown": "No Date"})
-        ordered_cols = [c if c != "Unknown" else "No Date" for c in ordered_cols]
+    ordered_cols = [c for c in AGING_ORDER if c in pivot.columns]
     pivot = pivot[ordered_cols]
     pivot["Total"] = pivot.sum(axis=1)
     pivot = pivot.sort_index(ascending=True)
@@ -486,10 +484,10 @@ def _make_aging_summary(dfc: pd.DataFrame):
     dfc_clean = dfc[dfc["Insurance"] != "Not Available"].copy()
     if dfc_clean.empty:
         dfc_clean = dfc.copy()
-    # Known buckets in order, then No Date
-    existing_known = [c for c in AGING_ORDER if c in dfc_clean["AgingBucket"].unique()]
-    has_unknown = "Unknown" in dfc_clean["AgingBucket"].unique()
-    all_buckets = existing_known + (["Unknown"] if has_unknown else [])
+    # Rename Unknown → No Date first, then order via AGING_ORDER (No Date is last)
+    dfc_clean = dfc_clean.copy()
+    dfc_clean["AgingBucket"] = dfc_clean["AgingBucket"].replace("Unknown", "No Date")
+    all_buckets = [c for c in AGING_ORDER if c in dfc_clean["AgingBucket"].unique()]
     summary = (
         dfc_clean.groupby("AgingBucket")["Balance"]
         .sum()
@@ -497,7 +495,6 @@ def _make_aging_summary(dfc: pd.DataFrame):
         .fillna(0)
         .reset_index()
     )
-    summary["AgingBucket"] = summary["AgingBucket"].replace("Unknown", "No Date")
     total = summary["Balance"].sum()
     summary["% of Total"] = (summary["Balance"] / total * 100).round(1) if total > 0 else 0.0
     summary["Balance"] = summary["Balance"].round(2)
@@ -1310,7 +1307,7 @@ def load_kpis_only(path_str: str, token: float, center_key: str, _v: int = 9):
         keywords = SOLD_TO_KLAIM_KEYWORDS_DEFAULT
 
     balance_df = df[df["Balance"] > 0].copy()
-    balance_df = balance_df[balance_df["AgingBucket"] != "Unknown"].copy()
+    # Keep "Unknown" (No Date) rows so Total Balance matches the main dashboard
 
     total_balance = float(pd.to_numeric(balance_df["Balance"], errors="coerce").fillna(0).sum())
 
