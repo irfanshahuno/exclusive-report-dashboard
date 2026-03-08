@@ -493,14 +493,19 @@ def _make_aging_summary(dfc: pd.DataFrame):
     return pd.concat([summary, grand], ignore_index=True)
 
 
-def compute_stages(df: pd.DataFrame) -> list[dict]:
+def compute_stages(df: pd.DataFrame, keywords: list = None) -> list[dict]:
     """
     Returns a list of stage dicts, each containing:
-      label, css, total_balance, pivot, aging_summary
-    Only stages that have at least one positive-balance row are included.
+      label, css, total, pivot, aging_summary,
+      klaim_pivot, klaim_aging_summary, klaim_total,
+      current_pivot, current_aging_summary, current_total,
+      raw_df  (for CSV export)
+    Only stages with at least one positive-balance row are included.
     """
     if "Insurance" not in df.columns or "AgingBucket" not in df.columns:
         return []
+
+    keywords = keywords or []
 
     # Forward-fill Status
     status_filled = (
@@ -512,24 +517,46 @@ def compute_stages(df: pd.DataFrame) -> list[dict]:
     df = df.copy()
     df["_stage_key"] = status_filled.apply(_stage_key)
 
-    base = df[
-        df["Balance"] > 0
-    ][["Insurance", "AgingBucket", "Balance", "_stage_key"]].copy()
+    base = df[df["Balance"] > 0].copy()
     base["Balance"] = pd.to_numeric(base["Balance"], errors="coerce").fillna(0)
+
+    # Tag each row: Klaim or Current
+    sold_mask = sold_to_klaim_mask(base["Insurance"], keywords)
+    base["_klaim"] = sold_mask
 
     stages_out = []
     for stage_def in STAGE_DEFINITIONS:
         css = stage_def["css"]
-        subset = base[base["_stage_key"] == css][["Insurance", "AgingBucket", "Balance"]].copy()
+        subset = base[base["_stage_key"] == css].copy()
         if subset.empty:
             continue
-        total = float(subset["Balance"].sum())
+
+        cols = ["Insurance", "AgingBucket", "Balance"]
+        all_rows   = subset[cols].copy()
+        klaim_rows = subset[subset["_klaim"]][cols].copy()
+        curr_rows  = subset[~subset["_klaim"]][cols].copy()
+
+        # Build a clean raw_df for CSV (include useful columns)
+        raw_cols = [c for c in ["Insurance", "AgingBucket", "Balance", "Status",
+                                "SubDate", "Resub1Date", "Resub2Date", "Resub3Date",
+                                "DaysDiff"] if c in subset.columns]
+        raw_df = subset[raw_cols].copy()
+        raw_df.insert(0, "Stage", stage_def["label"])
+        raw_df.insert(1, "Klaim_Sold", subset["_klaim"].map({True: "Klaim", False: "Current"}))
+
         stages_out.append({
-            "label":        stage_def["label"],
-            "css":          css,
-            "total":        total,
-            "pivot":        _make_pivot(subset),
-            "aging_summary": _make_aging_summary(subset),
+            "label":                  stage_def["label"],
+            "css":                    css,
+            "total":                  float(all_rows["Balance"].sum()),
+            "pivot":                  _make_pivot(all_rows),
+            "aging_summary":          _make_aging_summary(all_rows),
+            "klaim_total":            float(klaim_rows["Balance"].sum()),
+            "klaim_pivot":            _make_pivot(klaim_rows),
+            "klaim_aging_summary":    _make_aging_summary(klaim_rows),
+            "current_total":          float(curr_rows["Balance"].sum()),
+            "current_pivot":          _make_pivot(curr_rows),
+            "current_aging_summary":  _make_aging_summary(curr_rows),
+            "raw_df":                 raw_df,
         })
 
     return stages_out
@@ -670,12 +697,36 @@ def render_insurance_aging_tables(pivot, aging_summary):
     pass
 
 
+def _render_pivot_and_summary(pivot, summary, color: str, key_suffix: str):
+    """Shared helper: renders Insurance×Aging pivot + Aging Summary side by side."""
+    col1, col2 = st.columns([3, 1], gap="large")
+    with col1:
+        st.markdown("**Insurance × Aging Bucket**")
+        if pivot is not None:
+            st.dataframe(
+                _style_insurance_aging(pivot),
+                use_container_width=True,
+                height=min(40 + 38 * len(pivot), 540),
+            )
+        else:
+            st.info("No data.")
+    with col2:
+        st.markdown("**Aging Summary**")
+        if summary is not None:
+            st.dataframe(
+                _style_aging_summary(summary, color),
+                use_container_width=True,
+                height=min(60 + 38 * len(summary), 420),
+            )
+        else:
+            st.info("No data.")
+
+
 def render_stages_section(stages: list[dict], canonical_total: float = 0.0):
     """
-    Renders one collapsible expander per submission stage, each containing:
-      - a coloured header with total balance
-      - Insurance × Aging pivot table  |  Aging Summary side by side
-    canonical_total: the authoritative total from submission_breakdown (used for % calc).
+    Renders one collapsible expander per submission stage with:
+      - Three tabs: All | Klaim Sold | Current
+      - CSV download button per stage
     """
     if not stages:
         return
@@ -685,50 +736,91 @@ def render_stages_section(stages: list[dict], canonical_total: float = 0.0):
 
     grand_total = canonical_total if canonical_total > 0 else sum(s["total"] for s in stages)
 
-    for stage in stages:
-        label   = stage["label"]
-        css     = stage["css"]
-        total   = stage["total"]
-        pivot   = stage["pivot"]
-        summary = stage["aging_summary"]
-        color   = STAGE_COLORS.get(css, "#3B82F6")
-        pct     = (total / grand_total * 100) if grand_total > 0 else 0
+    # ── Collect all stages raw_df for combined CSV ────────────────────
+    all_raw_dfs = [s["raw_df"] for s in stages if s.get("raw_df") is not None]
 
-        header_html = (
-            f'<span style="border-left:4px solid {color}; padding-left:10px; '
-            f'font-weight:800; color:#0B2D5C;">{label}</span> '
-            f'<span style="color:#64748B; font-size:13px; margin-left:10px;">'
-            f'Total: <strong style="color:{color};">{total:,.2f}</strong>'
-            f'<span style="margin-left:8px; color:#94A3B8;">({pct:.1f}% of all)</span></span>'
+    if all_raw_dfs:
+        combined_csv = pd.concat(all_raw_dfs, ignore_index=True).to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="⬇️ Download All Stages CSV",
+            data=combined_csv,
+            file_name="balance_all_stages.csv",
+            mime="text/csv",
+            key="dl_all_stages",
         )
 
-        with st.expander(f"{label}  —  {total:,.2f}", expanded=(css == "initial")):
-            st.markdown(header_html, unsafe_allow_html=True)
+    for stage in stages:
+        label         = stage["label"]
+        css           = stage["css"]
+        total         = stage["total"]
+        klaim_total   = stage.get("klaim_total", 0.0)
+        current_total = stage.get("current_total", 0.0)
+        color         = STAGE_COLORS.get(css, "#3B82F6")
+        pct           = (total / grand_total * 100) if grand_total > 0 else 0
+        raw_df        = stage.get("raw_df")
+
+        expander_label = (
+            f"{label}  —  {total:,.2f}  "
+            f"(Klaim: {klaim_total:,.2f}  |  Current: {current_total:,.2f})"
+        )
+
+        with st.expander(expander_label, expanded=(css == "initial")):
+            # ── Header row: title + % + CSV download ─────────────────
+            hcol1, hcol2 = st.columns([3, 1])
+            with hcol1:
+                st.markdown(
+                    f'<span style="border-left:4px solid {color}; padding-left:10px; '
+                    f'font-weight:800; color:#0B2D5C; font-size:15px;">{label}</span> '
+                    f'<span style="color:#64748B; font-size:13px; margin-left:12px;">'
+                    f'Total: <strong style="color:{color};">{total:,.2f}</strong> '
+                    f'<span style="color:#94A3B8; margin-left:6px;">({pct:.1f}% of all)</span>'
+                    f'</span>',
+                    unsafe_allow_html=True,
+                )
+            with hcol2:
+                if raw_df is not None:
+                    csv_bytes = raw_df.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        label="⬇️ CSV",
+                        data=csv_bytes,
+                        file_name=f"balance_{css}.csv",
+                        mime="text/csv",
+                        key=f"dl_{css}",
+                        use_container_width=True,
+                    )
+
             st.markdown("")
 
-            col1, col2 = st.columns([3, 1], gap="large")
+            # ── Three tabs: All | Klaim Sold | Current ────────────────
+            tab_all, tab_klaim, tab_current = st.tabs([
+                f"📊 All  ({total:,.2f})",
+                f"🔵 Klaim Sold  ({klaim_total:,.2f})",
+                f"🟢 Current  ({current_total:,.2f})",
+            ])
 
-            with col1:
-                st.markdown("**Insurance × Aging Bucket**")
-                if pivot is not None:
-                    st.dataframe(
-                        _style_insurance_aging(pivot),
-                        use_container_width=True,
-                        height=min(40 + 38 * len(pivot), 540),
+            with tab_all:
+                _render_pivot_and_summary(
+                    stage.get("pivot"), stage.get("aging_summary"),
+                    color, f"{css}_all"
+                )
+
+            with tab_klaim:
+                if klaim_total > 0:
+                    _render_pivot_and_summary(
+                        stage.get("klaim_pivot"), stage.get("klaim_aging_summary"),
+                        "#3B82F6", f"{css}_klaim"
                     )
                 else:
-                    st.info("No data.")
+                    st.info("No Klaim-sold balance for this stage.")
 
-            with col2:
-                st.markdown("**Aging Summary**")
-                if summary is not None:
-                    st.dataframe(
-                        _style_aging_summary(summary, color),
-                        use_container_width=True,
-                        height=min(60 + 38 * len(summary), 420),
+            with tab_current:
+                if current_total > 0:
+                    _render_pivot_and_summary(
+                        stage.get("current_pivot"), stage.get("current_aging_summary"),
+                        "#10B981", f"{css}_current"
                     )
                 else:
-                    st.info("No data.")
+                    st.info("No current balance for this stage.")
 
 
 
@@ -1210,7 +1302,7 @@ def load_kpis_only(path_str: str, token: float, center_key: str):
     submission_breakdown = compute_submission_breakdown(df)
 
     # ── Per-stage Insurance × Aging breakdown ────────────
-    stages = compute_stages(df)
+    stages = compute_stages(df, keywords=keywords)
 
     return (
         total_balance, sold_to_klaim_balance, current_balance,
