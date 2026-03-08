@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import io
 import re
 from pathlib import Path
 from datetime import datetime as dt
@@ -48,6 +47,8 @@ require_view_access_balance()
 st.set_page_config(page_title="Balance — Initial / Resub with Aging", layout="wide")
 st.title("Balance — Initial / Resub with Aging (Summary)")
 
+# ✅ NEEDFUL CHANGE ONLY:
+# If this file is inside /pages, store data at repo root /data (not /pages/data)
 THIS_FILE = Path(__file__).resolve()
 BASE = THIS_FILE.parents[1] if THIS_FILE.parent.name == "pages" else THIS_FILE.parent
 
@@ -62,9 +63,13 @@ CENTERS = {
     "pharmacy": "Excellent Pharmacy (PF3205)",
 }
 
+# Your required order: start from 0–30
 AGING_ORDER = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", "91–120 Days", ">120 Days"]
 
+# Default sold-to-klaim keywords (for medical centers)
 SOLD_TO_KLAIM_KEYWORDS_DEFAULT = ["NextCare", "Sukoon", "Almadallah", "Daman", "FMC"]
+
+# Pharmacy sold insurers
 SOLD_TO_KLAIM_KEYWORDS_PHARMACY = ["ALMADALLAH-AD", "Daman"]
 
 GT_PAT = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
@@ -141,6 +146,7 @@ div.stButton > button:focus-visible{
   font-weight: 900;
   color: #111827;
   letter-spacing: 0.2px;
+
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -156,6 +162,77 @@ div.stButton > button:focus-visible{
 
 @media (max-width: 1100px){
   .kpi-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ── Submission breakdown row ── */
+.sub-section-title{
+  font-size: 13px;
+  font-weight: 800;
+  color: #64748B;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  margin: 18px 0 8px 2px;
+}
+.sub-grid{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.sub-card{
+  background: #FAFCFF;
+  border: 1.3px solid #E3ECFA;
+  border-radius: 13px;
+  padding: 11px 14px;
+  box-shadow: 0 4px 12px rgba(11,45,92,0.05);
+  min-width: 0;
+}
+.sub-card.initial{
+  border-left: 4px solid #3B82F6;
+}
+.sub-card.resub{
+  border-left: 4px solid #8B5CF6;
+}
+.sub-card.approved{
+  border-left: 4px solid #10B981;
+}
+.sub-card.rejected{
+  border-left: 4px solid #EF4444;
+}
+.sub-card.other{
+  border-left: 4px solid #F59E0B;
+}
+.sub-card.total{
+  border-left: 4px solid #0B2D5C;
+  background: linear-gradient(135deg, #EEF6FF 0%, #F8FBFF 100%);
+  border: 1.5px solid #CFE3FF;
+}
+.sub-card.total .sub-label{
+  color: #0B2D5C;
+  font-weight: 800;
+}
+.sub-card.total .sub-value{
+  color: #0B2D5C;
+}
+.sub-label{
+  font-size: 11.5px;
+  color: #64748B;
+  font-weight: 700;
+  margin-bottom: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sub-value{
+  font-size: clamp(14px, 1.6vw, 22px);
+  font-weight: 900;
+  color: #111827;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 1100px){
+  .sub-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 </style>
 """,
@@ -201,47 +278,481 @@ def render_balance_kpi_cards(total_balance, sold_to_klaim_balance, current_balan
     st.markdown(html, unsafe_allow_html=True)
 
 
+# =========================================================
+# Submission-attempt breakdown renderer
+# =========================================================
+def _classify_status(raw: str) -> tuple[str, str]:
+    """
+    Returns (display_label, css_class) for a given raw Status value.
+    Examples:
+      'Submitted'               → ('Initial Submission', 'initial')
+      'Submitted(Resub- 1)'     → ('1st Resubmission', 'resub')
+      'Rejection Accepted(Resub- 1)' → ('1st Resubmission', 'resub')
+      'Submitted(Resub- 2)'     → ('2nd Resubmission', 'resub')
+      'Approved'                → ('Approved', 'approved')
+      'Rejected'                → ('Rejected', 'rejected')
+    """
+    s = str(raw).strip()
+    sl = s.lower()
 
-def render_submission_stage_kpis(stage_kpis: dict):
+    # ── Resubmission: extract the number ──────────────────
+    m = re.search(r"resub[-\s]*(\d+)", sl)
+    if m:
+        n = int(m.group(1))
+        suffix = {1: "1st", 2: "2nd", 3: "3rd"}.get(n, f"{n}th")
+        return (f"{suffix} Resubmission", "resub")
+
+    # ── Approved ──────────────────────────────────────────
+    if "approved" in sl:
+        return ("Approved", "approved")
+
+    # ── Rejected / Denial ────────────────────────────────
+    if any(x in sl for x in ["reject", "denial", "denied"]):
+        return ("Rejected / Denied", "rejected")
+
+    # ── Initial Submitted ─────────────────────────────────
+    if "submit" in sl:
+        return ("Initial Submission", "initial")
+
+    # ── Anything else ─────────────────────────────────────
+    label = s if s not in ("", "nan", "None") else "Unknown"
+    return (label, "other")
+
+
+def compute_submission_breakdown(df: pd.DataFrame) -> list[dict]:
+    """
+    Forward-fill the 'Status' column, then sum Balance per classified group.
+    Returns list of {label, css_class, balance} sorted by natural order.
+    """
+    if "Status" not in df.columns:
+        return []
+
+    dfc = df.copy()
+    # Forward-fill blanks / NaN in Status column
+    dfc["Status"] = dfc["Status"].replace("", pd.NA)
+    dfc["Status"] = dfc["Status"].ffill()
+
+    # Only rows with a positive balance
+    dfc = dfc[dfc["Balance"] > 0].copy()
+    if dfc.empty:
+        return []
+
+    dfc["_label"], dfc["_class"] = zip(*dfc["Status"].apply(_classify_status))
+
+    grouped = (
+        dfc.groupby(["_label", "_class"], sort=False)["Balance"]
+        .sum()
+        .reset_index()
+        .rename(columns={"Balance": "total"})
+    )
+
+    # Natural sort order
+    order = [
+        "Initial Submission",
+        "1st Resubmission",
+        "2nd Resubmission",
+        "3rd Resubmission",
+        "Approved",
+        "Rejected / Denied",
+    ]
+
+    def sort_key(row):
+        try:
+            return order.index(row["_label"])
+        except ValueError:
+            return 99
+
+    grouped["_order"] = grouped.apply(sort_key, axis=1)
+    grouped = grouped.sort_values("_order")
+
+    return [
+        {"label": r["_label"], "css_class": r["_class"], "balance": float(r["total"])}
+        for _, r in grouped.iterrows()
+    ]
+
+
+def render_submission_breakdown(breakdown: list[dict]):
+    if not breakdown:
+        return
+
     def fmt(x):
         try:
             return f"{float(x):,.2f}"
         except Exception:
             return "—"
 
+    grand_total = sum(b["balance"] for b in breakdown)
+
+    cards_html = "".join(
+        f"""<div class="sub-card {b['css_class']}" title="{fmt(b['balance'])}">
+              <div class="sub-label">{b['label']}</div>
+              <div class="sub-value">{fmt(b['balance'])}</div>
+            </div>"""
+        for b in breakdown
+    )
+
+    # Total card appended at the end
+    total_card = f"""<div class="sub-card total" title="{fmt(grand_total)}">
+              <div class="sub-label">Total (All Stages)</div>
+              <div class="sub-value">{fmt(grand_total)}</div>
+            </div>"""
+
     html = f"""
-    <div class="kpi-grid">
-      <div class="kpi-card">
-        <div class="kpi-label">Initial Submission Balance</div>
-        <div class="kpi-value">{fmt(stage_kpis.get('Initial Submission', 0))}</div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">1st Resubmission Balance</div>
-        <div class="kpi-value">{fmt(stage_kpis.get('Resubmission 1', 0))}</div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">2nd Resubmission Balance</div>
-        <div class="kpi-value">{fmt(stage_kpis.get('Resubmission 2', 0))}</div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">3rd Resubmission Balance</div>
-        <div class="kpi-value">{fmt(stage_kpis.get('Resubmission 3', 0))}</div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Not Submitted Balance</div>
-        <div class="kpi-value">{fmt(stage_kpis.get('Not Submitted', 0))}</div>
-      </div>
-    </div>
+    <div class="sub-section-title">Balance by Submission Attempt</div>
+    <div class="sub-grid">{cards_html}{total_card}</div>
     """
     st.markdown(html, unsafe_allow_html=True)
 
 
 # =========================================================
-# Helpers
+# Insurance × Aging — per submission stage
+# =========================================================
+
+# Defines the display order + labels for each stage
+STAGE_DEFINITIONS = [
+    {"label": "Initial Submission",  "css": "initial",  "resub_n": None},
+    {"label": "1st Resubmission",    "css": "resub1",   "resub_n": 1},
+    {"label": "2nd Resubmission",    "css": "resub2",   "resub_n": 2},
+    {"label": "3rd Resubmission",    "css": "resub3",   "resub_n": 3},
+    {"label": "Approved",            "css": "approved", "resub_n": "approved"},
+    {"label": "Rejected / Denied",   "css": "rejected", "resub_n": "rejected"},
+]
+
+STAGE_COLORS = {
+    "initial":  "#3B82F6",
+    "resub1":   "#8B5CF6",
+    "resub2":   "#7C3AED",
+    "resub3":   "#6D28D9",
+    "approved": "#10B981",
+    "rejected": "#EF4444",
+}
+
+
+def _stage_key(status: str) -> str:
+    """Map a raw (ffilled) Status value to a stage key matching STAGE_DEFINITIONS css."""
+    s = str(status).lower().strip()
+    m = re.search(r"resub[-\s]*(\d+)", s)
+    if m:
+        n = int(m.group(1))
+        return {1: "resub1", 2: "resub2", 3: "resub3"}.get(n, f"resub{n}")
+    if "approved" in s:
+        return "approved"
+    if any(x in s for x in ["reject", "denial", "denied"]):
+        return "rejected"
+    if "submit" in s:
+        return "initial"
+    return "initial"  # default
+
+
+def _make_pivot(dfc: pd.DataFrame):
+    """Build Insurance × AgingBucket pivot with Grand Total row.
+    Unknown aging rows are included in a separate 'No Date' column."""
+    if dfc.empty:
+        return None
+    pivot = dfc.pivot_table(
+        index="Insurance", columns="AgingBucket",
+        values="Balance", aggfunc="sum", fill_value=0,
+    )
+    # Known buckets first, then Unknown last as "No Date"
+    ordered_cols = [c for c in AGING_ORDER if c in pivot.columns]
+    if "Unknown" in pivot.columns:
+        ordered_cols = ordered_cols + ["Unknown"]
+        pivot = pivot.rename(columns={"Unknown": "No Date"})
+        ordered_cols = [c if c != "Unknown" else "No Date" for c in ordered_cols]
+    pivot = pivot[ordered_cols]
+    pivot["Total"] = pivot.sum(axis=1)
+    pivot = pivot.sort_values("Total", ascending=False)
+    grand = pivot.sum(numeric_only=True).rename("Grand Total")
+    pivot = pd.concat([pivot, grand.to_frame().T])
+    return pivot
+
+
+def _make_aging_summary(dfc: pd.DataFrame):
+    """Build AgingBucket → Balance + % summary with Grand Total row.
+    Unknown aging rows appear as 'No Date' at the bottom."""
+    if dfc.empty:
+        return None
+    # Known buckets in order, then No Date
+    existing_known = [c for c in AGING_ORDER if c in dfc["AgingBucket"].unique()]
+    has_unknown = "Unknown" in dfc["AgingBucket"].unique()
+    all_buckets = existing_known + (["Unknown"] if has_unknown else [])
+    summary = (
+        dfc.groupby("AgingBucket")["Balance"]
+        .sum()
+        .reindex(all_buckets)
+        .fillna(0)
+        .reset_index()
+    )
+    summary["AgingBucket"] = summary["AgingBucket"].replace("Unknown", "No Date")
+    total = summary["Balance"].sum()
+    summary["% of Total"] = (summary["Balance"] / total * 100).round(1) if total > 0 else 0.0
+    summary["Balance"] = summary["Balance"].round(2)
+    grand = pd.DataFrame([{"AgingBucket": "Grand Total",
+                           "Balance": round(total, 2), "% of Total": 100.0}])
+    return pd.concat([summary, grand], ignore_index=True)
+
+
+def compute_stages(df: pd.DataFrame) -> list[dict]:
+    """
+    Returns a list of stage dicts, each containing:
+      label, css, total_balance, pivot, aging_summary
+    Only stages that have at least one positive-balance row are included.
+    """
+    if "Insurance" not in df.columns or "AgingBucket" not in df.columns:
+        return []
+
+    # Forward-fill Status
+    status_filled = (
+        df["Status"].replace("", pd.NA).ffill()
+        if "Status" in df.columns
+        else pd.Series("initial", index=df.index)
+    )
+
+    df = df.copy()
+    df["_stage_key"] = status_filled.apply(_stage_key)
+
+    base = df[
+        df["Balance"] > 0
+    ][["Insurance", "AgingBucket", "Balance", "_stage_key"]].copy()
+    base["Balance"] = pd.to_numeric(base["Balance"], errors="coerce").fillna(0)
+
+    stages_out = []
+    for stage_def in STAGE_DEFINITIONS:
+        css = stage_def["css"]
+        subset = base[base["_stage_key"] == css][["Insurance", "AgingBucket", "Balance"]].copy()
+        if subset.empty:
+            continue
+        total = float(subset["Balance"].sum())
+        stages_out.append({
+            "label":        stage_def["label"],
+            "css":          css,
+            "total":        total,
+            "pivot":        _make_pivot(subset),
+            "aging_summary": _make_aging_summary(subset),
+        })
+
+    return stages_out
+
+
+# Keep these thin wrappers so load_kpis_only doesn't need restructuring
+def compute_insurance_aging_table(df):
+    return None   # replaced by compute_stages
+
+def compute_aging_summary(df):
+    return None   # replaced by compute_stages
+
+
+def _blue_cell(val: float, max_val: float) -> str:
+    """Return inline CSS background based on value intensity — no matplotlib needed."""
+    if max_val <= 0 or val <= 0:
+        return ""
+    intensity = min(val / max_val, 1.0)
+    # Map 0→1 to light blue (#EEF6FF) → medium blue (#3B82F6)
+    r = int(238 - intensity * (238 - 59))
+    g = int(246 - intensity * (246 - 130))
+    b = int(255 - intensity * (255 - 246))
+    text = "#0B2D5C" if intensity > 0.55 else "#1e3a5f"
+    return f"background-color: rgb({r},{g},{b}); color: {text};"
+
+
+def _style_insurance_aging(pivot: pd.DataFrame):
+    """Apply formatting to the pivot table — no matplotlib dependency."""
+    fmt_dict = {c: "{:,.2f}" for c in pivot.columns}
+
+    # Compute max across all data cells (exclude Grand Total row and Total col)
+    data_cols = [c for c in pivot.columns if c != "Total"]
+    data_rows = [r for r in pivot.index if r != "Grand Total"]
+    max_val = float(pivot.loc[data_rows, data_cols].max().max()) if data_rows and data_cols else 1.0
+
+    def style_cells(df):
+        styles = pd.DataFrame("", index=df.index, columns=df.columns)
+        for row in df.index:
+            for col in df.columns:
+                if row == "Grand Total":
+                    styles.loc[row, col] = "background-color: #EEF6FF; font-weight: 900; color: #0B2D5C;"
+                elif col == "Total":
+                    styles.loc[row, col] = "font-weight: 800; color: #0B2D5C;"
+                elif col in data_cols:
+                    try:
+                        styles.loc[row, col] = _blue_cell(float(df.loc[row, col]), max_val)
+                    except Exception:
+                        pass
+        return styles
+
+    styler = (
+        pivot.style
+        .format(fmt_dict)
+        .apply(style_cells, axis=None)
+        .set_properties(**{
+            "font-size": "13px",
+            "text-align": "right",
+            "padding": "6px 12px",
+        })
+        .set_table_styles([
+            {"selector": "th", "props": [
+                ("background-color", "#F1F7FF"),
+                ("color", "#0B2D5C"),
+                ("font-weight", "800"),
+                ("font-size", "12px"),
+                ("text-align", "center"),
+                ("padding", "8px 12px"),
+                ("border-bottom", "2px solid #CFE3FF"),
+            ]},
+            {"selector": "th.row_heading", "props": [
+                ("text-align", "left"),
+                ("min-width", "160px"),
+                ("font-weight", "700"),
+            ]},
+            {"selector": "td", "props": [("border-bottom", "1px solid #F0F4FA")]},
+            {"selector": "table", "props": [("border-collapse", "collapse"), ("width", "100%")]},
+        ])
+    )
+    return styler
+
+
+def _style_aging_summary(df: pd.DataFrame, accent_color: str):
+    """Style the aging summary table with a given accent color — no matplotlib."""
+    max_bal = float(df.loc[df["AgingBucket"] != "Grand Total", "Balance"].max()) if not df.empty else 1.0
+
+    # Build a custom single-color gradient using the accent color
+    import colorsys
+    # Parse hex → HSV so we can vary lightness
+    hex_col = accent_color.lstrip("#")
+    r0, g0, b0 = tuple(int(hex_col[i:i+2], 16) for i in (0, 2, 4))
+    h, s, v = colorsys.rgb_to_hsv(r0/255, g0/255, b0/255)
+
+    def tint(intensity):
+        """intensity 0→1: white → accent color"""
+        ri = int((1 - intensity * 0.65) * 255)
+        gi = int((1 - intensity * 0.65) * 255)
+        bi = int((1 - intensity * 0.65) * 255)
+        # blend with accent
+        ri = int(ri + intensity * 0.65 * r0)
+        gi = int(gi + intensity * 0.65 * g0)
+        bi = int(bi + intensity * 0.65 * b0)
+        text = "#0B2D5C" if intensity > 0.55 else "#1e3a5f"
+        return f"background-color: rgb({ri},{gi},{bi}); color: {text};"
+
+    def cell_style(df2):
+        styles = pd.DataFrame("", index=df2.index, columns=df2.columns)
+        for i in df2.index:
+            if df2.loc[i, "AgingBucket"] == "Grand Total":
+                styles.loc[i, :] = "background-color: #EEF6FF; font-weight: 900; color: #0B2D5C;"
+            else:
+                try:
+                    bal = float(df2.loc[i, "Balance"])
+                    intensity = min(bal / max_bal, 1.0) if max_bal > 0 else 0
+                    styles.loc[i, "Balance"] = tint(intensity)
+                except Exception:
+                    pass
+        return styles
+
+    return (
+        df.style
+        .format({"Balance": "{:,.2f}", "% of Total": "{:.1f}%"})
+        .apply(cell_style, axis=None)
+        .set_properties(**{"font-size": "13px", "padding": "6px 10px"})
+        .set_table_styles([
+            {"selector": "th", "props": [
+                ("background-color", "#F1F7FF"), ("color", "#0B2D5C"),
+                ("font-weight", "800"), ("font-size", "12px"),
+                ("padding", "8px 10px"), ("border-bottom", "2px solid #CFE3FF"),
+            ]},
+            {"selector": "td", "props": [("border-bottom", "1px solid #F0F4FA")]},
+        ])
+        .hide(axis="index")
+    )
+
+
+def render_insurance_aging_tables(pivot, aging_summary):
+    """Legacy stub — replaced by render_stages_section below."""
+    pass
+
+
+def render_stages_section(stages: list[dict]):
+    """
+    Renders one collapsible expander per submission stage, each containing:
+      - a coloured header with total balance
+      - Insurance × Aging pivot table  |  Aging Summary side by side
+    """
+    if not stages:
+        return
+
+    st.markdown('<div class="sub-section-title">Aging Breakdown by Submission Stage</div>',
+                unsafe_allow_html=True)
+
+    grand_total = sum(s["total"] for s in stages)
+
+    for stage in stages:
+        label   = stage["label"]
+        css     = stage["css"]
+        total   = stage["total"]
+        pivot   = stage["pivot"]
+        summary = stage["aging_summary"]
+        color   = STAGE_COLORS.get(css, "#3B82F6")
+        pct     = (total / grand_total * 100) if grand_total > 0 else 0
+
+        header_html = (
+            f'<span style="border-left:4px solid {color}; padding-left:10px; '
+            f'font-weight:800; color:#0B2D5C;">{label}</span> '
+            f'<span style="color:#64748B; font-size:13px; margin-left:10px;">'
+            f'Total: <strong style="color:{color};">{total:,.2f}</strong>'
+            f'<span style="margin-left:8px; color:#94A3B8;">({pct:.1f}% of all)</span></span>'
+        )
+
+        with st.expander(f"{label}  —  {total:,.2f}", expanded=(css == "initial")):
+            st.markdown(header_html, unsafe_allow_html=True)
+            st.markdown("")
+
+            col1, col2 = st.columns([3, 1], gap="large")
+
+            with col1:
+                st.markdown("**Insurance × Aging Bucket**")
+                if pivot is not None:
+                    st.dataframe(
+                        _style_insurance_aging(pivot),
+                        use_container_width=True,
+                        height=min(40 + 38 * len(pivot), 540),
+                    )
+                else:
+                    st.info("No data.")
+
+            with col2:
+                st.markdown("**Aging Summary**")
+                if summary is not None:
+                    st.dataframe(
+                        _style_aging_summary(summary, color),
+                        use_container_width=True,
+                        height=min(60 + 38 * len(summary), 420),
+                    )
+                else:
+                    st.info("No data.")
+
+    # ── Grand Total footer across all stages ─────────────────────────
+    st.markdown(
+        f'''<div style="
+            margin-top:18px;
+            padding:14px 20px;
+            background:linear-gradient(90deg,#EEF6FF,#F8FBFF);
+            border:1.5px solid #CFE3FF;
+            border-radius:14px;
+            display:flex;
+            align-items:center;
+            gap:16px;
+        ">
+          <span style="font-size:13px;font-weight:800;color:#64748B;letter-spacing:0.6px;text-transform:uppercase;">
+            Grand Total (All Stages)
+          </span>
+          <span style="font-size:26px;font-weight:900;color:#0B2D5C;letter-spacing:0.3px;">
+            {grand_total:,.2f}
+          </span>
+        </div>''',
+        unsafe_allow_html=True,
+    )
+
+
+# =========================================================
+# Helpers (generic medical-center logic)
 # =========================================================
 INSURANCE_COLS = ["Insurance", "PayerName", "Insurer", "Plan"]
 NET_COLS = ["ActivityIns", "Net Amount", "NetAmount"]
@@ -254,13 +765,17 @@ PAID_COLS = [
 ]
 ACTIVITY_STATUS_COLS = ["ActivityStatus"]
 DENIAL_COLS = ["DenialCode", "Denial Code"]
-STAGE_DATE_CANDIDATES = {
-    "Initial Submission": ["SubDate", "SubmissionDate", "Sub Date"],
-    "Resubmission 1": ["Resub1Date", "Resub 1 Date", "ResubDate1"],
-    "Resubmission 2": ["Resub2Date", "Resub 2 Date", "ResubDate2"],
-    "Resubmission 3": ["Resub3Date", "Resub 3 Date", "ResubDate3"],
-    "Resubmission 4": ["Resub4Date", "Resub 4 Date", "ResubDate4"],
+DATE_COLS = ["SubmissionDate", "ClaimDate", "VisitDate", "ServiceDate", "InvoiceDate", "EncounterDate"]
+
+# Submission-attempt date columns (used in smart aging)
+# Maps resub number → date column name.  0 = initial submission.
+RESUB_DATE_COLS = {
+    0: "SubDate",
+    1: "Resub1Date",
+    2: "Resub2Date",
+    3: "Resub3Date",
 }
+SUBDATE_COL = "SubDate"   # fallback / approved / rejected
 
 
 def pick(df, candidates):
@@ -268,7 +783,6 @@ def pick(df, candidates):
         if c in df.columns:
             return c
     return None
-
 
 
 def ensure_insurance(df):
@@ -279,7 +793,6 @@ def ensure_insurance(df):
         df["Insurance"] = df[c]
     df["Insurance"] = df["Insurance"].fillna("Not Available").astype(str)
     return df
-
 
 
 def ensure_numeric(df):
@@ -293,7 +806,6 @@ def ensure_numeric(df):
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
     return df, net, present_paid
-
 
 
 def compute_measures(df, net_col, paid_cols):
@@ -324,6 +836,79 @@ def compute_measures(df, net_col, paid_cols):
     return df
 
 
+def _resub_number_from_status(status: str) -> int | None:
+    """Extract resub number from a status string. Returns None if not a resub."""
+    m = re.search(r"resub[-\s]*(\d+)", str(status).lower())
+    return int(m.group(1)) if m else None
+
+
+def add_aging(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Smart aging: picks the correct date column per row based on the Status column.
+      - Initial Submission (no resub tag)  → SubDate
+      - Resub 1                            → Resub1Date
+      - Resub 2                            → Resub2Date
+      - Resub 3                            → Resub3Date
+      - Approved / Rejected / anything else → SubDate
+    Falls back to generic DATE_COLS if none of the resub columns exist.
+    """
+    today = pd.Timestamp(dt.today().date())
+    bins   = [-1, 30, 45, 60, 90, 120, float("inf")]
+    labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", "91–120 Days", ">120 Days"]
+
+    # ── Check whether the smart date columns are present ────────────────
+    has_smart = any(c in df.columns for c in RESUB_DATE_COLS.values())
+
+    if not has_smart:
+        # ── Fallback: original generic logic ────────────────────────────
+        existing = [c for c in DATE_COLS if c in df.columns]
+        for c in existing:
+            df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
+        df["RefDate"] = df[existing].bfill(axis=1).iloc[:, 0] if existing else pd.NaT
+        df["DaysDiff"] = (today - df["RefDate"]).dt.days
+        df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
+        df["AgingBucket"] = df["AgingBucket"].astype(str).replace("nan", "Unknown")
+        return df
+
+    # ── Parse all resub date columns that exist ──────────────────────────
+    for resub_n, col in RESUB_DATE_COLS.items():
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+
+    # ── Forward-fill Status so blank rows inherit their parent status ────
+    status_filled = (
+        df["Status"].replace("", pd.NA).ffill()
+        if "Status" in df.columns
+        else pd.Series("", index=df.index)
+    )
+
+    # ── Assign RefDate per row based on the status ───────────────────────
+    def _pick_date(idx):
+        s = str(status_filled.iloc[idx])
+        resub_n = _resub_number_from_status(s)
+        if resub_n is not None:
+            col = RESUB_DATE_COLS.get(resub_n, SUBDATE_COL)
+        else:
+            col = SUBDATE_COL          # initial / approved / rejected → SubDate
+        if col in df.columns:
+            return df[col].iloc[idx]
+        # If that specific date col is missing, cascade down to any available
+        for fallback_col in RESUB_DATE_COLS.values():
+            if fallback_col in df.columns:
+                v = df[fallback_col].iloc[idx]
+                if pd.notna(v):
+                    return v
+        return pd.NaT
+
+    df["RefDate"] = pd.to_datetime(
+        [_pick_date(i) for i in range(len(df))], errors="coerce"
+    )
+
+    df["DaysDiff"] = (today - df["RefDate"]).dt.days
+    df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
+    df["AgingBucket"] = df["AgingBucket"].astype(str).replace("nan", "Unknown")
+    return df
+
 
 def sold_to_klaim_mask(series: pd.Series, keywords) -> pd.Series:
     s = series.fillna("").astype(str).str.lower()
@@ -334,341 +919,13 @@ def sold_to_klaim_mask(series: pd.Series, keywords) -> pd.Series:
     return s.str.contains(pat, regex=True)
 
 
-
 def is_over_60_bucket(bucket_series: pd.Series) -> pd.Series:
     b = bucket_series.fillna("").astype(str)
     return b.isin(["61–90 Days", "91–120 Days", ">120 Days"])
 
 
 # =========================================================
-# Status fill + stage-based aging
-# =========================================================
-def prepare_status_stage(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
-    status_col = None
-    for c in df.columns:
-        if str(c).strip().lower() == "status":
-            status_col = c
-            break
-
-    if status_col is None:
-        df["FilledStatus"] = "Unknown"
-        df["SubmissionStage"] = "Unknown"
-        return df
-
-    s = df[status_col].astype(str).replace("nan", "").replace("None", "").str.strip()
-    s = s.replace("", pd.NA).ffill().fillna("Unknown")
-    df["FilledStatus"] = s
-
-    def map_stage(x):
-        t = str(x).strip().lower()
-        t_compact = re.sub(r"\s+", "", t)
-
-        if t == "not submitted" or t_compact == "notsubmitted":
-            return "Not Submitted"
-        if t == "submitted":
-            return "Initial Submission"
-        if "submitted" in t and "resub" in t and re.search(r"\b1\b", t):
-            return "Resubmission 1"
-        if "submitted" in t and "resub" in t and re.search(r"\b2\b", t):
-            return "Resubmission 2"
-        if "submitted" in t and "resub" in t and re.search(r"\b3\b", t):
-            return "Resubmission 3"
-        if "submitted" in t and "resub" in t and re.search(r"\b4\b", t):
-            return "Resubmission 4"
-        return "Other"
-
-    df["SubmissionStage"] = df["FilledStatus"].apply(map_stage)
-    return df
-
-
-
-def add_stage_based_aging(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
-    # Make sure candidate date columns are datetime
-    all_candidates = []
-    for cols in STAGE_DATE_CANDIDATES.values():
-        all_candidates.extend(cols)
-    for c in all_candidates:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
-
-    stage_to_col = {}
-    for stage_name, candidates in STAGE_DATE_CANDIDATES.items():
-        stage_to_col[stage_name] = pick(df, candidates)
-
-    def row_ref_date(row):
-        stage = row.get("SubmissionStage", "")
-        col = stage_to_col.get(stage)
-        if col and col in row.index:
-            return row[col]
-        return pd.NaT
-
-    df["RefDate"] = df.apply(row_ref_date, axis=1)
-
-    # Not Submitted = no aging date
-    df.loc[df["SubmissionStage"] == "Not Submitted", "RefDate"] = pd.NaT
-
-    today = pd.Timestamp(dt.today().date())
-    df["DaysDiff"] = (today - df["RefDate"]).dt.days
-
-    bins = [-1, 30, 45, 60, 90, 120, float("inf")]
-    labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", "91–120 Days", ">120 Days"]
-    df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
-    df["AgingBucket"] = df["AgingBucket"].astype(str).replace("nan", "Unknown")
-    return df
-
-
-
-def calculate_submission_stage_kpis(balance_df: pd.DataFrame):
-    b = balance_df.copy()
-    b["Balance"] = pd.to_numeric(b["Balance"], errors="coerce").fillna(0)
-
-    def stage_sum(stage_name):
-        return float(b.loc[b["SubmissionStage"] == stage_name, "Balance"].sum())
-
-    return {
-        "Initial Submission": stage_sum("Initial Submission"),
-        "Resubmission 1": stage_sum("Resubmission 1"),
-        "Resubmission 2": stage_sum("Resubmission 2"),
-        "Resubmission 3": stage_sum("Resubmission 3"),
-        "Not Submitted": stage_sum("Not Submitted"),
-    }
-
-
-
-def build_insurance_stage_summary(balance_df: pd.DataFrame) -> pd.DataFrame:
-    b = balance_df.copy()
-
-    if "Insurance" not in b.columns:
-        b["Insurance"] = "Not Available"
-
-    b["Insurance"] = b["Insurance"].fillna("Not Available").astype(str).str.strip()
-    b["Balance"] = pd.to_numeric(b["Balance"], errors="coerce").fillna(0)
-
-    wanted_order = [
-        "Initial Submission",
-        "Resubmission 1",
-        "Resubmission 2",
-        "Resubmission 3",
-        "Not Submitted",
-    ]
-
-    piv = pd.pivot_table(
-        b,
-        index="Insurance",
-        columns="SubmissionStage",
-        values="Balance",
-        aggfunc="sum",
-        fill_value=0,
-    ).reset_index()
-
-    for col in wanted_order:
-        if col not in piv.columns:
-            piv[col] = 0.0
-
-    piv["Total Balance"] = (
-        piv["Initial Submission"]
-        + piv["Resubmission 1"]
-        + piv["Resubmission 2"]
-        + piv["Resubmission 3"]
-        + piv["Not Submitted"]
-    )
-
-    piv = piv[["Insurance"] + wanted_order + ["Total Balance"]]
-    piv = piv.sort_values("Total Balance", ascending=False).reset_index(drop=True)
-
-    grand = pd.DataFrame([{
-        "Insurance": "Grand Total",
-        "Initial Submission": piv["Initial Submission"].sum(),
-        "Resubmission 1": piv["Resubmission 1"].sum(),
-        "Resubmission 2": piv["Resubmission 2"].sum(),
-        "Resubmission 3": piv["Resubmission 3"].sum(),
-        "Not Submitted": piv["Not Submitted"].sum(),
-        "Total Balance": piv["Total Balance"].sum(),
-    }])
-
-
-    return pd.concat([piv, grand], ignore_index=True)
-
-
-def build_stage_aging_summary(balance_df: pd.DataFrame) -> pd.DataFrame:
-    b = balance_df.copy()
-    b["Balance"] = pd.to_numeric(b["Balance"], errors="coerce").fillna(0)
-    b["AgingBucket"] = b.get("AgingBucket", "Unknown").astype(str)
-
-    stage_order = [
-        "Initial Submission",
-        "Resubmission 1",
-        "Resubmission 2",
-        "Resubmission 3",
-        "Not Submitted",
-    ]
-    aging_order = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", "91–120 Days", ">120 Days"]
-
-    # For Not Submitted (no stage date), do not allocate to aging buckets
-    b.loc[b["SubmissionStage"] == "Not Submitted", "AgingBucket"] = "No Stage Date"
-
-    piv = pd.pivot_table(
-        b,
-        index="SubmissionStage",
-        columns="AgingBucket",
-        values="Balance",
-        aggfunc="sum",
-        fill_value=0,
-    ).reset_index()
-
-    for col in aging_order:
-        if col not in piv.columns:
-            piv[col] = 0.0
-    if "No Stage Date" not in piv.columns:
-        piv["No Stage Date"] = 0.0
-
-    piv["Total"] = piv[aging_order + ["No Stage Date"]].sum(axis=1)
-
-    # ensure all main rows exist
-    existing = set(piv["SubmissionStage"].astype(str))
-    missing_rows = []
-    for stg in stage_order:
-        if stg not in existing:
-            row = {"SubmissionStage": stg}
-            for c in aging_order + ["No Stage Date", "Total"]:
-                row[c] = 0.0
-            missing_rows.append(row)
-    if missing_rows:
-        piv = pd.concat([piv, pd.DataFrame(missing_rows)], ignore_index=True)
-
-    piv["SubmissionStage"] = pd.Categorical(piv["SubmissionStage"], categories=stage_order, ordered=True)
-    piv = piv.sort_values("SubmissionStage").reset_index(drop=True)
-    piv["SubmissionStage"] = piv["SubmissionStage"].astype(str)
-
-    grand = pd.DataFrame([{
-        "SubmissionStage": "Grand Total",
-        **{c: float(piv[c].sum()) for c in aging_order + ["No Stage Date", "Total"]}
-    }])
-
-    return pd.concat([piv, grand], ignore_index=True)
-
-
-def build_stage_over60_kpis(balance_df: pd.DataFrame) -> dict:
-    b = balance_df.copy()
-    b["Balance"] = pd.to_numeric(b["Balance"], errors="coerce").fillna(0)
-    over60 = is_over_60_bucket(b["AgingBucket"])
-
-    def stage_sum(stage_name: str) -> float:
-        return float(b.loc[(b["SubmissionStage"] == stage_name) & over60, "Balance"].sum())
-
-    initial = stage_sum("Initial Submission")
-    r1 = stage_sum("Resubmission 1")
-    r2 = stage_sum("Resubmission 2")
-    r3 = stage_sum("Resubmission 3")
-
-    return {
-        "Initial >60 Days": initial,
-        "Resubmission 1 >60 Days": r1,
-        "Resubmission 2 >60 Days": r2,
-        "Resubmission 3 >60 Days": r3,
-        "Total >60 Days": initial + r1 + r2 + r3,
-    }
-
-
-def build_insurance_stage_aging_detail(balance_df: pd.DataFrame, selected_stage: str) -> pd.DataFrame:
-    b = balance_df.copy()
-    if "Insurance" not in b.columns:
-        b["Insurance"] = "Not Available"
-
-    b["Insurance"] = b["Insurance"].fillna("Not Available").astype(str).str.strip()
-    b["Balance"] = pd.to_numeric(b["Balance"], errors="coerce").fillna(0)
-    b["AgingBucket"] = b.get("AgingBucket", "Unknown").astype(str)
-
-    if selected_stage == "Not Submitted":
-        filtered = b[b["SubmissionStage"] == selected_stage].copy()
-        if filtered.empty:
-            return pd.DataFrame(columns=["Insurance", "No Stage Date", "Total"])
-        grouped = filtered.groupby("Insurance", as_index=False)["Balance"].sum()
-        grouped.rename(columns={"Balance": "No Stage Date"}, inplace=True)
-        grouped["Total"] = grouped["No Stage Date"]
-        grouped = grouped.sort_values("Total", ascending=False).reset_index(drop=True)
-        grand = pd.DataFrame([{
-            "Insurance": "Grand Total",
-            "No Stage Date": float(grouped["No Stage Date"].sum()),
-            "Total": float(grouped["Total"].sum()),
-        }])
-        return pd.concat([grouped, grand], ignore_index=True)
-
-    aging_order = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", "91–120 Days", ">120 Days"]
-
-    filtered = b[(b["SubmissionStage"] == selected_stage) & (b["AgingBucket"].isin(aging_order))].copy()
-    piv = pd.pivot_table(
-        filtered,
-        index="Insurance",
-        columns="AgingBucket",
-        values="Balance",
-        aggfunc="sum",
-        fill_value=0,
-    ).reset_index()
-
-    for col in aging_order:
-        if col not in piv.columns:
-            piv[col] = 0.0
-
-    if piv.empty:
-        piv = pd.DataFrame(columns=["Insurance"] + aging_order)
-
-    piv["Total"] = piv[aging_order].sum(axis=1)
-    piv = piv[["Insurance"] + aging_order + ["Total"]]
-    piv = piv.sort_values("Total", ascending=False).reset_index(drop=True)
-
-    grand = pd.DataFrame([{
-        "Insurance": "Grand Total",
-        **{c: float(piv[c].sum()) for c in aging_order + ["Total"]}
-    }])
-
-    return pd.concat([piv, grand], ignore_index=True)
-
-
-def render_stage_over60_kpis(stage_over60_kpis: dict):
-    def fmt(x):
-        try:
-            return f"{float(x):,.2f}"
-        except Exception:
-            return "—"
-
-    html = f"""
-    <div class="kpi-grid">
-      <div class="kpi-card">
-        <div class="kpi-label">Initial &gt;60 Days</div>
-        <div class="kpi-value">{fmt(stage_over60_kpis.get('Initial >60 Days', 0))}</div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Resubmission 1 &gt;60 Days</div>
-        <div class="kpi-value">{fmt(stage_over60_kpis.get('Resubmission 1 >60 Days', 0))}</div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Resubmission 2 &gt;60 Days</div>
-        <div class="kpi-value">{fmt(stage_over60_kpis.get('Resubmission 2 >60 Days', 0))}</div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Resubmission 3 &gt;60 Days</div>
-        <div class="kpi-value">{fmt(stage_over60_kpis.get('Resubmission 3 >60 Days', 0))}</div>
-      </div>
-
-      <div class="kpi-card current">
-        <div class="kpi-label">Total &gt;60 Days</div>
-        <div class="kpi-value">{fmt(stage_over60_kpis.get('Total >60 Days', 0))}</div>
-      </div>
-    </div>
-    """
-    st.markdown(html, unsafe_allow_html=True)
-
-
-# =========================================================
-# Pharmacy logic
+# Pharmacy logic (NEEDFUL)
 # =========================================================
 def ci_get(df, names):
     lower_map = {str(c).strip().lower(): c for c in df.columns}
@@ -679,7 +936,6 @@ def ci_get(df, names):
     return None
 
 
-
 def compute_pharmacy_balance(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
@@ -688,8 +944,10 @@ def compute_pharmacy_balance(df: pd.DataFrame) -> pd.DataFrame:
     col_paid = ci_get(df, ["Remitted Amount", "Remitted Amount (Paid)", "Paid", "Remit Amount", "RemitAmount"])
     col_stat = ci_get(df, ["ClaimStatus", "Status", "ResponseType"])
     col_payer = ci_get(df, ["Insurance", "PayerName", "Insurer", "Plan", "InsurancePlan"])
+    col_date = ci_get(df, ["ClaimDate", "RxDate", "DispenseDate", "SubmissionDate", "VisitDate", "DOS", "DateOfService"])
 
     if not col_net or not col_paid or not col_stat:
+        # fallback to generic
         df = ensure_insurance(df)
         df, net_col, paid_cols = ensure_numeric(df)
         df = compute_measures(df, net_col, paid_cols)
@@ -698,9 +956,13 @@ def compute_pharmacy_balance(df: pd.DataFrame) -> pd.DataFrame:
     if not col_payer:
         col_payer = "Insurance"
         df[col_payer] = "Not Available"
+    if not col_date:
+        col_date = "ClaimDate"
+        df[col_date] = pd.NaT
 
     df[col_net] = pd.to_numeric(df[col_net], errors="coerce").fillna(0.0).clip(lower=0)
     df[col_paid] = pd.to_numeric(df[col_paid], errors="coerce").fillna(0.0).clip(lower=0)
+    df[col_date] = pd.to_datetime(df[col_date], errors="coerce", dayfirst=True)
 
     lower_status = df[col_stat].astype(str).str.lower().str.strip()
     net = df[col_net]
@@ -728,11 +990,12 @@ def compute_pharmacy_balance(df: pd.DataFrame) -> pd.DataFrame:
     mask_bal = (~mask_denied) & (diff > tiny_threshold)
     df.loc[mask_bal, "Balance"] = diff
 
+    df["RefDate"] = df[col_date]
     return df
 
 
 # =========================================================
-# Admin mode
+# Admin mode (optional)
 # =========================================================
 def is_admin_mode() -> bool:
     secret_pwd = st.secrets.get("ADMIN_PASSWORD", "")
@@ -755,7 +1018,7 @@ def is_admin_mode() -> bool:
 st.session_state.is_admin = is_admin_mode()
 
 # =========================================================
-# S3 helpers
+# ✅ S3 FALLBACK HELPERS (NEEDFUL)
 # =========================================================
 def _get_s3_cfg():
     access_key = st.secrets.get("AWS_ACCESS_KEY_ID", "")
@@ -787,7 +1050,6 @@ def _get_s3_cfg():
     }
 
 
-
 def _s3_client(cfg):
     return boto3.client(
         "s3",
@@ -797,12 +1059,12 @@ def _s3_client(cfg):
     )
 
 
-
 def s3_key_for(center_key: str, year: int, filename: str) -> str:
     cfg = _get_s3_cfg()
     pre = (cfg["prefix"] + "/") if (cfg and cfg.get("prefix")) else ""
+    # IMPORTANT: matches your uploaded structure: streamlit/<center>/<year>/...
+    # If you used S3_PREFIX="streamlit", then prefix handles that.
     return f"{pre}{center_key}/{year}/{filename}"
-
 
 
 def ensure_local_from_s3(local_path: Path, center_key: str, year: int) -> bool:
@@ -825,7 +1087,7 @@ def ensure_local_from_s3(local_path: Path, center_key: str, year: int) -> bool:
 
 
 # =========================================================
-# Paths
+# Paths (match main dashboard)
 # =========================================================
 def report_path(center_key: str, year: int) -> Path:
     if center_key == "pharmacy":
@@ -838,7 +1100,6 @@ def report_path(center_key: str, year: int) -> Path:
         return DATA_DIR / center_key / str(year) / "report.xlsx"
 
 
-
 def save_uploaded_report(center_key: str, year: int, upload) -> Path:
     rp = report_path(center_key, year)
     rp.parent.mkdir(parents=True, exist_ok=True)
@@ -847,7 +1108,9 @@ def save_uploaded_report(center_key: str, year: int, upload) -> Path:
 
 
 # =========================================================
-# Query params
+# ✅ NEEDFUL: Read query params from dashboard click
+# - If center/year given → do NOT show password again (handled above) and do NOT show year selection.
+# - If opened directly (no center/year), show the old year landing.
 # =========================================================
 def _qs_first(key: str):
     v = st.query_params.get(key)
@@ -859,15 +1122,18 @@ def _qs_first(key: str):
 qs_year = _qs_first("year")
 qs_center = _qs_first("center")
 
+# set year from query OR from main dashboard selection
 if qs_year:
     try:
         st.session_state.year = int(qs_year)
     except Exception:
         pass
 elif st.session_state.get("year") is None:
+    # main dashboard uses rcm_year
     if st.session_state.get("rcm_year") in YEARS:
         st.session_state.year = int(st.session_state.get("rcm_year"))
 
+# set center from query params (only when coming from dashboard click)
 if qs_center:
     qs_center = str(qs_center).strip().lower()
     if qs_center in CENTERS:
@@ -880,7 +1146,7 @@ st.caption(
 )
 
 # =========================================================
-# Year landing
+# Year landing (ONLY if opened directly, no year provided anywhere)
 # =========================================================
 if st.session_state.get("year") is None:
     st.subheader("Select Year")
@@ -895,9 +1161,13 @@ if st.session_state.get("year") is None:
 
 year = int(st.session_state.year)
 
+# Keep query params consistent
 if st.query_params.get("year") != str(year):
     st.query_params["year"] = str(year)
 
+# =========================================================
+# Centers to show (2024: no easyhealth)
+# =========================================================
 if year == 2024:
     centers_to_show = ["excellent", "pharmacy"]
 else:
@@ -909,18 +1179,20 @@ if forced_center in centers_to_show:
 
 
 # =========================================================
-# Load data
+# ✅ LOAD KPI (detail sheet first) — FIXED
 # =========================================================
 @st.cache_data(show_spinner=True)
 def load_kpis_only(path_str: str, token: float, center_key: str):
     xls = pd.ExcelFile(path_str, engine="openpyxl")
 
+    # ✅ NEEDFUL: pick correct sheet (detail first)
     preferred = ["Balance_Aging_Detail", "Balance_Aging_Summary", "Insurance_Totals"]
     base_sheet = None
     for s in preferred:
         if s in xls.sheet_names:
             base_sheet = s
             break
+
     if base_sheet is None:
         base_sheet = xls.sheet_names[0]
 
@@ -929,17 +1201,17 @@ def load_kpis_only(path_str: str, token: float, center_key: str):
 
     if center_key == "pharmacy":
         df = compute_pharmacy_balance(df)
+        df = add_aging(df) if "AgingBucket" not in df.columns else df
         keywords = SOLD_TO_KLAIM_KEYWORDS_PHARMACY
     else:
         df = ensure_insurance(df)
         df, net_col, paid_cols = ensure_numeric(df)
         df = compute_measures(df, net_col, paid_cols)
+        df = add_aging(df)
         keywords = SOLD_TO_KLAIM_KEYWORDS_DEFAULT
 
-    df = prepare_status_stage(df)
-    df = add_stage_based_aging(df)
-
     balance_df = df[df["Balance"] > 0].copy()
+    balance_df = balance_df[balance_df["AgingBucket"] != "Unknown"].copy()
 
     total_balance = float(pd.to_numeric(balance_df["Balance"], errors="coerce").fillna(0).sum())
 
@@ -951,34 +1223,30 @@ def load_kpis_only(path_str: str, token: float, center_key: str):
     sold_over60 = float(pd.to_numeric(balance_df.loc[sold_mask & over60_mask, "Balance"], errors="coerce").fillna(0).sum())
     current_over60 = float(pd.to_numeric(balance_df.loc[(~sold_mask) & over60_mask, "Balance"], errors="coerce").fillna(0).sum())
 
-    stage_kpis = calculate_submission_stage_kpis(balance_df)
-    stage_over60_kpis = build_stage_over60_kpis(balance_df)
-    insurance_stage_summary = build_insurance_stage_summary(balance_df)
-    stage_aging_summary = build_stage_aging_summary(balance_df)
+    # ── Submission attempt breakdown ─────────────────────
+    # Use full df so Status ffill works on original row order, then filter Balance > 0 inside
+    submission_breakdown = compute_submission_breakdown(df)
+
+    # ── Per-stage Insurance × Aging breakdown ────────────
+    stages = compute_stages(df)
 
     return (
-        total_balance,
-        sold_to_klaim_balance,
-        current_balance,
-        sold_over60,
-        current_over60,
-        keywords,
-        stage_kpis,
-        stage_over60_kpis,
-        insurance_stage_summary,
-        stage_aging_summary,
-        balance_df,
+        total_balance, sold_to_klaim_balance, current_balance,
+        sold_over60, current_over60, keywords,
+        submission_breakdown, stages,
     )
 
 
 # =========================================================
-# Render
+# Render per center
 # =========================================================
 def render_center_kpis_only(center_key: str, year: int):
     st.markdown(f"<h2 class='center-title'>{CENTERS[center_key]}</h2>", unsafe_allow_html=True)
     st.caption(f"Year: **{year}**")
 
     rp = report_path(center_key, year)
+
+    # ✅ NEEDFUL: S3 fallback (download if local missing)
     ensure_local_from_s3(rp, center_key, year)
 
     token = rp.stat().st_mtime if rp.exists() else 0.0
@@ -1003,109 +1271,16 @@ def render_center_kpis_only(center_key: str, year: int):
         return
 
     (
-        total_balance,
-        sold_to_klaim_balance,
-        current_balance,
-        sold_over60,
-        current_over60,
-        keywords_used,
-        stage_kpis,
-        stage_over60_kpis,
-        insurance_stage_summary,
-        stage_aging_summary,
-        balance_df,
+        total_balance, sold_to_klaim_balance, current_balance,
+        sold_over60, current_over60, keywords_used,
+        submission_breakdown, stages,
     ) = load_kpis_only(str(rp), token, center_key)
 
     render_balance_kpi_cards(total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60)
-    render_submission_stage_kpis(stage_kpis)
-    render_stage_over60_kpis(stage_over60_kpis)
     st.caption(f"Sold-to-Klaim keywords: {', '.join(keywords_used)}")
 
-    st.subheader("Stage-wise Aging Summary")
-    stage_aging_show_df = stage_aging_summary.copy()
-    stage_aging_numeric_cols = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", "91–120 Days", ">120 Days", "No Stage Date", "Total"]
-    for c in stage_aging_numeric_cols:
-        if c in stage_aging_show_df.columns:
-            stage_aging_show_df[c] = pd.to_numeric(stage_aging_show_df[c], errors="coerce").fillna(0.0)
-
-    st.dataframe(stage_aging_show_df, use_container_width=True, hide_index=True)
-
-    stage_aging_buffer = io.BytesIO()
-    with pd.ExcelWriter(stage_aging_buffer, engine="openpyxl") as writer:
-        stage_aging_show_df.to_excel(writer, index=False, sheet_name="Stage_Aging_Summary")
-    stage_aging_buffer.seek(0)
-
-    st.download_button(
-        label="📥 Download Stage-wise Aging Summary",
-        data=stage_aging_buffer.getvalue(),
-        file_name=f"{center_key}_{year}_stage_aging_summary.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key=f"download_stage_aging_summary_{center_key}_{year}",
-    )
-
-    st.subheader("Insurance-wise Submission Balance")
-    show_df = insurance_stage_summary.copy()
-    numeric_cols = [
-        "Initial Submission",
-        "Resubmission 1",
-        "Resubmission 2",
-        "Resubmission 3",
-        "Not Submitted",
-        "Total Balance",
-    ]
-    for c in numeric_cols:
-        if c in show_df.columns:
-            show_df[c] = pd.to_numeric(show_df[c], errors="coerce").fillna(0.0)
-
-    st.dataframe(show_df, use_container_width=True, hide_index=True)
-
-    excel_buffer = io.BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-        show_df.to_excel(writer, index=False, sheet_name="Insurance_Stage_Summary")
-    excel_buffer.seek(0)
-
-    st.download_button(
-        label="📥 Download Insurance-wise Summary",
-        data=excel_buffer.getvalue(),
-        file_name=f"{center_key}_{year}_insurance_stage_summary.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key=f"download_stage_summary_{center_key}_{year}",
-    )
-
-    st.subheader("Insurance-wise Aging Detail")
-    stage_options = ["Initial Submission", "Resubmission 1", "Resubmission 2", "Resubmission 3", "Not Submitted"]
-    selected_stage = st.selectbox(
-        "Select Submission Stage",
-        stage_options,
-        index=0,
-        key=f"stage_filter_{center_key}_{year}",
-    )
-
-    insurance_stage_aging_df = build_insurance_stage_aging_detail(balance_df, selected_stage).copy()
-    aging_detail_numeric_cols = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", "91–120 Days", ">120 Days", "No Stage Date", "Total"]
-    for c in aging_detail_numeric_cols:
-        if c in insurance_stage_aging_df.columns:
-            insurance_stage_aging_df[c] = pd.to_numeric(insurance_stage_aging_df[c], errors="coerce").fillna(0.0)
-
-    st.dataframe(insurance_stage_aging_df, use_container_width=True, hide_index=True)
-
-    aging_detail_buffer = io.BytesIO()
-    with pd.ExcelWriter(aging_detail_buffer, engine="openpyxl") as writer:
-        insurance_stage_aging_df.to_excel(writer, index=False, sheet_name="Insurance_Aging_Detail")
-    aging_detail_buffer.seek(0)
-
-    safe_stage = selected_stage.lower().replace(" ", "_").replace(">", "gt").replace("-", "_")
-    st.download_button(
-        label=f"📥 Download {selected_stage} Aging Detail",
-        data=aging_detail_buffer.getvalue(),
-        file_name=f"{center_key}_{year}_{safe_stage}_aging_detail.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key=f"download_stage_aging_detail_{center_key}_{year}",
-    )
-
+    render_submission_breakdown(submission_breakdown)
+    render_stages_section(stages)
     st.markdown("---")
 
 
