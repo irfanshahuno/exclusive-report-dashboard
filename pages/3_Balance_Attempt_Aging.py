@@ -557,16 +557,23 @@ def compute_stages(df: pd.DataFrame, keywords: list = None) -> list[dict]:
         raw_df.insert(0, "Stage", stage_def["label"])
         raw_df.insert(1, "Klaim_Sold", subset["_klaim"].map({True: "Klaim", False: "Current"}))
 
+        over60_all   = is_over_60_bucket(all_rows["AgingBucket"])
+        over60_klaim = is_over_60_bucket(klaim_rows["AgingBucket"]) if not klaim_rows.empty else pd.Series(dtype=bool)
+        over60_curr  = is_over_60_bucket(curr_rows["AgingBucket"])  if not curr_rows.empty  else pd.Series(dtype=bool)
+
         stages_out.append({
             "label":                  stage_def["label"],
             "css":                    css,
             "total":                  float(all_rows["Balance"].sum()),
+            "over60_total":           float(all_rows.loc[over60_all,   "Balance"].sum()),
             "pivot":                  _make_pivot(all_rows),
             "aging_summary":          _make_aging_summary(all_rows),
             "klaim_total":            float(klaim_rows["Balance"].sum()),
+            "klaim_over60":           float(klaim_rows.loc[over60_klaim, "Balance"].sum()) if not klaim_rows.empty else 0.0,
             "klaim_pivot":            _make_pivot(klaim_rows),
             "klaim_aging_summary":    _make_aging_summary(klaim_rows),
             "current_total":          float(curr_rows["Balance"].sum()),
+            "current_over60":         float(curr_rows.loc[over60_curr,  "Balance"].sum()) if not curr_rows.empty  else 0.0,
             "current_pivot":          _make_pivot(curr_rows),
             "current_aging_summary":  _make_aging_summary(curr_rows),
             "raw_df":                 raw_df,
@@ -763,18 +770,21 @@ def render_stages_section(stages: list[dict], canonical_total: float = 0.0):
         )
 
     for stage in stages:
-        label         = stage["label"]
-        css           = stage["css"]
-        total         = stage["total"]
-        klaim_total   = stage.get("klaim_total", 0.0)
-        current_total = stage.get("current_total", 0.0)
-        color         = STAGE_COLORS.get(css, "#3B82F6")
-        pct           = (total / grand_total * 100) if grand_total > 0 else 0
-        raw_df        = stage.get("raw_df")
+        label          = stage["label"]
+        css            = stage["css"]
+        total          = stage["total"]
+        klaim_total    = stage.get("klaim_total", 0.0)
+        current_total  = stage.get("current_total", 0.0)
+        over60_total   = stage.get("over60_total", 0.0)
+        klaim_over60   = stage.get("klaim_over60", 0.0)
+        current_over60 = stage.get("current_over60", 0.0)
+        color          = STAGE_COLORS.get(css, "#3B82F6")
+        pct            = (total / grand_total * 100) if grand_total > 0 else 0
+        raw_df         = stage.get("raw_df")
 
         expander_label = (
             f"{label}  —  {total:,.2f}  "
-            f"(Klaim: {klaim_total:,.2f}  |  Current: {current_total:,.2f})"
+            f"(Klaim: {klaim_total:,.2f}  |  Current: {current_total:,.2f}  |  >60 Days: {over60_total:,.2f})"
         )
 
         with st.expander(expander_label, expanded=(css == "initial")):
@@ -786,8 +796,10 @@ def render_stages_section(stages: list[dict], canonical_total: float = 0.0):
                     f'font-weight:800; color:#0B2D5C; font-size:15px;">{label}</span> '
                     f'<span style="color:#64748B; font-size:13px; margin-left:12px;">'
                     f'Total: <strong style="color:{color};">{total:,.2f}</strong> '
-                    f'<span style="color:#94A3B8; margin-left:6px;">({pct:.1f}% of all)</span>'
-                    f'</span>',
+                    f'<span style="color:#94A3B8; margin-left:6px;">({pct:.1f}% of all) · '
+                    f'<span style="color:#EF4444; font-weight:700;">⚠ &gt;60 Days: {over60_total:,.2f}</span>'
+                    f'<span style="color:#94A3B8;"> (Klaim: {klaim_over60:,.2f} | Current: {current_over60:,.2f})</span>'
+                    f'</span></span>',
                     unsafe_allow_html=True,
                 )
             with hcol2:
