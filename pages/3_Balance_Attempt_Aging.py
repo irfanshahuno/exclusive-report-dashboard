@@ -425,14 +425,20 @@ def _stage_key(status: str) -> str:
 
 
 def _make_pivot(dfc: pd.DataFrame):
-    """Build Insurance × AgingBucket pivot with Grand Total row."""
+    """Build Insurance × AgingBucket pivot with Grand Total row.
+    Unknown aging rows are included in a separate 'No Date' column."""
     if dfc.empty:
         return None
     pivot = dfc.pivot_table(
         index="Insurance", columns="AgingBucket",
         values="Balance", aggfunc="sum", fill_value=0,
     )
+    # Known buckets first, then Unknown last as "No Date"
     ordered_cols = [c for c in AGING_ORDER if c in pivot.columns]
+    if "Unknown" in pivot.columns:
+        ordered_cols = ordered_cols + ["Unknown"]
+        pivot = pivot.rename(columns={"Unknown": "No Date"})
+        ordered_cols = [c if c != "Unknown" else "No Date" for c in ordered_cols]
     pivot = pivot[ordered_cols]
     pivot["Total"] = pivot.sum(axis=1)
     pivot = pivot.sort_values("Total", ascending=False)
@@ -442,17 +448,22 @@ def _make_pivot(dfc: pd.DataFrame):
 
 
 def _make_aging_summary(dfc: pd.DataFrame):
-    """Build AgingBucket → Balance + % summary with Grand Total row."""
+    """Build AgingBucket → Balance + % summary with Grand Total row.
+    Unknown aging rows appear as 'No Date' at the bottom."""
     if dfc.empty:
         return None
-    existing_buckets = [c for c in AGING_ORDER if c in dfc["AgingBucket"].unique()]
+    # Known buckets in order, then No Date
+    existing_known = [c for c in AGING_ORDER if c in dfc["AgingBucket"].unique()]
+    has_unknown = "Unknown" in dfc["AgingBucket"].unique()
+    all_buckets = existing_known + (["Unknown"] if has_unknown else [])
     summary = (
         dfc.groupby("AgingBucket")["Balance"]
         .sum()
-        .reindex(existing_buckets)
+        .reindex(all_buckets)
         .fillna(0)
         .reset_index()
     )
+    summary["AgingBucket"] = summary["AgingBucket"].replace("Unknown", "No Date")
     total = summary["Balance"].sum()
     summary["% of Total"] = (summary["Balance"] / total * 100).round(1) if total > 0 else 0.0
     summary["Balance"] = summary["Balance"].round(2)
@@ -481,7 +492,7 @@ def compute_stages(df: pd.DataFrame) -> list[dict]:
     df["_stage_key"] = status_filled.apply(_stage_key)
 
     base = df[
-        (df["Balance"] > 0) & (df["AgingBucket"] != "Unknown")
+        df["Balance"] > 0
     ][["Insurance", "AgingBucket", "Balance", "_stage_key"]].copy()
     base["Balance"] = pd.to_numeric(base["Balance"], errors="coerce").fillna(0)
 
@@ -650,6 +661,8 @@ def render_stages_section(stages: list[dict]):
     st.markdown('<div class="sub-section-title">Aging Breakdown by Submission Stage</div>',
                 unsafe_allow_html=True)
 
+    grand_total = sum(s["total"] for s in stages)
+
     for stage in stages:
         label   = stage["label"]
         css     = stage["css"]
@@ -657,9 +670,14 @@ def render_stages_section(stages: list[dict]):
         pivot   = stage["pivot"]
         summary = stage["aging_summary"]
         color   = STAGE_COLORS.get(css, "#3B82F6")
+        pct     = (total / grand_total * 100) if grand_total > 0 else 0
 
         header_html = (
-            f'<span style="border-left:4px solid {color}; padding-left:10px; '            f'font-weight:800; color:#0B2D5C;">{label}</span> '            f'<span style="color:#64748B; font-size:13px; margin-left:10px;">'            f'Total: <strong style="color:{color};">{total:,.2f}</strong></span>'
+            f'<span style="border-left:4px solid {color}; padding-left:10px; '
+            f'font-weight:800; color:#0B2D5C;">{label}</span> '
+            f'<span style="color:#64748B; font-size:13px; margin-left:10px;">'
+            f'Total: <strong style="color:{color};">{total:,.2f}</strong>'
+            f'<span style="margin-left:8px; color:#94A3B8;">({pct:.1f}% of all)</span></span>'
         )
 
         with st.expander(f"{label}  —  {total:,.2f}", expanded=(css == "initial")):
@@ -689,6 +707,28 @@ def render_stages_section(stages: list[dict]):
                     )
                 else:
                     st.info("No data.")
+
+    # ── Grand Total footer across all stages ─────────────────────────
+    st.markdown(
+        f'''<div style="
+            margin-top:18px;
+            padding:14px 20px;
+            background:linear-gradient(90deg,#EEF6FF,#F8FBFF);
+            border:1.5px solid #CFE3FF;
+            border-radius:14px;
+            display:flex;
+            align-items:center;
+            gap:16px;
+        ">
+          <span style="font-size:13px;font-weight:800;color:#64748B;letter-spacing:0.6px;text-transform:uppercase;">
+            Grand Total (All Stages)
+          </span>
+          <span style="font-size:26px;font-weight:900;color:#0B2D5C;letter-spacing:0.3px;">
+            {grand_total:,.2f}
+          </span>
+        </div>''',
+        unsafe_allow_html=True,
+    )
 
 
 # =========================================================
