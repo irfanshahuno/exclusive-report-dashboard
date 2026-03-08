@@ -163,6 +163,65 @@ div.stButton > button:focus-visible{
 @media (max-width: 1100px){
   .kpi-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* ── Submission breakdown row ── */
+.sub-section-title{
+  font-size: 13px;
+  font-weight: 800;
+  color: #64748B;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  margin: 18px 0 8px 2px;
+}
+.sub-grid{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.sub-card{
+  background: #FAFCFF;
+  border: 1.3px solid #E3ECFA;
+  border-radius: 13px;
+  padding: 11px 14px;
+  box-shadow: 0 4px 12px rgba(11,45,92,0.05);
+  min-width: 0;
+}
+.sub-card.initial{
+  border-left: 4px solid #3B82F6;
+}
+.sub-card.resub{
+  border-left: 4px solid #8B5CF6;
+}
+.sub-card.approved{
+  border-left: 4px solid #10B981;
+}
+.sub-card.rejected{
+  border-left: 4px solid #EF4444;
+}
+.sub-card.other{
+  border-left: 4px solid #F59E0B;
+}
+.sub-label{
+  font-size: 11.5px;
+  color: #64748B;
+  font-weight: 700;
+  margin-bottom: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sub-value{
+  font-size: clamp(14px, 1.6vw, 22px);
+  font-weight: 900;
+  color: #111827;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 1100px){
+  .sub-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -203,6 +262,124 @@ def render_balance_kpi_cards(total_balance, sold_to_klaim_balance, current_balan
         <div class="kpi-value">{fmt(current_over60)}</div>
       </div>
     </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+# =========================================================
+# Submission-attempt breakdown renderer
+# =========================================================
+def _classify_status(raw: str) -> tuple[str, str]:
+    """
+    Returns (display_label, css_class) for a given raw Status value.
+    Examples:
+      'Submitted'               → ('Initial Submission', 'initial')
+      'Submitted(Resub- 1)'     → ('1st Resubmission', 'resub')
+      'Rejection Accepted(Resub- 1)' → ('1st Resubmission', 'resub')
+      'Submitted(Resub- 2)'     → ('2nd Resubmission', 'resub')
+      'Approved'                → ('Approved', 'approved')
+      'Rejected'                → ('Rejected', 'rejected')
+    """
+    s = str(raw).strip()
+    sl = s.lower()
+
+    # ── Resubmission: extract the number ──────────────────
+    m = re.search(r"resub[-\s]*(\d+)", sl)
+    if m:
+        n = int(m.group(1))
+        suffix = {1: "1st", 2: "2nd", 3: "3rd"}.get(n, f"{n}th")
+        return (f"{suffix} Resubmission", "resub")
+
+    # ── Approved ──────────────────────────────────────────
+    if "approved" in sl:
+        return ("Approved", "approved")
+
+    # ── Rejected / Denial ────────────────────────────────
+    if any(x in sl for x in ["reject", "denial", "denied"]):
+        return ("Rejected / Denied", "rejected")
+
+    # ── Initial Submitted ─────────────────────────────────
+    if "submit" in sl:
+        return ("Initial Submission", "initial")
+
+    # ── Anything else ─────────────────────────────────────
+    label = s if s not in ("", "nan", "None") else "Unknown"
+    return (label, "other")
+
+
+def compute_submission_breakdown(df: pd.DataFrame) -> list[dict]:
+    """
+    Forward-fill the 'Status' column, then sum Balance per classified group.
+    Returns list of {label, css_class, balance} sorted by natural order.
+    """
+    if "Status" not in df.columns:
+        return []
+
+    dfc = df.copy()
+    # Forward-fill blanks / NaN in Status column
+    dfc["Status"] = dfc["Status"].replace("", pd.NA)
+    dfc["Status"] = dfc["Status"].ffill()
+
+    # Only rows with a positive balance
+    dfc = dfc[dfc["Balance"] > 0].copy()
+    if dfc.empty:
+        return []
+
+    dfc["_label"], dfc["_class"] = zip(*dfc["Status"].apply(_classify_status))
+
+    grouped = (
+        dfc.groupby(["_label", "_class"], sort=False)["Balance"]
+        .sum()
+        .reset_index()
+        .rename(columns={"Balance": "total"})
+    )
+
+    # Natural sort order
+    order = [
+        "Initial Submission",
+        "1st Resubmission",
+        "2nd Resubmission",
+        "3rd Resubmission",
+        "Approved",
+        "Rejected / Denied",
+    ]
+
+    def sort_key(row):
+        try:
+            return order.index(row["_label"])
+        except ValueError:
+            return 99
+
+    grouped["_order"] = grouped.apply(sort_key, axis=1)
+    grouped = grouped.sort_values("_order")
+
+    return [
+        {"label": r["_label"], "css_class": r["_class"], "balance": float(r["total"])}
+        for _, r in grouped.iterrows()
+    ]
+
+
+def render_submission_breakdown(breakdown: list[dict]):
+    if not breakdown:
+        return
+
+    def fmt(x):
+        try:
+            return f"{float(x):,.2f}"
+        except Exception:
+            return "—"
+
+    cards_html = "".join(
+        f"""<div class="sub-card {b['css_class']}" title="{fmt(b['balance'])}">
+              <div class="sub-label">{b['label']}</div>
+              <div class="sub-value">{fmt(b['balance'])}</div>
+            </div>"""
+        for b in breakdown
+    )
+
+    html = f"""
+    <div class="sub-section-title">Balance by Submission Attempt</div>
+    <div class="sub-grid">{cards_html}</div>
     """
     st.markdown(html, unsafe_allow_html=True)
 
@@ -616,7 +793,11 @@ def load_kpis_only(path_str: str, token: float, center_key: str):
     sold_over60 = float(pd.to_numeric(balance_df.loc[sold_mask & over60_mask, "Balance"], errors="coerce").fillna(0).sum())
     current_over60 = float(pd.to_numeric(balance_df.loc[(~sold_mask) & over60_mask, "Balance"], errors="coerce").fillna(0).sum())
 
-    return total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60, keywords
+    # ── Submission attempt breakdown ─────────────────────
+    # Use full df so Status ffill works on original row order, then filter Balance > 0 inside
+    submission_breakdown = compute_submission_breakdown(df)
+
+    return total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60, keywords, submission_breakdown
 
 
 # =========================================================
@@ -652,12 +833,14 @@ def render_center_kpis_only(center_key: str, year: int):
         st.markdown("---")
         return
 
-    total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60, keywords_used = load_kpis_only(
+    total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60, keywords_used, submission_breakdown = load_kpis_only(
         str(rp), token, center_key
     )
 
     render_balance_kpi_cards(total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60)
     st.caption(f"Sold-to-Klaim keywords: {', '.join(keywords_used)}")
+
+    render_submission_breakdown(submission_breakdown)
     st.markdown("---")
 
 
