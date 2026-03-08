@@ -448,17 +448,15 @@ def _stage_key(status: str) -> str:
 def _make_pivot(dfc: pd.DataFrame):
     """Build Insurance × AgingBucket pivot with Grand Total row.
     Unknown aging rows are included in a separate 'No Date' column.
-    Rows where Insurance == 'Not Available' are excluded from the per-insurer
-    rows (they have no insurer info) but their amounts are still captured in
-    the Grand Total row so the total remains accurate."""
+    Rows where Insurance == 'Not Available' are excluded from both the
+    per-insurer rows AND the Grand Total so numbers stay consistent."""
     if dfc.empty:
         return None
-    # Exclude "Not Available" from the per-insurer breakdown rows.
-    # Their balances are still summed into the Grand Total below.
-    dfc_display = dfc[dfc["Insurance"] != "Not Available"].copy()
-    if dfc_display.empty:
-        dfc_display = dfc.copy()  # fallback: show all if everything is Not Available
-    pivot = dfc_display.pivot_table(
+    # Exclude "Not Available" rows entirely — both from display and totals
+    dfc_clean = dfc[dfc["Insurance"] != "Not Available"].copy()
+    if dfc_clean.empty:
+        dfc_clean = dfc.copy()  # fallback: show all if everything is Not Available
+    pivot = dfc_clean.pivot_table(
         index="Insurance", columns="AgingBucket",
         values="Balance", aggfunc="sum", fill_value=0,
     )
@@ -471,36 +469,29 @@ def _make_pivot(dfc: pd.DataFrame):
     pivot = pivot[ordered_cols]
     pivot["Total"] = pivot.sum(axis=1)
     pivot = pivot.sort_index(ascending=True)
-    # Grand Total uses the FULL dfc (including "Not Available" rows) so the
-    # bottom-row total always matches the KPI cards and no amounts are hidden.
-    full_pivot_for_gt = dfc.pivot_table(
-        index="Insurance", columns="AgingBucket",
-        values="Balance", aggfunc="sum", fill_value=0,
-    )
-    if "Unknown" in full_pivot_for_gt.columns:
-        full_pivot_for_gt = full_pivot_for_gt.rename(columns={"Unknown": "No Date"})
-    for col in ordered_cols:
-        if col not in full_pivot_for_gt.columns:
-            full_pivot_for_gt[col] = 0
-    full_pivot_for_gt["Total"] = full_pivot_for_gt[
-        [c for c in ordered_cols if c in full_pivot_for_gt.columns]
-    ].sum(axis=1)
-    grand = full_pivot_for_gt[[c for c in ordered_cols + ["Total"] if c in full_pivot_for_gt.columns]].sum(numeric_only=True).rename("Grand Total")
+    # Grand Total sums only the visible rows (no "Not Available")
+    grand = pivot.sum(numeric_only=True).rename("Grand Total")
     pivot = pd.concat([pivot, grand.to_frame().T])
     return pivot
 
 
 def _make_aging_summary(dfc: pd.DataFrame):
     """Build AgingBucket → Balance + % summary with Grand Total row.
-    Unknown aging rows appear as 'No Date' at the bottom."""
+    Unknown aging rows appear as 'No Date' at the bottom.
+    Rows where Insurance == 'Not Available' are excluded so totals
+    stay consistent with the pivot table."""
     if dfc.empty:
         return None
+    # Exclude "Not Available" rows to stay consistent with _make_pivot
+    dfc_clean = dfc[dfc["Insurance"] != "Not Available"].copy()
+    if dfc_clean.empty:
+        dfc_clean = dfc.copy()
     # Known buckets in order, then No Date
-    existing_known = [c for c in AGING_ORDER if c in dfc["AgingBucket"].unique()]
-    has_unknown = "Unknown" in dfc["AgingBucket"].unique()
+    existing_known = [c for c in AGING_ORDER if c in dfc_clean["AgingBucket"].unique()]
+    has_unknown = "Unknown" in dfc_clean["AgingBucket"].unique()
     all_buckets = existing_known + (["Unknown"] if has_unknown else [])
     summary = (
-        dfc.groupby("AgingBucket")["Balance"]
+        dfc_clean.groupby("AgingBucket")["Balance"]
         .sum()
         .reindex(all_buckets)
         .fillna(0)
