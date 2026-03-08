@@ -45,7 +45,7 @@ require_view_access_balance()
 # Settings
 # =========================================================
 st.set_page_config(page_title="Balance — Initial / Resub with Aging", layout="wide")
-st.title("Balance — Aging & Submission Overview")
+st.title("Balance — Initial / Resub with Aging (Summary)")
 
 # ✅ NEEDFUL CHANGE ONLY:
 # If this file is inside /pages, store data at repo root /data (not /pages/data)
@@ -80,63 +80,164 @@ GT_PAT = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
 st.markdown(
     """
 <style>
-:root{
-  --bg:#F6F9FE;
-  --card:#FFFFFF;
-  --text:#0F172A;
-  --muted:#64748B;
-  --line:#D9E6F7;
-  --line-strong:#BFD4F3;
-  --brand:#163A70;
-  --brand-soft:#EEF5FF;
-  --shadow:0 8px 24px rgba(15, 23, 42, 0.06);
+.stApp{
+  background: linear-gradient(180deg, #F7FAFF 0%, #FFFFFF 45%) !important;
 }
-.block-container{padding-top:1.25rem;padding-bottom:2rem;max-width:1500px;}
-.stApp{background: linear-gradient(180deg, #F8FBFF 0%, #FFFFFF 45%) !important;}
-h1,h2,h3{ color: var(--brand); }
-hr{ border:none !important;height:1px !important;background:#E6EEF8 !important; }
-.center-title{color:var(--brand) !important;font-weight:900 !important;margin-bottom:.1rem !important;letter-spacing:.1px;}
-.meta-chip-wrap{display:flex;flex-wrap:wrap;gap:10px;margin:8px 0 18px 0;}
-.meta-chip{background:#F8FBFF;border:1px solid var(--line);color:var(--muted);border-radius:999px;padding:7px 12px;font-size:12px;font-weight:700;}
-.section-title{font-size:13px;font-weight:900;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin:22px 0 10px 2px;}
-.section-subtitle{font-size:12px;color:#94A3B8;margin:-4px 0 12px 2px;}
-.kpi-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px;margin-top:8px;margin-bottom:10px;}
-.kpi-card{background:linear-gradient(180deg,#FFFFFF 0%,#FBFDFF 100%);border:1.4px solid var(--line);border-radius:18px;padding:16px 18px;box-shadow:var(--shadow);min-width:0;}
-.kpi-card.current{background:linear-gradient(180deg,#F4F8FF 0%,#FFFFFF 100%);border-color:var(--line-strong);}
-.kpi-label{font-size:12px;line-height:1.35;min-height:34px;color:var(--muted);font-weight:800;margin-bottom:10px;}
-.kpi-value{font-size:clamp(18px,1.9vw,30px);font-weight:900;color:var(--text);letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.kpi-card.current .kpi-value{color:var(--brand);}
-.sub-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:10px;}
-.sub-card{background:#FFFFFF;border:1.3px solid var(--line);border-radius:16px;padding:14px 16px;box-shadow:0 6px 16px rgba(11,45,92,0.05);min-width:0;}
-.sub-card.initial{border-top:4px solid #3B82F6;}
-.sub-card.resub{border-top:4px solid #8B5CF6;}
-.sub-card.approved{border-top:4px solid #10B981;}
-.sub-card.rejected{border-top:4px solid #EF4444;}
-.sub-card.total{border-top:4px solid #BFDBFE;background:linear-gradient(180deg,#F7FBFF 0%,#FFFFFF 100%);}
-.sub-card.other{border-top:4px solid #F59E0B;}
-.sub-label{font-size:11.5px;color:var(--muted);font-weight:800;margin-bottom:8px;line-height:1.35;}
-.sub-value{font-size:clamp(16px,1.75vw,24px);font-weight:900;color:var(--text);}
-.stage-banner{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:linear-gradient(180deg,#FFFFFF 0%,#FBFDFF 100%);margin:2px 0 12px 0;}
-.stage-banner-left{display:flex;align-items:center;gap:12px;}
-.stage-dot{width:10px;height:10px;border-radius:999px;flex:0 0 auto;}
-.stage-title{font-size:15px;font-weight:900;color:var(--brand);}
-.stage-meta{font-size:12px;color:#94A3B8;font-weight:700;}
-.stage-total{font-size:22px;font-weight:900;color:var(--brand);white-space:nowrap;}
-div.stButton > button{width:100% !important;min-height:48px !important;padding:10px 16px !important;font-size:15px !important;font-weight:800 !important;background:var(--brand-soft) !important;color:var(--brand) !important;border:1.5px solid var(--line-strong) !important;border-radius:14px !important;box-shadow:0 3px 10px rgba(11,45,92,0.08) !important;}
-div[data-testid="stExpander"]{border:1px solid var(--line) !important;border-radius:16px !important;background:#FFFFFF !important;box-shadow:0 6px 20px rgba(15,23,42,0.04);margin-bottom:14px;}
-div[data-testid="stDataFrame"]{border:1px solid #EAF1FB;border-radius:14px;overflow:hidden;}
-@media (max-width:1200px){.kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.sub-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
-@media (max-width:760px){.kpi-grid,.sub-grid{grid-template-columns:1fr;}}
+hr{ border: none !important; height:1px !important; background:#E6EEF8 !important; }
+
+div.stButton > button{
+  width: 100% !important;
+  min-height: 58px !important;
+  padding: 14px 22px !important;
+  font-size: 18px !important;
+  font-weight: 800 !important;
+
+  background: #EEF6FF !important;
+  color: #0B2D5C !important;
+  border: 1.8px solid #B6D4FF !important;
+  border-radius: 14px !important;
+
+  box-shadow: 0 3px 10px rgba(11, 45, 92, 0.10) !important;
+}
+div.stButton > button:hover{
+  background: #DCEBFF !important;
+  border-color: #6FA4FF !important;
+  box-shadow: 0 6px 16px rgba(11, 45, 92, 0.14) !important;
+}
+div.stButton > button:active,
+div.stButton > button:focus,
+div.stButton > button:focus-visible{
+  background: #0B2D5C !important;
+  color: #ffffff !important;
+  border-color: #0B2D5C !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.center-title{
+  color:#0B2D5C !important;
+  font-weight: 900 !important;
+  margin-bottom: 0.15rem !important;
+}
+
+.kpi-grid{
+  display:grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 10px;
+  margin-bottom: 10px;
+}
+.kpi-card{
+  background: rgba(255,255,255,0.92);
+  border: 1.4px solid #E3ECFA;
+  border-radius: 16px;
+  padding: 14px 16px;
+  box-shadow: 0 8px 18px rgba(11,45,92,0.06);
+  min-width: 0;
+}
+.kpi-label{
+  font-size: 13px;
+  color: #64748B;
+  font-weight: 750;
+  margin-bottom: 6px;
+}
+.kpi-value{
+  font-size: clamp(16px, 2.0vw, 28px);
+  font-weight: 900;
+  color: #111827;
+  letter-spacing: 0.2px;
+
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kpi-card.current{
+  background: linear-gradient(180deg, #F1F7FF 0%, #FFFFFF 100%);
+  border-color: #CFE3FF;
+}
+.kpi-card.current .kpi-value{
+  color:#0B2D5C;
+}
+
+@media (max-width: 1100px){
+  .kpi-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ── Submission breakdown row ── */
+.sub-section-title{
+  font-size: 13px;
+  font-weight: 800;
+  color: #64748B;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  margin: 18px 0 8px 2px;
+}
+.sub-grid{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.sub-card{
+  background: #FAFCFF;
+  border: 1.3px solid #E3ECFA;
+  border-radius: 13px;
+  padding: 11px 14px;
+  box-shadow: 0 4px 12px rgba(11,45,92,0.05);
+  min-width: 0;
+}
+.sub-card.initial{
+  border-left: 4px solid #3B82F6;
+}
+.sub-card.resub{
+  border-left: 4px solid #8B5CF6;
+}
+.sub-card.approved{
+  border-left: 4px solid #10B981;
+}
+.sub-card.rejected{
+  border-left: 4px solid #EF4444;
+}
+.sub-card.other{
+  border-left: 4px solid #F59E0B;
+}
+.sub-card.total{
+  border-left: 4px solid #0B2D5C;
+  background: linear-gradient(135deg, #EEF6FF 0%, #F8FBFF 100%);
+  border: 1.5px solid #CFE3FF;
+}
+.sub-card.total .sub-label{
+  color: #0B2D5C;
+  font-weight: 800;
+}
+.sub-card.total .sub-value{
+  color: #0B2D5C;
+}
+.sub-label{
+  font-size: 11.5px;
+  color: #64748B;
+  font-weight: 700;
+  margin-bottom: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sub-value{
+  font-size: clamp(14px, 1.6vw, 22px);
+  font-weight: 900;
+  color: #111827;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 1100px){
+  .sub-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 </style>
 """,
     unsafe_allow_html=True,
 )
-
-
-def render_section_heading(title: str, subtitle: str | None = None):
-    st.markdown(f'<div class="section-title">{title}</div>', unsafe_allow_html=True)
-    if subtitle:
-        st.markdown(f'<div class="section-subtitle">{subtitle}</div>', unsafe_allow_html=True)
 
 
 def render_balance_kpi_cards(total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60):
@@ -270,7 +371,7 @@ def compute_submission_breakdown(df: pd.DataFrame) -> list[dict]:
     ]
 
 
-def render_submission_breakdown(breakdown: list[dict]):
+def render_submission_breakdown(breakdown: list[dict], total_balance: float = 0.0):
     if not breakdown:
         return
 
@@ -280,21 +381,28 @@ def render_submission_breakdown(breakdown: list[dict]):
         except Exception:
             return "—"
 
-    render_section_heading("Balance by Submission Attempt", "Clear stage-wise view of all positive outstanding balances")
-
-    total_all = sum(float(b.get("balance", 0) or 0) for b in breakdown)
-    cards = list(breakdown)
-    cards.append({"label": "Total (All Stages)", "css_class": "total", "balance": total_all})
+    # Use the authoritative Total Balance KPI value — same number as the top card
+    grand_total = total_balance if total_balance > 0 else sum(b["balance"] for b in breakdown)
 
     cards_html = "".join(
-        f'<div class="sub-card {b["css_class"]}" title="{fmt(b["balance"])}">'
-        f'<div class="sub-label">{b["label"]}</div>'
-        f'<div class="sub-value">{fmt(b["balance"])}<\/div>'
-        f'<\/div>'
-        for b in cards
+        f"""<div class="sub-card {b['css_class']}" title="{fmt(b['balance'])}">
+              <div class="sub-label">{b['label']}</div>
+              <div class="sub-value">{fmt(b['balance'])}</div>
+            </div>"""
+        for b in breakdown
     )
 
-    st.markdown(f'<div class="sub-grid">{cards_html}</div>', unsafe_allow_html=True)
+    # Total card — always matches the Total Balance KPI card above
+    total_card = f"""<div class="sub-card total" title="{fmt(grand_total)}">
+              <div class="sub-label">Total Balance</div>
+              <div class="sub-value">{fmt(grand_total)}</div>
+            </div>"""
+
+    html = f"""
+    <div class="sub-section-title">Balance by Submission Attempt</div>
+    <div class="sub-grid">{cards_html}{total_card}</div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
 
 
 # =========================================================
@@ -562,16 +670,22 @@ def render_insurance_aging_tables(pivot, aging_summary):
     pass
 
 
-def render_stages_section(stages: list[dict]):
-    """Professional, cleaner stage sections with compact banners and aligned tables."""
+def render_stages_section(stages: list[dict], canonical_total: float = 0.0):
+    """
+    Renders one collapsible expander per submission stage, each containing:
+      - a coloured header with total balance
+      - Insurance × Aging pivot table  |  Aging Summary side by side
+    canonical_total: the authoritative total from submission_breakdown (used for % calc).
+    """
     if not stages:
         return
 
-    render_section_heading("Aging Breakdown by Submission Stage", "Each section shows insurance-wise aging and a compact aging summary")
+    st.markdown('<div class="sub-section-title">Aging Breakdown by Submission Stage</div>',
+                unsafe_allow_html=True)
 
-    grand_total = sum(s["total"] for s in stages)
+    grand_total = canonical_total if canonical_total > 0 else sum(s["total"] for s in stages)
 
-    for idx, stage in enumerate(stages):
+    for stage in stages:
         label   = stage["label"]
         css     = stage["css"]
         total   = stage["total"]
@@ -580,22 +694,19 @@ def render_stages_section(stages: list[dict]):
         color   = STAGE_COLORS.get(css, "#3B82F6")
         pct     = (total / grand_total * 100) if grand_total > 0 else 0
 
-        with st.expander(f"{label}  ·  {total:,.2f}", expanded=(idx == 0)):
-            st.markdown(
-                f'''<div class="stage-banner">
-                      <div class="stage-banner-left">
-                        <span class="stage-dot" style="background:{color};"></span>
-                        <div>
-                          <div class="stage-title">{label}</div>
-                          <div class="stage-meta">Share of overall balance: {pct:.1f}%</div>
-                        </div>
-                      </div>
-                      <div class="stage-total">{total:,.2f}</div>
-                    </div>''',
-                unsafe_allow_html=True,
-            )
+        header_html = (
+            f'<span style="border-left:4px solid {color}; padding-left:10px; '
+            f'font-weight:800; color:#0B2D5C;">{label}</span> '
+            f'<span style="color:#64748B; font-size:13px; margin-left:10px;">'
+            f'Total: <strong style="color:{color};">{total:,.2f}</strong>'
+            f'<span style="margin-left:8px; color:#94A3B8;">({pct:.1f}% of all)</span></span>'
+        )
 
-            col1, col2 = st.columns([2.25, 1], gap="large")
+        with st.expander(f"{label}  —  {total:,.2f}", expanded=(css == "initial")):
+            st.markdown(header_html, unsafe_allow_html=True)
+            st.markdown("")
+
+            col1, col2 = st.columns([3, 1], gap="large")
 
             with col1:
                 st.markdown("**Insurance × Aging Bucket**")
@@ -603,7 +714,7 @@ def render_stages_section(stages: list[dict]):
                     st.dataframe(
                         _style_insurance_aging(pivot),
                         use_container_width=True,
-                        height=min(80 + 38 * len(pivot), 520),
+                        height=min(40 + 38 * len(pivot), 540),
                     )
                 else:
                     st.info("No data.")
@@ -614,24 +725,12 @@ def render_stages_section(stages: list[dict]):
                     st.dataframe(
                         _style_aging_summary(summary, color),
                         use_container_width=True,
-                        height=min(80 + 38 * len(summary), 380),
+                        height=min(60 + 38 * len(summary), 420),
                     )
                 else:
                     st.info("No data.")
 
-    st.markdown(
-        f'''<div class="stage-banner" style="margin-top:18px; background:linear-gradient(180deg,#F7FBFF 0%,#FFFFFF 100%);">
-              <div class="stage-banner-left">
-                <span class="stage-dot" style="background:#BFDBFE;"></span>
-                <div>
-                  <div class="stage-title">Grand Total (All Stages)</div>
-                  <div class="stage-meta">Combined outstanding balance across all submission stages</div>
-                </div>
-              </div>
-              <div class="stage-total">{grand_total:,.2f}</div>
-            </div>''',
-        unsafe_allow_html=True,
-    )
+
 
 
 # =========================================================
@@ -1125,13 +1224,7 @@ def load_kpis_only(path_str: str, token: float, center_key: str):
 # =========================================================
 def render_center_kpis_only(center_key: str, year: int):
     st.markdown(f"<h2 class='center-title'>{CENTERS[center_key]}</h2>", unsafe_allow_html=True)
-    st.markdown(
-        f'''<div class="meta-chip-wrap">
-              <span class="meta-chip">Year: {year}</span>
-              <span class="meta-chip">Center Key: {center_key}</span>
-            </div>''',
-        unsafe_allow_html=True,
-    )
+    st.caption(f"Year: **{year}**")
 
     rp = report_path(center_key, year)
 
@@ -1166,13 +1259,10 @@ def render_center_kpis_only(center_key: str, year: int):
     ) = load_kpis_only(str(rp), token, center_key)
 
     render_balance_kpi_cards(total_balance, sold_to_klaim_balance, current_balance, sold_over60, current_over60)
-    st.markdown(
-        f'''<div class="meta-chip-wrap"><span class="meta-chip">Sold-to-Klaim keywords: {', '.join(keywords_used)}</span></div>''',
-        unsafe_allow_html=True,
-    )
+    st.caption(f"Sold-to-Klaim keywords: {', '.join(keywords_used)}")
 
-    render_submission_breakdown(submission_breakdown)
-    render_stages_section(stages)
+    render_submission_breakdown(submission_breakdown, total_balance=total_balance)
+    render_stages_section(stages, canonical_total=total_balance)
     st.markdown("---")
 
 
