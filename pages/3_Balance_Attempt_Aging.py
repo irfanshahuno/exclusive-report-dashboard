@@ -64,7 +64,7 @@ CENTERS = {
 }
 
 # Your required order: start from 0–30
-AGING_ORDER = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", "91–120 Days", ">120 Days"]
+AGING_ORDER = ["0–30 Days", "31–45 Days", "46–60 Days", ">90 Days"]
 
 # Default sold-to-klaim keywords (for medical centers)
 SOLD_TO_KLAIM_KEYWORDS_DEFAULT = ["NextCare", "Sukoon", "Almadallah", "Daman", "FMC"]
@@ -927,8 +927,8 @@ def add_aging(df: pd.DataFrame) -> pd.DataFrame:
     Falls back to generic DATE_COLS if none of the resub columns exist.
     """
     today = pd.Timestamp(dt.today().date())
-    bins   = [-1, 30, 45, 60, 90, 120, float("inf")]
-    labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", "91–120 Days", ">120 Days"]
+    bins   = [-1, 30, 45, 60, 90, float("inf")]
+    labels = ["0–30 Days", "31–45 Days", "46–60 Days", ">90 Days"]
 
     # ── Check whether the smart date columns are present ────────────────
     has_smart = any(c in df.columns for c in RESUB_DATE_COLS.values())
@@ -995,7 +995,7 @@ def sold_to_klaim_mask(series: pd.Series, keywords) -> pd.Series:
 
 def is_over_60_bucket(bucket_series: pd.Series) -> pd.Series:
     b = bucket_series.fillna("").astype(str)
-    return b.isin(["61–90 Days", "91–120 Days", ">120 Days"])
+    return b.isin([">90 Days"])
 
 
 # =========================================================
