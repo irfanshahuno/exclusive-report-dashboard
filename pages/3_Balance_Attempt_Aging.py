@@ -1256,7 +1256,7 @@ if forced_center in centers_to_show:
 # ✅ LOAD KPI (detail sheet first) — FIXED
 # =========================================================
 @st.cache_data(show_spinner=True)
-def load_kpis_only(path_str: str, token: float, center_key: str, _v: int = 4):
+def load_kpis_only(path_str: str, token: float, center_key: str, _v: int = 9):
     xls = pd.ExcelFile(path_str, engine="openpyxl")
 
     # ✅ NEEDFUL: pick correct sheet (detail first)
@@ -1361,6 +1361,7 @@ def render_center_kpis_only(center_key: str, year: int):
 # =========================================================
 # Page output
 # =========================================================
+load_kpis_only.clear()  # force fresh computation with latest bucket definitions
 st.markdown(f"## Pending Balance — {year}")
 
 for ckey in centers_to_show:
