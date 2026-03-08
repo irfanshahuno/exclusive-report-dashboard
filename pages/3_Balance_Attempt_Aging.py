@@ -457,29 +457,47 @@ def compute_aging_summary(df: pd.DataFrame):
     return summary
 
 
+def _blue_cell(val: float, max_val: float) -> str:
+    """Return inline CSS background based on value intensity — no matplotlib needed."""
+    if max_val <= 0 or val <= 0:
+        return ""
+    intensity = min(val / max_val, 1.0)
+    # Map 0→1 to light blue (#EEF6FF) → medium blue (#3B82F6)
+    r = int(238 - intensity * (238 - 59))
+    g = int(246 - intensity * (246 - 130))
+    b = int(255 - intensity * (255 - 246))
+    text = "#0B2D5C" if intensity > 0.55 else "#1e3a5f"
+    return f"background-color: rgb({r},{g},{b}); color: {text};"
+
+
 def _style_insurance_aging(pivot: pd.DataFrame):
-    """Apply a clean gradient + formatting to the pivot table."""
+    """Apply formatting to the pivot table — no matplotlib dependency."""
     fmt_dict = {c: "{:,.2f}" for c in pivot.columns}
 
-    def highlight_total_row(row):
-        if row.name == "Grand Total":
-            return ["background-color: #EEF6FF; font-weight: 900; color: #0B2D5C;"] * len(row)
-        return [""] * len(row)
-
-    def highlight_total_col(df):
-        styles = pd.DataFrame("", index=df.index, columns=df.columns)
-        if "Total" in df.columns:
-            styles["Total"] = "font-weight: 800; color: #0B2D5C;"
-        return styles
-
+    # Compute max across all data cells (exclude Grand Total row and Total col)
     data_cols = [c for c in pivot.columns if c != "Total"]
+    data_rows = [r for r in pivot.index if r != "Grand Total"]
+    max_val = float(pivot.loc[data_rows, data_cols].max().max()) if data_rows and data_cols else 1.0
+
+    def style_cells(df):
+        styles = pd.DataFrame("", index=df.index, columns=df.columns)
+        for row in df.index:
+            for col in df.columns:
+                if row == "Grand Total":
+                    styles.loc[row, col] = "background-color: #EEF6FF; font-weight: 900; color: #0B2D5C;"
+                elif col == "Total":
+                    styles.loc[row, col] = "font-weight: 800; color: #0B2D5C;"
+                elif col in data_cols:
+                    try:
+                        styles.loc[row, col] = _blue_cell(float(df.loc[row, col]), max_val)
+                    except Exception:
+                        pass
+        return styles
 
     styler = (
         pivot.style
         .format(fmt_dict)
-        .apply(highlight_total_row, axis=1)
-        .apply(highlight_total_col, axis=None)
-        .background_gradient(subset=data_cols if data_cols else pivot.columns, cmap="Blues", vmin=0)
+        .apply(style_cells, axis=None)
         .set_properties(**{
             "font-size": "13px",
             "text-align": "right",
@@ -535,11 +553,25 @@ def render_insurance_aging_tables(pivot, aging_summary):
                         return ["background-color: #EEF6FF; font-weight: 900; color: #0B2D5C;"] * len(row)
                     return [""] * len(row)
 
+                # Manual blue intensity — no matplotlib
+                max_bal = float(df["Balance"].max()) if not df.empty else 1.0
+
+                def cell_style(df2):
+                    styles = pd.DataFrame("", index=df2.index, columns=df2.columns)
+                    for i in df2.index:
+                        if df2.loc[i, "AgingBucket"] == "Grand Total":
+                            styles.loc[i, :] = "background-color: #EEF6FF; font-weight: 900; color: #0B2D5C;"
+                        else:
+                            try:
+                                styles.loc[i, "Balance"] = _blue_cell(float(df2.loc[i, "Balance"]), max_bal)
+                            except Exception:
+                                pass
+                    return styles
+
                 return (
                     df.style
                     .format({"Balance": "{:,.2f}", "% of Total": "{:.1f}%"})
-                    .apply(row_style, axis=1)
-                    .background_gradient(subset=["Balance"], cmap="Blues", vmin=0)
+                    .apply(cell_style, axis=None)
                     .set_properties(**{"font-size": "13px", "padding": "6px 10px"})
                     .set_table_styles([
                         {"selector": "th", "props": [
