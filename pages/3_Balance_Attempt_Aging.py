@@ -64,7 +64,7 @@ CENTERS = {
 }
 
 # Your required order: start from 0–30
-AGING_ORDER = ["0–30 Days", "31–45 Days", "46–60 Days", ">60 Days"]
+AGING_ORDER = ["0–30 Days", "31–45 Days", "46–60 Days", ">90 Days"]
 
 # Default sold-to-klaim keywords (for medical centers)
 SOLD_TO_KLAIM_KEYWORDS_DEFAULT = ["NextCare", "Sukoon", "Almadallah", "Daman", "FMC"]
@@ -462,7 +462,7 @@ def _make_pivot(dfc: pd.DataFrame):
         ordered_cols = [c if c != "Unknown" else "No Date" for c in ordered_cols]
     pivot = pivot[ordered_cols]
     pivot["Total"] = pivot.sum(axis=1)
-    pivot = pivot.sort_values("Total", ascending=False)
+    pivot = pivot.sort_index(ascending=True)
     grand = pivot.sum(numeric_only=True).rename("Grand Total")
     pivot = pd.concat([pivot, grand.to_frame().T])
     return pivot
@@ -928,7 +928,7 @@ def add_aging(df: pd.DataFrame) -> pd.DataFrame:
     """
     today = pd.Timestamp(dt.today().date())
     bins   = [-1, 30, 45, 60, float("inf")]
-    labels = ["0–30 Days", "31–45 Days", "46–60 Days", ">60 Days"]
+    labels = ["0–30 Days", "31–45 Days", "46–60 Days", ">90 Days"]
 
     # ── Check whether the smart date columns are present ────────────────
     has_smart = any(c in df.columns for c in RESUB_DATE_COLS.values())
@@ -995,7 +995,7 @@ def sold_to_klaim_mask(series: pd.Series, keywords) -> pd.Series:
 
 def is_over_60_bucket(bucket_series: pd.Series) -> pd.Series:
     b = bucket_series.fillna("").astype(str)
-    return b.isin([">60 Days"])
+    return b.isin([">90 Days"])
 
 
 # =========================================================
