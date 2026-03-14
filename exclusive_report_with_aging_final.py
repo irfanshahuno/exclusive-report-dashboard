@@ -374,7 +374,11 @@ def style_rcm_summary(ws, title_label):
                 cell.number_format = INT_FMT
             elif col == 15:  # Rej. %
                 cell.number_format = '0.00'
-                if not is_total and cell.value and float(str(cell.value or 0)) > 5:
+                try:
+                    _pct = float(cell.value or 0)
+                except (ValueError, TypeError):
+                    _pct = 0.0
+                if not is_total and _pct > 5:
                     cell.font = RED_FONT
             else:
                 cell.number_format = NUM_FMT
