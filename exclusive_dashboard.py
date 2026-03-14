@@ -766,6 +766,49 @@ def get_report_bytes(path: str) -> bytes:
     return Path(path).read_bytes()
 
 
+def _df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Sheet1") -> bytes:
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment
+
+    output = io.BytesIO()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name[:31]
+
+    header_fill = PatternFill(start_color="D9EAF7", end_color="D9EAF7", fill_type="solid")
+    total_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+
+    headers = list(df.columns)
+    for c_idx, col_name in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=c_idx, value=col_name)
+        cell.fill = header_fill
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for r_idx, row in enumerate(df.itertuples(index=False), start=2):
+        first_val = str(row[0]).strip().lower() if len(row) > 0 else ""
+        is_gt = first_val in {"grand total", "total"}
+        for c_idx, value in enumerate(row, start=1):
+            cell = ws.cell(row=r_idx, column=c_idx, value=value)
+            if is_gt:
+                cell.fill = total_fill
+                cell.font = Font(bold=True)
+
+    for col in ws.columns:
+        max_len = 0
+        col_letter = col[0].column_letter
+        for cell in col:
+            try:
+                max_len = max(max_len, len(str(cell.value or "")))
+            except Exception:
+                pass
+        ws.column_dimensions[col_letter].width = min(max_len + 3, 40)
+
+    wb.save(output)
+    return output.getvalue()
+
+
 @st.cache_data(show_spinner=True)
 def load_core_sheets(path: str, _token: float):
     """Load the two core sheets efficiently.
@@ -1529,270 +1572,38 @@ try:
             key=f"dl_xlsx_full_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
-        # ====================== RCM SUMMARY MANAGEMENT REPORT ======================
         st.markdown("---")
-        st.markdown("### 📋 RCM Management Summary")
-        st.caption("Management-facing report with claim counts, remittances, outstanding amounts, and rejection rates per insurance.")
-
+        st.markdown("### 📘 RCM Summary")
         try:
-            import io
-            from openpyxl import Workbook as _WB
-            from openpyxl.styles import (PatternFill as _PF, Font as _Font,
-                                          Alignment as _Align, Border as _Border, Side as _Side)
-            from openpyxl.utils import get_column_letter as _gcl
-            from openpyxl.formatting.rule import ColorScaleRule as _CSR
-
             _ext_rcm = Path(str(out_path)).suffix.lower()
             _eng_rcm = "pyxlsb" if _ext_rcm == ".xlsb" else "openpyxl"
-
-            # Load raw source sheets needed for RCM summary
             try:
-                _ins_tot = pd.read_excel(str(out_path), sheet_name="Insurance_Totals", engine=_eng_rcm)
-                _ins_tot = trim_empty_rows(_ins_tot)
+                _rcm = pd.read_excel(str(out_path), sheet_name="RCM_Summary", engine=_eng_rcm)
             except Exception:
-                _ins_tot = None
+                _rcm = None
 
-            try:
-                _mon_tot = pd.read_excel(str(out_path), sheet_name="Monthly_Totals", engine=_eng_rcm)
-                _mon_tot = trim_empty_rows(_mon_tot)
-            except Exception:
-                _mon_tot = None
-
-            if _ins_tot is None or _ins_tot.empty:
-                st.info("Insurance_Totals sheet not found. Please rebuild the report first.")
+            if _rcm is None or _rcm.empty:
+                st.info("RCM_Summary sheet not found. Please rebuild the report with the updated generator.")
             else:
-                # ── Build RCM Summary DataFrame ──────────────────────────────────
-                _df = _ins_tot.copy()
-
-                # Normalise column name for insurance
-                if "Insurance" not in _df.columns and len(_df.columns) > 0:
-                    _df = _df.rename(columns={_df.columns[0]: "Insurance"})
-
-                # Drop Grand Total rows for calculation
-                _df_data = _df[~_df["Insurance"].astype(str).str.match(GT_PAT)].copy()
-
-                # We need remittance breakdown columns from source if available
-                # Map whatever columns exist → RCM columns
-                def _get(df, *names, default=0.0):
-                    for n in names:
-                        if n in df.columns:
-                            return pd.to_numeric(df[n], errors="coerce").fillna(0)
-                    return pd.Series([default] * len(df), index=df.index)
-
-                _rcm = pd.DataFrame()
-                _rcm["Insurance Name"] = _df_data["Insurance"].values
-
-                # Claim count — use a dedicated column if present, else row count approximation
-                _rcm["Claim count"] = _get(_df_data, "ClaimCount", "Claim count", "Claims").values
-
-                # Financial columns from Insurance_Totals
-                _claimed  = _get(_df_data, "Net Amount", "NetAmount", "ActivityIns", "Claimed Amount")
-                _paid     = _get(_df_data, "Paid")
-                _balance  = _get(_df_data, "Balance")
-                _rejected = _get(_df_data, "Rejected", "Rejection", "Final Rejn")
-                _accepted = _get(_df_data, "Accepted", "Rejection Accepted")
-
-                _rcm["Claimd Amount"]  = _claimed.values
-                _rcm["Remited Amt"]    = _paid.values  # best proxy without raw remit breakdown
-                _rcm["Initial pay"]    = _get(_df_data, "InitialPay", "Initial pay", "actRemitInsShare").values
-                _rcm["Resb1 pay"]      = _get(_df_data, "Resub1Pay",  "Resb1 pay", "actResub1RemitInsShare").values
-                _rcm["Resb2 pay"]      = _get(_df_data, "Resub2Pay",  "Resb2 pay", "actResub2RemitInsShare").values
-                _rcm["Resb3 pay"]      = _get(_df_data, "Resub3Pay",  "Resb3 pay", "actResub3RemitInsShare").values
-                _rcm["Total pay"]      = _paid.values
-                _rcm["Sub Nt Rmtd\n(outstanding amount)"]   = (_claimed - _paid).values
-                _rcm["Pending for\nResubmission"]            = _get(_df_data, "PendingResub", "Pending for Resubmission").values
-                _rcm["Rsub Nt Rmtd\n(outstanding amount)"]  = _get(_df_data, "RsubNtRmtd", "Rsub Nt Rmtd").values
-                _rcm["Rejection Accepted"] = _accepted.values
-                _rcm["Final Rejn"]         = _rejected.values
-                _rcm["Rej. %"] = (_rejected / _claimed.replace(0, float("nan")) * 100).fillna(0).values
-
-                # Sort A→Z
-                _rcm = _rcm.sort_values("Insurance Name").reset_index(drop=True)
-
-                # Grand Total row
-                _gt = {c: _rcm[c].sum() if _rcm[c].dtype.kind in "fi" else "Grand Total"
-                       for c in _rcm.columns}
-                _gt["Insurance Name"] = "Grand Total"
-                _gt_claimed = _gt["Claimd Amount"]
-                _gt["Rej. %"] = (_gt["Final Rejn"] / _gt_claimed * 100) if _gt_claimed else 0
-                _rcm = pd.concat([_rcm, pd.DataFrame([_gt])], ignore_index=True)
-
-                # ── Build Excel workbook ─────────────────────────────────────────
-                _wb2 = _WB()
-
-                # Colours
-                _navy      = "1F4E78"
-                _hdr_gray  = "C9C9C9"
-                _soft_blue = "DDEBF7"
-                _peach     = "FCE4D6"
-                _red_str   = "C00000"
-                _dark      = "222222"
-                _green_col = "00B050"
-                _thin      = _Side(style="thin", color="BFBFBF")
-                _med_navy  = _Side(style="medium", color=_navy)
-                _bdr       = _Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
-
-                _center_name = cfg.get("name", "EMC")
-                _yr_label    = str(st.session_state.get("year", ""))
-                _title_txt   = f"{_center_name} - RCM SUMMARY {_yr_label}"
-
-                # Sheet 1: RCM Summary
-                _ws  = _wb2.active
-                _ws.title = "RCM Summary"
-                _ws.sheet_view.showGridLines = False
-
-                # Title row
-                _ws.merge_cells("A1:O1")
-                _ws["A1"] = _title_txt
-                _ws["A1"].font      = _Font(size=16, bold=True, color=_dark)
-                _ws["A1"].alignment = _Align(horizontal="center", vertical="center")
-                _ws["A1"].fill      = _PF("solid", fgColor="D9E1F2")
-                _ws.row_dimensions[1].height = 30
-
-                # Blank row 2
-                _ws.row_dimensions[2].height = 4
-
-                # Header row 3
-                _hdrs = [
-                    "Insurance Name", "Claim count", "Claimd Amount", "Remited Amt",
-                    "Initial pay", "Resb1 pay", "Resb2 pay", "Resb3 pay", "Total pay",
-                    "Sub Nt Rmtd\n(outstanding amount)", "Pending for\nResubmission",
-                    "Rsub Nt Rmtd\n(outstanding amount)", "Rejection Accepted",
-                    "Final Rejn", "Rej. %"
-                ]
-                _pay_cols_idx = {5, 6, 7, 8, 9}  # 1-based
-                for _ci, _h in enumerate(_hdrs, 1):
-                    _cell = _ws.cell(3, _ci, _h)
-                    _cell.font      = _Font(bold=True, size=10,
-                                            color=(_green_col if _ci in _pay_cols_idx
-                                                   else _red_str if _ci == 15 else _dark))
-                    _cell.fill      = _PF("solid", fgColor=_hdr_gray)
-                    _cell.alignment = _Align(horizontal="center", vertical="center", wrap_text=True)
-                    _cell.border    = _bdr
-                _ws.row_dimensions[3].height = 40
-
-                # Data rows start at row 4
-                _data_start = 4
-                _col_keys = [
-                    "Insurance Name", "Claim count", "Claimd Amount", "Remited Amt",
-                    "Initial pay", "Resb1 pay", "Resb2 pay", "Resb3 pay", "Total pay",
-                    "Sub Nt Rmtd\n(outstanding amount)", "Pending for\nResubmission",
-                    "Rsub Nt Rmtd\n(outstanding amount)", "Rejection Accepted",
-                    "Final Rejn", "Rej. %"
-                ]
-                for _ri, _row in _rcm.iterrows():
-                    _r = _data_start + _ri
-                    _is_gt = str(_row["Insurance Name"]) == "Grand Total"
-                    for _ci, _ck in enumerate(_col_keys, 1):
-                        _val = _row.get(_ck, "")
-                        # Use formula for Total pay and Rej%
-                        if _ci == 9 and not _is_gt:
-                            _val = f"=SUM(E{_r}:H{_r})"
-                        elif _ci == 15 and not _is_gt:
-                            _val = f"=IFERROR(N{_r}/C{_r}*100,0)"
-                        _c = _ws.cell(_r, _ci, _val)
-                        _c.border = _bdr
-                        if _is_gt:
-                            _c.fill = _PF("solid", fgColor=_soft_blue)
-                            _c.font = _Font(bold=True, size=10,
-                                            color=(_red_str if _ci == 15 else _dark))
-                            _c.border = _Border(top=_med_navy, bottom=_med_navy,
-                                                left=_thin, right=_thin)
-                        else:
-                            _c.font = _Font(size=10,
-                                            color=(_red_str if _ci == 15 else _dark))
-                        _c.alignment = _Align(
-                            horizontal="left" if _ci == 1 else "center",
-                            vertical="center"
-                        )
-                        # Number formats
-                        if _ci == 2:
-                            _c.number_format = "#,##0"
-                        elif _ci == 15:
-                            _c.number_format = "0.00"
-                        elif _ci > 2:
-                            _c.number_format = "#,##0.00;[Red](#,##0.00);-"
-
-                _total_row = _data_start + len(_rcm) - 1  # last row (Grand Total)
-
-                # Grand Total formulas for sum columns (cols 2–14)
-                for _ci2 in range(2, 15):
-                    _ltr = _gcl(_ci2)
-                    _ws.cell(_total_row, _ci2,
-                             f"=SUM({_ltr}{_data_start}:{_ltr}{_total_row - 1})")
-                _ws.cell(_total_row, 15,
-                         f"=IFERROR(N{_total_row}/C{_total_row}*100,0)")
-
-                # Column widths
-                _col_widths2 = {"A":45,"B":12,"C":15,"D":14,"E":13,"F":11,
-                                "G":11,"H":11,"I":13,"J":16,"K":14,"L":16,
-                                "M":15,"N":12,"O":9}
-                for _cl, _cw in _col_widths2.items():
-                    _ws.column_dimensions[_cl].width = _cw
-
-                _ws.freeze_panes = "A4"
-                _ws.auto_filter.ref = f"A3:O{_total_row}"
-
-                # Conditional formatting on Rej. % column
-                _ws.conditional_formatting.add(
-                    f"O{_data_start}:O{_total_row - 1}",
-                    _CSR(start_type="num", start_value=0,  start_color="E2F0D9",
-                         mid_type="percentile", mid_value=50, mid_color="FFF2CC",
-                         end_type="num",   end_value=15,  end_color="F4CCCC")
-                )
-
-                # Sheet 2: Monthly Totals (if available)
-                if _mon_tot is not None and not _mon_tot.empty:
-                    _ws_m = _wb2.create_sheet("Monthly_Totals")
-                    _ws_m.sheet_view.showGridLines = False
-                    _m_hdrs = list(_mon_tot.columns)
-                    _m_thin = _Side(style="thin", color="BFBFBF")
-                    _m_bdr  = _Border(left=_m_thin, right=_m_thin, top=_m_thin, bottom=_m_thin)
-                    for _ci, _h in enumerate(_m_hdrs, 1):
-                        _c = _ws_m.cell(1, _ci, _h)
-                        _c.fill      = _PF("solid", fgColor=_navy)
-                        _c.font      = _Font(bold=True, color="FFFFFF", size=10)
-                        _c.alignment = _Align(horizontal="center", vertical="center")
-                        _c.border    = _m_bdr
-                    _ws_m.row_dimensions[1].height = 22
-                    _m_data = _mon_tot[_mon_tot.iloc[:, 0] != "Grand Total"].copy()
-                    _m_gt   = _mon_tot[_mon_tot.iloc[:, 0] == "Grand Total"]
-                    _m_all  = pd.concat([_m_data, _m_gt], ignore_index=True)
-                    for _ri2, _row2 in _m_all.iterrows():
-                        _is_gt2 = str(_row2.iloc[0]) == "Grand Total"
-                        for _ci2, _v in enumerate(_row2, 1):
-                            _c2 = _ws_m.cell(_ri2 + 2, _ci2, _v)
-                            _c2.fill      = _PF("solid", fgColor=_peach if _is_gt2 else "EBF3FB")
-                            _c2.font      = _Font(bold=_is_gt2, size=10,
-                                                   color=("8B0000" if _is_gt2 else _dark))
-                            _c2.alignment = _Align(horizontal="right" if _ci2 > 1 else "left",
-                                                    vertical="center")
-                            _c2.border    = _m_bdr
-                            if _ci2 > 1:
-                                _c2.number_format = "#,##0.00"
-                    _ws_m.freeze_panes = "A2"
-                    for _col3 in _ws_m.columns:
-                        _max_len = max((len(str(_cell2.value or "")) for _cell2 in _col3), default=8)
-                        _ws_m.column_dimensions[_gcl(_col3[0].column)].width = min(_max_len + 4, 40)
-
-                # Save to buffer
-                _buf2 = io.BytesIO()
-                _wb2.save(_buf2)
-                _buf2.seek(0)
-
-                _fname_rcm = f"{cfg['key']}_{st.session_state.get('year')}_RCM_Summary.xlsx"
+                _rcm = trim_empty_rows(_rcm)
+                _rcm = move_grand_total_last(_rcm) if not _rcm.empty else _rcm
                 st.download_button(
-                    "⬇️ Download RCM Management Summary (.xlsx)",
-                    _buf2.read(),
-                    file_name=_fname_rcm,
+                    "⬇️ Download RCM Summary (.xlsx)",
+                    data=_df_to_excel_bytes(_rcm, sheet_name="RCM_Summary"),
+                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_RCM_Summary.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
-                    key=f"dl_rcm_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                    key=f"dl_xlsx_rcm_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
                 )
-
-        except Exception as _rcm_err:
-            st.warning(f"RCM Summary could not be generated: {_rcm_err}")
-        # ============================================================================
+                st.download_button(
+                    "⬇️ Export RCM Summary (CSV)",
+                    data=_rcm.to_csv(index=False).encode("utf-8"),
+                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_RCM_Summary.csv",
+                    use_container_width=True,
+                    key=f"dl_csv_rcm_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                )
+        except Exception as e:
+            st.warning(f"Could not prepare RCM Summary download: {e}")
 
         # ====================== MONTHLY BREAKDOWN (DOWNLOAD ONLY) ======================
         st.markdown("---")
