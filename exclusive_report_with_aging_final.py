@@ -162,7 +162,7 @@ def build_rcm_summary(df, date_label=""):
 
     summary = pd.DataFrame({
         "Insurance Name":                        claim_counts.index,
-        "Claim count":                           claim_counts.values,
+        "Claim count":                           claim_counts.astype(int).values,
         "Claimed Amount":                        grp["ActivityIns"].sum().values,
         "Remitted Amt":                          grp["RemittedAmt"].sum().values,
         "Initial pay":                           grp["InitialPay"].sum().values,
@@ -189,7 +189,7 @@ def build_rcm_summary(df, date_label=""):
     # Grand Total row
     total = {
         "Insurance Name": "Grand Total",
-        "Claim count": summary["Claim count"].sum(),
+        "Claim count": int(summary["Claim count"].sum()),
         "Claimed Amount": summary["Claimed Amount"].sum(),
         "Remitted Amt": summary["Remitted Amt"].sum(),
         "Initial pay": summary["Initial pay"].sum(),
@@ -452,8 +452,25 @@ def main():
     monthly_insurance_detail = build_monthly_insurance_detail(df)
 
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
-        # RCM_Summary is the first (and most important) sheet
+        # RCM_Summary — write manually so Total pay uses Excel formula
         rcm_summary.to_excel(writer, sheet_name="RCM_Summary", index=False)
+        # Patch Total pay (col I = col 9, 1-based) with SUM formula
+        # After styling, rows shift by 2 (title + blank), but here we write BEFORE styling
+        # so data row 1 = Excel row 2 (header is row 1)
+        ws_rcm = writer.sheets["RCM_Summary"]
+        n_data = len(rcm_summary)  # includes Grand Total row
+        for r in range(2, n_data + 2):  # row 2 .. last data row
+            # Col 9 = I = Total pay = SUM(E:H) = InitialPay+Resb1+Resb2+Resb3+TKBK
+            ws_rcm.cell(row=r, column=9).value = f"=SUM(E{r}:H{r})"
+            # Col 15 = O = Rej. % = Final Rejn / Claimed Amount * 100
+            ws_rcm.cell(row=r, column=15).value = f"=IFERROR(N{r}/C{r}*100,0)"
+            # Claim count: force integer
+            cc = ws_rcm.cell(row=r, column=2).value
+            if cc is not None:
+                try:
+                    ws_rcm.cell(row=r, column=2).value = int(float(cc))
+                except Exception:
+                    pass
         if WRITE_EXCLUSIVE_SHEET:
             df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
         insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
