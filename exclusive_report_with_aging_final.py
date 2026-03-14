@@ -48,53 +48,72 @@ def ensure_numeric(df):
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
     return df
 
+def ffill_status(df):
+    """Forward-fill the Status column: blank/NaN rows inherit the last non-empty status above."""
+    if "Status" not in df.columns:
+        df["Status"] = ""
+    df["Status"] = (
+        df["Status"]
+        .astype(str)
+        .str.strip()
+        .replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+    )
+    df["Status"] = df["Status"].ffill().fillna("")
+    return df
+
+
 def compute_measures(df):
-    df["InitialPay"]  = df["actRemitInsShare"]
-    df["Resub1Pay"]   = df["actResub1RemitInsShare"]
-    df["Resub2Pay"]   = df["actResub2RemitInsShare"]
-    df["Resub3Pay"]   = df["actResub3RemitInsShare"]
+    # ── Step 1: ffill Status FIRST so all bucketing is correct ──────────────
+    df = ffill_status(df)
 
-    # RemittedAmt = all remittance columns (including TKBK)
+    # ── Step 2: remittance columns ───────────────────────────────────────────
+    df["InitialPay"] = df["actRemitInsShare"]
+    df["Resub1Pay"]  = df["actResub1RemitInsShare"]
+    df["Resub2Pay"]  = df["actResub2RemitInsShare"]
+    df["Resub3Pay"]  = df["actResub3RemitInsShare"]
+
     df["RemittedAmt"] = df[["actRemitInsShare", "actResub1RemitInsShare",
-                             "actResub2RemitInsShare", "actResub3RemitInsShare",
-                             "TKBKAmountAct"]].sum(axis=1)
+                              "actResub2RemitInsShare", "actResub3RemitInsShare",
+                              "TKBKAmountAct"]].sum(axis=1)
 
-    # TotalPay = Initial + Resub1 + Resub2 + Resub3 (same as RemittedAmt for most cases)
     df["TotalPay"] = df[["actRemitInsShare", "actResub1RemitInsShare",
-                          "actResub2RemitInsShare", "actResub3RemitInsShare"]].sum(axis=1)
+                           "actResub2RemitInsShare", "actResub3RemitInsShare",
+                           "TKBKAmountAct"]].sum(axis=1)
 
-    # Outstanding = Claimed - Remitted
-    df["SubNtRmtd"] = df["ActivityIns"] - df["RemittedAmt"]
+    df["Paid"] = df["RemittedAmt"]
 
+    # ── Step 3: Status-based buckets (on ffilled Status) ────────────────────
+    st = df["Status"].astype(str).str.strip()
+
+    # Sub Nt Rmtd  → Status == "Submitted" (exact, case-insensitive)
+    mask_submitted   = st.str.lower() == "submitted"
+
+    # Rsub Nt Rmtd → Status is "Submitted(Resub- N)" — submitted resubmissions only
+    mask_resub       = st.str.lower().str.contains(r"submitted\(resub-\s*\d", na=False)
+
+    # Rejection Accepted → Status starts with "Rejection Accepted"
+    mask_rej_acc     = st.str.lower().str.startswith("rejection accepted")
+
+    # Pending for Resubmission → Status starts with "Not Submitted" (covers Not Submitted, Not Submitted(Resub- 1/2/3) etc)
+    mask_pending     = st.str.lower().str.startswith("not submitted")
+
+    df["SubNtRmtd"]   = df["ActivityIns"].where(mask_submitted, 0.0)
+    df["RsubNtRmtd"]  = df["ActivityIns"].where(mask_resub,     0.0)
+    df["Accepted"]    = df["ActivityIns"].where(mask_rej_acc,   0.0)
+    df["PendingResub"]= df["ActivityIns"].where(mask_pending,   0.0)
+
+    # ── Step 4: Final Rejection & Balance (existing logic) ───────────────────
     df["Rejection"] = 0.0
-    df["Accepted"]  = 0.0
     df["Balance"]   = 0.0
-    df["Paid"]      = df["RemittedAmt"]
 
     if "ActivityStatus" in df.columns and "DenialCode" in df.columns:
-        lower_status = df["ActivityStatus"].astype(str).str.lower()
+        lower_as   = df["ActivityStatus"].astype(str).str.lower()
         mask_paid    = df["Paid"] > 0
-        mask_reject  = (df["Paid"] == 0) & (lower_status == "rejected") & df["DenialCode"].notna()
+        mask_reject  = (df["Paid"] == 0) & (lower_as == "rejected") & df["DenialCode"].notna()
         mask_balance = (df["Paid"] == 0) & ~mask_reject
 
-        df.loc[mask_paid,    "Accepted"]  = df["ActivityIns"] - df["Paid"]
         df.loc[mask_reject,  "Rejection"] = df["ActivityIns"]
         df.loc[mask_balance, "Balance"]   = df["ActivityIns"]
-
-    # PendingForResubmission: outstanding on unpaid resub claims
-    # = SubNtRmtd for rows where resub1 remit is 0 but resub was attempted
-    # Approximated as: rows where Balance > 0 and initial was submitted
-    df["PendingResub"] = 0.0
-    if "ActivityStatus" in df.columns:
-        lower_status = df["ActivityStatus"].astype(str).str.lower()
-        mask_pending = (df["Paid"] == 0) & lower_status.str.contains("pending|resubmit", na=False)
-        df.loc[mask_pending, "PendingResub"] = df.loc[mask_pending, "ActivityIns"]
-
-    # RsubNtRmtd: outstanding on resubmitted but not yet remitted claims
-    df["RsubNtRmtd"] = 0.0
-    mask_resub_outstanding = (df["Resub1Pay"] + df["Resub2Pay"] + df["Resub3Pay"] == 0) & \
-                             (df["InitialPay"] == 0) & (df["Rejection"] == 0)
-    df.loc[mask_resub_outstanding, "RsubNtRmtd"] = df.loc[mask_resub_outstanding, "ActivityIns"]
 
     return df
 
@@ -134,21 +153,28 @@ def build_rcm_summary(df, date_label=""):
     """
     grp = df.groupby("Insurance", dropna=False)
 
+    # Claim count = distinct UniqueIDs per insurance (remove duplicates)
+    uid_col = next((c for c in ["UniqueID", "ClaimID", "ActivityID"] if c in df.columns), None)
+    if uid_col:
+        claim_counts = df.groupby("Insurance", dropna=False)[uid_col].nunique()
+    else:
+        claim_counts = grp["ActivityIns"].count()
+
     summary = pd.DataFrame({
-        "Insurance Name":           grp["ActivityIns"].count().rename("Claim count").index,
-        "Claim count":              grp["ActivityIns"].count().values,
-        "Claimed Amount":           grp["ActivityIns"].sum().values,
-        "Remitted Amt":             grp["RemittedAmt"].sum().values,
-        "Initial pay":              grp["InitialPay"].sum().values,
-        "Resb1 pay":                grp["Resub1Pay"].sum().values,
-        "Resb2 pay":                grp["Resub2Pay"].sum().values,
-        "Resb3 pay":                grp["Resub3Pay"].sum().values,
-        "Total pay":                grp["TotalPay"].sum().values,
+        "Insurance Name":                        claim_counts.index,
+        "Claim count":                           claim_counts.values,
+        "Claimed Amount":                        grp["ActivityIns"].sum().values,
+        "Remitted Amt":                          grp["RemittedAmt"].sum().values,
+        "Initial pay":                           grp["InitialPay"].sum().values,
+        "Resb1 pay":                             grp["Resub1Pay"].sum().values,
+        "Resb2 pay":                             grp["Resub2Pay"].sum().values,
+        "Resb3 pay":                             grp["Resub3Pay"].sum().values,
+        "Total pay":                             grp["TotalPay"].sum().values,
         "Sub Nt Rmtd\n(outstanding amount)":    grp["SubNtRmtd"].sum().values,
         "Pending for\nResubmission":            grp["PendingResub"].sum().values,
         "Rsub Nt Rmtd\n(outstanding amount)":   grp["RsubNtRmtd"].sum().values,
-        "Rejection Accepted":       grp["Accepted"].sum().values,
-        "Final Rejn":               grp["Rejection"].sum().values,
+        "Rejection Accepted":                    grp["Accepted"].sum().values,
+        "Final Rejn":                            grp["Rejection"].sum().values,
     })
 
     # Sort A→Z by insurance name
@@ -218,7 +244,11 @@ def build_insurance_totals(df):
               "RsubNtRmtd":   "Rsub Nt Rmtd",
           })
     )
-    counts = df.groupby("Insurance", dropna=False)["ActivityIns"].count().reset_index()
+    uid_col2 = next((c for c in ["UniqueID", "ClaimID", "ActivityID"] if c in df.columns), None)
+    if uid_col2:
+        counts = df.groupby("Insurance", dropna=False)[uid_col2].nunique().reset_index()
+    else:
+        counts = df.groupby("Insurance", dropna=False)["ActivityIns"].count().reset_index()
     counts.columns = ["Insurance", "Claim count"]
     t = t.merge(counts, on="Insurance", how="left")
     ordered = ["Insurance", "Claim count", "Net Amount", "Remitted Amt",
