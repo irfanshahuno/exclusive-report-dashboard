@@ -197,12 +197,35 @@ def build_balance_aging_summary(balance_df):
     return pivot
 
 def build_insurance_totals(df):
+    agg_cols = ["ActivityIns", "Paid", "Rejection", "Accepted", "Balance",
+                "InitialPay", "Resub1Pay", "Resub2Pay", "Resub3Pay",
+                "TotalPay", "RemittedAmt", "SubNtRmtd", "PendingResub", "RsubNtRmtd"]
+    agg_cols = [c for c in agg_cols if c in df.columns]
     t = (
-        df.groupby("Insurance", dropna=False)[["ActivityIns", "Paid", "Rejection", "Accepted", "Balance"]]
+        df.groupby("Insurance", dropna=False)[agg_cols]
           .sum().reset_index()
-          .rename(columns={"ActivityIns": "Net Amount", "Rejection": "Rejected"})
+          .rename(columns={
+              "ActivityIns":  "Net Amount",
+              "Rejection":    "Rejected",
+              "InitialPay":   "Initial pay",
+              "Resub1Pay":    "Resb1 pay",
+              "Resub2Pay":    "Resb2 pay",
+              "Resub3Pay":    "Resb3 pay",
+              "TotalPay":     "Total pay",
+              "RemittedAmt":  "Remitted Amt",
+              "SubNtRmtd":    "Sub Nt Rmtd",
+              "PendingResub": "Pending for Resubmission",
+              "RsubNtRmtd":   "Rsub Nt Rmtd",
+          })
     )
-    t = t[["Insurance", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
+    counts = df.groupby("Insurance", dropna=False)["ActivityIns"].count().reset_index()
+    counts.columns = ["Insurance", "Claim count"]
+    t = t.merge(counts, on="Insurance", how="left")
+    ordered = ["Insurance", "Claim count", "Net Amount", "Remitted Amt",
+               "Initial pay", "Resb1 pay", "Resb2 pay", "Resb3 pay", "Total pay",
+               "Sub Nt Rmtd", "Pending for Resubmission", "Rsub Nt Rmtd",
+               "Paid", "Balance", "Rejected", "Accepted"]
+    t = t[[c for c in ordered if c in t.columns]]
     total = {c: t[c].sum() for c in t.columns if c != "Insurance"}
     total["Insurance"] = "Grand Total"
     return pd.concat([t, pd.DataFrame([total])], ignore_index=True)
