@@ -4,15 +4,13 @@ import sys, os, hashlib, argparse
 from datetime import datetime
 import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
-# =========================================
-# Toggle: write the raw "Exclusive_Report" sheet?
-# =========================================
-WRITE_EXCLUSIVE_SHEET = False  # <-- leave False to skip that sheet
+WRITE_EXCLUSIVE_SHEET = False
 
 # -------------------- helpers --------------------
-def sha1_short(path: str) -> str:
+def sha1_short(path):
     h = hashlib.sha1()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
@@ -20,29 +18,24 @@ def sha1_short(path: str) -> str:
     return h.hexdigest()[:12]
 
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="Build Exclusive_Report_with_Aging from an input .xlsx"
-    )
+    p = argparse.ArgumentParser(description="Build Exclusive_Report_with_Aging from an input .xlsx")
     p.add_argument("input_xlsx", help="Path to source Excel (.xlsx)")
-    p.add_argument("--out", dest="out_xlsx", required=True,
-                   help="Path to write the output workbook (.xlsx)")
+    p.add_argument("--out", dest="out_xlsx", required=True, help="Path to write the output workbook (.xlsx)")
     args = p.parse_args()
-
     if not os.path.exists(args.input_xlsx):
         raise FileNotFoundError(f"❌ File not found: {args.input_xlsx}")
     if not args.input_xlsx.lower().endswith(".xlsx"):
         raise ValueError("❌ Input must be .xlsx")
-    out_dir = os.path.dirname(os.path.abspath(args.out_xlsx)) or "."
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(args.out_xlsx)) or ".", exist_ok=True)
     return args
 
-# -------------------- ETL parts --------------------
-def load_data(input_file: str) -> pd.DataFrame:
+# -------------------- ETL --------------------
+def load_data(input_file):
     df = pd.read_excel(input_file, engine="openpyxl")
     df.columns = df.columns.str.strip()
     return df
 
-def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
+def ensure_numeric(df):
     num_cols = [
         "ActivityIns",
         "actRemitInsShare", "actResub1RemitInsShare",
@@ -55,29 +48,57 @@ def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
     return df
 
-def compute_measures(df: pd.DataFrame) -> pd.DataFrame:
-    df["Paid"] = df[
-        ["actRemitInsShare", "actResub1RemitInsShare",
-         "actResub2RemitInsShare", "actResub3RemitInsShare",
-         "TKBKAmountAct"]
-    ].sum(axis=1)
+def compute_measures(df):
+    df["InitialPay"]  = df["actRemitInsShare"]
+    df["Resub1Pay"]   = df["actResub1RemitInsShare"]
+    df["Resub2Pay"]   = df["actResub2RemitInsShare"]
+    df["Resub3Pay"]   = df["actResub3RemitInsShare"]
 
-    df["Rejection"], df["Accepted"], df["Balance"] = 0.0, 0.0, 0.0
+    # RemittedAmt = all remittance columns (including TKBK)
+    df["RemittedAmt"] = df[["actRemitInsShare", "actResub1RemitInsShare",
+                             "actResub2RemitInsShare", "actResub3RemitInsShare",
+                             "TKBKAmountAct"]].sum(axis=1)
+
+    # TotalPay = Initial + Resub1 + Resub2 + Resub3 (same as RemittedAmt for most cases)
+    df["TotalPay"] = df[["actRemitInsShare", "actResub1RemitInsShare",
+                          "actResub2RemitInsShare", "actResub3RemitInsShare"]].sum(axis=1)
+
+    # Outstanding = Claimed - Remitted
+    df["SubNtRmtd"] = df["ActivityIns"] - df["RemittedAmt"]
+
+    df["Rejection"] = 0.0
+    df["Accepted"]  = 0.0
+    df["Balance"]   = 0.0
+    df["Paid"]      = df["RemittedAmt"]
 
     if "ActivityStatus" in df.columns and "DenialCode" in df.columns:
         lower_status = df["ActivityStatus"].astype(str).str.lower()
-        mask_paid = df["Paid"] > 0
-        mask_reject = (df["Paid"] == 0) & (lower_status == "rejected") & (df["DenialCode"].notna())
+        mask_paid    = df["Paid"] > 0
+        mask_reject  = (df["Paid"] == 0) & (lower_status == "rejected") & df["DenialCode"].notna()
         mask_balance = (df["Paid"] == 0) & ~mask_reject
 
-        df.loc[mask_paid, "Accepted"] = df["ActivityIns"] - df["Paid"]
-        df.loc[mask_reject, "Rejection"] = df["ActivityIns"]
-        df.loc[mask_balance, "Balance"] = df["ActivityIns"]
+        df.loc[mask_paid,    "Accepted"]  = df["ActivityIns"] - df["Paid"]
+        df.loc[mask_reject,  "Rejection"] = df["ActivityIns"]
+        df.loc[mask_balance, "Balance"]   = df["ActivityIns"]
+
+    # PendingForResubmission: outstanding on unpaid resub claims
+    # = SubNtRmtd for rows where resub1 remit is 0 but resub was attempted
+    # Approximated as: rows where Balance > 0 and initial was submitted
+    df["PendingResub"] = 0.0
+    if "ActivityStatus" in df.columns:
+        lower_status = df["ActivityStatus"].astype(str).str.lower()
+        mask_pending = (df["Paid"] == 0) & lower_status.str.contains("pending|resubmit", na=False)
+        df.loc[mask_pending, "PendingResub"] = df.loc[mask_pending, "ActivityIns"]
+
+    # RsubNtRmtd: outstanding on resubmitted but not yet remitted claims
+    df["RsubNtRmtd"] = 0.0
+    mask_resub_outstanding = (df["Resub1Pay"] + df["Resub2Pay"] + df["Resub3Pay"] == 0) & \
+                             (df["InitialPay"] == 0) & (df["Rejection"] == 0)
+    df.loc[mask_resub_outstanding, "RsubNtRmtd"] = df.loc[mask_resub_outstanding, "ActivityIns"]
 
     return df
 
-def add_aging(df: pd.DataFrame) -> pd.DataFrame:
-    from datetime import datetime as dt
+def add_aging(df):
     date_candidates = [c for c in ["SubmissionDate", "ClaimDate", "VisitDate"] if c in df.columns]
     if date_candidates:
         for c in date_candidates:
@@ -86,152 +107,262 @@ def add_aging(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["RefDate"] = pd.NaT
 
-    today = pd.Timestamp(dt.today().date())
+    today = pd.Timestamp(datetime.today().date())
     df["DaysDiff"] = (today - df["RefDate"]).dt.days
-
-    bins = [-1, 30, 45, 60, 90, float("inf")]
+    bins   = [-1, 30, 45, 60, 90, float("inf")]
     labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
     df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
     return df
 
-def ensure_insurance_column(df: pd.DataFrame) -> pd.DataFrame:
-    insurance_col = next((c for c in ["Insurance", "PayerName", "Insurer", "Plan"] if c in df.columns), "Insurance")
-    if insurance_col not in df.columns:
+def ensure_insurance_column(df):
+    insurance_col = next((c for c in ["Insurance", "PayerName", "Insurer", "Plan"] if c in df.columns), None)
+    if insurance_col is None:
         df["Insurance"] = "Not Available"
     elif insurance_col != "Insurance":
         df["Insurance"] = df[insurance_col]
     return df
 
-def build_balance_aging_summary(balance_df: pd.DataFrame) -> pd.DataFrame:
-    labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
-    pivot_summary = pd.pivot_table(
-        balance_df,
-        index="Insurance",
-        columns="AgingBucket",
-        values="Balance",
-        aggfunc="sum",
-        fill_value=0,
-        observed=False,
-    ).reindex(columns=labels)
-    pivot_summary["Grand Total"] = pivot_summary.sum(axis=1)
-    pivot_summary.loc["Grand Total"] = pivot_summary.sum(axis=0)
-    pivot_summary.reset_index(inplace=True)
-    return pivot_summary
+# -------------------- Summary builders --------------------
 
-def build_insurance_totals(df: pd.DataFrame) -> pd.DataFrame:
-    insurance_totals = (
-        df.groupby("Insurance", dropna=False)[["ActivityIns", "Paid", "Rejection", "Accepted", "Balance"]]
-          .sum()
-          .reset_index()
-    )
-    insurance_totals = insurance_totals.rename(columns={"ActivityIns": "Net Amount", "Rejection": "Rejected"})
-    insurance_totals = insurance_totals[["Insurance", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
-    total_row = {
-        "Insurance": "Grand Total",
-        "Net Amount": insurance_totals["Net Amount"].sum(),
-        "Paid": insurance_totals["Paid"].sum(),
-        "Balance": insurance_totals["Balance"].sum(),
-        "Rejected": insurance_totals["Rejected"].sum(),
-        "Accepted": insurance_totals["Accepted"].sum(),
-    }
-    insurance_totals = pd.concat([insurance_totals, pd.DataFrame([total_row])], ignore_index=True)
-    return insurance_totals
+def build_rcm_summary(df, date_label=""):
+    """
+    Management-facing RCM Summary sheet with columns:
+    Insurance Name | Claim count | Claimed Amount | Remitted Amt |
+    Initial pay | Resb1 pay | Resb2 pay | Resb3 pay | Total pay |
+    Sub Nt Rmtd | Pending for Resubmission | Rsub Nt Rmtd |
+    Rejection Accepted | Final Rejn | Rej. %
+    """
+    grp = df.groupby("Insurance", dropna=False)
 
-def build_monthly_insurance_detail(df: pd.DataFrame) -> pd.DataFrame:
-    """For each month, insurance-wise breakdown: Net Amount, Paid, Balance, Rejected, Accepted."""
-    date_col = next(
-        (c for c in ["VisitDate", "SubmissionDate", "ClaimDate"] if c in df.columns), None
-    )
-    if date_col is None:
-        return pd.DataFrame()
-
-    df = df.copy()
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
-    df = df.dropna(subset=[date_col])
-    df["_Month"] = df[date_col].dt.to_period("M").dt.strftime("%B %Y")
-
-    result = (
-        df.groupby(["_Month", "Insurance"], observed=True)[
-            ["ActivityIns", "Paid", "Rejection", "Accepted", "Balance"]
-        ]
-        .sum()
-        .reset_index()
-    )
-    result = result.rename(columns={
-        "_Month": "Month",
-        "ActivityIns": "Net Amount",
-        "Rejection": "Rejected",
+    summary = pd.DataFrame({
+        "Insurance Name":           grp["ActivityIns"].count().rename("Claim count").index,
+        "Claim count":              grp["ActivityIns"].count().values,
+        "Claimed Amount":           grp["ActivityIns"].sum().values,
+        "Remitted Amt":             grp["RemittedAmt"].sum().values,
+        "Initial pay":              grp["InitialPay"].sum().values,
+        "Resb1 pay":                grp["Resub1Pay"].sum().values,
+        "Resb2 pay":                grp["Resub2Pay"].sum().values,
+        "Resb3 pay":                grp["Resub3Pay"].sum().values,
+        "Total pay":                grp["TotalPay"].sum().values,
+        "Sub Nt Rmtd\n(outstanding amount)":    grp["SubNtRmtd"].sum().values,
+        "Pending for\nResubmission":            grp["PendingResub"].sum().values,
+        "Rsub Nt Rmtd\n(outstanding amount)":   grp["RsubNtRmtd"].sum().values,
+        "Rejection Accepted":       grp["Accepted"].sum().values,
+        "Final Rejn":               grp["Rejection"].sum().values,
     })
-    result = result[["Month", "Insurance", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
-    return result
 
+    # Sort A→Z by insurance name
+    summary = summary.sort_values("Insurance Name").reset_index(drop=True)
 
-def build_monthly_totals(df: pd.DataFrame) -> pd.DataFrame:
-    """Same structure as Insurance_Totals but grouped by VisitDate month."""
-    # Find date column
-    date_col = next(
-        (c for c in ["VisitDate", "SubmissionDate", "ClaimDate"] if c in df.columns), None
+    # Rej. % = Final Rejn / Claimed Amount * 100
+    summary["Rej. %"] = summary.apply(
+        lambda r: (r["Final Rejn"] / r["Claimed Amount"] * 100) if r["Claimed Amount"] != 0 else 0,
+        axis=1
     )
+
+    # Grand Total row
+    total = {
+        "Insurance Name": "Grand Total",
+        "Claim count": summary["Claim count"].sum(),
+        "Claimed Amount": summary["Claimed Amount"].sum(),
+        "Remitted Amt": summary["Remitted Amt"].sum(),
+        "Initial pay": summary["Initial pay"].sum(),
+        "Resb1 pay": summary["Resb1 pay"].sum(),
+        "Resb2 pay": summary["Resb2 pay"].sum(),
+        "Resb3 pay": summary["Resb3 pay"].sum(),
+        "Total pay": summary["Total pay"].sum(),
+        "Sub Nt Rmtd\n(outstanding amount)": summary["Sub Nt Rmtd\n(outstanding amount)"].sum(),
+        "Pending for\nResubmission": summary["Pending for\nResubmission"].sum(),
+        "Rsub Nt Rmtd\n(outstanding amount)": summary["Rsub Nt Rmtd\n(outstanding amount)"].sum(),
+        "Rejection Accepted": summary["Rejection Accepted"].sum(),
+        "Final Rejn": summary["Final Rejn"].sum(),
+        "Rej. %": 0.0,
+    }
+    tot_claimed = total["Claimed Amount"]
+    if tot_claimed:
+        total["Rej. %"] = total["Final Rejn"] / tot_claimed * 100
+
+    summary = pd.concat([summary, pd.DataFrame([total])], ignore_index=True)
+    return summary, date_label
+
+def build_balance_aging_summary(balance_df):
+    labels = ["0–30 Days", "31–45 Days", "46–60 Days", "61–90 Days", ">90 Days"]
+    pivot = pd.pivot_table(
+        balance_df, index="Insurance", columns="AgingBucket",
+        values="Balance", aggfunc="sum", fill_value=0, observed=False,
+    ).reindex(columns=labels)
+    pivot["Grand Total"] = pivot.sum(axis=1)
+    pivot.loc["Grand Total"] = pivot.sum(axis=0)
+    pivot.reset_index(inplace=True)
+    return pivot
+
+def build_insurance_totals(df):
+    t = (
+        df.groupby("Insurance", dropna=False)[["ActivityIns", "Paid", "Rejection", "Accepted", "Balance"]]
+          .sum().reset_index()
+          .rename(columns={"ActivityIns": "Net Amount", "Rejection": "Rejected"})
+    )
+    t = t[["Insurance", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
+    total = {c: t[c].sum() for c in t.columns if c != "Insurance"}
+    total["Insurance"] = "Grand Total"
+    return pd.concat([t, pd.DataFrame([total])], ignore_index=True)
+
+def build_monthly_totals(df):
+    date_col = next((c for c in ["VisitDate", "SubmissionDate", "ClaimDate"] if c in df.columns), None)
     if date_col is None:
         return pd.DataFrame()
-
     df = df.copy()
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
     df = df.dropna(subset=[date_col])
     df["_Month"] = df[date_col].dt.to_period("M")
-
-    monthly = (
+    m = (
         df.groupby("_Month", observed=True)[["ActivityIns", "Paid", "Rejection", "Accepted", "Balance"]]
-        .sum()
-        .reset_index()
+          .sum().reset_index()
     )
-    monthly["_Month"] = monthly["_Month"].dt.strftime("%B %Y")
-    monthly = monthly.rename(columns={
-        "_Month": "Month",
-        "ActivityIns": "Net Amount",
-        "Rejection": "Rejected",
-    })
-    monthly = monthly[["Month", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
+    m["_Month"] = m["_Month"].dt.strftime("%B %Y")
+    m = m.rename(columns={"_Month": "Month", "ActivityIns": "Net Amount", "Rejection": "Rejected"})
+    m = m[["Month", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
+    total = {c: m[c].sum() for c in m.columns if c != "Month"}
+    total["Month"] = "Grand Total"
+    return pd.concat([m, pd.DataFrame([total])], ignore_index=True)
 
-    total_row = {
-        "Month":      "Grand Total",
-        "Net Amount": monthly["Net Amount"].sum(),
-        "Paid":       monthly["Paid"].sum(),
-        "Balance":    monthly["Balance"].sum(),
-        "Rejected":   monthly["Rejected"].sum(),
-        "Accepted":   monthly["Accepted"].sum(),
-    }
-    monthly = pd.concat([monthly, pd.DataFrame([total_row])], ignore_index=True)
-    return monthly
+def build_monthly_insurance_detail(df):
+    date_col = next((c for c in ["VisitDate", "SubmissionDate", "ClaimDate"] if c in df.columns), None)
+    if date_col is None:
+        return pd.DataFrame()
+    df = df.copy()
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
+    df = df.dropna(subset=[date_col])
+    df["_Month"] = df[date_col].dt.to_period("M").dt.strftime("%B %Y")
+    r = (
+        df.groupby(["_Month", "Insurance"], observed=True)[
+            ["ActivityIns", "Paid", "Rejection", "Accepted", "Balance"]
+        ].sum().reset_index()
+         .rename(columns={"_Month": "Month", "ActivityIns": "Net Amount", "Rejection": "Rejected"})
+    )
+    return r[["Month", "Insurance", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
+
+# -------------------- Styling --------------------
+HEADER_FILL   = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")   # dark blue
+SUBHDR_FILL   = PatternFill(start_color="2E75B6", end_color="2E75B6", fill_type="solid")   # medium blue
+GREEN_FILL    = PatternFill(start_color="375623", end_color="375623", fill_type="solid")   # dark green for pay cols
+TOTAL_FILL    = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+ALT_FILL      = PatternFill(start_color="EBF3FB", end_color="EBF3FB", fill_type="solid")
+OLD_HEADER    = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
+
+WHITE_BOLD    = Font(bold=True, color="FFFFFF", name="Arial", size=9)
+BLACK_BOLD    = Font(bold=True, name="Arial", size=9)
+NORMAL_FONT   = Font(name="Arial", size=9)
+RED_FONT      = Font(name="Arial", size=9, color="C00000")
+
+CENTER        = Alignment(horizontal="center", vertical="center", wrap_text=True)
+LEFT          = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+
+thin = Side(style="thin", color="BFBFBF")
+THIN_BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+NUM_FMT  = '#,##0.00'
+INT_FMT  = '#,##0'
+PCT_FMT  = '0.00"%"'
 
 
-# -------------------- styling --------------------
-HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
-TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+def style_rcm_summary(ws, title_label):
+    """Apply full styling to the RCM_Summary sheet."""
+    # ---- Title row (row 1) ----
+    title_text = f"EMC - RCM SUMMARY{(' - ' + title_label) if title_label else ''}"
+    ws.insert_rows(1)
+    ws.insert_rows(1)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=15)
+    title_cell = ws.cell(row=1, column=1, value=title_text)
+    title_cell.font = Font(bold=True, name="Arial", size=14, color="FFFFFF")
+    title_cell.fill = HEADER_FILL
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 30
 
-def style_headers(ws):
+    # ---- Column header row (now row 3 after insert) ----
+    header_row = 3
+    # Mark "pay" columns (cols 5-9, E-I = Initial pay through Total pay) with green
+    pay_cols = {5, 6, 7, 8, 9}
+    for col in range(1, 16):
+        cell = ws.cell(row=header_row, column=col)
+        cell.font   = WHITE_BOLD
+        cell.fill   = GREEN_FILL if col in pay_cols else SUBHDR_FILL
+        cell.alignment = CENTER
+        cell.border = THIN_BORDER
+    ws.row_dimensions[header_row].height = 42
+
+    # ---- Blank separator row 2 ----
+    ws.row_dimensions[2].height = 4
+    for col in range(1, 16):
+        ws.cell(row=2, column=col).fill = HEADER_FILL
+
+    # ---- Data rows ----
+    max_row = ws.max_row
+    for row in range(header_row + 1, max_row + 1):
+        ins_val = ws.cell(row=row, column=1).value
+        is_total = str(ins_val) == "Grand Total"
+        for col in range(1, 16):
+            cell = ws.cell(row=row, column=col)
+            cell.border = THIN_BORDER
+            if is_total:
+                cell.fill = TOTAL_FILL
+                cell.font = BLACK_BOLD
+                cell.alignment = CENTER if col > 1 else LEFT
+            else:
+                # Alternating rows
+                cell.fill = ALT_FILL if row % 2 == 0 else PatternFill(fill_type=None)
+                cell.font = NORMAL_FONT
+                cell.alignment = CENTER if col > 1 else LEFT
+
+            # Number formats
+            if col == 1:
+                cell.alignment = LEFT
+            elif col == 2:   # Claim count
+                cell.number_format = INT_FMT
+            elif col == 15:  # Rej. %
+                cell.number_format = '0.00'
+                if not is_total and cell.value and float(str(cell.value or 0)) > 5:
+                    cell.font = RED_FONT
+            else:
+                cell.number_format = NUM_FMT
+
+    # ---- Column widths ----
+    col_widths = [38, 10, 14, 13, 11, 10, 10, 10, 11, 14, 14, 14, 14, 12, 8]
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    ws.freeze_panes = "B4"
+
+
+def style_headers_generic(ws):
     for c in range(1, ws.max_column + 1):
         cell = ws.cell(row=1, column=c)
-        cell.fill = HEADER_FILL
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.fill = OLD_HEADER
+        cell.font = Font(bold=True, name="Arial", size=9)
+        cell.alignment = CENTER
 
-def apply_styling(output_file: str):
+
+def apply_styling(output_file):
     wb = load_workbook(output_file)
+
     for ws in wb.worksheets:
-        style_headers(ws)
+        if ws.title == "RCM_Summary":
+            style_rcm_summary(ws, "")
+            continue
+
+        style_headers_generic(ws)
+
         if ws.title == "Balance_Aging_Summary":
             for r in range(2, ws.max_row + 1):
                 if ws.cell(row=r, column=1).value == "Grand Total":
                     for c in range(1, ws.max_column + 1):
                         cell = ws.cell(row=r, column=c)
                         cell.fill = TOTAL_FILL
-                        cell.font = Font(bold=True)
+                        cell.font = Font(bold=True, name="Arial", size=9)
             last_col = ws.max_column
             for r in range(1, ws.max_row + 1):
-                cell = ws.cell(row=r, column=last_col)
-                cell.fill = TOTAL_FILL
-                cell.font = Font(bold=True)
+                ws.cell(row=r, column=last_col).fill = TOTAL_FILL
+                ws.cell(row=r, column=last_col).font = Font(bold=True, name="Arial", size=9)
 
         if ws.title in ("Insurance_Totals", "Monthly_Totals"):
             for r in range(2, ws.max_row + 1):
@@ -239,8 +370,10 @@ def apply_styling(output_file: str):
                     for c in range(1, ws.max_column + 1):
                         cell = ws.cell(row=r, column=c)
                         cell.fill = TOTAL_FILL
-                        cell.font = Font(bold=True)
+                        cell.font = Font(bold=True, name="Arial", size=9)
+
     wb.save(output_file)
+
 
 # -------------------- main --------------------
 def main():
@@ -248,9 +381,9 @@ def main():
     input_file = os.path.abspath(args.input_xlsx)
     out_file   = os.path.abspath(args.out_xlsx)
 
-    print(f"📂 Using input : {input_file}")
-    print(f"📄 Output file : {out_file}")
-    print(f"🔑 Input SHA1  : {sha1_short(input_file)}")
+    print(f"📂 Input : {input_file}")
+    print(f"📄 Output: {out_file}")
+    print(f"🔑 SHA1  : {sha1_short(input_file)}")
 
     df = load_data(input_file)
     df = ensure_numeric(df)
@@ -258,14 +391,16 @@ def main():
     df = add_aging(df)
     df = ensure_insurance_column(df)
 
-    balance_df = df.loc[df["Balance"] > 0].copy()
-    pivot_summary = build_balance_aging_summary(balance_df)
-    insurance_totals = build_insurance_totals(df)
-    monthly_totals = build_monthly_totals(df)
+    rcm_summary, date_label = build_rcm_summary(df)
+    balance_df              = df.loc[df["Balance"] > 0].copy()
+    pivot_summary           = build_balance_aging_summary(balance_df)
+    insurance_totals        = build_insurance_totals(df)
+    monthly_totals          = build_monthly_totals(df)
     monthly_insurance_detail = build_monthly_insurance_detail(df)
 
-    # Write sheets (skip "Exclusive_Report" if disabled)
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
+        # RCM_Summary is the first (and most important) sheet
+        rcm_summary.to_excel(writer, sheet_name="RCM_Summary", index=False)
         if WRITE_EXCLUSIVE_SHEET:
             df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
         insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
@@ -280,13 +415,12 @@ def main():
             "InputFile": os.path.basename(input_file),
             "InputSHA1": sha1_short(input_file),
             "GeneratedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Exclusive_Report_Written": WRITE_EXCLUSIVE_SHEET,
         }])
         meta.to_excel(writer, sheet_name="Meta", index=False)
 
     apply_styling(out_file)
     print("✅ Done.")
 
+
 if __name__ == "__main__":
     main()
-
