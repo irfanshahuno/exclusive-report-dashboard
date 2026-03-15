@@ -588,13 +588,38 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
             """Convert Month + Year columns to Jan-22 format."""
             import re as _re
             s = str(row["Month"]).strip()
-            # Get year from Year column if available
+
+            # Get year — strip index names and try variants
             yr_val = None
-            if "Year" in row.index:
-                try:
-                    yr_val = int(float(str(row["Year"]))) % 100
-                except Exception:
-                    pass
+            _row_idx_stripped = {str(k).strip(): k for k in row.index}
+            for _ycol in ["Year", "year", "YEAR", "yr", "YR"]:
+                _actual = _row_idx_stripped.get(_ycol)
+                if _actual is not None:
+                    try:
+                        yr_val = int(float(str(row[_actual]))) % 100
+                        break
+                    except Exception:
+                        pass
+            # Also try to extract year from VisitDate or date columns
+            if yr_val is None:
+                for _dcol in ["VisitDate","SubDate","SubmissionDate","ClaimDate"]:
+                    _actual = _row_idx_stripped.get(_dcol)
+                    if _actual is not None:
+                        try:
+                            _dval = row[_actual]
+                            # Handle pandas Timestamp directly
+                            if hasattr(_dval, "year"):
+                                yr_val = int(_dval.year) % 100
+                                break
+                            # Handle string "2022-01-15"
+                            import re as _re2
+                            m2 = _re2.match(r"(\d{4})", str(_dval).strip())
+                            if m2:
+                                yr_val = int(m2.group(1)) % 100
+                                break
+                        except Exception:
+                            pass
+
             # datetime string: "2022-01-01 00:00:00" or "2022-01-01"
             dt_match = _re.match(r"(\d{4})-(\d{2})-\d{2}", s)
             if dt_match:
@@ -604,7 +629,7 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
             # Already Jan-22 format
             if _re.match(r"[A-Za-z]{3}-\d{2}", s):
                 return s.title()[:3] + s[3:]
-            # Full month name "April" + year from Year column
+            # Full month name "April" + year
             lower = s.lower()
             if lower in _month_name_map:
                 abbr = _cal.month_abbr[_month_name_map[lower]]
@@ -765,7 +790,7 @@ def build_excel_output(result: dict) -> bytes:
                             cell.number_format = "0.00%"
                             val = val / 100
                         elif col_name == "Claim count":
-                            cell.number_format = "#,##0"
+                            cell.number_format = "0"
                             val = int(val)
                         else:
                             cell.number_format = "#,##0.00"
@@ -779,7 +804,7 @@ def build_excel_output(result: dict) -> bytes:
                             cell.number_format = "0.00%"
                             val = val / 100
                         elif col_name == "Claim count":
-                            cell.number_format = "#,##0"
+                            cell.number_format = "0"
                             val = int(val)
                         else:
                             cell.number_format = "#,##0.00"
@@ -819,37 +844,41 @@ def build_excel_output(result: dict) -> bytes:
 
     # ── Build title from date range in data ──────────────────────────────────
     def _get_date_range():
-        """Get start/end month-year from rcm_month or from df dates."""
+        """Get start/end month-year from rcm_month rows (e.g. Jan-22, Feb-22)."""
         try:
-            rcm_m = result.get("rcm_month")
-            if rcm_m is not None and not rcm_m.empty:
-                import calendar as _cal
-                month_map = {m: i for i, m in enumerate(_cal.month_abbr) if m}
-                def _mk(v):
+            import calendar as _cal
+            _abbr_map = {m.lower(): i for i, m in enumerate(_cal.month_abbr) if m}
+
+            def _mk(v):
+                """Sort key for Mon-YY labels."""
+                p = str(v).strip().split("-")
+                if len(p) == 2:
                     try:
-                        p = str(v).strip().split("-")
-                        if len(p) == 2:
-                            return (int(p[1]), month_map.get(p[0].title()[:3], 0))
+                        return (int(p[1]), _abbr_map.get(p[0].lower()[:3], 0))
                     except Exception:
                         pass
-                    return (9999, 99)
+                return (9999, 99)
+
+            def _expand(lbl):
+                """Jan-22 -> JAN 2022"""
+                p = str(lbl).strip().split("-")
+                if len(p) == 2:
+                    mon = p[0].upper()
+                    yr  = int(p[1])
+                    full_yr = (2000 + yr) if yr < 50 else (1900 + yr)
+                    return f"{mon} {full_yr}"
+                return lbl.upper()
+
+            rcm_m = result.get("rcm_month")
+            if rcm_m is not None and not rcm_m.empty:
                 gt_p = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
-                rows = [str(r) for r in rcm_m.iloc[:, 0] if not gt_p.match(str(r))]
-                if rows:
-                    rows_sorted = sorted(rows, key=_mk)
-                    start = rows_sorted[0].upper()   # e.g. JAN-22
-                    end   = rows_sorted[-1].upper()  # e.g. DEC-22
-                    # Format: 01 JAN 2022 - 31 DEC 2022 style
-                    def _expand(lbl):
-                        import calendar as _c2
-                        parts = lbl.split("-")
-                        if len(parts) == 2:
-                            mon = parts[0].title()
-                            yr  = int(parts[1])
-                            full_yr = (2000 + yr) if yr < 50 else (1900 + yr)
-                            return f"{mon.upper()} {full_yr}"
-                        return lbl
-                    return f"EMC - RCM SUMMARY - {_expand(start)} - {_expand(end)}"
+                rows = [str(v).strip() for v in rcm_m.iloc[:, 0]
+                        if not gt_p.match(str(v))]
+                # Only use rows that have Mon-YY format (contain "-")
+                valid = [r for r in rows if "-" in r]
+                if valid:
+                    rows_sorted = sorted(valid, key=_mk)
+                    return f"EMC - RCM SUMMARY - {_expand(rows_sorted[0])} - {_expand(rows_sorted[-1])}"
         except Exception:
             pass
         return "EMC - RCM SUMMARY"
