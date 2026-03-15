@@ -407,7 +407,7 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, rejection_url: 
       <!-- ✅ NEEDFUL: remove target=_blank so it opens in same app -->
       <a class="kpi-link" href="{balance_url}" title="{fmt(bal)}">
         <div class="kpi-card balance">
-          <div class="kpi-label">Balance</div>
+          <div class="kpi-label">Under Process</div>
           <div class="kpi-value">{fmt(bal)}</div>
         </div>
       </a>
