@@ -248,8 +248,15 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     Returns a dict with all result DataFrames + metadata.
     """
     # ── Load ──────────────────────────────────────────────────────────────────
+    import importlib
+    importlib.import_module("openpyxl")   # explicit import — surfaces missing-dep clearly
+
     buf = io.BytesIO(uploaded_bytes)
-    df = pd.read_excel(buf, engine="openpyxl")
+    try:
+        df = pd.read_excel(buf, engine="openpyxl")
+    except Exception:
+        buf.seek(0)
+        df = pd.read_excel(buf)           # fallback: let pandas auto-detect engine
     df.columns = df.columns.astype(str).str.strip()
 
     # ── Ensure numeric cols ───────────────────────────────────────────────────
