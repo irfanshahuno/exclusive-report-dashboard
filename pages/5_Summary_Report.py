@@ -1140,14 +1140,43 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     part.add_header("Content-Disposition", f'attachment; filename="{excel_filename}"')
     msg.attach(part)
 
+    all_to = [r.strip() for r in ([recipient] + ([cc] if cc else [])) if r.strip()]
+    errors = []
+
+    # Try 1: SSL on configured port (default 465) — matches mail.emc-uae.com
     try:
-        all_to = [r.strip() for r in ([recipient] + ([cc] if cc else [])) if r.strip()]
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as srv:
-            srv.ehlo(); srv.starttls(); srv.login(sender, password)
+        import ssl
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP_SSL(smtp_host, smtp_port, context=ctx, timeout=20) as srv:
+            srv.login(sender, password)
             srv.sendmail(sender, all_to, msg.as_string())
         return True, f"Email sent to {recipient}"
-    except Exception as e:
-        return False, str(e)
+    except Exception as e1:
+        errors.append(f"{smtp_port}/SSL: {e1}")
+
+    # Try 2: STARTTLS on port 587
+    try:
+        with smtplib.SMTP(smtp_host, 587, timeout=20) as srv:
+            srv.ehlo(); srv.starttls(); srv.ehlo()
+            srv.login(sender, password)
+            srv.sendmail(sender, all_to, msg.as_string())
+        return True, f"Email sent to {recipient}"
+    except Exception as e2:
+        errors.append(f"587/STARTTLS: {e2}")
+
+    # Try 3: STARTTLS on port 25
+    try:
+        with smtplib.SMTP(smtp_host, 25, timeout=20) as srv:
+            srv.ehlo()
+            try: srv.starttls(); srv.ehlo()
+            except Exception: pass
+            srv.login(sender, password)
+            srv.sendmail(sender, all_to, msg.as_string())
+        return True, f"Email sent to {recipient}"
+    except Exception as e3:
+        errors.append(f"25: {e3}")
+
+    return False, " | ".join(errors)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CENTER SELECTION
