@@ -633,37 +633,31 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
 
 def build_excel_output(result: dict) -> bytes:
     """
-    Build a single-sheet premium Excel workbook.
-    Layout (same as reference file):
-      Row 1  : Title (merged, dark navy, white bold)
-      Row 2  : blank
-      Row 3  : Insurance header
-      Rows   : Insurance data + Grand Total
-      blank  : separator
-      Row    : Doctor header
-      Rows   : Doctor data + Grand Total
-      blank  : separator
-      Row    : Month header
-      Rows   : Month data + Grand Total
+    Build a single-sheet Excel workbook matching the reference format:
+    - Light grey title row with auto date range
+    - Dark green column headers, green text for pay columns
+    - White/light grey alternating rows
+    - Green Grand Total row
+    - All 3 sections (Insurance / Doctor / Month) in one sheet
     """
     from openpyxl import Workbook
-    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side, numbers
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
-    # ── Colour palette ────────────────────────────────────────────────────────
-    C_TITLE_BG   = "1F3864"   # dark navy  — title row bg
-    C_TITLE_FG   = "FFFFFF"   # white      — title text
-    C_HDR_BG     = "2E75B6"   # mid blue   — section header bg
-    C_HDR_FG     = "FFFFFF"   # white      — header text
-    C_SUBHDR_BG  = "D6E4F0"   # light blue — section label (Insurance / Doctor / Month)
-    C_SUBHDR_FG  = "1F3864"   # navy       — section label text
-    C_GT_BG      = "FCE4D6"   # soft orange— grand total row
-    C_GT_FG      = "8B0000"   # dark red   — grand total text
-    C_ALT1       = "FFFFFF"   # white      — odd data rows
-    C_ALT2       = "EBF3FB"   # pale blue  — even data rows
-    C_REJ_FG     = "C0392B"   # red        — Rej.% > 0
-    C_GREEN_FG   = "1E8449"   # green      — Initial/Resb pay columns
-    C_BORDER     = "BDD7EE"   # border colour
+    # ── Colour palette (matching screenshot) ─────────────────────────────────
+    C_TITLE_BG   = "D9D9D9"   # light grey  — title bg
+    C_TITLE_FG   = "000000"   # black       — title text
+    C_HDR_BG     = "375623"   # dark green  — column header bg
+    C_HDR_FG     = "FFFFFF"   # white       — header text
+    C_GREEN_FG   = "00B050"   # bright green— Initial/Resb pay col text
+    C_SUBHDR_BG  = "D9D9D9"   # light grey  — section label row
+    C_SUBHDR_FG  = "000000"   # black       — section label text
+    C_GT_BG      = "E2EFDA"   # light green — grand total row
+    C_GT_FG      = "375623"   # dark green  — grand total text
+    C_ALT1       = "FFFFFF"   # white       — odd rows
+    C_ALT2       = "F2F2F2"   # light grey  — even rows
+    C_REJ_FG     = "FF0000"   # red         — Rej.% > 0
+    C_BORDER     = "BFBFBF"   # grey border
 
     NUM_COLS = 13   # total columns (same as reference)
 
@@ -791,14 +785,43 @@ def build_excel_output(result: dict) -> bytes:
 
         return r  # next row after this section
 
+    # ── Build title from date range in data ──────────────────────────────────
+    def _get_date_range():
+        """Get start/end month-year from rcm_month or from df dates."""
+        try:
+            rcm_m = result.get("rcm_month")
+            if rcm_m is not None and not rcm_m.empty:
+                import calendar as _cal
+                month_map = {m: i for i, m in enumerate(_cal.month_abbr) if m}
+                def _mk(v):
+                    try:
+                        p = str(v).strip().split("-")
+                        if len(p) == 2:
+                            return (int(p[1]), month_map.get(p[0].title()[:3], 0))
+                    except Exception:
+                        pass
+                    return (9999, 99)
+                gt_p = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
+                rows = [str(r) for r in rcm_m.iloc[:, 0] if not gt_p.match(str(r))]
+                if rows:
+                    rows_sorted = sorted(rows, key=_mk)
+                    start = rows_sorted[0].upper()
+                    end   = rows_sorted[-1].upper()
+                    return f"EMC - RCM SUMMARY - {start} - {end}"
+        except Exception:
+            pass
+        return "EMC - RCM SUMMARY"
+
+    title_text = _get_date_range()
+
     # ── Title row ─────────────────────────────────────────────────────────────
     ws.merge_cells(start_row=cur, start_column=1, end_row=cur, end_column=NUM_COLS)
     title_cell = ws.cell(row=cur, column=1)
-    title_cell.value     = result.get("filename", "RCM SUMMARY").replace(".xlsx","").upper()
+    title_cell.value     = title_text
     title_cell.fill      = _fill(C_TITLE_BG)
     title_cell.font      = _font(bold=True, color=C_TITLE_FG, size=14)
     title_cell.alignment = _align("center")
-    ws.row_dimensions[cur].height = 30
+    ws.row_dimensions[cur].height = 36
     cur += 1
 
     # blank row
