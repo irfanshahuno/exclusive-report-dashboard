@@ -655,49 +655,32 @@ def build_excel_output(result: dict) -> bytes:
                     cell.font = Font(bold=True)
 
     wb = Workbook()
-    ws_ins = wb.active
-    ws_ins.title = "Insurance_Totals"
-    _write_sheet(ws_ins, result["ins_totals"])
 
-    ws_fb = wb.create_sheet("Final_Bucket_Summary")
-    _write_sheet(ws_fb, result["fb_summary"])
+    # ── Sheet 1: RCM Insurance ───────────────────────────────────────────────
+    ws1 = wb.active
+    ws1.title = "RCM_Insurance"
+    rcm_ins = result.get("rcm_insurance")
+    if rcm_ins is not None and not rcm_ins.empty:
+        _write_sheet(ws1, rcm_ins)
 
-    if result["monthly"] is not None and not result["monthly"].empty:
-        ws_m = wb.create_sheet("Monthly_Totals")
-        _write_sheet(ws_m, result["monthly"])
-
-    ws_age = wb.create_sheet("Balance_Aging_Summary")
-    _write_sheet(ws_age, result["aging_summary"])
-
-    ws_bss = wb.create_sheet("Balance_Status_Stage_Summary")
-    _write_sheet(ws_bss, result["bss"])
-
-    # RCM Summary — Insurance (first sheet, matches the report format)
-    # ── RCM Summary sheets (Insurance / Doctor / Month) as first 3 sheets ──
-    if result.get("rcm_insurance") is not None and not result["rcm_insurance"].empty:
-        ws_rcm = wb.create_sheet("RCM_Insurance", 0)
-        _write_sheet(ws_rcm, result["rcm_insurance"])
-
+    # ── Sheet 2: RCM Doctor ──────────────────────────────────────────────────
     rcm_doc = result.get("rcm_doctor")
     if rcm_doc is not None and not rcm_doc.empty:
-        ws_doc = wb.create_sheet("RCM_Doctor", 1)
-        _write_sheet(ws_doc, rcm_doc)
+        ws2 = wb.create_sheet("RCM_Doctor")
+        _write_sheet(ws2, rcm_doc)
 
+    # ── Sheet 3: RCM Month ───────────────────────────────────────────────────
     rcm_mon = result.get("rcm_month")
     if rcm_mon is not None and not rcm_mon.empty:
-        ws_mon = wb.create_sheet("RCM_Month", 2)
-        _write_sheet(ws_mon, rcm_mon)
+        ws3 = wb.create_sheet("RCM_Month")
+        _write_sheet(ws3, rcm_mon)
 
-    ws_det = wb.create_sheet("Balance_Detail")
-    balance_detail = result["df"][result["df"]["Balance"] > 0].copy()
-    _write_sheet(ws_det, balance_detail)
-
+    # ── Meta ─────────────────────────────────────────────────────────────────
     ws_meta = wb.create_sheet("Meta")
     meta_data = [
-        ("InputFile",     result["filename"]),
-        ("GeneratedAt",   result["generated_at"]),
-        ("TotalRows",     result["row_count"]),
-        ("ReconDiffTotal",result["recon_diff"]),
+        ("InputFile",    result.get("filename", "")),
+        ("GeneratedAt",  result.get("generated_at", "")),
+        ("TotalRows",    result.get("row_count", "")),
     ]
     for ri, (k, v) in enumerate(meta_data, 1):
         ws_meta.cell(row=ri, column=1, value=k).font = Font(bold=True)
