@@ -568,6 +568,36 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
 
     rcm_insurance = build_rcm_summary(df, rcm_group_col)
 
+    # Doctor wise
+    rcm_doctor = pd.DataFrame()
+    if "DocName" in df.columns:
+        df["DocName"] = df["DocName"].fillna("Not Available")
+        rcm_doctor = build_rcm_summary(df, "DocName")
+
+    # Month wise — use VisitDate > SubDate > SubmissionDate > ClaimDate
+    rcm_month = pd.DataFrame()
+    date_col_rcm = next((c for c in ["VisitDate","SubDate","SubmissionDate","ClaimDate"] if c in df.columns), None)
+    if date_col_rcm:
+        tmp_m = df.copy()
+        tmp_m[date_col_rcm] = pd.to_datetime(tmp_m[date_col_rcm], errors="coerce", dayfirst=True)
+        tmp_m = tmp_m.dropna(subset=[date_col_rcm])
+        if not tmp_m.empty:
+            tmp_m["Month"] = tmp_m[date_col_rcm].dt.strftime("%b-%y")
+            tmp_m["_month_sort"] = tmp_m[date_col_rcm].dt.to_period("M")
+            rcm_month = build_rcm_summary(tmp_m, "Month")
+            # Sort months chronologically (Grand Total stays last)
+            gt_mask = rcm_month["Month"].astype(str).str.match(r"^\s*(grand\s*total|total)\s*$", case=False)
+            body = rcm_month[~gt_mask].copy()
+            gt_row = rcm_month[gt_mask].copy()
+            # map month label back to period for sorting
+            month_order = (tmp_m[["Month","_month_sort"]]
+                           .drop_duplicates()
+                           .set_index("Month")["_month_sort"]
+                           .to_dict())
+            body["_sort"] = body["Month"].map(month_order)
+            body = body.sort_values("_sort").drop(columns=["_sort"])
+            rcm_month = pd.concat([body, gt_row], ignore_index=True)
+
     return {
         "df":            df,
         "ins_totals":    ins_totals,
@@ -581,6 +611,8 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         "filename":      filename,
         "generated_at":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "rcm_insurance": rcm_insurance,
+        "rcm_doctor":    rcm_doctor,
+        "rcm_month":     rcm_month,
         "rcm_group_col": rcm_group_col,
     }
 
@@ -748,41 +780,37 @@ st.markdown("---")
 
 # ── File uploader ────────────────────────────────────────────────────────────
 RESULT_KEY = f"sum_result_{ck}"
-UPLOADED_BYTES_KEY = f"sum_uploaded_bytes_{ck}"
-UPLOADED_NAME_KEY = f"sum_uploaded_name_{ck}"
 
 up = st.file_uploader(
     f"Upload source Excel for **{center_cfg['name']}** (.xlsx)",
     type=["xlsx"],
     key=f"sum_uploader_{ck}",
-    help="Upload the raw claims source file. The summary engine will run only after you click Process Summary Report.",
+    help="Upload the raw claims source file. The summary engine will process it and display results below.",
 )
 
+up_rcm = None  # placeholder — no second uploader in this version
+
 if up is not None:
-    st.session_state[UPLOADED_BYTES_KEY] = up.getvalue()
-    st.session_state[UPLOADED_NAME_KEY] = up.name
-    st.success(f"File uploaded: {up.name}")
-    st.info("After uploading, click **Process Summary Report** to generate the report.")
-
-    if st.button("🚀 Process Summary Report", type="primary", use_container_width=True, key=f"sum_process_{ck}"):
-        with st.spinner("⚙️ Processing file — please wait..."):
+    if st.button("⚙️ Process File", use_container_width=True, key=f"sum_process_btn_{ck}"):
+        with st.spinner("Processing file — please wait..."):
             try:
-                file_bytes = st.session_state.get(UPLOADED_BYTES_KEY, b"")
-                file_name = st.session_state.get(UPLOADED_NAME_KEY, up.name)
+                file_bytes = up.read()
 
-                source_s3_key = build_summary_s3_key(center_cfg["key"], file_name)
+                source_s3_key = build_summary_s3_key(center_cfg["key"], up.name)
                 ok_src, err_src = upload_bytes_to_s3(
                     file_bytes,
                     source_s3_key,
                     content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
 
-                result = run_summary_engine(file_bytes, file_name)
+                result = run_summary_engine(file_bytes, up.name)
                 result["source_s3_key"] = source_s3_key if ok_src else ""
                 result["source_s3_saved"] = ok_src
                 result["source_s3_error"] = err_src or ""
+                result["rcm_summary_bytes"] = up_rcm.read() if up_rcm is not None else None
+                result["rcm_summary_name"]  = up_rcm.name  if up_rcm is not None else None
                 st.session_state[RESULT_KEY] = result
-                st.success("Summary report generated successfully.")
+                st.rerun()
             except Exception as e:
                 st.error(f"Processing failed: {e}")
                 st.session_state.pop(RESULT_KEY, None)
@@ -839,67 +867,50 @@ if result:
     st.markdown("---")
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
+    # ── 3 RCM tabs ────────────────────────────────────────────────────────────
     tabs = st.tabs([
-        "🏥 RCM Summary — Insurance",
-        "📊 Insurance Totals",
-        "🪣 Final Bucket",
-        "📅 Monthly Totals",
-        "⏳ Balance Aging",
-        "🔀 Status × Stage",
+        "🏥 Insurance",
+        "👨‍⚕️ Doctor",
+        "📅 Month",
     ])
+
+    def _show_rcm(df_rcm, key):
+        """Shared styled display for all 3 RCM summary views."""
+        if df_rcm is None or (hasattr(df_rcm, "empty") and df_rcm.empty):
+            st.info("No data available.")
+            return
+        gt_p = re.compile(r'^\s*(grand\s*total|total)\s*$', re.I)
+        nums = df_rcm.select_dtypes(include="number").columns.tolist()
+        fmt  = {c: ("{:.2f}%" if c == "Rej. %" else "{:,.2f}") for c in nums}
+
+        def _style(row):
+            if gt_p.match(str(row.iloc[0])):
+                return ["background-color:#FCE4D6;font-weight:bold"] * len(row)
+            styles = [""] * len(row)
+            if "Rej. %" in row.index:
+                try:
+                    if float(row["Rej. %"]) > 0:
+                        styles[list(row.index).index("Rej. %")] = "color:#C0392B;font-weight:600"
+                except Exception:
+                    pass
+            return styles
+
+        st.dataframe(
+            df_rcm.style.apply(_style, axis=1).format(fmt),
+            use_container_width=True, hide_index=True, key=key
+        )
 
     with tabs[0]:
         st.subheader("RCM Summary — by Insurance")
-        rcm_ins = result.get("rcm_insurance")
-        if rcm_ins is not None and not rcm_ins.empty:
-            # Style: Grand Total orange+bold, Rej% red if > 0
-            gt_pat_local = re.compile(r'^\s*(grand\s*total|total)\s*$', re.I)
-            num_cols_rcm = rcm_ins.select_dtypes(include="number").columns.tolist()
-            pct_cols     = ["Rej. %"]
-            fmt_dict     = {c: "{:,.2f}" for c in num_cols_rcm if c not in pct_cols}
-            fmt_dict.update({c: "{:.2f}%" for c in pct_cols if c in rcm_ins.columns})
-
-            def _rcm_style(row):
-                if gt_pat_local.match(str(row.iloc[0])):
-                    return ["background-color:#FCE4D6;font-weight:bold"] * len(row)
-                styles = [""] * len(row)
-                # Red Rej% if > 0
-                if "Rej. %" in row.index:
-                    try:
-                        if float(row["Rej. %"]) > 0:
-                            idx = list(row.index).index("Rej. %")
-                            styles[idx] = "color:#C0392B;font-weight:600"
-                    except Exception:
-                        pass
-                return styles
-
-            styled_rcm = rcm_ins.style.apply(_rcm_style, axis=1).format(fmt_dict)
-            st.dataframe(styled_rcm, use_container_width=True, hide_index=True, key="sum_rcm_ins")
-        else:
-            st.info("RCM Summary not available.")
+        _show_rcm(result.get("rcm_insurance"), "rcm_ins")
 
     with tabs[1]:
-        st.subheader("Insurance Totals")
-        show_table(result["ins_totals"], key="sum_ins")
+        st.subheader("RCM Summary — by Doctor")
+        _show_rcm(result.get("rcm_doctor"), "rcm_doc")
 
     with tabs[2]:
-        st.subheader("Final Bucket Summary")
-        show_table(result["fb_summary"], key="sum_fb")
-
-    with tabs[3]:
-        st.subheader("Monthly Totals")
-        if result["monthly"] is not None and not result["monthly"].empty:
-            show_table(result["monthly"], key="sum_monthly")
-        else:
-            st.info("No monthly data — date column (VisitDate / SubDate / SubmissionDate / ClaimDate) not found in source.")
-
-    with tabs[4]:
-        st.subheader("Balance Aging Summary (by Insurance)")
-        show_table(result["aging_summary"], key="sum_aging")
-
-    with tabs[5]:
-        st.subheader("Balance Status × Submission Stage")
-        show_table(result["bss"], key="sum_bss")
+        st.subheader("RCM Summary — by Month")
+        _show_rcm(result.get("rcm_month"), "rcm_mon")
 
 else:
     st.info("👆 Upload a source Excel file above to generate the summary report.")
