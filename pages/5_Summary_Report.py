@@ -985,13 +985,41 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     from email                import encoders
     import calendar as _cal, re as _re
 
-    sender    = st.secrets.get("EMAIL_SENDER",    "")
-    password  = st.secrets.get("EMAIL_PASSWORD",  "")
-    recipient = st.secrets.get("EMAIL_RECIPIENT", "")
-    cc        = st.secrets.get("EMAIL_RECIPIENT_CC", "")
+    # Read secrets — handle both flat and nested [email] section formats
+    def _get_secret(*keys):
+        for k in keys:
+            # flat: EMAIL_SENDER = "..."
+            try:
+                v = st.secrets[k]
+                if v: return str(v).strip()
+            except Exception:
+                pass
+            # nested: [email] section
+            try:
+                v = st.secrets["email"][k]
+                if v: return str(v).strip()
+            except Exception:
+                pass
+            # nested: [EMAIL] section
+            try:
+                v = st.secrets["EMAIL"][k]
+                if v: return str(v).strip()
+            except Exception:
+                pass
+        return ""
 
-    if not sender or not password or not recipient:
-        return False, "EMAIL_SENDER, EMAIL_PASSWORD or EMAIL_RECIPIENT not set in Streamlit secrets."
+    sender    = _get_secret("EMAIL_SENDER",       "sender")
+    password  = _get_secret("EMAIL_PASSWORD",     "password")
+    recipient = _get_secret("EMAIL_RECIPIENT",    "recipient")
+    cc        = _get_secret("EMAIL_RECIPIENT_CC", "cc", "recipient_cc")
+
+    missing = []
+    if not sender:    missing.append("EMAIL_SENDER")
+    if not password:  missing.append("EMAIL_PASSWORD")
+    if not recipient: missing.append("EMAIL_RECIPIENT")
+    if missing:
+        available = list(st.secrets.keys())
+        return False, f"Missing secrets: {', '.join(missing)}. Available keys: {available}"
 
     net, paid, bal, rej, acc = result.get("kpi", (0,0,0,0,0))
     generated_at  = result.get("generated_at", "")
