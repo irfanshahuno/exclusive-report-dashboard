@@ -342,10 +342,6 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     d["_rsub_nt_rmtd"]  = d["Difference"].where(mask_sub_resub,   0.0)
     d["_rej_accepted"]  = d["Difference"].where(mask_rej_acc,      0.0)
 
-    # Pending for Resubmission: SubInsShare where Status = "Not Submitted" (initial)
-    mask_not_sub_init  = d["_status_norm"] == "not submitted"
-    d["_pending_resub"] = d["SubInsShare"].where(mask_not_sub_init, 0.0)
-
     agg = d.groupby(group_col, dropna=False, sort=True).agg(
         claim_count     = ("UniqueID",            "nunique"),
         claimed_amt     = ("SubInsShare",          "sum"),
@@ -356,7 +352,6 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
         resb2_pay       = ("Resub2RemitInsShare",  "sum"),
         resb3_pay       = ("Resub3RemitInsShare",  "sum"),
         sub_nt_rmtd     = ("_sub_nt_rmtd",        "sum"),
-        pending_resub   = ("_pending_resub",       "sum"),
         rsub_nt_rmtd    = ("_rsub_nt_rmtd",       "sum"),
         rej_accepted    = ("_rej_accepted",        "sum"),
     ).reset_index()
@@ -382,7 +377,6 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     out["Resb3 pay"]                        = agg["resb3_pay"]
     out["Total pay"]                        = agg["total_pay"]
     out["Sub Nt Rmtd (outstanding amount)"] = agg["sub_nt_rmtd"]
-    out["Pending for Resubmission"]          = agg["pending_resub"]
     out["Rsub Nt Rmtd (outstanding amount)"] = agg["rsub_nt_rmtd"]
     out["Rejection Accepted"]               = agg["rej_accepted"]
     out["Final Rejn"]                       = agg["final_rejn"]
