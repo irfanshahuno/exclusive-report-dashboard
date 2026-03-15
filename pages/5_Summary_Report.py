@@ -580,21 +580,43 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     # Priority: direct "Month" column first, then parse from date columns
     date_col_rcm = next((c for c in ["VisitDate","SubDate","SubmissionDate","ClaimDate"] if c in df.columns), None)
     if "Month" in df.columns:
+        import calendar as _cal
+        _month_name_map = {m.lower(): i for i, m in enumerate(_cal.month_name) if m}
+        _month_abbr_map = {m.lower(): i for i, m in enumerate(_cal.month_abbr) if m}
+
+        def _to_month_label(val):
+            """Convert any month value to Jan-22 format."""
+            import re as _re
+            s = str(val).strip()
+            # datetime string: "2022-01-01 00:00:00" or "2022-01-01"
+            dt_match = _re.match(r"(\d{4})-(\d{2})-\d{2}", s)
+            if dt_match:
+                yr = int(dt_match.group(1)) % 100
+                mo = int(dt_match.group(2))
+                return f"{_cal.month_abbr[mo]}-{yr:02d}"
+            # Already Jan-22 format
+            if _re.match(r"[A-Za-z]{3}-\d{2}", s):
+                return s.title()[:3] + s[3:]
+            # Full month name "April" — no year available, use as-is abbreviated
+            lower = s.lower()
+            if lower in _month_name_map:
+                return _cal.month_abbr[_month_name_map[lower]]
+            return s
+
         tmp_m = df.copy()
-        tmp_m["Month"] = tmp_m["Month"].astype(str).str.strip()
+        tmp_m["Month"] = tmp_m["Month"].apply(_to_month_label)
         tmp_m = tmp_m[tmp_m["Month"].str.lower() != "nan"]
         if not tmp_m.empty:
             rcm_month = build_rcm_summary(tmp_m, "Month")
-            # Sort months chronologically
-            import calendar
-            month_map = {m: i for i, m in enumerate(calendar.month_abbr) if m}
+            # Sort chronologically
             def _month_sort_key(val):
+                import re as _re
                 try:
                     parts = str(val).strip().split("-")
                     if len(parts) == 2:
                         mon = parts[0].strip().title()[:3]
                         yr  = int(parts[1].strip())
-                        return (yr, month_map.get(mon, 0))
+                        return (yr, _month_abbr_map.get(mon.lower(), 0))
                 except Exception:
                     pass
                 return (9999, 99)
@@ -647,13 +669,13 @@ def build_excel_output(result: dict) -> bytes:
     # ── Colour palette (matching screenshot) ─────────────────────────────────
     C_TITLE_BG   = "D9D9D9"   # light grey  — title bg
     C_TITLE_FG   = "000000"   # black       — title text
-    C_HDR_BG     = "375623"   # dark green  — column header bg
+    C_HDR_BG     = "595959"   # dark grey   — column header bg
     C_HDR_FG     = "FFFFFF"   # white       — header text
-    C_GREEN_FG   = "00B050"   # bright green— Initial/Resb pay col text
-    C_SUBHDR_BG  = "D9D9D9"   # light grey  — section label row
+    C_GREEN_FG   = "00B050"   # green       — Initial/Resb pay col text
+    C_SUBHDR_BG  = "BFBFBF"   # mid grey    — section label row
     C_SUBHDR_FG  = "000000"   # black       — section label text
-    C_GT_BG      = "E2EFDA"   # light green — grand total row
-    C_GT_FG      = "375623"   # dark green  — grand total text
+    C_GT_BG      = "D9D9D9"   # grey        — grand total row
+    C_GT_FG      = "000000"   # black bold  — grand total text
     C_ALT1       = "FFFFFF"   # white       — odd rows
     C_ALT2       = "F2F2F2"   # light grey  — even rows
     C_REJ_FG     = "FF0000"   # red         — Rej.% > 0
