@@ -342,6 +342,16 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     d["_rsub_nt_rmtd"]  = d["Difference"].where(mask_sub_resub,   0.0)
     d["_rej_accepted"]  = d["Difference"].where(mask_rej_acc,      0.0)
 
+    # Catch-all: any status not matched by above 3 masks AND not "approved"/"not submitted"
+    # goes into Sub Nt Rmtd by default (treated as outstanding submitted)
+    mask_approved    = d["_status_norm"].str.match(r"^approved(\s*\(.+\))?$", na=False)
+    mask_not_sub     = d["_status_norm"].str.match(r"^not submitted(\s*\(.+\))?$", na=False)
+    mask_rejected    = d["_status_norm"].str.match(r"^rejected(\s*\(.+\))?$", na=False)
+    mask_any_matched = mask_sub_init | mask_sub_resub | mask_rej_acc | mask_approved | mask_not_sub | mask_rejected
+    # Unmatched rows with SubInsShare > 0: treat as Sub Nt Rmtd
+    mask_unmatched   = (~mask_any_matched) & (pd.to_numeric(d["SubInsShare"], errors="coerce").fillna(0) > 0)
+    d.loc[mask_unmatched, "_sub_nt_rmtd"] = d.loc[mask_unmatched, "SubInsShare"]
+
     agg = d.groupby(group_col, dropna=False, sort=True).agg(
         claim_count     = ("UniqueID",            "nunique"),
         claimed_amt     = ("SubInsShare",          "sum"),
@@ -583,22 +593,31 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     rcm_group_col = ins_col_rcm if ins_col_rcm else "Insurance"
     if rcm_group_col not in df.columns:
         df[rcm_group_col] = "Not Available"
-    df[rcm_group_col] = df[rcm_group_col].fillna("Not Available")
+    df[rcm_group_col] = df[rcm_group_col].fillna("Not Available").astype(str).str.strip()
 
-    rcm_insurance = build_rcm_summary(df, rcm_group_col)
+    # Drop rows where Insurance is blank/Not Available — these are embedded total/summary rows
+    df_rcm = df[~df[rcm_group_col].str.lower().isin(
+        ["not available", "", "nan", "none", "total", "grand total"]
+    )].copy()
+
+    rcm_insurance = build_rcm_summary(df_rcm, rcm_group_col)
 
     # Doctor wise — try DocName, DoctorName, Doctor, PhysicianName
     rcm_doctor = pd.DataFrame()
     doc_col = next((c for c in ["DocName","DoctorName","Doctor","PhysicianName"] if c in df.columns), None)
     if doc_col:
-        df[doc_col] = df[doc_col].fillna("Not Available").astype(str).str.strip()
-        rcm_doctor = build_rcm_summary(df, doc_col)
+        df_rcm[doc_col] = df_rcm[doc_col].fillna("Not Available").astype(str).str.strip()
+        # Also filter out blank doctor names
+        df_doc = df_rcm[~df_rcm[doc_col].str.lower().isin(
+            ["not available","","nan","none","total","grand total"]
+        )].copy()
+        rcm_doctor = build_rcm_summary(df_doc, doc_col)
 
     # Month wise — source file has a "Month" column directly
     rcm_month = pd.DataFrame()
     # Priority: direct "Month" column first, then parse from date columns
-    date_col_rcm = next((c for c in ["VisitDate","SubDate","SubmissionDate","ClaimDate"] if c in df.columns), None)
-    if "Month" in df.columns:
+    date_col_rcm = next((c for c in ["VisitDate","SubDate","SubmissionDate","ClaimDate"] if c in df_rcm.columns), None)
+    if "Month" in df_rcm.columns:
         import calendar as _cal
         _month_name_map = {m.lower(): i for i, m in enumerate(_cal.month_name) if m}
         _month_abbr_map = {m.lower(): i for i, m in enumerate(_cal.month_abbr) if m}
@@ -657,7 +676,7 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
                 return abbr
             return s
 
-        tmp_m = df.copy()
+        tmp_m = df_rcm.copy()
         tmp_m["Month"] = tmp_m.apply(_to_month_label, axis=1)
         tmp_m = tmp_m[tmp_m["Month"].str.lower() != "nan"]
         if not tmp_m.empty:
