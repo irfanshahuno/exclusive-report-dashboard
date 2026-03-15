@@ -632,59 +632,200 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
 
 
 def build_excel_output(result: dict) -> bytes:
-    """Build a styled Excel workbook from results (same styling as exclusive_report_status_final.py)."""
+    """
+    Build a single-sheet premium Excel workbook.
+    Layout (same as reference file):
+      Row 1  : Title (merged, dark navy, white bold)
+      Row 2  : blank
+      Row 3  : Insurance header
+      Rows   : Insurance data + Grand Total
+      blank  : separator
+      Row    : Doctor header
+      Rows   : Doctor data + Grand Total
+      blank  : separator
+      Row    : Month header
+      Rows   : Month data + Grand Total
+    """
     from openpyxl import Workbook
-    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side, numbers
+    from openpyxl.utils import get_column_letter
 
-    HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
-    TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+    # ── Colour palette ────────────────────────────────────────────────────────
+    C_TITLE_BG   = "1F3864"   # dark navy  — title row bg
+    C_TITLE_FG   = "FFFFFF"   # white      — title text
+    C_HDR_BG     = "2E75B6"   # mid blue   — section header bg
+    C_HDR_FG     = "FFFFFF"   # white      — header text
+    C_SUBHDR_BG  = "D6E4F0"   # light blue — section label (Insurance / Doctor / Month)
+    C_SUBHDR_FG  = "1F3864"   # navy       — section label text
+    C_GT_BG      = "FCE4D6"   # soft orange— grand total row
+    C_GT_FG      = "8B0000"   # dark red   — grand total text
+    C_ALT1       = "FFFFFF"   # white      — odd data rows
+    C_ALT2       = "EBF3FB"   # pale blue  — even data rows
+    C_REJ_FG     = "C0392B"   # red        — Rej.% > 0
+    C_GREEN_FG   = "1E8449"   # green      — Initial/Resb pay columns
+    C_BORDER     = "BDD7EE"   # border colour
 
-    def _write_sheet(ws, df):
-        # Header row
-        for ci, col in enumerate(df.columns, 1):
-            cell = ws.cell(row=1, column=ci, value=col)
-            cell.fill = HEADER_FILL
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-        # Data rows
-        for ri, row in df.iterrows():
-            for ci, val in enumerate(row, 1):
-                cell = ws.cell(row=ri + 2, column=ci, value=val)
-                if str(row.iloc[0]) == "Grand Total":
-                    cell.fill = TOTAL_FILL
-                    cell.font = Font(bold=True)
+    NUM_COLS = 13   # total columns (same as reference)
+
+    def _thin():
+        s = Side(style="thin", color=C_BORDER)
+        return Border(left=s, right=s, top=s, bottom=s)
+
+    def _fill(hex_color):
+        return PatternFill("solid", fgColor=hex_color)
+
+    def _font(bold=False, color="000000", size=10, italic=False):
+        return Font(bold=bold, color=color, size=size, italic=italic,
+                    name="Calibri")
+
+    def _align(h="center", v="center", wrap=False):
+        return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
 
     wb = Workbook()
+    ws = wb.active
+    ws.title = "RCM SUMMARY"
 
-    # ── Sheet 1: RCM Insurance ───────────────────────────────────────────────
-    ws1 = wb.active
-    ws1.title = "RCM_Insurance"
+    # ── Column widths ─────────────────────────────────────────────────────────
+    col_widths = [42, 12, 16, 14, 13, 11, 11, 11, 13, 18, 18, 14, 9]
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    cur = 1  # current row pointer
+
+    def _write_section(df_sec, section_label, start_row):
+        """Write one section (Insurance / Doctor / Month) starting at start_row.
+        Returns next available row."""
+        r = start_row
+
+        # Section label row (e.g. "Insurance Name")
+        ws.row_dimensions[r].height = 20
+        for c in range(1, NUM_COLS + 1):
+            cell = ws.cell(row=r, column=c)
+            cell.fill    = _fill(C_SUBHDR_BG)
+            cell.font    = _font(bold=True, color=C_SUBHDR_FG, size=11)
+            cell.border  = _thin()
+            cell.alignment = _align("center")
+        ws.cell(row=r, column=1, value=section_label)
+        ws.cell(row=r, column=1).alignment = _align("left")
+        r += 1
+
+        # Column header row
+        ws.row_dimensions[r].height = 36
+        GREEN_COLS = {"Initial pay", "Resb1 pay", "Resb2 pay", "Resb3 pay"}
+        for ci, col in enumerate(df_sec.columns, 1):
+            cell = ws.cell(row=r, column=ci, value=col)
+            cell.fill      = _fill(C_HDR_BG)
+            cell.font      = _font(bold=True,
+                                   color=("90EE90" if col in GREEN_COLS else C_HDR_FG),
+                                   size=10)
+            cell.border    = _thin()
+            cell.alignment = _align("center", wrap=True)
+        r += 1
+
+        # Data rows
+        for row_idx, (_, row) in enumerate(df_sec.iterrows()):
+            is_gt = str(row.iloc[0]).strip().lower() in ("grand total", "total")
+            ws.row_dimensions[r].height = 18
+
+            for ci, val in enumerate(row, 1):
+                cell = ws.cell(row=r, column=ci)
+
+                # Format numbers
+                if ci > 1 and not is_gt:
+                    try:
+                        val = float(val)
+                        col_name = df_sec.columns[ci - 1]
+                        if col_name == "Rej. %":
+                            cell.number_format = "0.00%"
+                            val = val / 100
+                        elif col_name == "Claim count":
+                            cell.number_format = "#,##0"
+                            val = int(val)
+                        else:
+                            cell.number_format = "#,##0.00"
+                    except (ValueError, TypeError):
+                        pass
+                elif ci > 1 and is_gt:
+                    try:
+                        val = float(val)
+                        col_name = df_sec.columns[ci - 1]
+                        if col_name == "Rej. %":
+                            cell.number_format = "0.00%"
+                            val = val / 100
+                        elif col_name == "Claim count":
+                            cell.number_format = "#,##0"
+                            val = int(val)
+                        else:
+                            cell.number_format = "#,##0.00"
+                    except (ValueError, TypeError):
+                        pass
+
+                cell.value = val
+
+                if is_gt:
+                    cell.fill      = _fill(C_GT_BG)
+                    cell.font      = _font(bold=True, color=C_GT_FG, size=10)
+                else:
+                    bg = C_ALT1 if row_idx % 2 == 0 else C_ALT2
+                    cell.fill = _fill(bg)
+                    # Red Rej.%
+                    col_name = df_sec.columns[ci - 1]
+                    if col_name == "Rej. %" and not is_gt:
+                        try:
+                            if float(row.iloc[ci - 1]) > 0:
+                                cell.font = _font(bold=True, color=C_REJ_FG, size=10)
+                            else:
+                                cell.font = _font(color="000000", size=10)
+                        except Exception:
+                            cell.font = _font(size=10)
+                    elif col_name in ("Initial pay","Resb1 pay","Resb2 pay","Resb3 pay"):
+                        cell.font = _font(color="1E8449", size=10)
+                    else:
+                        cell.font = _font(size=10)
+                    cell.alignment = _align("right" if ci > 1 else "left")
+
+                cell.border = _thin()
+                if is_gt:
+                    cell.alignment = _align("right" if ci > 1 else "left")
+            r += 1
+
+        return r  # next row after this section
+
+    # ── Title row ─────────────────────────────────────────────────────────────
+    ws.merge_cells(start_row=cur, start_column=1, end_row=cur, end_column=NUM_COLS)
+    title_cell = ws.cell(row=cur, column=1)
+    title_cell.value     = result.get("filename", "RCM SUMMARY").replace(".xlsx","").upper()
+    title_cell.fill      = _fill(C_TITLE_BG)
+    title_cell.font      = _font(bold=True, color=C_TITLE_FG, size=14)
+    title_cell.alignment = _align("center")
+    ws.row_dimensions[cur].height = 30
+    cur += 1
+
+    # blank row
+    ws.row_dimensions[cur].height = 8
+    cur += 1
+
+    # ── Insurance section ─────────────────────────────────────────────────────
     rcm_ins = result.get("rcm_insurance")
     if rcm_ins is not None and not rcm_ins.empty:
-        _write_sheet(ws1, rcm_ins)
+        cur = _write_section(rcm_ins, "Insurance Name", cur)
+        ws.row_dimensions[cur].height = 8
+        cur += 1   # blank separator
 
-    # ── Sheet 2: RCM Doctor ──────────────────────────────────────────────────
+    # ── Doctor section ────────────────────────────────────────────────────────
     rcm_doc = result.get("rcm_doctor")
     if rcm_doc is not None and not rcm_doc.empty:
-        ws2 = wb.create_sheet("RCM_Doctor")
-        _write_sheet(ws2, rcm_doc)
+        cur = _write_section(rcm_doc, "Doctor Name", cur)
+        ws.row_dimensions[cur].height = 8
+        cur += 1
 
-    # ── Sheet 3: RCM Month ───────────────────────────────────────────────────
+    # ── Month section ─────────────────────────────────────────────────────────
     rcm_mon = result.get("rcm_month")
     if rcm_mon is not None and not rcm_mon.empty:
-        ws3 = wb.create_sheet("RCM_Month")
-        _write_sheet(ws3, rcm_mon)
+        cur = _write_section(rcm_mon, "Month", cur)
 
-    # ── Meta ─────────────────────────────────────────────────────────────────
-    ws_meta = wb.create_sheet("Meta")
-    meta_data = [
-        ("InputFile",    result.get("filename", "")),
-        ("GeneratedAt",  result.get("generated_at", "")),
-        ("TotalRows",    result.get("row_count", "")),
-    ]
-    for ri, (k, v) in enumerate(meta_data, 1):
-        ws_meta.cell(row=ri, column=1, value=k).font = Font(bold=True)
-        ws_meta.cell(row=ri, column=2, value=v)
+    # freeze panes below title
+    ws.freeze_panes = "A3"
 
     buf = io.BytesIO()
     wb.save(buf)
