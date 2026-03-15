@@ -1036,7 +1036,8 @@ def show_table(df: pd.DataFrame, key: str):
 
 def _result_cache_key(center_key: str) -> str:
     """S3 key for the cached result JSON for a center."""
-    return f"{S3_PREFIX}/{center_key}/_latest_result_cache.json"
+    year = st.session_state.get("rcm_year") or datetime.now().year
+    return f"{SUMMARY_S3_PREFIX}/{year}/{center_key}/_latest_result_cache.json"
 
 
 def _save_result_to_s3(result: dict, center_key: str):
@@ -1055,7 +1056,9 @@ def _save_result_to_s3(result: dict, center_key: str):
             "rcm_month":     result["rcm_month"].to_json(orient="split")     if result.get("rcm_month")     is not None and not result["rcm_month"].empty     else None,
         }
         key = _result_cache_key(center_key)
-        _s3_client().put_object(
+        s3 = get_s3_client()
+        if s3 is None: return
+        s3.put_object(
             Bucket=S3_BUCKET, Key=key,
             Body=json.dumps(cache, ensure_ascii=False).encode("utf-8"),
             ContentType="application/json"
@@ -1069,7 +1072,9 @@ def _load_result_from_s3(center_key: str) -> dict | None:
     import json
     try:
         key = _result_cache_key(center_key)
-        obj = _s3_client().get_object(Bucket=S3_BUCKET, Key=key)
+        s3 = get_s3_client()
+        if s3 is None: return None
+        obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
         cache = json.loads(obj["Body"].read().decode("utf-8"))
         # Reconstruct DataFrames
         def _from_json(j):
