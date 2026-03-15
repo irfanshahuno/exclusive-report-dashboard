@@ -659,9 +659,20 @@ def build_excel_output(result: dict) -> bytes:
     _write_sheet(ws_bss, result["bss"])
 
     # RCM Summary — Insurance (first sheet, matches the report format)
+    # ── RCM Summary sheets (Insurance / Doctor / Month) as first 3 sheets ──
     if result.get("rcm_insurance") is not None and not result["rcm_insurance"].empty:
-        ws_rcm = wb.create_sheet("RCM_Summary_Insurance", 0)  # insert as first sheet
+        ws_rcm = wb.create_sheet("RCM_Insurance", 0)
         _write_sheet(ws_rcm, result["rcm_insurance"])
+
+    rcm_doc = result.get("rcm_doctor")
+    if rcm_doc is not None and not rcm_doc.empty:
+        ws_doc = wb.create_sheet("RCM_Doctor", 1)
+        _write_sheet(ws_doc, rcm_doc)
+
+    rcm_mon = result.get("rcm_month")
+    if rcm_mon is not None and not rcm_mon.empty:
+        ws_mon = wb.create_sheet("RCM_Month", 2)
+        _write_sheet(ws_mon, rcm_mon)
 
     ws_det = wb.create_sheet("Balance_Detail")
     balance_detail = result["df"][result["df"]["Balance"] > 0].copy()
