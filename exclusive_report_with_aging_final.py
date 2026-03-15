@@ -199,19 +199,29 @@ def generate_report(file_bytes: bytes, filename: str) -> bytes:
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        # Sheet 1
         insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
+        # Sheet 2
         if not monthly_totals.empty:
             monthly_totals.to_excel(writer, sheet_name="Monthly_Totals", index=False)
+        else:
+            pd.DataFrame([{"Note": "No date column found"}]).to_excel(writer, sheet_name="Monthly_Totals", index=False)
+        # Sheet 3
         if not monthly_insurance_detail.empty:
             monthly_insurance_detail.to_excel(writer, sheet_name="Monthly_Insurance_Detail", index=False)
+        else:
+            pd.DataFrame([{"Note": "No date column found"}]).to_excel(writer, sheet_name="Monthly_Insurance_Detail", index=False)
+        # Sheet 4
         pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
+        # Sheet 5
         balance_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
+        # Sheet 6 - always write raw data
         df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
-
+        # Sheet 7
         meta = pd.DataFrame([{
-            "InputFile":    filename,
-            "InputSHA1":    sha1_short(file_bytes),
-            "GeneratedAt":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "InputFile":   filename,
+            "InputSHA1":   sha1_short(file_bytes),
+            "GeneratedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }])
         meta.to_excel(writer, sheet_name="Meta", index=False)
 
