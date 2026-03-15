@@ -163,9 +163,15 @@ def get_s3_client():
 
 
 def build_summary_s3_key(center_key: str, filename: str) -> str:
+    """Fixed key per center — always replaces previous file."""
     year = st.session_state.get("rcm_year") or datetime.now().year
-    safe_filename = re.sub(r"[^\w\-.]", "_", str(filename))
-    return f"{SUMMARY_S3_PREFIX}/{year}/{center_key}/{safe_filename}"
+    ext = str(filename).rsplit(".", 1)[-1] if "." in str(filename) else "xlsx"
+    return f"{SUMMARY_S3_PREFIX}/{year}/{center_key}/source_latest.{ext}"
+
+def build_report_s3_key(center_key: str) -> str:
+    """Fixed key for the processed report Excel — always replaces previous."""
+    year = st.session_state.get("rcm_year") or datetime.now().year
+    return f"{SUMMARY_S3_PREFIX}/{year}/{center_key}/report_latest.xlsx"
 
 
 def upload_bytes_to_s3(file_bytes: bytes, key: str, content_type: str | None = None):
@@ -1069,6 +1075,16 @@ def _load_result_from_s3(center_key: str) -> dict | None:
         def _from_json(j):
             if j is None: return pd.DataFrame()
             return pd.read_json(j, orient="split")
+        # ── 3-day TTL check ──────────────────────────────────────────────
+        generated_at = cache.get("generated_at", "")
+        if generated_at:
+            try:
+                age = datetime.now() - datetime.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
+                if age.total_seconds() > 3 * 24 * 3600:
+                    return None  # expired — force fresh upload
+            except Exception:
+                pass
+        # ─────────────────────────────────────────────────────────────────────
         cache["rcm_insurance"] = _from_json(cache.get("rcm_insurance"))
         cache["rcm_doctor"]    = _from_json(cache.get("rcm_doctor"))
         cache["rcm_month"]     = _from_json(cache.get("rcm_month"))
@@ -1420,7 +1436,7 @@ if result:
     safe_name = re.sub(r"[^\w\-.]", "_", center_cfg["key"])
     dl_name = f"{safe_name}_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
 
-    report_s3_key = build_summary_s3_key(center_cfg["key"], dl_name)
+    report_s3_key = build_report_s3_key(center_cfg["key"])
     ok_rep, err_rep = upload_bytes_to_s3(
         excel_bytes,
         report_s3_key,
