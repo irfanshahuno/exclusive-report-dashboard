@@ -451,7 +451,7 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     }
 
 
-def build_excel_output(result: dict) -> bytes:
+def build_excel_output(result: dict, rcm_bytes: bytes | None = None) -> bytes:
     """Build a styled Excel workbook from results (same styling as exclusive_report_status_final.py)."""
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font, Alignment
@@ -506,6 +506,39 @@ def build_excel_output(result: dict) -> bytes:
     for ri, (k, v) in enumerate(meta_data, 1):
         ws_meta.cell(row=ri, column=1, value=k).font = Font(bold=True)
         ws_meta.cell(row=ri, column=2, value=v)
+
+    # Append all sheets from RCM Summary file if provided
+    if rcm_bytes:
+        try:
+            from openpyxl import load_workbook
+            rcm_wb = load_workbook(io.BytesIO(rcm_bytes))
+            for sheet_name in rcm_wb.sheetnames:
+                rcm_ws = rcm_wb[sheet_name]
+                # Avoid duplicate sheet names
+                safe_name = sheet_name
+                existing = [s.title for s in wb.worksheets]
+                if safe_name in existing:
+                    safe_name = f"{sheet_name}_RCM"
+                new_ws = wb.create_sheet(safe_name)
+                for row in rcm_ws.iter_rows():
+                    for cell in row:
+                        nc = new_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+                        # Copy basic styling
+                        if cell.has_style:
+                            try:
+                                nc.font      = cell.font.copy()
+                                nc.fill      = cell.fill.copy()
+                                nc.alignment = cell.alignment.copy()
+                                nc.border    = cell.border.copy()
+                                nc.number_format = cell.number_format
+                            except Exception:
+                                pass
+                # Copy column widths
+                for col_letter, col_dim in rcm_ws.column_dimensions.items():
+                    new_ws.column_dimensions[col_letter].width = col_dim.width
+        except Exception as _e:
+            # If RCM appending fails, still save without it
+            pass
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -617,6 +650,13 @@ up = st.file_uploader(
     help="Upload the raw claims source file. The summary engine will process it and display results below.",
 )
 
+up_rcm = st.file_uploader(
+    "Upload RCM Summary Excel (.xlsx) — optional, will be included as extra sheet in download",
+    type=["xlsx"],
+    key=f"sum_rcm_uploader_{ck}",
+    help="Upload the RCM Summary file (e.g. excellent_2025_RCM_Summary.xlsx). All its sheets will be appended to the download.",
+)
+
 if up is not None:
     with st.spinner("⚙️ Processing file — please wait..."):
         try:
@@ -633,6 +673,9 @@ if up is not None:
             result["source_s3_key"] = source_s3_key if ok_src else ""
             result["source_s3_saved"] = ok_src
             result["source_s3_error"] = err_src or ""
+            # Attach RCM summary bytes if uploaded
+            result["rcm_summary_bytes"] = up_rcm.read() if up_rcm is not None else None
+            result["rcm_summary_name"]  = up_rcm.name  if up_rcm is not None else None
             st.session_state[RESULT_KEY] = result
         except Exception as e:
             st.error(f"Processing failed: {e}")
@@ -656,8 +699,8 @@ if result:
 
     st.markdown("---")
 
-    # Download full Excel
-    excel_bytes = build_excel_output(result)
+    # Download full Excel (with optional RCM summary appended)
+    excel_bytes = build_excel_output(result, rcm_bytes=result.get("rcm_summary_bytes"))
     safe_name = re.sub(r"[^\w\-.]", "_", center_cfg["key"])
     dl_name = f"{safe_name}_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
 
