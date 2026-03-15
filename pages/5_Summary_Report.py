@@ -412,6 +412,22 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     df = pd.read_excel(buf, engine="openpyxl")
     df.columns = df.columns.astype(str).str.strip()
 
+    # ── Drop blank/footer rows ────────────────────────────────────────────────
+    # Remove completely empty rows
+    df = df.dropna(how="all").reset_index(drop=True)
+    # Remove rows where entire row is blank string
+    all_blank = df.fillna("").astype(str).apply(
+        lambda r: "".join(r.values).strip() == "", axis=1
+    )
+    df = df[~all_blank].reset_index(drop=True)
+    # Remove footer/total rows: Status is blank AND SubInsShare is 0 or null
+    if "SubInsShare" in df.columns and "Status" in df.columns:
+        sub_zero   = pd.to_numeric(df["SubInsShare"], errors="coerce").fillna(0) == 0
+        stat_blank = df["Status"].astype(str).str.strip().str.lower().isin(
+            ["", "nan", "none", "total", "grand total"]
+        )
+        df = df[~(sub_zero & stat_blank)].reset_index(drop=True)
+
     # ── Ensure numeric cols ───────────────────────────────────────────────────
     numeric_cols = ["SubInsShare", "RemitInsShare",
                     "Resub1RemitInsShare", "Resub2RemitInsShare",
@@ -1272,9 +1288,19 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if st.button("◀ Choose another center", key="sum_back_center"):
-    st.session_state[SUM_CENTER_KEY] = None
-    st.rerun()
+col_back, col_clear = st.columns([2, 1])
+with col_back:
+    if st.button("◀ Choose another center", key="sum_back_center", use_container_width=True):
+        st.session_state[SUM_CENTER_KEY] = None
+        st.rerun()
+with col_clear:
+    if st.button("🗑️ Clear Cache", key="sum_clear_cache", use_container_width=True):
+        try:
+            _s3_client().delete_object(Bucket=S3_BUCKET, Key=_result_cache_key(ck))
+        except Exception:
+            pass
+        st.session_state.pop(RESULT_KEY, None)
+        st.rerun()
 
 st.markdown("---")
 
