@@ -215,8 +215,11 @@ def generate_report(file_bytes: bytes, filename: str) -> bytes:
         pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
         # Sheet 5
         balance_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
-        # Sheet 6 - always write raw data
-        df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
+        # Sheet 6 - always write raw data (reset categoricals first)
+        df_export = df.copy()
+        for col in df_export.select_dtypes(["category"]).columns:
+            df_export[col] = df_export[col].astype(str)
+        df_export.to_excel(writer, sheet_name="Exclusive_Report", index=False)
         # Sheet 7
         meta = pd.DataFrame([{
             "InputFile":   filename,
