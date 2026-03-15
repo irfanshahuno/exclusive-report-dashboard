@@ -892,41 +892,6 @@ def build_excel_output(result: dict) -> bytes:
     # freeze panes below title
     ws.freeze_panes = "A3"
 
-    # ── Sheet 2: Raw Data (original uploaded file) ────────────────────────────
-    raw_df = result.get("df")
-    if raw_df is not None and not raw_df.empty:
-        ws2 = wb.create_sheet("Raw Data")
-        ws2.freeze_panes = "A2"
-
-        HDR2_FILL = _fill("404040")   # dark charcoal header
-        ALT2A     = _fill("FFFFFF")
-        ALT2B     = _fill("F5F5F5")
-
-        # Header row
-        ws2.row_dimensions[1].height = 22
-        for ci, col in enumerate(raw_df.columns, 1):
-            c = ws2.cell(row=1, column=ci, value=col)
-            c.fill      = HDR2_FILL
-            c.font      = _font(bold=True, color="FFFFFF", size=10)
-            c.alignment = _align("center", wrap=True)
-            c.border    = _thin()
-
-        # Data rows
-        for ri, (_, row) in enumerate(raw_df.iterrows(), 2):
-            ws2.row_dimensions[ri].height = 16
-            fill = ALT2A if ri % 2 == 0 else ALT2B
-            for ci, val in enumerate(row, 1):
-                c = ws2.cell(row=ri, column=ci, value=val)
-                c.fill      = fill
-                c.font      = _font(size=9)
-                c.border    = _thin()
-                c.alignment = _align("right" if ci > 1 else "left", "center")
-
-        # Auto column widths (capped)
-        from openpyxl.utils import get_column_letter as _gcl
-        for col in ws2.columns:
-            max_w = max((len(str(c.value or "")) for c in col), default=8)
-            ws2.column_dimensions[_gcl(col[0].column)].width = min(max_w + 3, 35)
 
     buf = io.BytesIO()
     wb.save(buf)
