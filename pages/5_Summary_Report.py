@@ -1008,10 +1008,12 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
                 pass
         return ""
 
-    sender    = _get_secret("EMAIL_SENDER",       "sender")
-    password  = _get_secret("EMAIL_PASSWORD",     "password")
-    recipient = _get_secret("EMAIL_RECIPIENT",    "recipient")
-    cc        = _get_secret("EMAIL_RECIPIENT_CC", "cc", "recipient_cc")
+    sender    = _get_secret("SMTP_USER",   "EMAIL_SENDER",    "sender")
+    password  = _get_secret("SMTP_PASS",   "EMAIL_PASSWORD",  "password")
+    recipient = _get_secret("EMAIL_TO",    "EMAIL_RECIPIENT", "recipient")
+    cc        = _get_secret("EMAIL_CC",    "EMAIL_RECIPIENT_CC", "cc")
+    smtp_host = _get_secret("SMTP_HOST") or "smtp.office365.com"
+    smtp_port = int(_get_secret("SMTP_PORT") or 587)
 
     missing = []
     if not sender:    missing.append("EMAIL_SENDER")
@@ -1140,7 +1142,7 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
 
     try:
         all_to = [r.strip() for r in ([recipient] + ([cc] if cc else [])) if r.strip()]
-        with smtplib.SMTP("smtp.office365.com", 587, timeout=30) as srv:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as srv:
             srv.ehlo(); srv.starttls(); srv.login(sender, password)
             srv.sendmail(sender, all_to, msg.as_string())
         return True, f"Email sent to {recipient}"
