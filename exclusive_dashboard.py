@@ -407,7 +407,7 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, rejection_url: 
       <!-- ✅ NEEDFUL: remove target=_blank so it opens in same app -->
       <a class="kpi-link" href="{balance_url}" title="{fmt(bal)}">
         <div class="kpi-card balance">
-          <div class="kpi-label">Under Process</div>
+          <div class="kpi-label">Balance</div>
           <div class="kpi-value">{fmt(bal)}</div>
         </div>
       </a>
@@ -954,8 +954,8 @@ with t2:
 
     st.markdown(f'<a class="navlink" href="{daily_url}" target="_blank">📅 Daily Report</a>', unsafe_allow_html=True)
 with t3:
-    if st.button("📋 Summary", use_container_width=True, key="btn_summary_report"):
-        st.switch_page("pages/5_Summary_Report.py")
+    summary_url = f"https://{st.context.headers.get('host', '')}/Summary_Report{qp}"
+    st.markdown(f'<a class="navlink" href="{summary_url}" target="_blank">📋 Summary</a>', unsafe_allow_html=True)
 with t4:
     if st.button("⬅ Change Year", use_container_width=True, key="btn_change_year"):
         reset_year_selection()
