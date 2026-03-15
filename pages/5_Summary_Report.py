@@ -382,13 +382,22 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     out["Final Rejn"]                       = agg["final_rejn"]
     out["Rej. %"]                           = agg["rej_pct"]
 
-    # Grand Total row
+    # Grand Total row — recalculate Final Rejn and Rej% from raw column sums
+    # (never sum Final Rejn or Rej% directly — always derive from components)
     num_cols = out.select_dtypes(include="number").columns.tolist()
     gt = {c: out[c].sum() if c in num_cols else "Grand Total" for c in out.columns}
     gt[group_col] = "Grand Total"
-    # Rej% for grand total: recalculate from totals
-    gt_claimed = out["Claimed Amount"].sum()
-    gt["Rej. %"] = (gt["Final Rejn"] / gt_claimed * 100) if gt_claimed else 0.0
+
+    # Recalculate Final Rejn from summed components (same formula as per-row)
+    gt_claimed  = out["Claimed Amount"].sum()
+    gt_total_pay = out["Total pay"].sum()
+    gt_sub       = out["Sub Nt Rmtd (outstanding amount)"].sum()
+    gt_rsub      = out["Rsub Nt Rmtd (outstanding amount)"].sum()
+    gt_rej_acc   = out["Rejection Accepted"].sum()
+    gt_final_rejn = max(gt_claimed - gt_total_pay - gt_sub - gt_rsub - gt_rej_acc, 0)
+    gt["Final Rejn"] = gt_final_rejn
+    gt["Rej. %"]     = (gt_final_rejn / gt_claimed * 100) if gt_claimed else 0.0
+
     out = pd.concat([out, pd.DataFrame([gt])], ignore_index=True)
 
     return out
