@@ -340,7 +340,7 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     # Per-row columns for aggregation
     d["_sub_nt_rmtd"]   = d["SubInsShare"].where(mask_sub_init,   0.0)
     d["_rsub_nt_rmtd"]  = d["Difference"].where(mask_sub_resub,   0.0)
-    d["_rej_accepted"]  = d["SubInsShare"].where(mask_rej_acc,     0.0)
+    d["_rej_accepted"]  = d["Difference"].where(mask_rej_acc,      0.0)
 
     # Pending for Resubmission: SubInsShare where Status = "Not Submitted" (initial)
     mask_not_sub_init  = d["_status_norm"] == "not submitted"
