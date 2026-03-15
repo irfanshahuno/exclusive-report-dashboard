@@ -954,7 +954,9 @@ with t2:
 
     st.markdown(f'<a class="navlink" href="{daily_url}" target="_blank">📅 Daily Report</a>', unsafe_allow_html=True)
 with t3:
-    summary_url = f"https://{st.context.headers.get('host', '')}/Summary_Report{qp}"
+    _auth = _make_auth_param()
+    _host = st.context.headers.get("host", "")
+    summary_url = f"https://{_host}/Summary_Report?auth={_auth}" + (f"&center={ck}&year={yr}" if ck else f"&year={yr}")
     st.markdown(f'<a class="navlink" href="{summary_url}" target="_blank">📋 Summary</a>', unsafe_allow_html=True)
 with t4:
     if st.button("⬅ Change Year", use_container_width=True, key="btn_change_year"):
