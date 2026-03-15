@@ -1,126 +1,75 @@
 #!/usr/bin/env python3
 # pages/5_Summary_Report.py
-# Summary Report — upload source -> process in-memory -> display + save to S3
+# Summary Report page — mirrors center selection flow.
+# User selects a center → uploads a source file → runs exclusive_report_status_final.py
+# logic in-memory → displays results (Insurance_Totals, Final_Bucket_Summary, Monthly_Totals,
+# Balance_Aging_Summary, Balance_Status_Stage_Summary) + download button for full Excel.
 
-# =============================================================================
-# STEP 1: Install missing packages BEFORE any other imports that need them
-# =============================================================================
-import subprocess, sys
-for _pkg in ["openpyxl", "boto3"]:
-    try:
-        __import__(_pkg)
-    except ImportError:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", _pkg, "-q"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-
-# =============================================================================
-# STEP 2: Standard imports (openpyxl & boto3 now guaranteed)
-# =============================================================================
-import io, re, hmac, hashlib, base64, json, time
+import io
+import sys
+import hashlib
+import re
+import hmac
+import base64
+import json
+import time
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import boto3
-from botocore.exceptions import ClientError
-from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Font, Alignment
+from botocore.exceptions import BotoCoreError, ClientError
 
-# =============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
-# =============================================================================
-st.set_page_config(page_title="Summary Report - Excellent Medical Group", layout="wide")
+# ─────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="Summary Report — Excellent Medical Group", layout="wide")
 st.set_option("client.showErrorDetails", False)
 
-# =============================================================================
-# S3 CONFIG
-# =============================================================================
-S3_BUCKET = "emc-rcm-storage-2026"
-S3_PREFIX = "streamlit2"
-
-
-def _s3_client():
-    return boto3.client(
-        "s3",
-        aws_access_key_id=st.secrets.get("AWS_ACCESS_KEY_ID", ""),
-        aws_secret_access_key=st.secrets.get("AWS_SECRET_ACCESS_KEY", ""),
-        region_name=(
-            st.secrets.get("AWS_REGION")
-            or st.secrets.get("AWS_DEFAULT_REGION")
-            or "eu-north-1"
-        ),
-    )
-
-
-def s3_key(center_key: str, filename: str) -> str:
-    return f"{S3_PREFIX}/{center_key}/{filename}"
-
-
-def s3_upload(data: bytes, center_key: str, filename: str) -> str:
-    try:
-        key = s3_key(center_key, filename)
-        _s3_client().put_object(Bucket=S3_BUCKET, Key=key, Body=data)
-        return f"s3://{S3_BUCKET}/{key}"
-    except Exception as e:
-        return f"ERROR: {e}"
-
-
-def s3_download(center_key: str, filename: str):
-    try:
-        key = s3_key(center_key, filename)
-        obj = _s3_client().get_object(Bucket=S3_BUCKET, Key=key)
-        return obj["Body"].read()
-    except ClientError as e:
-        if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
-            return None
-        raise
-
-
-def s3_list_reports(center_key: str):
-    try:
-        prefix = f"{S3_PREFIX}/{center_key}/"
-        resp = _s3_client().list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix)
-        return [
-            obj["Key"].replace(prefix, "")
-            for obj in resp.get("Contents", [])
-            if obj["Key"].endswith(".xlsx") and "summary_report" in obj["Key"]
-        ]
-    except Exception:
-        return []
-
-
-# =============================================================================
-# AUTH
-# =============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTH — reuse same view password from main dashboard
+# ─────────────────────────────────────────────────────────────────────────────
 VIEW_PASSWORD = st.secrets.get("VIEW_PASSWORD", "Emc@2026")
-TOKEN_SECRET = st.secrets.get("TOKEN_SECRET", None)
+TOKEN_SECRET  = st.secrets.get("TOKEN_SECRET", None)
 TOKEN_TTL_SECONDS = int(st.secrets.get("TOKEN_TTL_SECONDS", 600))
 
 
-def _b64url_decode(s):
-    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+def _b64url_decode(s: str) -> bytes:
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+
+def verify_url_token(token: str) -> dict | None:
+    if not TOKEN_SECRET:
+        return None
+    try:
+        body_b64, sig_b64 = token.split(".", 1)
+        body = _b64url_decode(body_b64)
+        sig  = _b64url_decode(sig_b64)
+        expected = hmac.new(TOKEN_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        data = json.loads(body.decode("utf-8"))
+        if int(time.time()) - int(data.get("iat", 0)) > TOKEN_TTL_SECONDS:
+            return None
+        return data
+    except Exception:
+        return None
 
 
 def _auto_auth():
     tok = st.query_params.get("token")
-    if tok and TOKEN_SECRET:
-        try:
-            body_b64, sig_b64 = tok.split(".", 1)
-            body = _b64url_decode(body_b64)
-            sig = _b64url_decode(sig_b64)
-            exp = hmac.new(TOKEN_SECRET.encode(), body, hashlib.sha256).digest()
-            if hmac.compare_digest(sig, exp):
-                d = json.loads(body)
-                if int(time.time()) - int(d.get("iat", 0)) <= TOKEN_TTL_SECONDS:
-                    st.session_state.is_view_auth = True
-        except Exception:
-            pass
-    auth = st.query_params.get("auth")
-    if auth:
-        _sec = st.secrets.get("TOKEN_SECRET", VIEW_PASSWORD)
-        if auth == hmac.new(_sec.encode(), b"view_auth", hashlib.sha256).hexdigest()[:16]:
+    if tok:
+        data = verify_url_token(tok)
+        if data:
+            st.session_state.is_view_auth = True
+    auth_param = st.query_params.get("auth")
+    if auth_param:
+        _secret = st.secrets.get("TOKEN_SECRET", VIEW_PASSWORD)
+        expected = hmac.new(_secret.encode("utf-8"), b"view_auth", hashlib.sha256).hexdigest()[:16]
+        if auth_param == expected:
             st.session_state.is_view_auth = True
 
 
@@ -128,9 +77,10 @@ _auto_auth()
 
 
 def require_view_access():
-    if st.session_state.get("is_view_auth"):
+    if st.session_state.get("is_view_auth", False):
         return
-    st.title("Dashboard Access")
+    st.title("🔒 Dashboard Access")
+    st.info("Enter the view password to open the dashboard.")
     pwd = st.text_input("View Password", type="password", key="sum_view_pwd")
     if st.button("Enter Dashboard", use_container_width=True):
         if pwd == VIEW_PASSWORD:
@@ -143,21 +93,39 @@ def require_view_access():
 
 require_view_access()
 
-# =============================================================================
-# CSS
-# =============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# PREMIUM CSS (same as main dashboard)
+# ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
-.stApp{background:linear-gradient(145deg,#EDF2FB 0%,#F8FAFF 40%,#FAFCFF 100%)!important;font-family:'Inter',sans-serif!important;}
-hr{border:none!important;height:1px!important;background:linear-gradient(90deg,transparent,#C8D9F0,transparent)!important;}
-div.stButton>button{width:100%!important;min-height:50px!important;padding:12px 20px!important;font-size:15px!important;font-weight:700!important;font-family:'Inter',sans-serif!important;background:linear-gradient(160deg,#FFFFFF 0%,#EEF4FF 100%)!important;color:#0A2647!important;border:1.5px solid #C5D8F5!important;border-radius:14px!important;box-shadow:0 2px 8px rgba(10,38,71,0.08),inset 0 1px 0 rgba(255,255,255,0.9)!important;transition:all 0.2s ease!important;}
-div.stButton>button:hover{background:linear-gradient(160deg,#E8F1FF 0%,#D6E8FF 100%)!important;border-color:#7DAAEE!important;transform:translateY(-1px)!important;}
-div.stButton>button:active{background:linear-gradient(160deg,#0A2647 0%,#154B8A 100%)!important;color:#fff!important;}
+.stApp{
+  background: linear-gradient(145deg, #EDF2FB 0%, #F8FAFF 40%, #FAFCFF 100%) !important;
+  font-family: 'Inter', sans-serif !important;
+}
+hr{ border:none!important;height:1px!important;background:linear-gradient(90deg,transparent,#C8D9F0,transparent)!important; }
+div.stButton > button{
+  width:100%!important;min-height:50px!important;padding:12px 20px!important;
+  font-size:15px!important;font-weight:700!important;font-family:'Inter',sans-serif!important;
+  background:linear-gradient(160deg,#FFFFFF 0%,#EEF4FF 100%)!important;
+  color:#0A2647!important;border:1.5px solid #C5D8F5!important;border-radius:14px!important;
+  box-shadow:0 2px 8px rgba(10,38,71,0.08),inset 0 1px 0 rgba(255,255,255,0.9)!important;
+  transition:all 0.2s ease!important;
+}
+div.stButton > button:hover{
+  background:linear-gradient(160deg,#E8F1FF 0%,#D6E8FF 100%)!important;
+  border-color:#7DAAEE!important;box-shadow:0 6px 20px rgba(10,38,71,0.15)!important;
+  transform:translateY(-1px)!important;
+}
+div.stButton > button:active{
+  background:linear-gradient(160deg,#0A2647 0%,#154B8A 100%)!important;
+  color:#fff!important;border-color:#0A2647!important;
+}
+.center-title{color:#0A2647!important;font-weight:900!important;font-family:'Inter',sans-serif!important;letter-spacing:-0.5px!important;margin-bottom:0!important;}
 .kpi-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px;margin-top:10px;margin-bottom:10px;}
-.kpi-card{background:rgba(255,255,255,0.85);backdrop-filter:blur(12px);border:1.5px solid rgba(197,216,245,0.7);border-radius:18px;padding:16px 18px;box-shadow:0 4px 16px rgba(10,38,71,0.07),inset 0 1px 0 rgba(255,255,255,0.95);min-width:0;}
-.kpi-label{font-size:12px;color:#8A9BB5;font-weight:600;letter-spacing:0.6px;text-transform:uppercase;margin-bottom:8px;}
-.kpi-value{font-size:clamp(17px,2.1vw,28px);font-weight:800;color:#0D1B2E;letter-spacing:-0.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.kpi-card{background:rgba(255,255,255,0.85);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1.5px solid rgba(197,216,245,0.7);border-radius:18px;padding:16px 18px;box-shadow:0 4px 16px rgba(10,38,71,0.07),0 1px 3px rgba(10,38,71,0.05),inset 0 1px 0 rgba(255,255,255,0.95);min-width:0;transition:all 0.2s ease;}
+.kpi-label{font-size:12px;color:#8A9BB5;font-weight:600;font-family:'Inter',sans-serif;letter-spacing:0.6px;text-transform:uppercase;margin-bottom:8px;}
+.kpi-value{font-size:clamp(17px,2.1vw,28px);font-weight:800;color:#0D1B2E;letter-spacing:-0.5px;font-family:'Inter',sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .kpi-card.balance{background:linear-gradient(145deg,rgba(10,38,71,0.96) 0%,rgba(15,56,110,0.96) 100%);border-color:rgba(180,210,255,0.25);}
 .kpi-card.balance .kpi-label{color:rgba(180,205,255,0.75);}
 .kpi-card.balance .kpi-value{color:#FFFFFF;}
@@ -165,72 +133,118 @@ div.stButton>button:active{background:linear-gradient(160deg,#0A2647 0%,#154B8A 
 </style>
 """, unsafe_allow_html=True)
 
-# =============================================================================
-# CENTERS
-# =============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# CENTERS CONFIG (same as main dashboard)
+# ─────────────────────────────────────────────────────────────────────────────
 CENTERS = {
     "excellent":  {"key": "excellent",  "name": "Excellent Medical Center (MF4777)"},
     "pharmacy":   {"key": "pharmacy",   "name": "Excellent Pharmacy (PF3205)"},
     "easyhealth": {"key": "easyhealth", "name": "Easy Health Medical Clinic (MF8031)"},
 }
 
-# =============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# S3 CONFIG — summary files ONLY (kept separate from main dashboard prefix)
+# ─────────────────────────────────────────────────────────────────────────────
+S3_BUCKET = st.secrets.get("S3_BUCKET", "emc-rcm-storage-2026")
+SUMMARY_S3_PREFIX = st.secrets.get("SUMMARY_S3_PREFIX", "streamlit2")
+AWS_REGION = st.secrets.get("AWS_REGION", "eu-north-1")
+
+
+def get_s3_client():
+    try:
+        return boto3.client(
+            "s3",
+            aws_access_key_id=st.secrets.get("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=st.secrets.get("AWS_SECRET_ACCESS_KEY"),
+            region_name=AWS_REGION,
+        )
+    except Exception:
+        return None
+
+
+def build_summary_s3_key(center_key: str, filename: str) -> str:
+    year = st.session_state.get("rcm_year") or datetime.now().year
+    safe_filename = re.sub(r"[^\w\-.]", "_", str(filename))
+    return f"{SUMMARY_S3_PREFIX}/{year}/{center_key}/{safe_filename}"
+
+
+def upload_bytes_to_s3(file_bytes: bytes, key: str, content_type: str | None = None):
+    s3 = get_s3_client()
+    if s3 is None:
+        return False, "S3 client not available. Check AWS secrets."
+    extra = {}
+    if content_type:
+        extra["ContentType"] = content_type
+    try:
+        s3.put_object(Bucket=S3_BUCKET, Key=key, Body=file_bytes, **extra)
+        return True, None
+    except (BotoCoreError, ClientError, Exception) as e:
+        return False, str(e)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # HEADER
-# =============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
 h1, h2 = st.columns([8, 2])
 with h1:
-    st.title("Summary Report")
-    st.caption(f"Files saved to  s3://{S3_BUCKET}/{S3_PREFIX}/<center>/")
+    st.title("📋 Summary Report")
+    st.caption("Upload a source file per center — results are generated instantly in-memory.")
 with h2:
-    if st.button("Back to Dashboard", use_container_width=True, key="sum_back"):
+    if st.button("🏠 Back to Dashboard", use_container_width=True, key="sum_back"):
         st.switch_page("exclusive_dashboard.py")
 
 st.markdown("---")
 
-# =============================================================================
-# KPI CARDS
-# =============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# SESSION HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+SUM_CENTER_KEY = "sum_center_key"
+
+def reset_sum_center():
+    st.session_state[SUM_CENTER_KEY] = None
+    st.rerun()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KPI RENDERER (same visual as main dashboard, no links needed here)
+# ─────────────────────────────────────────────────────────────────────────────
 def render_kpi_cards(net, paid, bal, rej, acc):
     def fmt(x):
-        try:
-            return f"{float(x):,.2f}"
-        except Exception:
-            return "0.00"
-    st.markdown(f"""
+        try: return f"{float(x):,.2f}"
+        except: return "—"
+    html = f"""
     <div class="kpi-grid">
       <div class="kpi-card"><div class="kpi-label">Net Amount</div><div class="kpi-value">{fmt(net)}</div></div>
       <div class="kpi-card"><div class="kpi-label">Paid</div><div class="kpi-value">{fmt(paid)}</div></div>
       <div class="kpi-card balance"><div class="kpi-label">Balance</div><div class="kpi-value">{fmt(bal)}</div></div>
       <div class="kpi-card"><div class="kpi-label">Rejected</div><div class="kpi-value">{fmt(rej)}</div></div>
       <div class="kpi-card"><div class="kpi-label">Accepted</div><div class="kpi-value">{fmt(acc)}</div></div>
-    </div>""", unsafe_allow_html=True)
+    </div>"""
+    st.markdown(html, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INLINE ENGINE — all logic from exclusive_report_status_final.py
+# ─────────────────────────────────────────────────────────────────────────────
+MAX_RESUB_STAGE = 10
 
 
-# =============================================================================
-# SUMMARY ENGINE  (exclusive_report_status_final.py logic inline)
-# =============================================================================
-MAX_RESUB = 10
-GT_PAT = re.compile(r'^\s*(grand\s*total|total)\s*$', re.I)
-AGE_LABELS = ["0-30 Days", "31-45 Days", "46-60 Days", "61-90 Days", ">90 Days"]
+def _normalize_status(value) -> str:
+    s = str(value or "").strip().lower()
+    return re.sub(r"\s+", " ", s)
 
 
-def _norm(v):
-    return re.sub(r"\s+", " ", str(v or "").strip().lower())
-
-
-def _stage_info(status):
-    s = _norm(status)
+def _extract_stage_info(status_value: str):
+    s = _normalize_status(status_value)
     m = re.match(r"^(submitted|not submitted|approved)\s*(?:\(\s*resub\s*-\s*(\d+)\s*\))?$", s)
     if not m:
         return "Other", "Other", None
     base = m.group(1)
-    n = int(m.group(2)) if m.group(2) else 0
-    lbl = {"submitted": "Submitted", "not submitted": "Not Submitted", "approved": "Approved"}[base]
-    return lbl, ("Initial" if n == 0 else f"Resub-{n}"), n
+    stage_num = int(m.group(2)) if m.group(2) is not None else 0
+    stage_label = "Initial" if stage_num == 0 else f"Resub-{stage_num}"
+    base_label = {"submitted": "Submitted", "not submitted": "Not Submitted", "approved": "Approved"}[base]
+    return base_label, stage_label, stage_num
 
 
-def _final_bucket(status):
-    s = _norm(status)
+def _classify_final_bucket(status_value: str) -> str:
+    s = _normalize_status(status_value)
     if re.match(r"^rejected\s*(?:\(\s*resub\s*-\s*\d+\s*\))?$", s):
         return "Rejected"
     if re.match(r"^rejection accepted\s*(?:\(\s*resub\s*-\s*\d+\s*\))?$", s):
@@ -238,199 +252,260 @@ def _final_bucket(status):
     return "Balance"
 
 
-def _stage_date(row, cols):
-    if row.get("Balance Status Group") == "Not Submitted":
+def _choose_stage_date(row, df_columns):
+    status_group = row.get("Balance Status Group", "")
+    stage_no = row.get("Balance Submission No")
+    if status_group == "Not Submitted":
         return pd.NaT
-    sn = row.get("Balance Submission No")
-    cands = ([] if sn is None or pd.isna(sn)
-             else (["SubDate"] if int(sn) == 0 else [f"Resub{int(sn)}Date"]))
-    cands += ["SubDate", "SubmissionDate", "ClaimDate", "VisitDate"]
-    for c in cands:
-        if c in cols and pd.notna(row.get(c)):
+    candidates = []
+    if stage_no is None or pd.isna(stage_no):
+        candidates = []
+    elif int(stage_no) == 0:
+        candidates = ["SubDate"]
+    else:
+        candidates = [f"Resub{int(stage_no)}Date"]
+    candidates += ["SubDate", "SubmissionDate", "ClaimDate", "VisitDate"]
+    for c in candidates:
+        if c in df_columns and pd.notna(row.get(c)):
             return row[c]
     return pd.NaT
 
 
-def _add_gt(df, key):
+def _add_grand_total_row(df: pd.DataFrame, key_col: str) -> pd.DataFrame:
     if df.empty:
         return df
-    nums = df.select_dtypes(include="number").columns.tolist()
-    row = {c: (df[c].sum() if c in nums else "") for c in df.columns}
-    row[key] = "Grand Total"
-    return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+    total = {key_col: "Grand Total"}
+    for c in df.columns:
+        if c == key_col:
+            continue
+        total[c] = df[c].sum() if c in numeric_cols else ""
+    return pd.concat([df, pd.DataFrame([total])], ignore_index=True)
 
 
-def run_engine(raw_bytes: bytes, filename: str) -> dict:
-    buf = io.BytesIO(raw_bytes)
+def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
+    """
+    Run the full exclusive_report_status_final.py logic in-memory.
+    Returns a dict with all result DataFrames + metadata.
+    """
+    # ── Load ──────────────────────────────────────────────────────────────────
+    buf = io.BytesIO(uploaded_bytes)
     df = pd.read_excel(buf, engine="openpyxl")
     df.columns = df.columns.astype(str).str.strip()
 
-    num_src = ["SubInsShare", "RemitInsShare", "Resub1RemitInsShare",
-               "Resub2RemitInsShare", "Resub3RemitInsShare", "Resub4RemitInsShare", "TakeBack"]
-    for c in num_src:
-        if c not in df.columns:
-            df[c] = 0
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    # ── Ensure numeric cols ───────────────────────────────────────────────────
+    numeric_cols = ["SubInsShare", "RemitInsShare",
+                    "Resub1RemitInsShare", "Resub2RemitInsShare",
+                    "Resub3RemitInsShare", "Resub4RemitInsShare", "TakeBack"]
+    for col in numeric_cols:
+        if col not in df.columns:
+            df[col] = 0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
     if "Status" not in df.columns:
         df["Status"] = ""
 
+    # ── Compute measures ─────────────────────────────────────────────────────
     df["Net Amount"] = df["SubInsShare"]
-    df["Paid"] = df[num_src[1:]].sum(axis=1).clip(upper=df["SubInsShare"])
+    df["Paid"] = df[["RemitInsShare","Resub1RemitInsShare","Resub2RemitInsShare",
+                      "Resub3RemitInsShare","Resub4RemitInsShare","TakeBack"]].sum(axis=1)
+    df["Paid"] = df[["Paid","Net Amount"]].min(axis=1)
     df["Residual"] = (df["Net Amount"] - df["Paid"]).clip(lower=0)
-    df["Rejected"] = df["Accepted"] = df["Balance"] = 0.0
-    df["Final Bucket"] = df["Status"].apply(_final_bucket)
 
-    for col, bkt in [("Rejected", "Rejected"), ("Accepted", "Accepted"), ("Balance", "Balance")]:
-        m = df["Final Bucket"] == bkt
-        df.loc[m, col] = df.loc[m, "Residual"]
+    df["Rejected"] = 0.0
+    df["Accepted"] = 0.0
+    df["Balance"]  = 0.0
 
-    df["Recon Total"] = df[["Paid", "Balance", "Rejected", "Accepted"]].sum(axis=1)
-    df["Recon Diff"] = (df["Net Amount"] - df["Recon Total"]).round(2)
-
-    si = df["Status"].apply(_stage_info)
-    df["Balance Status Group"] = si.apply(lambda x: x[0])
-    df["Balance Submission Stage"] = si.apply(lambda x: x[1])
-    df["Balance Submission No"] = si.apply(lambda x: x[2])
+    df["Final Bucket"] = df["Status"].apply(_classify_final_bucket)
+    mask_rej = df["Final Bucket"] == "Rejected"
+    mask_acc = df["Final Bucket"] == "Accepted"
     mask_bal = df["Final Bucket"] == "Balance"
-    df.loc[~mask_bal, ["Balance Status Group", "Balance Submission Stage", "Balance Submission No"]] = ["", "", None]
 
-    bdefs = [("Submitted", 0, "Initial Submitted Balance"),
-             ("Approved", 0, "Initial Approved Balance"),
-             ("Not Submitted", 0, "Initial Not Submitted Balance")]
-    for n in range(1, MAX_RESUB + 1):
-        bdefs += [("Submitted", n, f"Resub{n} Submitted Balance"),
-                  ("Approved", n, f"Resub{n} Approved Balance"),
-                  ("Not Submitted", n, f"Resub{n} Not Submitted Balance")]
-    for _, _, c in bdefs:
-        df[c] = 0.0
-    for grp, sn, c in bdefs:
-        m = (mask_bal & (df["Balance Status Group"] == grp)
-             & (df["Balance Submission No"].fillna(-999).astype(int) == sn))
-        df.loc[m, c] = df.loc[m, "Balance"]
+    df.loc[mask_rej, "Rejected"] = df.loc[mask_rej, "Residual"]
+    df.loc[mask_acc, "Accepted"] = df.loc[mask_acc, "Residual"]
+    df.loc[mask_bal, "Balance"]  = df.loc[mask_bal, "Residual"]
 
-    dcols = ["SubDate"] + [f"Resub{i}Date" for i in range(1, 11)] + ["SubmissionDate", "ClaimDate", "VisitDate"]
-    for c in [x for x in dcols if x in df.columns]:
+    df["Recon Total"] = df[["Paid","Balance","Rejected","Accepted"]].sum(axis=1)
+    df["Recon Diff"]  = (df["Net Amount"] - df["Recon Total"]).round(2)
+
+    stage_info = df["Status"].apply(_extract_stage_info)
+    df["Balance Status Group"]      = stage_info.apply(lambda x: x[0])
+    df["Balance Submission Stage"]  = stage_info.apply(lambda x: x[1])
+    df["Balance Submission No"]     = stage_info.apply(lambda x: x[2])
+    df.loc[~mask_bal, ["Balance Status Group","Balance Submission Stage","Balance Submission No"]] = ["","",None]
+
+    # Bucket detail columns
+    bucket_defs = [("Submitted",0,"Initial Submitted Balance"),
+                   ("Approved", 0,"Initial Approved Balance"),
+                   ("Not Submitted",0,"Initial Not Submitted Balance")]
+    for n in range(1, MAX_RESUB_STAGE + 1):
+        bucket_defs.extend([
+            ("Submitted",n,f"Resub{n} Submitted Balance"),
+            ("Approved", n,f"Resub{n} Approved Balance"),
+            ("Not Submitted",n,f"Resub{n} Not Submitted Balance"),
+        ])
+    for _, _, col in bucket_defs:
+        df[col] = 0.0
+    for group, stage_no, col in bucket_defs:
+        mask = (
+            (df["Balance"] > 0)
+            & (df["Balance Status Group"] == group)
+            & (df["Balance Submission No"].fillna(-999).astype(int) == stage_no)
+        )
+        df.loc[mask, col] = df.loc[mask, "Balance"]
+
+    # ── Dates & aging ─────────────────────────────────────────────────────────
+    date_cols_all = ["SubDate","Resub1Date","Resub2Date","Resub3Date","Resub4Date","Resub5Date",
+                     "Resub6Date","Resub7Date","Resub8Date","Resub9Date","Resub10Date",
+                     "SubmissionDate","ClaimDate","VisitDate"]
+    for c in [x for x in date_cols_all if x in df.columns]:
         df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
-    cols_list = list(df.columns)
-    df["Balance RefDate"] = df.apply(lambda r: _stage_date(r, cols_list), axis=1)
+
+    df_cols = list(df.columns)
+    df["Balance RefDate"] = df.apply(lambda r: _choose_stage_date(r, df_cols), axis=1)
     today = pd.Timestamp(datetime.today().date())
     df["DaysDiff"] = (today - df["Balance RefDate"]).dt.days
-    df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=[-1, 30, 45, 60, 90, float("inf")], labels=AGE_LABELS)
 
-    ins = next((c for c in ["Insurance", "PayerName", "Insurer", "Plan"] if c in df.columns), None)
-    if ins is None:
+    bins   = [-1, 30, 45, 60, 90, float("inf")]
+    labels = ["0–30 Days","31–45 Days","46–60 Days","61–90 Days",">90 Days"]
+    df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
+
+    # ── Insurance column ──────────────────────────────────────────────────────
+    ins_col = next((c for c in ["Insurance","PayerName","Insurer","Plan"] if c in df.columns), None)
+    if ins_col is None:
         df["Insurance"] = "Not Available"
-    elif ins != "Insurance":
-        df["Insurance"] = df[ins]
+    elif ins_col != "Insurance":
+        df["Insurance"] = df[ins_col]
     df["Insurance"] = df["Insurance"].fillna("Not Available")
 
-    BASE = ["Net Amount", "Paid", "Balance", "Rejected", "Accepted", "Recon Diff"]
-    ins_totals = _add_gt(df.groupby("Insurance", dropna=False)[BASE].sum().reset_index(), "Insurance")
-    fb_summary = _add_gt(df.groupby("Final Bucket", dropna=False)[BASE[:5]].sum().reset_index(), "Final Bucket")
+    # ── Build summary tables ──────────────────────────────────────────────────
+    cols_base = ["Net Amount","Paid","Balance","Rejected","Accepted","Recon Diff"]
 
-    dc = next((c for c in ["VisitDate", "SubDate", "SubmissionDate", "ClaimDate"] if c in df.columns), None)
+    # Insurance Totals
+    ins_totals = df.groupby("Insurance", dropna=False)[cols_base].sum().reset_index()
+    ins_totals = _add_grand_total_row(ins_totals, "Insurance")
+
+    # Final Bucket Summary
+    fb_summary = df.groupby("Final Bucket", dropna=False)[["Net Amount","Paid","Balance","Rejected","Accepted"]].sum().reset_index()
+    fb_summary = _add_grand_total_row(fb_summary, "Final Bucket")
+
+    # Monthly Totals
+    date_col_m = next((c for c in ["VisitDate","SubDate","SubmissionDate","ClaimDate"] if c in df.columns), None)
     monthly = pd.DataFrame()
-    if dc:
+    if date_col_m:
         tmp = df.copy()
-        tmp[dc] = pd.to_datetime(tmp[dc], errors="coerce", dayfirst=True)
-        tmp = tmp.dropna(subset=[dc])
+        tmp[date_col_m] = pd.to_datetime(tmp[date_col_m], errors="coerce", dayfirst=True)
+        tmp = tmp.dropna(subset=[date_col_m])
         if not tmp.empty:
-            tmp["Month"] = tmp[dc].dt.to_period("M").dt.strftime("%B %Y")
-            monthly = _add_gt(tmp.groupby("Month", observed=True)[BASE].sum().reset_index(), "Month")
+            tmp["Month"] = tmp[date_col_m].dt.to_period("M").dt.strftime("%B %Y")
+            monthly = tmp.groupby("Month", observed=True)[cols_base].sum().reset_index()
+            monthly = _add_grand_total_row(monthly, "Month")
 
-    bdf = df[(df["Balance"] > 0) & df["AgingBucket"].notna()].copy()
-    if not bdf.empty:
-        ap = pd.pivot_table(bdf, index="Insurance", columns="AgingBucket",
-                            values="Balance", aggfunc="sum", fill_value=0, observed=False
-                            ).reindex(columns=AGE_LABELS, fill_value=0)
-        ap["Grand Total"] = ap.sum(axis=1)
-        aging = _add_gt(ap.reset_index(), "Insurance")
+    # Balance Aging Summary
+    balance_df = df[(df["Balance"] > 0) & df["AgingBucket"].notna()].copy()
+    if not balance_df.empty:
+        aging_pivot = pd.pivot_table(
+            balance_df, index="Insurance", columns="AgingBucket",
+            values="Balance", aggfunc="sum", fill_value=0, observed=False,
+        ).reindex(columns=labels, fill_value=0)
+        aging_pivot["Grand Total"] = aging_pivot.sum(axis=1)
+        aging_summary = aging_pivot.reset_index()
+        aging_summary = _add_grand_total_row(aging_summary, "Insurance")
     else:
-        aging = pd.DataFrame(columns=["Insurance"] + AGE_LABELS + ["Grand Total"])
+        aging_summary = pd.DataFrame(columns=["Insurance"] + labels + ["Grand Total"])
 
+    # Balance Status Stage Summary
     bss_df = df[df["Balance"] > 0].copy()
     if not bss_df.empty:
-        bss = bss_df.groupby(["Balance Status Group", "Balance Submission Stage"],
-                              dropna=False)["Balance"].sum().reset_index()
-        bss = bss.sort_values(["Balance Status Group", "Balance Submission Stage"])
-        bss = pd.concat([bss, pd.DataFrame([{
-            "Balance Status Group": "Grand Total",
-            "Balance Submission Stage": "",
-            "Balance": bss["Balance"].sum()
-        }])], ignore_index=True)
+        bss = (bss_df.groupby(["Balance Status Group","Balance Submission Stage"], dropna=False)["Balance"]
+               .sum().reset_index()
+               .sort_values(["Balance Status Group","Balance Submission Stage"]))
+        gt_bss = pd.DataFrame([{"Balance Status Group":"Grand Total","Balance Submission Stage":"","Balance":bss["Balance"].sum()}])
+        bss = pd.concat([bss, gt_bss], ignore_index=True)
     else:
-        bss = pd.DataFrame(columns=["Balance Status Group", "Balance Submission Stage", "Balance"])
+        bss = pd.DataFrame(columns=["Balance Status Group","Balance Submission Stage","Balance"])
 
-    kdf = ins_totals[~ins_totals["Insurance"].astype(str).str.match(GT_PAT)]
-    kpis = tuple(float(pd.to_numeric(kdf.get(c, pd.Series([0])), errors="coerce").sum())
-                 for c in ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"])
+    # Recon check
+    recon_diff_total = float(df["Recon Diff"].sum())
+
+    # Grand KPIs (no GT row)
+    kpi_df = ins_totals[ins_totals["Insurance"] != "Grand Total"]
+    kpi_net  = float(pd.to_numeric(kpi_df["Net Amount"], errors="coerce").sum())
+    kpi_paid = float(pd.to_numeric(kpi_df["Paid"],       errors="coerce").sum())
+    kpi_bal  = float(pd.to_numeric(kpi_df["Balance"],    errors="coerce").sum())
+    kpi_rej  = float(pd.to_numeric(kpi_df["Rejected"],   errors="coerce").sum())
+    kpi_acc  = float(pd.to_numeric(kpi_df["Accepted"],   errors="coerce").sum())
 
     return {
-        "df": df, "ins_totals": ins_totals, "fb_summary": fb_summary,
-        "monthly": monthly, "aging": aging, "bss": bss,
-        "kpi": kpis, "recon_diff": float(df["Recon Diff"].sum()),
-        "row_count": len(df), "filename": filename,
+        "df":           df,
+        "ins_totals":   ins_totals,
+        "fb_summary":   fb_summary,
+        "monthly":      monthly,
+        "aging_summary":aging_summary,
+        "bss":          bss,
+        "kpi":          (kpi_net, kpi_paid, kpi_bal, kpi_rej, kpi_acc),
+        "recon_diff":   recon_diff_total,
+        "row_count":    len(df),
+        "filename":     filename,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
-# =============================================================================
-# EXCEL BUILDER
-# =============================================================================
-HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
-TOTAL_FILL = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+def build_excel_output(result: dict) -> bytes:
+    """Build a styled Excel workbook from results (same styling as exclusive_report_status_final.py)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment
 
+    HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
+    TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
 
-def _write_ws(ws, df):
-    for ci, col in enumerate(df.columns, 1):
-        c = ws.cell(row=1, column=ci, value=col)
-        c.fill = HEADER_FILL
-        c.font = Font(bold=True)
-        c.alignment = Alignment(horizontal="center", vertical="center")
-    for ri, row in enumerate(df.itertuples(index=False), 2):
-        is_gt = bool(GT_PAT.match(str(row[0])))
-        for ci, val in enumerate(row, 1):
-            c = ws.cell(row=ri, column=ci, value=val)
-            if is_gt:
-                c.fill = TOTAL_FILL
-                c.font = Font(bold=True)
+    def _write_sheet(ws, df):
+        # Header row
+        for ci, col in enumerate(df.columns, 1):
+            cell = ws.cell(row=1, column=ci, value=col)
+            cell.fill = HEADER_FILL
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        # Data rows
+        for ri, row in df.iterrows():
+            for ci, val in enumerate(row, 1):
+                cell = ws.cell(row=ri + 2, column=ci, value=val)
+                if str(row.iloc[0]) == "Grand Total":
+                    cell.fill = TOTAL_FILL
+                    cell.font = Font(bold=True)
 
-
-def build_excel(result: dict) -> bytes:
     wb = Workbook()
-    ws = wb.active
-    ws.title = "Insurance_Totals"
-    _write_ws(ws, result["ins_totals"])
+    ws_ins = wb.active
+    ws_ins.title = "Insurance_Totals"
+    _write_sheet(ws_ins, result["ins_totals"])
 
-    ws = wb.create_sheet("Final_Bucket_Summary")
-    _write_ws(ws, result["fb_summary"])
+    ws_fb = wb.create_sheet("Final_Bucket_Summary")
+    _write_sheet(ws_fb, result["fb_summary"])
 
     if result["monthly"] is not None and not result["monthly"].empty:
-        ws = wb.create_sheet("Monthly_Totals")
-        _write_ws(ws, result["monthly"])
+        ws_m = wb.create_sheet("Monthly_Totals")
+        _write_sheet(ws_m, result["monthly"])
 
-    ws = wb.create_sheet("Balance_Aging_Summary")
-    _write_ws(ws, result["aging"])
+    ws_age = wb.create_sheet("Balance_Aging_Summary")
+    _write_sheet(ws_age, result["aging_summary"])
 
-    ws = wb.create_sheet("Balance_Status_Stage")
-    _write_ws(ws, result["bss"])
+    ws_bss = wb.create_sheet("Balance_Status_Stage_Summary")
+    _write_sheet(ws_bss, result["bss"])
 
-    bd = result["df"][result["df"]["Balance"] > 0].copy()
-    ws = wb.create_sheet("Balance_Detail")
-    _write_ws(ws, bd)
+    ws_det = wb.create_sheet("Balance_Detail")
+    balance_detail = result["df"][result["df"]["Balance"] > 0].copy()
+    _write_sheet(ws_det, balance_detail)
 
-    ws = wb.create_sheet("Meta")
-    for ri, (k, v) in enumerate([
-        ("InputFile",   result["filename"]),
-        ("GeneratedAt", result["generated_at"]),
-        ("TotalRows",   result["row_count"]),
-        ("ReconDiff",   result["recon_diff"]),
-        ("S3Bucket",    S3_BUCKET),
-        ("S3Prefix",    S3_PREFIX),
-    ], 1):
-        ws.cell(row=ri, column=1, value=k).font = Font(bold=True)
-        ws.cell(row=ri, column=2, value=v)
+    ws_meta = wb.create_sheet("Meta")
+    meta_data = [
+        ("InputFile",     result["filename"]),
+        ("GeneratedAt",   result["generated_at"]),
+        ("TotalRows",     result["row_count"]),
+        ("ReconDiffTotal",result["recon_diff"]),
+    ]
+    for ri, (k, v) in enumerate(meta_data, 1):
+        ws_meta.cell(row=ri, column=1, value=k).font = Font(bold=True)
+        ws_meta.cell(row=ri, column=2, value=v)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -438,214 +513,213 @@ def build_excel(result: dict) -> bytes:
     return buf.read()
 
 
-# =============================================================================
-# TABLE DISPLAY
-# =============================================================================
-def show_table(df, key):
+# ─────────────────────────────────────────────────────────────────────────────
+# DISPLAY HELPER — styled dataframe (Grand Total last, highlighted)
+# ─────────────────────────────────────────────────────────────────────────────
+GT_PAT = re.compile(r'^\s*(grand\s*total|total)\s*$', re.I)
+
+
+def _move_gt_last(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
-        st.info("No data.")
-        return
+        return df
     first = df.columns[0]
     mask = df[first].astype(str).str.match(GT_PAT)
-    df = pd.concat([df[~mask], df[mask]], ignore_index=True)
-    nums = df.select_dtypes(include="number").columns.tolist()
+    return pd.concat([df.loc[~mask], df.loc[mask]], ignore_index=True)
+
+
+def _style_gt(df: pd.DataFrame):
+    """Apply Grand Total bold + orange highlight."""
+    def _highlight(row):
+        if GT_PAT.match(str(row.iloc[0])):
+            return ["background-color:#FCE4D6;font-weight:bold"] * len(row)
+        return [""] * len(row)
+    return df.style.apply(_highlight, axis=1)
+
+
+def _fmt_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """Format numeric columns to 2 decimal places for display."""
+    num_cols = df.select_dtypes(include="number").columns.tolist()
+    return df.style.format({c: "{:,.2f}" for c in num_cols})
+
+
+def show_table(df: pd.DataFrame, key: str):
+    if df is None or df.empty:
+        st.info("No data available.")
+        return
+    df = _move_gt_last(df)
+    num_cols = df.select_dtypes(include="number").columns.tolist()
     styled = df.style.apply(
-        lambda row: [
-            "background-color:#FCE4D6;font-weight:bold"
-            if GT_PAT.match(str(row.iloc[0])) else "" for _ in row
-        ], axis=1
-    ).format({c: "{:,.2f}" for c in nums})
+        lambda row: ["background-color:#FCE4D6;font-weight:bold" if GT_PAT.match(str(row.iloc[0])) else "" for _ in row],
+        axis=1
+    ).format({c: "{:,.2f}" for c in num_cols})
     st.dataframe(styled, use_container_width=True, hide_index=True, key=key)
 
 
-# =============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
 # CENTER SELECTION
-# =============================================================================
-SUM_CK = "sum_center_key"
-ck = st.session_state.get(SUM_CK)
+# ─────────────────────────────────────────────────────────────────────────────
+ck = st.session_state.get(SUM_CENTER_KEY)
 
 if ck not in CENTERS:
     st.subheader("Choose a center")
-    c1, c2, c3 = st.columns(3)
-    for col, ckey in zip([c1, c2, c3], ["excellent", "pharmacy", "easyhealth"]):
-        with col:
-            if st.container(border=True).button(
-                CENTERS[ckey]["name"], use_container_width=True, key=f"sum_{ckey}"
-            ):
-                st.session_state[SUM_CK] = ckey
-                st.rerun()
+
+    sel_year = st.session_state.get("rcm_year") or 2026
+    if sel_year not in (2024, 2025, 2026):
+        sel_year = 2026
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.container(border=True).button(CENTERS["excellent"]["name"], use_container_width=True, key="sum_exc"):
+            st.session_state[SUM_CENTER_KEY] = "excellent"
+            st.rerun()
+    with col2:
+        if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="sum_pharm"):
+            st.session_state[SUM_CENTER_KEY] = "pharmacy"
+            st.rerun()
+    with col3:
+        if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="sum_easy"):
+            st.session_state[SUM_CENTER_KEY] = "easyhealth"
+            st.rerun()
+
     st.stop()
 
-# =============================================================================
-# CENTER DETAIL
-# =============================================================================
-ccfg = CENTERS[ck]
+# ─────────────────────────────────────────────────────────────────────────────
+# CENTER DETAIL + UPLOAD + RESULTS
+# ─────────────────────────────────────────────────────────────────────────────
+center_cfg = CENTERS[ck]
 
-st.markdown(f"""
-<div style="background:#F5FAFF;border:1.5px solid #CFE3FF;padding:14px 18px;border-radius:16px;
-            margin-bottom:10px;box-shadow:0 6px 18px rgba(11,45,92,0.08);">
-  <div style="font-size:24px;font-weight:900;color:#0B2D5C;">{ccfg['name']}</div>
-  <div style="font-size:12px;color:#334155;margin-top:4px;">
-    S3: <code>s3://{S3_BUCKET}/{S3_PREFIX}/{ck}/</code>
-  </div>
-</div>""", unsafe_allow_html=True)
+st.markdown(
+    f"""
+    <div style="
+        background:#F5FAFF;border:1.5px solid #CFE3FF;padding:14px 18px;border-radius:16px;
+        margin-bottom:10px;box-shadow:0 6px 18px rgba(11,45,92,0.08);
+    ">
+      <div style="font-size:24px;font-weight:900;color:#0B2D5C;">{center_cfg['name']}</div>
+      <div style="font-size:13px;color:#334155;margin-top:2px;font-weight:600;">Summary Report — upload a source file to generate results</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-if st.button("Choose another center", key="sum_back_center"):
-    st.session_state[SUM_CK] = None
+if st.button("◀ Choose another center", key="sum_back_center"):
+    st.session_state[SUM_CENTER_KEY] = None
     st.rerun()
 
 st.markdown("---")
 
-# =============================================================================
-# UPLOAD + PROCESS + SAVE TO S3
-# =============================================================================
+# ── File uploader ────────────────────────────────────────────────────────────
 RESULT_KEY = f"sum_result_{ck}"
 
 up = st.file_uploader(
-    f"Upload source Excel for **{ccfg['name']}** (.xlsx)",
+    f"Upload source Excel for **{center_cfg['name']}** (.xlsx)",
     type=["xlsx"],
-    key=f"sum_up_{ck}",
-    help="Upload raw claims source file. Results are processed instantly and saved to S3.",
+    key=f"sum_uploader_{ck}",
+    help="Upload the raw claims source file. The summary engine will process it and display results below.",
 )
 
 if up is not None:
-    with st.spinner("Processing file — please wait..."):
+    with st.spinner("⚙️ Processing file — please wait..."):
         try:
-            raw = up.read()
+            file_bytes = up.read()
 
-            # Save raw source to S3
-            src_uri = s3_upload(raw, ck, f"source_{up.name}")
+            source_s3_key = build_summary_s3_key(center_cfg["key"], up.name)
+            ok_src, err_src = upload_bytes_to_s3(
+                file_bytes,
+                source_s3_key,
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
-            # Run engine
-            result = run_engine(raw, up.name)
-
-            # Build Excel and save report to S3
-            xl_bytes = build_excel(result)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            rpt_name = f"summary_report_{ck}_{ts}.xlsx"
-            rpt_uri = s3_upload(xl_bytes, ck, rpt_name)
-
-            result["s3_source_uri"] = src_uri
-            result["s3_report_uri"] = rpt_uri
-            result["s3_report_name"] = rpt_name
-            result["xl_bytes"] = xl_bytes
-
+            result = run_summary_engine(file_bytes, up.name)
+            result["source_s3_key"] = source_s3_key if ok_src else ""
+            result["source_s3_saved"] = ok_src
+            result["source_s3_error"] = err_src or ""
             st.session_state[RESULT_KEY] = result
-
         except Exception as e:
             st.error(f"Processing failed: {e}")
             st.session_state.pop(RESULT_KEY, None)
 
-# =============================================================================
-# LOAD PREVIOUS REPORT FROM S3
-# =============================================================================
-with st.expander("Load a previously saved report from S3", expanded=False):
-    saved = s3_list_reports(ck)
-    if saved:
-        chosen = st.selectbox("Select saved report", sorted(saved, reverse=True), key=f"s3_pick_{ck}")
-        if st.button("Load from S3", key=f"s3_load_{ck}", use_container_width=True):
-            with st.spinner("Downloading from S3..."):
-                try:
-                    xl_data = s3_download(ck, chosen)
-                    if xl_data:
-                        xls = pd.ExcelFile(io.BytesIO(xl_data), engine="openpyxl")
-
-                        def _read(sheet):
-                            try:
-                                return pd.read_excel(xls, sheet_name=sheet)
-                            except Exception:
-                                return pd.DataFrame()
-
-                        loaded = {
-                            "filename": chosen,
-                            "generated_at": "loaded from S3",
-                            "row_count": "—",
-                            "recon_diff": 0.0,
-                            "ins_totals": _read("Insurance_Totals"),
-                            "fb_summary": _read("Final_Bucket_Summary"),
-                            "monthly":    _read("Monthly_Totals"),
-                            "aging":      _read("Balance_Aging_Summary"),
-                            "bss":        _read("Balance_Status_Stage"),
-                            "kpi":        (0, 0, 0, 0, 0),
-                            "xl_bytes":   xl_data,
-                            "s3_report_uri": f"s3://{S3_BUCKET}/{s3_key(ck, chosen)}",
-                            "s3_report_name": chosen,
-                        }
-                        # Recompute KPIs from ins_totals
-                        it = loaded["ins_totals"]
-                        if not it.empty:
-                            kdf = it[~it.iloc[:, 0].astype(str).str.match(GT_PAT)]
-                            loaded["kpi"] = tuple(
-                                float(pd.to_numeric(kdf[c], errors="coerce").sum())
-                                for c in ["Net Amount", "Paid", "Balance", "Rejected", "Accepted"]
-                                if c in kdf.columns
-                            )
-                            if len(loaded["kpi"]) < 5:
-                                loaded["kpi"] = loaded["kpi"] + (0,) * (5 - len(loaded["kpi"]))
-                        st.session_state[RESULT_KEY] = loaded
-                        st.rerun()
-                    else:
-                        st.error("File not found in S3.")
-                except Exception as e:
-                    st.error(f"S3 load failed: {e}")
-    else:
-        st.info("No saved reports found for this center in S3.")
-
-# =============================================================================
-# DISPLAY RESULTS
-# =============================================================================
+# ── Show results ─────────────────────────────────────────────────────────────
 result = st.session_state.get(RESULT_KEY)
 
 if result:
-    st.success(
-        f"**{result['filename']}** | {result['row_count']} rows | {result['generated_at']}"
-    )
+    st.success(f"✅ Processed **{result['filename']}** — {result['row_count']:,} rows · Generated at {result['generated_at']}")
 
-    if result.get("s3_source_uri") and not result["s3_source_uri"].startswith("ERROR"):
-        st.info(f"Source saved to S3: `{result['s3_source_uri']}`")
-    if result.get("s3_report_uri") and not result["s3_report_uri"].startswith("ERROR"):
-        st.info(f"Report saved to S3: `{result['s3_report_uri']}`")
-
-    if abs(result.get("recon_diff", 0)) > 0.01:
-        st.warning(f"Recon Diff: {result['recon_diff']:,.2f}")
+    recon = result["recon_diff"]
+    if abs(recon) > 0.01:
+        st.warning(f"⚠️ Recon Diff: {recon:,.2f} — Net Amount does not fully reconcile with Paid + Balance + Rejected + Accepted.")
     else:
-        st.success("Reconciliation check passed.")
+        st.info("✅ Reconciliation check passed — Net = Paid + Balance + Rejected + Accepted.")
 
-    render_kpi_cards(*result["kpi"])
+    # KPI cards
+    net, paid, bal, rej, acc = result["kpi"]
+    render_kpi_cards(net, paid, bal, rej, acc)
+
     st.markdown("---")
 
+    # Download full Excel
+    excel_bytes = build_excel_output(result)
+    safe_name = re.sub(r"[^\w\-.]", "_", center_cfg["key"])
+    dl_name = f"{safe_name}_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+
+    report_s3_key = build_summary_s3_key(center_cfg["key"], dl_name)
+    ok_rep, err_rep = upload_bytes_to_s3(
+        excel_bytes,
+        report_s3_key,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    if result.get("source_s3_saved"):
+        st.caption(f"Source saved to S3: {result.get('source_s3_key','')}")
+    elif result.get("source_s3_error"):
+        st.warning(f"Source file could not be saved to S3: {result['source_s3_error']}")
+
+    if ok_rep:
+        st.caption(f"Summary saved to S3: {report_s3_key}")
+    else:
+        st.warning(f"Summary report could not be saved to S3: {err_rep}")
+
     st.download_button(
-        "Download Full Summary Report (Excel)",
-        data=result["xl_bytes"],
-        file_name=result.get("s3_report_name", f"{ck}_summary.xlsx"),
+        "⬇️ Download Full Summary Report (Excel)",
+        data=excel_bytes,
+        file_name=dl_name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
         key=f"sum_dl_{ck}",
     )
+
     st.markdown("---")
 
+    # Tabs for each summary table
     tabs = st.tabs([
-        "Insurance Totals", "Final Bucket", "Monthly", "Balance Aging", "Status x Stage"
+        "📊 Insurance Totals",
+        "🪣 Final Bucket",
+        "📅 Monthly Totals",
+        "⏳ Balance Aging",
+        "🔀 Status × Stage",
     ])
+
     with tabs[0]:
         st.subheader("Insurance Totals")
-        show_table(result["ins_totals"], f"t0_{ck}")
+        show_table(result["ins_totals"], key="sum_ins")
+
     with tabs[1]:
         st.subheader("Final Bucket Summary")
-        show_table(result["fb_summary"], f"t1_{ck}")
+        show_table(result["fb_summary"], key="sum_fb")
+
     with tabs[2]:
         st.subheader("Monthly Totals")
-        m = result.get("monthly")
-        if m is not None and not m.empty:
-            show_table(m, f"t2_{ck}")
+        if result["monthly"] is not None and not result["monthly"].empty:
+            show_table(result["monthly"], key="sum_monthly")
         else:
-            st.info("No monthly data — date column not found in source.")
+            st.info("No monthly data — date column (VisitDate / SubDate / SubmissionDate / ClaimDate) not found in source.")
+
     with tabs[3]:
-        st.subheader("Balance Aging (by Insurance)")
-        show_table(result["aging"], f"t3_{ck}")
+        st.subheader("Balance Aging Summary (by Insurance)")
+        show_table(result["aging_summary"], key="sum_aging")
+
     with tabs[4]:
-        st.subheader("Balance Status x Stage")
-        show_table(result["bss"], f"t4_{ck}")
+        st.subheader("Balance Status × Submission Stage")
+        show_table(result["bss"], key="sum_bss")
 
 else:
-    st.info("Upload a source Excel file above to generate the summary report.")
+    st.info("👆 Upload a source Excel file above to generate the summary report.")
