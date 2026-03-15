@@ -1072,9 +1072,29 @@ def _load_result_from_s3(center_key: str) -> dict | None:
         cache["rcm_insurance"] = _from_json(cache.get("rcm_insurance"))
         cache["rcm_doctor"]    = _from_json(cache.get("rcm_doctor"))
         cache["rcm_month"]     = _from_json(cache.get("rcm_month"))
-        cache["kpi"]           = tuple(cache.get("kpi", [0,0,0,0,0]))
-        # xl_bytes not cached (rebuild on demand)
         cache["xl_bytes"]      = None
+
+        # Always recompute KPIs from rcm_insurance Grand Total — never trust stored kpi
+        import re as _re2
+        _gt_p = _re2.compile(r"^\s*(grand\s*total|total)\s*$", _re2.I)
+        _ins = cache["rcm_insurance"]
+        if _ins is not None and not _ins.empty:
+            _gt = _ins[_ins.iloc[:,0].astype(str).str.match(_gt_p)]
+            if not _gt.empty:
+                def _kv(col):
+                    try: return float(_gt[col].values[0])
+                    except: return 0.0
+                cache["kpi"] = (
+                    _kv("Claimed Amount"),
+                    _kv("Total pay"),
+                    _kv("Sub Nt Rmtd (outstanding amount)") + _kv("Rsub Nt Rmtd (outstanding amount)"),
+                    _kv("Final Rejn"),
+                    _kv("Rejection Accepted"),
+                )
+            else:
+                cache["kpi"] = tuple(cache.get("kpi", [0,0,0,0,0]))
+        else:
+            cache["kpi"] = tuple(cache.get("kpi", [0,0,0,0,0]))
         return cache
     except Exception:
         return None
