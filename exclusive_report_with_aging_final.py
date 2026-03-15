@@ -9,7 +9,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # =========================================
 # Toggle: write the raw "Exclusive_Report" sheet?
 # =========================================
-WRITE_EXCLUSIVE_SHEET = False  # <-- leave False to skip that sheet
+WRITE_EXCLUSIVE_SHEET = True  # <-- leave False to skip that sheet
 
 # -------------------- helpers --------------------
 def sha1_short(path: str) -> str:
@@ -266,8 +266,6 @@ def main():
 
     # Write sheets (skip "Exclusive_Report" if disabled)
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
-        if WRITE_EXCLUSIVE_SHEET:
-            df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
         insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
         if not monthly_totals.empty:
             monthly_totals.to_excel(writer, sheet_name="Monthly_Totals", index=False)
@@ -275,6 +273,8 @@ def main():
             monthly_insurance_detail.to_excel(writer, sheet_name="Monthly_Insurance_Detail", index=False)
         pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
         balance_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
+        if WRITE_EXCLUSIVE_SHEET:
+            df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
 
         meta = pd.DataFrame([{
             "InputFile": os.path.basename(input_file),
