@@ -9,7 +9,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # =========================================
 # Toggle: write the raw "Exclusive_Report" sheet?
 # =========================================
-WRITE_EXCLUSIVE_SHEET = False  # <-- leave False to skip that sheet
+WRITE_EXCLUSIVE_SHEET = True   # Raw data sheet always written
 
 # -------------------- helpers --------------------
 def sha1_short(path: str) -> str:
@@ -113,8 +113,9 @@ def build_balance_aging_summary(balance_df: pd.DataFrame) -> pd.DataFrame:
         fill_value=0,
         observed=False,
     ).reindex(columns=labels)
-    pivot_summary["Grand Total"] = pivot_summary.sum(axis=1)
-    pivot_summary.loc["Grand Total"] = pivot_summary.sum(axis=0)
+    pivot_summary["Grand Total"] = pivot_summary[labels].sum(axis=1)
+    gt_row = {col: pivot_summary[col].sum() for col in pivot_summary.columns}
+    pivot_summary.loc["Grand Total"] = gt_row
     pivot_summary.reset_index(inplace=True)
     return pivot_summary
 
@@ -190,6 +191,19 @@ def main():
     df = add_aging(df)
     df = ensure_insurance_column(df)
 
+    # ── Strip footer/total rows from source data ─────────────────────────────
+    # Remove rows where Insurance is blank/null (source Excel subtotal rows)
+    df = df[df["Insurance"].astype(str).str.strip().replace("nan", "").str.len() > 0].reset_index(drop=True)
+    # Remove rows where Insurance is a Grand Total / Total label
+    df = df[~df["Insurance"].astype(str).str.strip().str.lower().isin(
+        ["grand total", "total", "nan", "none", ""]
+    )].reset_index(drop=True)
+    # Remove rows where ActivityIns is 0 and Insurance is still somehow blank
+    if "ActivityIns" in df.columns:
+        _blank_ins = df["Insurance"].astype(str).str.strip().isin(["", "nan", "none"])
+        _zero_amt  = pd.to_numeric(df["ActivityIns"], errors="coerce").fillna(0) == 0
+        df = df[~(_blank_ins & _zero_amt)].reset_index(drop=True)
+
     balance_df = df.loc[df["Balance"] > 0].copy()
     pivot_summary = build_balance_aging_summary(balance_df)
     insurance_totals = build_insurance_totals(df)
@@ -197,7 +211,7 @@ def main():
     # Write sheets (skip "Exclusive_Report" if disabled)
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
         if WRITE_EXCLUSIVE_SHEET:
-            df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
+            df.to_excel(writer, sheet_name="Raw_Data", index=False)
         insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
         pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
         balance_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
