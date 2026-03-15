@@ -9,7 +9,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # =========================================
 # Toggle: write the raw "Exclusive_Report" sheet?
 # =========================================
-WRITE_EXCLUSIVE_SHEET = True   # raw data sheet included in output
+WRITE_EXCLUSIVE_SHEET = False  # <-- leave False to skip that sheet
 
 # -------------------- helpers --------------------
 def sha1_short(path: str) -> str:
@@ -36,74 +36,10 @@ def parse_args():
     os.makedirs(out_dir, exist_ok=True)
     return args
 
-# -------------------- cleanup --------------------
-def remove_embedded_totals(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Remove blank/footer/grand-total rows already present in the source Excel
-    so they do not get counted again in grouped summaries.
-    """
-    df = df.copy()
-    df.columns = df.columns.str.strip()
-
-    # Drop fully empty rows
-    df = df.dropna(how="all").reset_index(drop=True)
-
-    # Drop visually blank rows
-    blank_mask = df.fillna("").astype(str).apply(
-        lambda r: "".join(r.values).strip() == "", axis=1
-    )
-    df = df.loc[~blank_mask].reset_index(drop=True)
-
-    total_words = {"grand total", "total", "subtotal", "grand tot", "tot"}
-
-    def is_total_like(v):
-        s = str(v).strip().lower()
-        return s in total_words
-
-    # Remove explicit total/footer labels from common text columns
-    check_cols = [
-        "Insurance", "PayerName", "Insurer", "Plan",
-        "Doctor", "DoctorName", "DocName",
-        "Month", "UniqueID", "ActivityStatus", "DenialCode"
-    ]
-    for col in check_cols:
-        if col in df.columns:
-            df = df.loc[~df[col].apply(is_total_like)].copy()
-
-    # Probe numeric columns used by the report
-    numeric_cols = [
-        "ActivityIns",
-        "actRemitInsShare", "actResub1RemitInsShare",
-        "actResub2RemitInsShare", "actResub3RemitInsShare",
-        "TKBKAmountAct",
-    ]
-    for c in numeric_cols:
-        if c not in df.columns:
-            df[c] = 0
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-
-    # Remove rows that are blank/totals and all important numeric fields are zero
-    status_col = "ActivityStatus" if "ActivityStatus" in df.columns else None
-    if status_col is not None:
-        status_blank_or_total = df[status_col].astype(str).str.strip().str.lower().isin(
-            ["", "nan", "none", "total", "grand total", "subtotal"]
-        )
-        nums_zero = df[numeric_cols].sum(axis=1).fillna(0).eq(0)
-        df = df.loc[~(status_blank_or_total & nums_zero)].reset_index(drop=True)
-
-    # Remove rows with blank UniqueID and no useful detail values
-    if "UniqueID" in df.columns:
-        uid_blank = df["UniqueID"].astype(str).str.strip().isin(["", "nan", "None"])
-        nums_zero = df[numeric_cols].sum(axis=1).fillna(0).eq(0)
-        df = df.loc[~(uid_blank & nums_zero)].reset_index(drop=True)
-
-    return df
-
 # -------------------- ETL parts --------------------
 def load_data(input_file: str) -> pd.DataFrame:
     df = pd.read_excel(input_file, engine="openpyxl")
     df.columns = df.columns.str.strip()
-    df = remove_embedded_totals(df)
     return df
 
 def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
@@ -120,33 +56,23 @@ def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def compute_measures(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
     df["Paid"] = df[
         ["actRemitInsShare", "actResub1RemitInsShare",
          "actResub2RemitInsShare", "actResub3RemitInsShare",
          "TKBKAmountAct"]
     ].sum(axis=1)
 
-    # Never allow paid to exceed claimed amount
-    df["Paid"] = df[["Paid", "ActivityIns"]].min(axis=1)
-
     df["Rejection"], df["Accepted"], df["Balance"] = 0.0, 0.0, 0.0
 
     if "ActivityStatus" in df.columns and "DenialCode" in df.columns:
-        lower_status = df["ActivityStatus"].astype(str).str.strip().str.lower()
-        denial_present = df["DenialCode"].notna() & (df["DenialCode"].astype(str).str.strip() != "")
-
+        lower_status = df["ActivityStatus"].astype(str).str.lower()
         mask_paid = df["Paid"] > 0
-        mask_reject = (df["Paid"] == 0) & (lower_status == "rejected") & denial_present
+        mask_reject = (df["Paid"] == 0) & (lower_status == "rejected") & (df["DenialCode"].notna())
         mask_balance = (df["Paid"] == 0) & ~mask_reject
 
-        # residual on paid claims is accepted
-        df.loc[mask_paid, "Accepted"] = (df.loc[mask_paid, "ActivityIns"] - df.loc[mask_paid, "Paid"]).clip(lower=0)
-        df.loc[mask_reject, "Rejection"] = df.loc[mask_reject, "ActivityIns"]
-        df.loc[mask_balance, "Balance"] = df.loc[mask_balance, "ActivityIns"]
-    else:
-        df["Balance"] = (df["ActivityIns"] - df["Paid"]).clip(lower=0)
+        df.loc[mask_paid, "Accepted"] = df["ActivityIns"] - df["Paid"]
+        df.loc[mask_reject, "Rejection"] = df["ActivityIns"]
+        df.loc[mask_balance, "Balance"] = df["ActivityIns"]
 
     return df
 
