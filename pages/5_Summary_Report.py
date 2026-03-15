@@ -1307,19 +1307,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-col_back, col_clear = st.columns([2, 1])
-with col_back:
-    if st.button("◀ Choose another center", key="sum_back_center", use_container_width=True):
-        st.session_state[SUM_CENTER_KEY] = None
-        st.rerun()
-with col_clear:
-    if st.button("🗑️ Clear Cache", key="sum_clear_cache", use_container_width=True):
-        try:
-            _s3_client().delete_object(Bucket=S3_BUCKET, Key=_result_cache_key(ck))
-        except Exception:
-            pass
-        st.session_state.pop(RESULT_KEY, None)
-        st.rerun()
+if st.button("◀ Choose another center", key="sum_back_center"):
+    st.session_state[SUM_CENTER_KEY] = None
+    st.rerun()
 
 st.markdown("---")
 
