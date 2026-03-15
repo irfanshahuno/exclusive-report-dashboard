@@ -584,10 +584,17 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         _month_name_map = {m.lower(): i for i, m in enumerate(_cal.month_name) if m}
         _month_abbr_map = {m.lower(): i for i, m in enumerate(_cal.month_abbr) if m}
 
-        def _to_month_label(val):
-            """Convert any month value to Jan-22 format."""
+        def _to_month_label(row):
+            """Convert Month + Year columns to Jan-22 format."""
             import re as _re
-            s = str(val).strip()
+            s = str(row["Month"]).strip()
+            # Get year from Year column if available
+            yr_val = None
+            if "Year" in row.index:
+                try:
+                    yr_val = int(float(str(row["Year"]))) % 100
+                except Exception:
+                    pass
             # datetime string: "2022-01-01 00:00:00" or "2022-01-01"
             dt_match = _re.match(r"(\d{4})-(\d{2})-\d{2}", s)
             if dt_match:
@@ -597,14 +604,17 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
             # Already Jan-22 format
             if _re.match(r"[A-Za-z]{3}-\d{2}", s):
                 return s.title()[:3] + s[3:]
-            # Full month name "April" — no year available, use as-is abbreviated
+            # Full month name "April" + year from Year column
             lower = s.lower()
             if lower in _month_name_map:
-                return _cal.month_abbr[_month_name_map[lower]]
+                abbr = _cal.month_abbr[_month_name_map[lower]]
+                if yr_val is not None:
+                    return f"{abbr}-{yr_val:02d}"
+                return abbr
             return s
 
         tmp_m = df.copy()
-        tmp_m["Month"] = tmp_m["Month"].apply(_to_month_label)
+        tmp_m["Month"] = tmp_m.apply(_to_month_label, axis=1)
         tmp_m = tmp_m[tmp_m["Month"].str.lower() != "nan"]
         if not tmp_m.empty:
             rcm_month = build_rcm_summary(tmp_m, "Month")
@@ -827,9 +837,19 @@ def build_excel_output(result: dict) -> bytes:
                 rows = [str(r) for r in rcm_m.iloc[:, 0] if not gt_p.match(str(r))]
                 if rows:
                     rows_sorted = sorted(rows, key=_mk)
-                    start = rows_sorted[0].upper()
-                    end   = rows_sorted[-1].upper()
-                    return f"EMC - RCM SUMMARY - {start} - {end}"
+                    start = rows_sorted[0].upper()   # e.g. JAN-22
+                    end   = rows_sorted[-1].upper()  # e.g. DEC-22
+                    # Format: 01 JAN 2022 - 31 DEC 2022 style
+                    def _expand(lbl):
+                        import calendar as _c2
+                        parts = lbl.split("-")
+                        if len(parts) == 2:
+                            mon = parts[0].title()
+                            yr  = int(parts[1])
+                            full_yr = (2000 + yr) if yr < 50 else (1900 + yr)
+                            return f"{mon.upper()} {full_yr}"
+                        return lbl
+                    return f"EMC - RCM SUMMARY - {_expand(start)} - {_expand(end)}"
         except Exception:
             pass
         return "EMC - RCM SUMMARY"
@@ -871,6 +891,42 @@ def build_excel_output(result: dict) -> bytes:
 
     # freeze panes below title
     ws.freeze_panes = "A3"
+
+    # ── Sheet 2: Raw Data (original uploaded file) ────────────────────────────
+    raw_df = result.get("df")
+    if raw_df is not None and not raw_df.empty:
+        ws2 = wb.create_sheet("Raw Data")
+        ws2.freeze_panes = "A2"
+
+        HDR2_FILL = _fill("404040")   # dark charcoal header
+        ALT2A     = _fill("FFFFFF")
+        ALT2B     = _fill("F5F5F5")
+
+        # Header row
+        ws2.row_dimensions[1].height = 22
+        for ci, col in enumerate(raw_df.columns, 1):
+            c = ws2.cell(row=1, column=ci, value=col)
+            c.fill      = HDR2_FILL
+            c.font      = _font(bold=True, color="FFFFFF", size=10)
+            c.alignment = _align("center", wrap=True)
+            c.border    = _thin()
+
+        # Data rows
+        for ri, (_, row) in enumerate(raw_df.iterrows(), 2):
+            ws2.row_dimensions[ri].height = 16
+            fill = ALT2A if ri % 2 == 0 else ALT2B
+            for ci, val in enumerate(row, 1):
+                c = ws2.cell(row=ri, column=ci, value=val)
+                c.fill      = fill
+                c.font      = _font(size=9)
+                c.border    = _thin()
+                c.alignment = _align("right" if ci > 1 else "left", "center")
+
+        # Auto column widths (capped)
+        from openpyxl.utils import get_column_letter as _gcl
+        for col in ws2.columns:
+            max_w = max((len(str(c.value or "")) for c in col), default=8)
+            ws2.column_dimensions[_gcl(col[0].column)].width = min(max_w + 3, 35)
 
     buf = io.BytesIO()
     wb.save(buf)
