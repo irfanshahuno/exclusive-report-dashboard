@@ -756,6 +756,8 @@ up = st.file_uploader(
     help="Upload the raw claims source file. The summary engine will process it and display results below.",
 )
 
+up_rcm = None  # placeholder — no second uploader in this version
+
 if up is not None:
     if st.button("⚙️ Process File", use_container_width=True, key=f"sum_process_btn_{ck}"):
         with st.spinner("Processing file — please wait..."):
