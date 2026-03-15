@@ -214,7 +214,7 @@ def render_kpi_cards(net, paid, bal, rej, acc):
     <div class="kpi-grid">
       <div class="kpi-card"><div class="kpi-label">Net Amount</div><div class="kpi-value">{fmt(net)}</div></div>
       <div class="kpi-card"><div class="kpi-label">Paid</div><div class="kpi-value">{fmt(paid)}</div></div>
-      <div class="kpi-card balance"><div class="kpi-label">Balance</div><div class="kpi-value">{fmt(bal)}</div></div>
+      <div class="kpi-card balance"><div class="kpi-label">Under Process</div><div class="kpi-value">{fmt(bal)}</div></div>
       <div class="kpi-card"><div class="kpi-label">Rejected</div><div class="kpi-value">{fmt(rej)}</div></div>
       <div class="kpi-card"><div class="kpi-label">Accepted</div><div class="kpi-value">{fmt(acc)}</div></div>
     </div>"""
@@ -437,6 +437,14 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
             ["", "nan", "none", "total", "grand total"]
         )
         df = df[~(sub_zero & stat_blank)].reset_index(drop=True)
+
+    # Remove any row where UniqueID looks like a Grand Total label
+    for _gc in ["UniqueID", "Insurance", "DocName", "Month"]:
+        if _gc in df.columns:
+            _gt_mask = df[_gc].astype(str).str.strip().str.lower().isin(
+                ["grand total", "total"]
+            )
+            df = df[~_gt_mask].reset_index(drop=True)
 
     # ── Ensure numeric cols ───────────────────────────────────────────────────
     numeric_cols = ["SubInsShare", "RemitInsShare",
