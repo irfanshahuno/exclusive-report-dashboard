@@ -124,13 +124,13 @@ def build_insurance_totals(df: pd.DataFrame) -> pd.DataFrame:
           .sum()
           .reset_index()
     )
-    insurance_totals = insurance_totals.rename(columns={"ActivityIns": "Net Amount", "Rejection": "Rejected"})
-    insurance_totals = insurance_totals[["Insurance", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
+    insurance_totals = insurance_totals.rename(columns={"ActivityIns": "Net Amount", "Rejection": "Rejected", "Balance": "Under Process"})
+    insurance_totals = insurance_totals[["Insurance", "Net Amount", "Paid", "Under Process", "Rejected", "Accepted"]]
     total_row = {
         "Insurance": "Grand Total",
         "Net Amount": insurance_totals["Net Amount"].sum(),
         "Paid": insurance_totals["Paid"].sum(),
-        "Balance": insurance_totals["Balance"].sum(),
+        "Under Process": insurance_totals["Under Process"].sum(),
         "Rejected": insurance_totals["Rejected"].sum(),
         "Accepted": insurance_totals["Accepted"].sum(),
     }
@@ -161,8 +161,9 @@ def build_monthly_insurance_detail(df: pd.DataFrame) -> pd.DataFrame:
         "_Month": "Month",
         "ActivityIns": "Net Amount",
         "Rejection": "Rejected",
+        "Balance": "Under Process",
     })
-    result = result[["Month", "Insurance", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
+    result = result[["Month", "Insurance", "Net Amount", "Paid", "Under Process", "Rejected", "Accepted"]]
     return result
 
 
@@ -190,14 +191,15 @@ def build_monthly_totals(df: pd.DataFrame) -> pd.DataFrame:
         "_Month": "Month",
         "ActivityIns": "Net Amount",
         "Rejection": "Rejected",
+        "Balance": "Under Process",
     })
-    monthly = monthly[["Month", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
+    monthly = monthly[["Month", "Net Amount", "Paid", "Under Process", "Rejected", "Accepted"]]
 
     total_row = {
         "Month":      "Grand Total",
         "Net Amount": monthly["Net Amount"].sum(),
         "Paid":       monthly["Paid"].sum(),
-        "Balance":    monthly["Balance"].sum(),
+        "Under Process": monthly["Under Process"].sum(),
         "Rejected":   monthly["Rejected"].sum(),
         "Accepted":   monthly["Accepted"].sum(),
     }
