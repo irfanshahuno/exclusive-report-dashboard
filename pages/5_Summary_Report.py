@@ -20,15 +20,6 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-# ── Auto-install openpyxl if missing (Streamlit Cloud may not have it) ────────
-import importlib, subprocess, sys as _sys
-try:
-    importlib.import_module("openpyxl")
-except ModuleNotFoundError:
-    subprocess.check_call([_sys.executable, "-m", "pip", "install", "openpyxl", "-q"])
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
@@ -257,12 +248,15 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     Returns a dict with all result DataFrames + metadata.
     """
     # ── Load ──────────────────────────────────────────────────────────────────
+    import importlib
+    importlib.import_module("openpyxl")   # explicit import — surfaces missing-dep clearly
+
     buf = io.BytesIO(uploaded_bytes)
     try:
         df = pd.read_excel(buf, engine="openpyxl")
     except Exception:
         buf.seek(0)
-        df = pd.read_excel(buf)
+        df = pd.read_excel(buf)           # fallback: let pandas auto-detect engine
     df.columns = df.columns.astype(str).str.strip()
 
     # ── Ensure numeric cols ───────────────────────────────────────────────────
