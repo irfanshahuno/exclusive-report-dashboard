@@ -19,8 +19,6 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-import boto3
-from botocore.exceptions import BotoCoreError, ClientError
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -143,45 +141,6 @@ CENTERS = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# S3 CONFIG — summary files ONLY (kept separate from main dashboard prefix)
-# ─────────────────────────────────────────────────────────────────────────────
-S3_BUCKET = st.secrets.get("S3_BUCKET", "emc-rcm-storage-2026")
-SUMMARY_S3_PREFIX = st.secrets.get("SUMMARY_S3_PREFIX", "streamlit2")
-AWS_REGION = st.secrets.get("AWS_REGION", "eu-north-1")
-
-
-def get_s3_client():
-    try:
-        return boto3.client(
-            "s3",
-            aws_access_key_id=st.secrets.get("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=st.secrets.get("AWS_SECRET_ACCESS_KEY"),
-            region_name=AWS_REGION,
-        )
-    except Exception:
-        return None
-
-
-def build_summary_s3_key(center_key: str, filename: str) -> str:
-    year = st.session_state.get("rcm_year") or datetime.now().year
-    safe_filename = re.sub(r"[^\w\-.]", "_", str(filename))
-    return f"{SUMMARY_S3_PREFIX}/{year}/{center_key}/{safe_filename}"
-
-
-def upload_bytes_to_s3(file_bytes: bytes, key: str, content_type: str | None = None):
-    s3 = get_s3_client()
-    if s3 is None:
-        return False, "S3 client not available. Check AWS secrets."
-    extra = {}
-    if content_type:
-        extra["ContentType"] = content_type
-    try:
-        s3.put_object(Bucket=S3_BUCKET, Key=key, Body=file_bytes, **extra)
-        return True, None
-    except (BotoCoreError, ClientError, Exception) as e:
-        return False, str(e)
-
-# ─────────────────────────────────────────────────────────────────────────────
 # HEADER
 # ─────────────────────────────────────────────────────────────────────────────
 h1, h2 = st.columns([8, 2])
@@ -284,120 +243,141 @@ def _add_grand_total_row(df: pd.DataFrame, key_col: str) -> pd.DataFrame:
 
 
 
-def build_rcm_summary(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
-    """
-    Build the RCM Summary table grouped by any column (Insurance, DocName, etc.)
-    Columns match the EMC RCM Summary report exactly.
 
-    Claim count     = count of unique UniqueID
-    Claimed Amount  = sum of SubInsShare
-    Remited Amt     = sum of RemitInsShare + sum of Difference
-    Initial pay     = sum of RemitInsShare
-    Resb1 pay       = sum of Resub1RemitInsShare
-    Resb2 pay       = sum of Resub2RemitInsShare
-    Resb3 pay       = sum of Resub3RemitInsShare
-    Total pay       = Initial + Resb1 + Resb2 + Resb3
-    Sub Nt Rmtd     = SubInsShare where Status == "Submitted" (initial only)
-    Rsub Nt Rmtd    = Difference where Status matches Submitted (Resub-N)
-    Rejection Accepted = SubInsShare where Status == "Rejection Accepted"
-    Final Rejn      = Claimed - (Total pay + Sub Nt Rmtd + Rsub Nt Rmtd + Rej Accepted)
-    Rej. %          = Final Rejn / Claimed Amount * 100
-    """
-    import re as _re
+def _find_first_existing_col(df: pd.DataFrame, candidates):
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
 
-    d = df.copy()
 
-    # Ensure needed columns exist
-    for c in ["SubInsShare", "RemitInsShare", "Resub1RemitInsShare",
-              "Resub2RemitInsShare", "Resub3RemitInsShare", "Difference",
-              "UniqueID", "Status"]:
-        if c not in d.columns:
-            d[c] = 0 if c not in ("UniqueID", "Status") else ("" if c == "Status" else 0)
+def _status_norm_series(series: pd.Series) -> pd.Series:
+    return series.fillna("").astype(str).str.strip().str.lower().str.replace(r"\s+", " ", regex=True)
 
-    for c in ["SubInsShare","RemitInsShare","Resub1RemitInsShare",
-              "Resub2RemitInsShare","Resub3RemitInsShare","Difference"]:
-        d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
 
-    # Status masks
-    def _norm(v):
-        return _re.sub(r"\s+", " ", str(v or "").strip().lower())
+def build_insurance_rcm_summary(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
 
-    d["_status_norm"] = d["Status"].apply(_norm)
+    for col in ["SubInsShare", "RemitInsShare", "Resub1RemitInsShare", "Resub2RemitInsShare", "Resub3RemitInsShare", "Difference"]:
+        if col not in work.columns:
+            work[col] = 0
+        work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0.0)
 
-    # Sub Nt Rmtd: Status exactly "submitted" (initial, no resub)
-    mask_sub_init = d["_status_norm"] == "submitted"
+    if "Insurance" not in work.columns:
+        ins_col = _find_first_existing_col(work, ["Insurance", "PayerName", "Insurer", "Plan"])
+        work["Insurance"] = work[ins_col] if ins_col else "Not Available"
+    work["Insurance"] = work["Insurance"].fillna("Not Available").astype(str).str.strip()
 
-    # Rsub Nt Rmtd: Status matches "submitted (resub-N)"
-    mask_sub_resub = d["_status_norm"].str.match(
-        r"^submitted\s*\(\s*resub\s*-\s*\d+\s*\)$"
+    id_col = _find_first_existing_col(work, ["ID", "UniqueID", "ClaimID", "Claim Id", "Claim No", "ClaimNo", "VisitNo"])
+    if id_col is None:
+        work["_claim_id_fallback_"] = range(1, len(work) + 1)
+        id_col = "_claim_id_fallback_"
+
+    if "Status" not in work.columns:
+        work["Status"] = ""
+    status_norm = _status_norm_series(work["Status"])
+
+    work["Claim count"] = 1
+    work["Claimd Amount"] = work["SubInsShare"]
+    work["Remited Amt"] = work["RemitInsShare"] + work["Difference"]
+    work["Initial pay"] = work["RemitInsShare"]
+    work["Resb1 pay"] = work["Resub1RemitInsShare"]
+    work["Resb2 pay"] = work["Resub2RemitInsShare"]
+    work["Resb3 pay"] = work["Resub3RemitInsShare"]
+    work["Total pay"] = work[["Initial pay", "Resb1 pay", "Resb2 pay", "Resb3 pay"]].sum(axis=1)
+
+    work["Sub Nt Rmtd (outstanding amount)"] = 0.0
+    mask_sub = status_norm.eq("submitted")
+    work.loc[mask_sub, "Sub Nt Rmtd (outstanding amount)"] = work.loc[mask_sub, "Difference"]
+
+    work["Pending for Resubmission"] = 0.0
+
+    work["Rsub Nt Rmtd (outstanding amount)"] = 0.0
+    mask_rsub = status_norm.str.match(r"^submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
+    work.loc[mask_rsub, "Rsub Nt Rmtd (outstanding amount)"] = work.loc[mask_rsub, "Difference"]
+
+    work["Rejection Accepted"] = 0.0
+    mask_acc = status_norm.str.match(r"^rejection accepted\s*(?:\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+    work.loc[mask_acc, "Rejection Accepted"] = work.loc[mask_acc, "Difference"]
+
+    grp = work.groupby("Insurance", dropna=False)
+    summary = pd.DataFrame({
+        "Insurance Name": grp["Insurance"].first(),
+        "Claim count": grp[id_col].nunique(),
+        "Claimd Amount": grp["Claimd Amount"].sum(),
+        "Remited Amt": grp["Remited Amt"].sum(),
+        "Initial pay": grp["Initial pay"].sum(),
+        "Resb1 pay": grp["Resb1 pay"].sum(),
+        "Resb2 pay": grp["Resb2 pay"].sum(),
+        "Resb3 pay": grp["Resb3 pay"].sum(),
+        "Total pay": grp["Total pay"].sum(),
+        "Sub Nt Rmtd (outstanding amount)": grp["Sub Nt Rmtd (outstanding amount)"].sum(),
+        "Pending for Resubmission": grp["Pending for Resubmission"].sum(),
+        "Rsub Nt Rmtd (outstanding amount)": grp["Rsub Nt Rmtd (outstanding amount)"].sum(),
+        "Rejection Accepted": grp["Rejection Accepted"].sum(),
+    }).reset_index(drop=True)
+
+    summary["Final Rejn"] = (
+        summary["Claimd Amount"]
+        - (
+            summary["Total pay"]
+            + summary["Sub Nt Rmtd (outstanding amount)"]
+            + summary["Rsub Nt Rmtd (outstanding amount)"]
+            + summary["Rejection Accepted"]
+        )
     )
+    summary["Final Rejn"] = summary["Final Rejn"].round(6)
+    summary["Rej. %"] = (summary["Final Rejn"] / summary["Claimd Amount"].replace(0, pd.NA) * 100).fillna(0.0)
 
-    # Rejection Accepted
-    mask_rej_acc = d["_status_norm"].str.match(
-        r"^rejection accepted(\s*\(\s*resub\s*-\s*\d+\s*\))?$"
-    )
+    summary = _add_grand_total_row(summary, "Insurance Name")
+    gt_mask = summary["Insurance Name"].astype(str).eq("Grand Total")
+    if gt_mask.any():
+        gt_idx = summary.index[gt_mask][0]
+        claimed = float(summary.loc[gt_idx, "Claimd Amount"] or 0)
+        final_rejn = float(summary.loc[gt_idx, "Final Rejn"] or 0)
+        summary.loc[gt_idx, "Rej. %"] = 0.0 if claimed == 0 else (final_rejn / claimed * 100)
 
-    # Per-row columns for aggregation
-    d["_sub_nt_rmtd"]   = d["SubInsShare"].where(mask_sub_init,   0.0)
-    d["_rsub_nt_rmtd"]  = d["Difference"].where(mask_sub_resub,   0.0)
-    d["_rej_accepted"]  = d["Difference"].where(mask_rej_acc,      0.0)
+    return summary
 
-    # Pending for Resubmission: SubInsShare where Status = "Not Submitted" (initial)
-    mask_not_sub_init  = d["_status_norm"] == "not submitted"
-    d["_pending_resub"] = d["SubInsShare"].where(mask_not_sub_init, 0.0)
 
-    agg = d.groupby(group_col, dropna=False, sort=True).agg(
-        claim_count     = ("UniqueID",            "nunique"),
-        claimed_amt     = ("SubInsShare",          "sum"),
-        remit_ins       = ("RemitInsShare",        "sum"),
-        difference      = ("Difference",           "sum"),
-        initial_pay     = ("RemitInsShare",        "sum"),
-        resb1_pay       = ("Resub1RemitInsShare",  "sum"),
-        resb2_pay       = ("Resub2RemitInsShare",  "sum"),
-        resb3_pay       = ("Resub3RemitInsShare",  "sum"),
-        sub_nt_rmtd     = ("_sub_nt_rmtd",        "sum"),
-        pending_resub   = ("_pending_resub",       "sum"),
-        rsub_nt_rmtd    = ("_rsub_nt_rmtd",       "sum"),
-        rej_accepted    = ("_rej_accepted",        "sum"),
-    ).reset_index()
+def build_detail_excel_output(result: dict) -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment
 
-    agg["remited_amt"]  = agg["remit_ins"] + agg["difference"]
-    agg["total_pay"]    = agg["initial_pay"] + agg["resb1_pay"] + agg["resb2_pay"] + agg["resb3_pay"]
-    agg["final_rejn"]   = (agg["claimed_amt"]
-                           - agg["total_pay"]
-                           - agg["sub_nt_rmtd"]
-                           - agg["rsub_nt_rmtd"]
-                           - agg["rej_accepted"]).clip(lower=0)
-    agg["rej_pct"]      = (agg["final_rejn"] / agg["claimed_amt"].replace(0, float("nan")) * 100).fillna(0.0)
+    HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
+    TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
 
-    # Build output with clean column names
-    out = pd.DataFrame()
-    out[group_col]                          = agg[group_col]
-    out["Claim count"]                      = agg["claim_count"]
-    out["Claimed Amount"]                   = agg["claimed_amt"]
-    out["Remited Amt"]                      = agg["remited_amt"]
-    out["Initial pay"]                      = agg["initial_pay"]
-    out["Resb1 pay"]                        = agg["resb1_pay"]
-    out["Resb2 pay"]                        = agg["resb2_pay"]
-    out["Resb3 pay"]                        = agg["resb3_pay"]
-    out["Total pay"]                        = agg["total_pay"]
-    out["Sub Nt Rmtd (outstanding amount)"] = agg["sub_nt_rmtd"]
-    out["Pending for Resubmission"]          = agg["pending_resub"]
-    out["Rsub Nt Rmtd (outstanding amount)"] = agg["rsub_nt_rmtd"]
-    out["Rejection Accepted"]               = agg["rej_accepted"]
-    out["Final Rejn"]                       = agg["final_rejn"]
-    out["Rej. %"]                           = agg["rej_pct"]
+    def _write_sheet(ws, df):
+        for ci, col in enumerate(df.columns, 1):
+            cell = ws.cell(row=1, column=ci, value=col)
+            cell.fill = HEADER_FILL
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        for ri, row in df.iterrows():
+            for ci, val in enumerate(row, 1):
+                cell = ws.cell(row=ri + 2, column=ci, value=val)
+                if len(row) and str(row.iloc[0]) == "Grand Total":
+                    cell.fill = TOTAL_FILL
+                    cell.font = Font(bold=True)
 
-    # Grand Total row
-    num_cols = out.select_dtypes(include="number").columns.tolist()
-    gt = {c: out[c].sum() if c in num_cols else "Grand Total" for c in out.columns}
-    gt[group_col] = "Grand Total"
-    # Rej% for grand total: recalculate from totals
-    gt_claimed = out["Claimed Amount"].sum()
-    gt["Rej. %"] = (gt["Final Rejn"] / gt_claimed * 100) if gt_claimed else 0.0
-    out = pd.concat([out, pd.DataFrame([gt])], ignore_index=True)
+    wb = Workbook()
+    ws_all = wb.active
+    ws_all.title = "All_Detail"
+    _write_sheet(ws_all, result["df"])
 
-    return out
+    ws_bal = wb.create_sheet("Balance_Detail")
+    _write_sheet(ws_bal, result["df"][result["df"]["Balance"] > 0].copy())
+
+    ws_rej = wb.create_sheet("Rejected_Detail")
+    _write_sheet(ws_rej, result["df"][result["df"]["Rejected"] > 0].copy())
+
+    ws_acc = wb.create_sheet("Accepted_Detail")
+    _write_sheet(ws_acc, result["df"][result["df"]["Accepted"] > 0].copy())
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
 
 def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     """
@@ -552,36 +532,21 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     kpi_rej  = float(pd.to_numeric(kpi_df["Rejected"],   errors="coerce").sum())
     kpi_acc  = float(pd.to_numeric(kpi_df["Accepted"],   errors="coerce").sum())
 
-    # ── RCM Summary (Insurance view) ─────────────────────────────────────────
-    # Ensure Difference column exists
-    if "Difference" not in df.columns:
-        df["Difference"] = 0.0
-    df["Difference"] = pd.to_numeric(df["Difference"], errors="coerce").fillna(0.0)
-    if "UniqueID" not in df.columns:
-        df["UniqueID"] = range(len(df))  # fallback sequential
-
-    ins_col_rcm = next((c for c in ["Insurance","PayerName","Insurer","Plan"] if c in df.columns), None)
-    rcm_group_col = ins_col_rcm if ins_col_rcm else "Insurance"
-    if rcm_group_col not in df.columns:
-        df[rcm_group_col] = "Not Available"
-    df[rcm_group_col] = df[rcm_group_col].fillna("Not Available")
-
-    rcm_insurance = build_rcm_summary(df, rcm_group_col)
+    insurance_rcm = build_insurance_rcm_summary(df)
 
     return {
-        "df":            df,
-        "ins_totals":    ins_totals,
-        "fb_summary":    fb_summary,
-        "monthly":       monthly,
-        "aging_summary": aging_summary,
-        "bss":           bss,
-        "kpi":           (kpi_net, kpi_paid, kpi_bal, kpi_rej, kpi_acc),
-        "recon_diff":    recon_diff_total,
-        "row_count":     len(df),
-        "filename":      filename,
-        "generated_at":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "rcm_insurance": rcm_insurance,
-        "rcm_group_col": rcm_group_col,
+        "df":           df,
+        "ins_totals":   ins_totals,
+        "insurance_rcm": insurance_rcm,
+        "fb_summary":   fb_summary,
+        "monthly":      monthly,
+        "aging_summary":aging_summary,
+        "bss":          bss,
+        "kpi":          (kpi_net, kpi_paid, kpi_bal, kpi_rej, kpi_acc),
+        "recon_diff":   recon_diff_total,
+        "row_count":    len(df),
+        "filename":     filename,
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -613,6 +578,9 @@ def build_excel_output(result: dict) -> bytes:
     ws_ins.title = "Insurance_Totals"
     _write_sheet(ws_ins, result["ins_totals"])
 
+    ws_rcm = wb.create_sheet("Insurance_RCM_Summary")
+    _write_sheet(ws_rcm, result["insurance_rcm"])
+
     ws_fb = wb.create_sheet("Final_Bucket_Summary")
     _write_sheet(ws_fb, result["fb_summary"])
 
@@ -625,11 +593,6 @@ def build_excel_output(result: dict) -> bytes:
 
     ws_bss = wb.create_sheet("Balance_Status_Stage_Summary")
     _write_sheet(ws_bss, result["bss"])
-
-    # RCM Summary — Insurance (first sheet, matches the report format)
-    if result.get("rcm_insurance") is not None and not result["rcm_insurance"].empty:
-        ws_rcm = wb.create_sheet("RCM_Summary_Insurance", 0)  # insert as first sheet
-        _write_sheet(ws_rcm, result["rcm_insurance"])
 
     ws_det = wb.create_sheet("Balance_Detail")
     balance_detail = result["df"][result["df"]["Balance"] > 0].copy()
@@ -760,18 +723,7 @@ if up is not None:
     with st.spinner("⚙️ Processing file — please wait..."):
         try:
             file_bytes = up.read()
-
-            source_s3_key = build_summary_s3_key(center_cfg["key"], up.name)
-            ok_src, err_src = upload_bytes_to_s3(
-                file_bytes,
-                source_s3_key,
-                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-
             result = run_summary_engine(file_bytes, up.name)
-            result["source_s3_key"] = source_s3_key if ok_src else ""
-            result["source_s3_saved"] = ok_src
-            result["source_s3_error"] = err_src or ""
             st.session_state[RESULT_KEY] = result
         except Exception as e:
             st.error(f"Processing failed: {e}")
@@ -795,78 +747,50 @@ if result:
 
     st.markdown("---")
 
-    # Download full Excel
+    # Download full Excel + detail Excel
     excel_bytes = build_excel_output(result)
+    detail_excel_bytes = build_detail_excel_output(result)
     safe_name = re.sub(r"[^\w\-.]", "_", center_cfg["key"])
-    dl_name = f"{safe_name}_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    ts = datetime.now().strftime('%Y%m%d_%H%M')
+    dl_name = f"{safe_name}_summary_{ts}.xlsx"
+    detail_name = f"{safe_name}_detail_{ts}.xlsx"
 
-    report_s3_key = build_summary_s3_key(center_cfg["key"], dl_name)
-    ok_rep, err_rep = upload_bytes_to_s3(
-        excel_bytes,
-        report_s3_key,
-        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-    if result.get("source_s3_saved"):
-        st.caption(f"Source saved to S3: {result.get('source_s3_key','')}")
-    elif result.get("source_s3_error"):
-        st.warning(f"Source file could not be saved to S3: {result['source_s3_error']}")
-
-    if ok_rep:
-        st.caption(f"Summary saved to S3: {report_s3_key}")
-    else:
-        st.warning(f"Summary report could not be saved to S3: {err_rep}")
-
-    st.download_button(
-        "⬇️ Download Full Summary Report (Excel)",
-        data=excel_bytes,
-        file_name=dl_name,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key=f"sum_dl_{ck}",
-    )
+    dlc1, dlc2 = st.columns(2)
+    with dlc1:
+        st.download_button(
+            "⬇️ Download Full Summary Report (Excel)",
+            data=excel_bytes,
+            file_name=dl_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key=f"sum_dl_{ck}",
+        )
+    with dlc2:
+        st.download_button(
+            "⬇️ Download Detail Excel",
+            data=detail_excel_bytes,
+            file_name=detail_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key=f"sum_detail_dl_{ck}",
+        )
 
     st.markdown("---")
 
-    # ── Tabs ──────────────────────────────────────────────────────────────────
+    # Tabs for each summary table
     tabs = st.tabs([
-        "🏥 RCM Summary — Insurance",
+        "📘 Insurance RCM Summary",
         "📊 Insurance Totals",
         "🪣 Final Bucket",
         "📅 Monthly Totals",
         "⏳ Balance Aging",
         "🔀 Status × Stage",
+        "🧾 Detail",
     ])
 
     with tabs[0]:
-        st.subheader("RCM Summary — by Insurance")
-        rcm_ins = result.get("rcm_insurance")
-        if rcm_ins is not None and not rcm_ins.empty:
-            # Style: Grand Total orange+bold, Rej% red if > 0
-            gt_pat_local = re.compile(r'^\s*(grand\s*total|total)\s*$', re.I)
-            num_cols_rcm = rcm_ins.select_dtypes(include="number").columns.tolist()
-            pct_cols     = ["Rej. %"]
-            fmt_dict     = {c: "{:,.2f}" for c in num_cols_rcm if c not in pct_cols}
-            fmt_dict.update({c: "{:.2f}%" for c in pct_cols if c in rcm_ins.columns})
-
-            def _rcm_style(row):
-                if gt_pat_local.match(str(row.iloc[0])):
-                    return ["background-color:#FCE4D6;font-weight:bold"] * len(row)
-                styles = [""] * len(row)
-                # Red Rej% if > 0
-                if "Rej. %" in row.index:
-                    try:
-                        if float(row["Rej. %"]) > 0:
-                            idx = list(row.index).index("Rej. %")
-                            styles[idx] = "color:#C0392B;font-weight:600"
-                    except Exception:
-                        pass
-                return styles
-
-            styled_rcm = rcm_ins.style.apply(_rcm_style, axis=1).format(fmt_dict)
-            st.dataframe(styled_rcm, use_container_width=True, hide_index=True, key="sum_rcm_ins")
-        else:
-            st.info("RCM Summary not available.")
+        st.subheader("EMC - RCM Insurance Summary")
+        show_table(result["insurance_rcm"], key="sum_ins_rcm")
 
     with tabs[1]:
         st.subheader("Insurance Totals")
@@ -890,6 +814,10 @@ if result:
     with tabs[5]:
         st.subheader("Balance Status × Submission Stage")
         show_table(result["bss"], key="sum_bss")
+
+    with tabs[6]:
+        st.subheader("Detail Data")
+        show_table(result["df"], key="sum_all_detail")
 
 else:
     st.info("👆 Upload a source Excel file above to generate the summary report.")
