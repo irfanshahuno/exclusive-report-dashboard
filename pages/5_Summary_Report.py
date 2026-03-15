@@ -973,6 +973,152 @@ def show_table(df: pd.DataFrame, key: str):
     st.dataframe(styled, use_container_width=True, hide_index=True, key=key)
 
 
+
+# =============================================================================
+# EMAIL — Outlook/Office365 SMTP
+# =============================================================================
+def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center_name: str) -> tuple:
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text      import MIMEText
+    from email.mime.base      import MIMEBase
+    from email                import encoders
+    import calendar as _cal, re as _re
+
+    sender    = st.secrets.get("EMAIL_SENDER",    "")
+    password  = st.secrets.get("EMAIL_PASSWORD",  "")
+    recipient = st.secrets.get("EMAIL_RECIPIENT", "")
+    cc        = st.secrets.get("EMAIL_RECIPIENT_CC", "")
+
+    if not sender or not password or not recipient:
+        return False, "EMAIL_SENDER, EMAIL_PASSWORD or EMAIL_RECIPIENT not set in Streamlit secrets."
+
+    net, paid, bal, rej, acc = result.get("kpi", (0,0,0,0,0))
+    generated_at  = result.get("generated_at", "")
+    filename_orig = result.get("filename", "")
+
+    # Build title
+    title_line = "EMC - RCM SUMMARY"
+    try:
+        _abbr_map = {m.lower(): i for i, m in enumerate(_cal.month_abbr) if m}
+        def _mk(v):
+            p = str(v).strip().split("-")
+            if len(p) == 2:
+                try: return (int(p[1]), _abbr_map.get(p[0].lower()[:3], 0))
+                except: pass
+            return (9999, 99)
+        def _expand(lbl):
+            p = str(lbl).strip().split("-")
+            if len(p) == 2:
+                yr = int(p[1])
+                return f"{p[0].upper()} {(2000+yr) if yr<50 else (1900+yr)}"
+            return lbl.upper()
+        gt_p = _re.compile(r"^\s*(grand\s*total|total)\s*$", _re.I)
+        rcm_m = result.get("rcm_month")
+        if rcm_m is not None and not rcm_m.empty:
+            rows = [str(v).strip() for v in rcm_m.iloc[:,0] if not gt_p.match(str(v))]
+            valid = [r for r in rows if "-" in r]
+            if valid:
+                s = sorted(valid, key=_mk)
+                title_line = f"EMC - RCM SUMMARY - {_expand(s[0])} - {_expand(s[-1])}"
+    except Exception:
+        pass
+
+    def _fmt(v):
+        try: return f"{float(v):,.2f}"
+        except: return "0.00"
+
+    gt_p2 = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
+
+    def _df_to_html(df, caption=""):
+        if df is None or df.empty:
+            return ""
+        rows_html = ""
+        for _, row in df.iterrows():
+            is_gt = bool(gt_p2.match(str(row.iloc[0])))
+            tr_style = 'style="background:#D9D9D9;font-weight:bold;"' if is_gt else ""
+            cells = ""
+            for ci, val in enumerate(row):
+                col = df.columns[ci]
+                align = "left" if ci == 0 else "right"
+                color = ""
+                if col == "Rej. %" and not is_gt:
+                    try:
+                        if float(val) > 0: color = "color:#C0392B;font-weight:600;"
+                    except: pass
+                if col == "Rej. %":
+                    try: val = f"{float(val):.2f}%"
+                    except: pass
+                elif col == "Claim count":
+                    try: val = f"{int(float(val)):,}"
+                    except: pass
+                elif ci > 0:
+                    try: val = f"{float(val):,.2f}"
+                    except: pass
+                cells += f'<td style="padding:5px 10px;border:1px solid #ccc;text-align:{align};{color}">{val}</td>'
+            rows_html += f"<tr {tr_style}>{cells}</tr>"
+        header = "".join(
+            f'<th style="padding:6px 10px;background:#595959;color:#fff;border:1px solid #888;text-align:{("left" if i==0 else "right")}">{c}</th>'
+            for i, c in enumerate(df.columns)
+        )
+        cap = f'<caption style="font-weight:bold;font-size:14px;text-align:left;padding:8px 0;">{caption}</caption>' if caption else ""
+        return f'''<table style="border-collapse:collapse;width:100%;font-size:11px;font-family:Calibri,Arial,sans-serif;margin-bottom:24px;">
+          {cap}<thead><tr>{header}</tr></thead><tbody>{rows_html}</tbody></table>'''
+
+    ins_html = _df_to_html(result.get("rcm_insurance"), "By Insurance")
+    doc_html = _df_to_html(result.get("rcm_doctor"),    "By Doctor")
+    mon_html = _df_to_html(result.get("rcm_month"),     "By Month")
+
+    html_body = f"""<html><body style="font-family:Calibri,Arial,sans-serif;color:#222;">
+    <h2 style="background:#D9D9D9;padding:14px 20px;margin:0 0 20px;">{title_line}</h2>
+    <p>Center: <b>{center_name}</b> &nbsp;|&nbsp; File: <b>{filename_orig}</b> &nbsp;|&nbsp; Generated: <b>{generated_at}</b></p>
+    <h3 style="border-bottom:2px solid #595959;padding-bottom:4px;">KPI Summary</h3>
+    <table style="border-collapse:collapse;margin-bottom:28px;font-size:13px;">
+      <tr>
+        <td style="padding:8px 20px;background:#f5f5f5;border:1px solid #ddd;">Net Amount</td>
+        <td style="padding:8px 20px;border:1px solid #ddd;font-weight:bold;">{_fmt(net)}</td>
+        <td style="padding:8px 20px;background:#f5f5f5;border:1px solid #ddd;">Paid</td>
+        <td style="padding:8px 20px;border:1px solid #ddd;font-weight:bold;">{_fmt(paid)}</td>
+      </tr><tr>
+        <td style="padding:8px 20px;background:#f5f5f5;border:1px solid #ddd;">Balance</td>
+        <td style="padding:8px 20px;border:1px solid #ddd;font-weight:bold;">{_fmt(bal)}</td>
+        <td style="padding:8px 20px;background:#f5f5f5;border:1px solid #ddd;">Rejected</td>
+        <td style="padding:8px 20px;border:1px solid #ddd;font-weight:bold;color:#C0392B;">{_fmt(rej)}</td>
+      </tr><tr>
+        <td style="padding:8px 20px;background:#f5f5f5;border:1px solid #ddd;">Accepted</td>
+        <td style="padding:8px 20px;border:1px solid #ddd;font-weight:bold;">{_fmt(acc)}</td>
+        <td colspan="2"></td>
+      </tr>
+    </table>
+    <h3 style="border-bottom:2px solid #595959;padding-bottom:4px;">Insurance Summary</h3>{ins_html}
+    <h3 style="border-bottom:2px solid #595959;padding-bottom:4px;">Doctor Summary</h3>{doc_html}
+    <h3 style="border-bottom:2px solid #595959;padding-bottom:4px;">Monthly Summary</h3>{mon_html}
+    <p style="color:#888;font-size:11px;margin-top:30px;">Auto-generated by Excellent Medical Group RCM Dashboard. Excel attached.</p>
+    </body></html>"""
+
+    msg = MIMEMultipart("mixed")
+    msg["Subject"] = f"{title_line} — {center_name}"
+    msg["From"]    = sender
+    msg["To"]      = recipient
+    if cc:
+        msg["Cc"] = cc
+    msg.attach(MIMEText(html_body, "html"))
+
+    part = MIMEBase("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    part.set_payload(excel_bytes)
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", f'attachment; filename="{excel_filename}"')
+    msg.attach(part)
+
+    try:
+        all_to = [r.strip() for r in ([recipient] + ([cc] if cc else [])) if r.strip()]
+        with smtplib.SMTP("smtp.office365.com", 587, timeout=30) as srv:
+            srv.ehlo(); srv.starttls(); srv.login(sender, password)
+            srv.sendmail(sender, all_to, msg.as_string())
+        return True, f"Email sent to {recipient}"
+    except Exception as e:
+        return False, str(e)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CENTER SELECTION
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1102,14 +1248,29 @@ if result:
     else:
         st.warning(f"Summary report could not be saved to S3: {err_rep}")
 
-    st.download_button(
-        "⬇️ Download Full Summary Report (Excel)",
-        data=excel_bytes,
-        file_name=dl_name,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key=f"sum_dl_{ck}",
-    )
+    col_dl, col_em = st.columns(2)
+    with col_dl:
+        st.download_button(
+            "⬇️ Download Full Summary Report (Excel)",
+            data=excel_bytes,
+            file_name=dl_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key=f"sum_dl_{ck}",
+        )
+    with col_em:
+        if st.button("📧 Send to Management", use_container_width=True, key=f"sum_email_{ck}"):
+            with st.spinner("Sending email..."):
+                ok, msg = send_rcm_email(
+                    excel_bytes=excel_bytes,
+                    excel_filename=dl_name,
+                    result=result,
+                    center_name=center_cfg["name"],
+                )
+                if ok:
+                    st.success(f"✅ {msg}")
+                else:
+                    st.error(f"❌ Email failed: {msg}")
 
     st.markdown("---")
 
