@@ -212,11 +212,11 @@ def render_kpi_cards(net, paid, bal, rej, acc):
         except: return "—"
     html = f"""
     <div class="kpi-grid">
-      <div class="kpi-card"><div class="kpi-label">Net Amount</div><div class="kpi-value">{fmt(net)}</div></div>
-      <div class="kpi-card"><div class="kpi-label">Paid</div><div class="kpi-value">{fmt(paid)}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Claimed Amount</div><div class="kpi-value">{fmt(net)}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Total Pay</div><div class="kpi-value">{fmt(paid)}</div></div>
       <div class="kpi-card balance"><div class="kpi-label">Under Process</div><div class="kpi-value">{fmt(bal)}</div></div>
-      <div class="kpi-card"><div class="kpi-label">Rejected</div><div class="kpi-value">{fmt(rej)}</div></div>
-      <div class="kpi-card"><div class="kpi-label">Accepted</div><div class="kpi-value">{fmt(acc)}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Final Rejn</div><div class="kpi-value">{fmt(rej)}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Rej. Accepted</div><div class="kpi-value">{fmt(acc)}</div></div>
     </div>"""
     st.markdown(html, unsafe_allow_html=True)
 
@@ -581,13 +581,9 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     # Recon check
     recon_diff_total = float(df["Recon Diff"].sum())
 
-    # Grand KPIs (no GT row)
-    kpi_df = ins_totals[ins_totals["Insurance"] != "Grand Total"]
-    kpi_net  = float(pd.to_numeric(kpi_df["Net Amount"], errors="coerce").sum())
-    kpi_paid = float(pd.to_numeric(kpi_df["Paid"],       errors="coerce").sum())
-    kpi_bal  = float(pd.to_numeric(kpi_df["Balance"],    errors="coerce").sum())
-    kpi_rej  = float(pd.to_numeric(kpi_df["Rejected"],   errors="coerce").sum())
-    kpi_acc  = float(pd.to_numeric(kpi_df["Accepted"],   errors="coerce").sum())
+    # ── KPIs derived from rcm_insurance Grand Total (set after build below) ──
+    # Placeholder — overwritten after rcm_insurance is built
+    kpi_net = kpi_paid = kpi_bal = kpi_rej = kpi_acc = 0.0
 
     # ── RCM Summary (Insurance view) ─────────────────────────────────────────
     # Ensure Difference column exists
@@ -714,6 +710,20 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         if not tmp_m.empty:
             tmp_m["Month"] = tmp_m[date_col_rcm].dt.strftime("%b-%y")
             rcm_month = build_rcm_summary(tmp_m, "Month")
+
+    # ── KPIs from rcm_insurance Grand Total row ─────────────────────────────
+    gt_pat_kpi = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
+    if rcm_insurance is not None and not rcm_insurance.empty:
+        gt_row_kpi = rcm_insurance[rcm_insurance.iloc[:,0].astype(str).str.match(gt_pat_kpi)]
+        if not gt_row_kpi.empty:
+            def _kv(col):
+                try: return float(gt_row_kpi[col].values[0])
+                except: return 0.0
+            kpi_net  = _kv("Claimed Amount")
+            kpi_paid = _kv("Total pay")
+            kpi_bal  = _kv("Sub Nt Rmtd (outstanding amount)") + _kv("Rsub Nt Rmtd (outstanding amount)")
+            kpi_rej  = _kv("Final Rejn")
+            kpi_acc  = _kv("Rejection Accepted")
 
     return {
         "df":            df,
