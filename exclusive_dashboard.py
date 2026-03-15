@@ -766,49 +766,6 @@ def get_report_bytes(path: str) -> bytes:
     return Path(path).read_bytes()
 
 
-def _df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Sheet1") -> bytes:
-    import io
-    from openpyxl import Workbook
-    from openpyxl.styles import PatternFill, Font, Alignment
-
-    output = io.BytesIO()
-    wb = Workbook()
-    ws = wb.active
-    ws.title = sheet_name[:31]
-
-    header_fill = PatternFill(start_color="D9EAF7", end_color="D9EAF7", fill_type="solid")
-    total_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
-
-    headers = list(df.columns)
-    for c_idx, col_name in enumerate(headers, start=1):
-        cell = ws.cell(row=1, column=c_idx, value=col_name)
-        cell.fill = header_fill
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    for r_idx, row in enumerate(df.itertuples(index=False), start=2):
-        first_val = str(row[0]).strip().lower() if len(row) > 0 else ""
-        is_gt = first_val in {"grand total", "total"}
-        for c_idx, value in enumerate(row, start=1):
-            cell = ws.cell(row=r_idx, column=c_idx, value=value)
-            if is_gt:
-                cell.fill = total_fill
-                cell.font = Font(bold=True)
-
-    for col in ws.columns:
-        max_len = 0
-        col_letter = col[0].column_letter
-        for cell in col:
-            try:
-                max_len = max(max_len, len(str(cell.value or "")))
-            except Exception:
-                pass
-        ws.column_dimensions[col_letter].width = min(max_len + 3, 40)
-
-    wb.save(output)
-    return output.getvalue()
-
-
 @st.cache_data(show_spinner=True)
 def load_core_sheets(path: str, _token: float):
     """Load the two core sheets efficiently.
@@ -977,7 +934,7 @@ def load_center_kpis(center_key: str, year: int):
 
 
 # ====================== Header & routing ======================
-t1, t2, t3 = st.columns([6, 2, 2])
+t1, t2, t3, t4 = st.columns([5, 2, 2, 2])
 with t1:
     st.title("📊 Excellent Medical Group")
 with t2:
@@ -997,6 +954,9 @@ with t2:
 
     st.markdown(f'<a class="navlink" href="{daily_url}" target="_blank">📅 Daily Report</a>', unsafe_allow_html=True)
 with t3:
+    if st.button("📋 Summary", use_container_width=True, key="btn_summary_report"):
+        st.switch_page("pages/5_Summary_Report.py")
+with t4:
     if st.button("⬅ Change Year", use_container_width=True, key="btn_change_year"):
         reset_year_selection()
 
@@ -1571,39 +1531,6 @@ try:
             use_container_width=True,
             key=f"dl_xlsx_full_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
-
-        st.markdown("---")
-        st.markdown("### 📘 RCM Summary")
-        try:
-            _ext_rcm = Path(str(out_path)).suffix.lower()
-            _eng_rcm = "pyxlsb" if _ext_rcm == ".xlsb" else "openpyxl"
-            try:
-                _rcm = pd.read_excel(str(out_path), sheet_name="RCM_Summary", engine=_eng_rcm)
-            except Exception:
-                _rcm = None
-
-            if _rcm is None or _rcm.empty:
-                st.info("RCM_Summary sheet not found. Please rebuild the report with the updated generator.")
-            else:
-                _rcm = trim_empty_rows(_rcm)
-                _rcm = move_grand_total_last(_rcm) if not _rcm.empty else _rcm
-                st.download_button(
-                    "⬇️ Download RCM Summary (.xlsx)",
-                    data=_df_to_excel_bytes(_rcm, sheet_name="RCM_Summary"),
-                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_RCM_Summary.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key=f"dl_xlsx_rcm_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-                )
-                st.download_button(
-                    "⬇️ Export RCM Summary (CSV)",
-                    data=_rcm.to_csv(index=False).encode("utf-8"),
-                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_RCM_Summary.csv",
-                    use_container_width=True,
-                    key=f"dl_csv_rcm_summary_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-                )
-        except Exception as e:
-            st.warning(f"Could not prepare RCM Summary download: {e}")
 
         # ====================== MONTHLY BREAKDOWN (DOWNLOAD ONLY) ======================
         st.markdown("---")
