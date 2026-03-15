@@ -55,114 +55,6 @@ def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
     return df
 
-
-def clean_status(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Clean and forward-fill Status so each activity row inherits its claim-block status.
-    """
-    if "Status" not in df.columns:
-        df["Status"] = ""
-    df["Status"] = df["Status"].replace(r"^\s*$", pd.NA, regex=True)
-    df["Status"] = df["Status"].ffill().fillna("")
-    df["Status"] = df["Status"].astype(str).str.strip()
-    return df
-
-def status_startswith(series: pd.Series, prefix: str) -> pd.Series:
-    s = series.fillna("").astype(str).str.strip()
-    return s.str.startswith(prefix, na=False)
-
-def status_contains_submitted_resub(series: pd.Series) -> pd.Series:
-    s = series.fillna("").astype(str).str.strip()
-    return s.str.contains(r"^Submitted\(Resub-\s*\d+\)", regex=True, na=False)
-
-def build_rcm_summary(df: pd.DataFrame) -> pd.DataFrame:
-    required_num_cols = [
-        "ActivityIns",
-        "Paid",
-        "actRemitInsShare",
-        "actResub1RemitInsShare",
-        "actResub2RemitInsShare",
-        "actResub3RemitInsShare",
-        "TKBKAmountAct",
-        "Balance",
-        "Rejection",
-        "Accepted",
-    ]
-    for c in required_num_cols:
-        if c not in df.columns:
-            df[c] = 0
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-
-    if "Insurance" not in df.columns:
-        df["Insurance"] = "Not Available"
-    if "UniqueID" not in df.columns:
-        # fallback so script still runs, but user-confirmed source is UniqueID
-        df["UniqueID"] = range(1, len(df) + 1)
-    if "Status" not in df.columns:
-        df["Status"] = ""
-
-    grouped = df.groupby("Insurance", dropna=False)
-
-    claim_count = grouped["UniqueID"].nunique()
-    claimed_amount = grouped["ActivityIns"].sum()
-    remitted_amt = grouped["Paid"].sum()
-    initial_pay = grouped["actRemitInsShare"].sum()
-    resb1_pay = grouped["actResub1RemitInsShare"].sum()
-    resb2_pay = grouped["actResub2RemitInsShare"].sum()
-    resb3_pay = grouped["actResub3RemitInsShare"].sum()
-    total_pay = initial_pay + resb1_pay + resb2_pay + resb3_pay + grouped["TKBKAmountAct"].sum()
-
-    st = df["Status"].fillna("").astype(str).str.strip()
-
-    sub_nt_rmtd = (
-        df.loc[status_startswith(st, "Submitted") & ~status_contains_submitted_resub(st)]
-          .groupby("Insurance", dropna=False)["Balance"].sum()
-    )
-    pending_resub = (
-        df.loc[status_startswith(st, "Not Submitted")]
-          .groupby("Insurance", dropna=False)["Balance"].sum()
-    )
-    rsub_nt_rmtd = (
-        df.loc[status_contains_submitted_resub(st)]
-          .groupby("Insurance", dropna=False)["Balance"].sum()
-    )
-    rejection_accepted = (
-        df.loc[status_startswith(st, "Rejection Accepted")]
-          .groupby("Insurance", dropna=False)["ActivityIns"].sum()
-    )
-    final_rejn = grouped["Rejection"].sum()
-
-    summary = pd.DataFrame({
-        "Insurance Name": claim_count.index,
-        "Claim count": claim_count.values,
-        "Claimed Amount": claimed_amount.reindex(claim_count.index, fill_value=0).values,
-        "Remited Amt": remitted_amt.reindex(claim_count.index, fill_value=0).values,
-        "Initial pay": initial_pay.reindex(claim_count.index, fill_value=0).values,
-        "Resb1 pay": resb1_pay.reindex(claim_count.index, fill_value=0).values,
-        "Resb2 pay": resb2_pay.reindex(claim_count.index, fill_value=0).values,
-        "Resb3 pay": resb3_pay.reindex(claim_count.index, fill_value=0).values,
-        "Total pay": total_pay.reindex(claim_count.index, fill_value=0).values,
-        "Sub Nt Rmtd (outstanding amount)": sub_nt_rmtd.reindex(claim_count.index, fill_value=0).values,
-        "Pending for Resubmission": pending_resub.reindex(claim_count.index, fill_value=0).values,
-        "Rsub Nt Rmtd (outstanding amount)": rsub_nt_rmtd.reindex(claim_count.index, fill_value=0).values,
-        "Rejection Accepted": rejection_accepted.reindex(claim_count.index, fill_value=0).values,
-        "Final Rejn": final_rejn.reindex(claim_count.index, fill_value=0).values,
-    })
-    summary["Rej. %"] = (summary["Final Rejn"] / summary["Claimed Amount"].replace(0, pd.NA)).fillna(0)
-    summary = summary.sort_values("Insurance Name", na_position="last").reset_index(drop=True)
-
-    total_row = {"Insurance Name": "Grand Total"}
-    for col in summary.columns[1:]:
-        if col == "Rej. %":
-            claimed_total = pd.to_numeric(summary["Claimed Amount"], errors="coerce").sum()
-            final_total = pd.to_numeric(summary["Final Rejn"], errors="coerce").sum()
-            total_row[col] = (final_total / claimed_total) if claimed_total else 0
-        else:
-            total_row[col] = pd.to_numeric(summary[col], errors="coerce").sum()
-
-    summary = pd.concat([summary, pd.DataFrame([total_row])], ignore_index=True)
-    return summary
-
 def compute_measures(df: pd.DataFrame) -> pd.DataFrame:
     df["Paid"] = df[
         ["actRemitInsShare", "actResub1RemitInsShare",
@@ -328,12 +220,6 @@ def apply_styling(output_file: str):
     wb = load_workbook(output_file)
     for ws in wb.worksheets:
         style_headers(ws)
-        if ws.title == "RCM_Summary":
-            header_map = {ws.cell(row=1, column=c).value: c for c in range(1, ws.max_column + 1)}
-            pct_col = header_map.get("Rej. %")
-            if pct_col:
-                for r in range(2, ws.max_row + 1):
-                    ws.cell(row=r, column=pct_col).number_format = "0.00%"
         if ws.title == "Balance_Aging_Summary":
             for r in range(2, ws.max_row + 1):
                 if ws.cell(row=r, column=1).value == "Grand Total":
@@ -347,7 +233,7 @@ def apply_styling(output_file: str):
                 cell.fill = TOTAL_FILL
                 cell.font = Font(bold=True)
 
-        if ws.title in ("RCM_Summary", "Insurance_Totals", "Monthly_Totals"):
+        if ws.title in ("Insurance_Totals", "Monthly_Totals"):
             for r in range(2, ws.max_row + 1):
                 if ws.cell(row=r, column=1).value == "Grand Total":
                     for c in range(1, ws.max_column + 1):
@@ -368,7 +254,6 @@ def main():
 
     df = load_data(input_file)
     df = ensure_numeric(df)
-    df = clean_status(df)
     df = compute_measures(df)
     df = add_aging(df)
     df = ensure_insurance_column(df)
@@ -376,7 +261,6 @@ def main():
     balance_df = df.loc[df["Balance"] > 0].copy()
     pivot_summary = build_balance_aging_summary(balance_df)
     insurance_totals = build_insurance_totals(df)
-    rcm_summary = build_rcm_summary(df)
     monthly_totals = build_monthly_totals(df)
     monthly_insurance_detail = build_monthly_insurance_detail(df)
 
@@ -384,7 +268,6 @@ def main():
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
         if WRITE_EXCLUSIVE_SHEET:
             df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
-        rcm_summary.to_excel(writer, sheet_name="RCM_Summary", index=False)
         insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
         if not monthly_totals.empty:
             monthly_totals.to_excel(writer, sheet_name="Monthly_Totals", index=False)
