@@ -974,6 +974,58 @@ def show_table(df: pd.DataFrame, key: str):
 
 
 
+
+def _result_cache_key(center_key: str) -> str:
+    """S3 key for the cached result JSON for a center."""
+    return f"{S3_PREFIX}/{center_key}/_latest_result_cache.json"
+
+
+def _save_result_to_s3(result: dict, center_key: str):
+    """Serialize the summary tables to JSON and save to S3."""
+    import json
+    try:
+        # Only serialize the display DataFrames — skip raw df (too large) and bytes
+        cache = {
+            "filename":     result.get("filename", ""),
+            "generated_at": result.get("generated_at", ""),
+            "row_count":    result.get("row_count", 0),
+            "recon_diff":   result.get("recon_diff", 0.0),
+            "kpi":          list(result.get("kpi", [0,0,0,0,0])),
+            "rcm_insurance": result["rcm_insurance"].to_json(orient="split") if result.get("rcm_insurance") is not None and not result["rcm_insurance"].empty else None,
+            "rcm_doctor":    result["rcm_doctor"].to_json(orient="split")    if result.get("rcm_doctor")    is not None and not result["rcm_doctor"].empty    else None,
+            "rcm_month":     result["rcm_month"].to_json(orient="split")     if result.get("rcm_month")     is not None and not result["rcm_month"].empty     else None,
+        }
+        key = _result_cache_key(center_key)
+        _s3_client().put_object(
+            Bucket=S3_BUCKET, Key=key,
+            Body=json.dumps(cache, ensure_ascii=False).encode("utf-8"),
+            ContentType="application/json"
+        )
+    except Exception:
+        pass  # cache save failure is non-fatal
+
+
+def _load_result_from_s3(center_key: str) -> dict | None:
+    """Load cached result JSON from S3. Returns None if not found."""
+    import json
+    try:
+        key = _result_cache_key(center_key)
+        obj = _s3_client().get_object(Bucket=S3_BUCKET, Key=key)
+        cache = json.loads(obj["Body"].read().decode("utf-8"))
+        # Reconstruct DataFrames
+        def _from_json(j):
+            if j is None: return pd.DataFrame()
+            return pd.read_json(j, orient="split")
+        cache["rcm_insurance"] = _from_json(cache.get("rcm_insurance"))
+        cache["rcm_doctor"]    = _from_json(cache.get("rcm_doctor"))
+        cache["rcm_month"]     = _from_json(cache.get("rcm_month"))
+        cache["kpi"]           = tuple(cache.get("kpi", [0,0,0,0,0]))
+        # xl_bytes not cached (rebuild on demand)
+        cache["xl_bytes"]      = None
+        return cache
+    except Exception:
+        return None
+
 # =============================================================================
 # EMAIL — Outlook/Office365 SMTP
 # =============================================================================
@@ -1190,16 +1242,12 @@ if ck not in CENTERS:
     if sel_year not in (2024, 2025, 2026):
         sel_year = 2026
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
         if st.container(border=True).button(CENTERS["excellent"]["name"], use_container_width=True, key="sum_exc"):
             st.session_state[SUM_CENTER_KEY] = "excellent"
             st.rerun()
     with col2:
-        if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="sum_pharm"):
-            st.session_state[SUM_CENTER_KEY] = "pharmacy"
-            st.rerun()
-    with col3:
         if st.container(border=True).button(CENTERS["easyhealth"]["name"], use_container_width=True, key="sum_easy"):
             st.session_state[SUM_CENTER_KEY] = "easyhealth"
             st.rerun()
@@ -1262,12 +1310,18 @@ if up is not None:
                 result["rcm_summary_bytes"] = up_rcm.read() if up_rcm is not None else None
                 result["rcm_summary_name"]  = up_rcm.name  if up_rcm is not None else None
                 st.session_state[RESULT_KEY] = result
+                _save_result_to_s3(result, ck)  # persist for refresh
                 st.rerun()
             except Exception as e:
                 st.error(f"Processing failed: {e}")
                 st.session_state.pop(RESULT_KEY, None)
 
-# ── Show results ─────────────────────────────────────────────────────────────
+# ── Show results — restore from S3 if session_state is empty ────────────────
+if RESULT_KEY not in st.session_state:
+    cached = _load_result_from_s3(ck)
+    if cached:
+        st.session_state[RESULT_KEY] = cached
+
 result = st.session_state.get(RESULT_KEY)
 
 if result:
@@ -1285,8 +1339,11 @@ if result:
 
     st.markdown("---")
 
-    # Download full Excel
-    excel_bytes = build_excel_output(result)
+    # Download full Excel — rebuild if loaded from S3 cache (xl_bytes not stored)
+    if result.get("xl_bytes"):
+        excel_bytes = result["xl_bytes"]
+    else:
+        excel_bytes = build_excel_output(result)
     safe_name = re.sub(r"[^\w\-.]", "_", center_cfg["key"])
     dl_name = f"{safe_name}_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
 
