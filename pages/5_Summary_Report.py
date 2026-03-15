@@ -748,37 +748,41 @@ st.markdown("---")
 
 # ── File uploader ────────────────────────────────────────────────────────────
 RESULT_KEY = f"sum_result_{ck}"
+UPLOADED_BYTES_KEY = f"sum_uploaded_bytes_{ck}"
+UPLOADED_NAME_KEY = f"sum_uploaded_name_{ck}"
 
 up = st.file_uploader(
     f"Upload source Excel for **{center_cfg['name']}** (.xlsx)",
     type=["xlsx"],
     key=f"sum_uploader_{ck}",
-    help="Upload the raw claims source file. The summary engine will process it and display results below.",
+    help="Upload the raw claims source file. The summary engine will run only after you click Process Summary Report.",
 )
 
-up_rcm = None  # placeholder — no second uploader in this version
-
 if up is not None:
-    if st.button("⚙️ Process File", use_container_width=True, key=f"sum_process_btn_{ck}"):
-        with st.spinner("Processing file — please wait..."):
-            try:
-                file_bytes = up.read()
+    st.session_state[UPLOADED_BYTES_KEY] = up.getvalue()
+    st.session_state[UPLOADED_NAME_KEY] = up.name
+    st.success(f"File uploaded: {up.name}")
+    st.info("After uploading, click **Process Summary Report** to generate the report.")
 
-                source_s3_key = build_summary_s3_key(center_cfg["key"], up.name)
+    if st.button("🚀 Process Summary Report", type="primary", use_container_width=True, key=f"sum_process_{ck}"):
+        with st.spinner("⚙️ Processing file — please wait..."):
+            try:
+                file_bytes = st.session_state.get(UPLOADED_BYTES_KEY, b"")
+                file_name = st.session_state.get(UPLOADED_NAME_KEY, up.name)
+
+                source_s3_key = build_summary_s3_key(center_cfg["key"], file_name)
                 ok_src, err_src = upload_bytes_to_s3(
                     file_bytes,
                     source_s3_key,
                     content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
 
-                result = run_summary_engine(file_bytes, up.name)
+                result = run_summary_engine(file_bytes, file_name)
                 result["source_s3_key"] = source_s3_key if ok_src else ""
                 result["source_s3_saved"] = ok_src
                 result["source_s3_error"] = err_src or ""
-                result["rcm_summary_bytes"] = up_rcm.read() if up_rcm is not None else None
-                result["rcm_summary_name"]  = up_rcm.name  if up_rcm is not None else None
                 st.session_state[RESULT_KEY] = result
-                st.rerun()
+                st.success("Summary report generated successfully.")
             except Exception as e:
                 st.error(f"Processing failed: {e}")
                 st.session_state.pop(RESULT_KEY, None)
