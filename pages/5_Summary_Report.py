@@ -72,6 +72,21 @@ def _auto_auth():
         if auth_param == expected:
             st.session_state.is_view_auth = True
 
+    # Auto-set year from URL param
+    _year_param = st.query_params.get("year")
+    if _year_param:
+        try:
+            _yr = int(_year_param)
+            if _yr in (2024, 2025, 2026):
+                st.session_state["rcm_year"] = _yr
+        except Exception:
+            pass
+
+    # Auto-set center from URL param (skip selection screen)
+    _center_param = st.query_params.get("center")
+    if _center_param and _center_param in ("excellent", "easyhealth", "pharmacy"):
+        st.session_state["sum_center_key"] = _center_param
+
 
 _auto_auth()
 
@@ -1332,24 +1347,10 @@ ck = st.session_state.get(SUM_CENTER_KEY)
 if ck not in CENTERS:
     st.subheader("Choose a center")
 
-    # ── Year selector ────────────────────────────────────────────────────────
     sel_year = st.session_state.get("rcm_year") or 2026
     if sel_year not in (2024, 2025, 2026):
         sel_year = 2026
 
-    yr_col, _ = st.columns([2, 5])
-    with yr_col:
-        chosen_year = st.selectbox(
-            "Select Year",
-            options=[2026, 2025, 2024],
-            index=[2026, 2025, 2024].index(sel_year),
-            key="sum_year_select",
-        )
-    st.session_state["rcm_year"] = chosen_year
-
-    st.markdown("---")
-
-    # ── Center buttons ───────────────────────────────────────────────────────
     col1, col2 = st.columns(2)
     with col1:
         if st.container(border=True).button(CENTERS["excellent"]["name"], use_container_width=True, key="sum_exc"):
@@ -1366,7 +1367,6 @@ if ck not in CENTERS:
 # CENTER DETAIL + UPLOAD + RESULTS
 # ─────────────────────────────────────────────────────────────────────────────
 center_cfg = CENTERS[ck]
-sel_year = st.session_state.get("rcm_year") or datetime.now().year
 
 st.markdown(
     f"""
@@ -1375,7 +1375,7 @@ st.markdown(
         margin-bottom:10px;box-shadow:0 6px 18px rgba(11,45,92,0.08);
     ">
       <div style="font-size:24px;font-weight:900;color:#0B2D5C;">{center_cfg['name']}</div>
-      <div style="font-size:13px;color:#334155;margin-top:2px;font-weight:600;">Summary Report · Year: {sel_year} — upload a source file to generate results</div>
+      <div style="font-size:13px;color:#334155;margin-top:2px;font-weight:600;">Summary Report — upload a source file to generate results</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -1432,12 +1432,6 @@ if RESULT_KEY not in st.session_state:
         st.session_state[RESULT_KEY] = cached
 
 result = st.session_state.get(RESULT_KEY)
-
-if not result:
-    st.warning(
-        f"📂 No summary found for **{center_cfg['name']}** · **{sel_year}**. "
-        f"Upload a source file above to generate one."
-    )
 
 if result:
     st.success(f"✅ Processed **{result['filename']}** — {result['row_count']:,} rows · Generated at {result['generated_at']}")
@@ -1550,3 +1544,6 @@ if result:
     with tabs[2]:
         st.subheader("RCM Summary — by Month")
         _show_rcm(result.get("rcm_month"), "rcm_mon")
+
+else:
+    st.info("👆 Upload a source Excel file above to generate the summary report.")
