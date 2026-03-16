@@ -85,7 +85,8 @@ def _auto_auth():
     # Auto-set center from URL param (skip selection screen)
     _center_param = st.query_params.get("center")
     if _center_param and _center_param in ("excellent", "easyhealth", "pharmacy"):
-        st.session_state["sum_center_key"] = _center_param
+        if st.session_state.get("sum_center_key") != _center_param:
+            st.session_state["sum_center_key"] = _center_param
 
 
 _auto_auth()
@@ -1345,11 +1346,26 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
 ck = st.session_state.get(SUM_CENTER_KEY)
 
 if ck not in CENTERS:
-    st.subheader("Choose a center")
-
     sel_year = st.session_state.get("rcm_year") or 2026
     if sel_year not in (2024, 2025, 2026):
         sel_year = 2026
+
+    st.subheader(f"Choose a center — {sel_year}")
+
+    # ── Year selector (only shown when no year passed via URL) ───────────────
+    if not st.query_params.get("year"):
+        yr_col, _ = st.columns([2, 5])
+        with yr_col:
+            chosen_year = st.selectbox(
+                "Select Year",
+                options=[2026, 2025, 2024],
+                index=[2026, 2025, 2024].index(sel_year),
+                key="sum_year_select",
+            )
+            if chosen_year != sel_year:
+                st.session_state["rcm_year"] = chosen_year
+                st.rerun()
+        st.markdown("---")
 
     col1, col2 = st.columns(2)
     with col1:
