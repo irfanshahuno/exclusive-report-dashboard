@@ -1152,6 +1152,27 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
                 if v: return str(v).strip()
             except Exception:
                 pass
+        # ── Fallback: read directly from secrets.toml file ──────────────────
+        # Needed when page is opened in a new tab (new session) locally
+        import re as _re
+        _toml_paths = [
+            Path(__file__).parent.parent / ".streamlit" / "secrets.toml",
+            Path(__file__).parent / ".streamlit" / "secrets.toml",
+            Path.home() / ".streamlit" / "secrets.toml",
+        ]
+        for _p in _toml_paths:
+            if _p.exists():
+                try:
+                    _txt = _p.read_text(encoding="utf-8")
+                    for k in keys:
+                        _m = _re.search(
+                            rf'^\s*{_re.escape(k)}\s*=\s*["\']([^"\']+)["\']',
+                            _txt, _re.MULTILINE
+                        )
+                        if _m:
+                            return _m.group(1).strip()
+                except Exception:
+                    pass
         return ""
 
     sender    = _get_secret("SMTP_USER",   "EMAIL_SENDER",    "sender")
