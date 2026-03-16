@@ -954,8 +954,10 @@ with t2:
 
     st.markdown(f'<a class="navlink" href="{daily_url}" target="_blank">📅 Daily Report</a>', unsafe_allow_html=True)
 with t3:
-    if st.button("📋 Summary", use_container_width=True, key="btn_summary"):
-        st.switch_page("pages/5_Summary_Report.py")
+    _auth = _make_auth_param()
+    # Use relative path so it opens within the same Streamlit deployment (keeps secrets)
+    summary_url = f"/Summary_Report?auth={_auth}" + (f"&center={ck}&year={yr}" if ck else f"&year={yr}")
+    st.markdown(f'<a class="navlink" href="{summary_url}" target="_blank">📋 Summary</a>', unsafe_allow_html=True)
 with t4:
     if st.button("⬅ Change Year", use_container_width=True, key="btn_change_year"):
         reset_year_selection()
@@ -1733,7 +1735,6 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
-
 
 
 
