@@ -287,36 +287,35 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     df_ins = _safe_df(dfs.get("Income | Insurance Wise Revenue"))
     df_dx  = _safe_df(dfs.get("Income | Doctor x Insurance Revenue"))
 
-    KPI_COLORS = [
-        {"bg": "#E8F4FD", "border": "#3498DB", "lc": "#2980B9", "vc": "#1A5276"},  # blue   — Total Visits
-        {"bg": "#E9F7EF", "border": "#27AE60", "lc": "#1E8449", "vc": "#145A32"},  # green  — New Patients
-        {"bg": "#EBF5FB", "border": "#2E86C1", "lc": "#21618C", "vc": "#154360"},  # teal   — Established
-        {"bg": "#FEF9E7", "border": "#F39C12", "lc": "#D68910", "vc": "#7D6608"},  # amber  — Follow Up
-        {"bg": "#F5EEF8", "border": "#8E44AD", "lc": "#7D3C98", "vc": "#4A235A"},  # purple — Pending
+    CARD_STYLES = [
+        {"bg": "#1A5276", "accent": "#2E86C1"},  # navy blue  — Total Visits
+        {"bg": "#1E8449", "accent": "#27AE60"},  # green      — New Patients
+        {"bg": "#1A5276", "accent": "#5DADE2"},  # steel blue — Established
+        {"bg": "#784212", "accent": "#E67E22"},  # amber      — Follow Up
+        {"bg": "#4A235A", "accent": "#9B59B6"},  # purple     — Pending
     ]
 
     def _kpi_card(label, val, idx=0):
-        c = KPI_COLORS[idx % len(KPI_COLORS)]
+        s = CARD_STYLES[idx % len(CARD_STYLES)]
         return (
-            f"<td style='padding:5px;'>"
-            f"<div style='background:{c['bg']};border-left:4px solid {c['border']};"
-            f"border-radius:10px;padding:10px 14px;"
-            f"box-shadow:0 2px 8px rgba(0,0,0,0.07);'>"
-            f"<div style='color:{c['lc']};font-size:10px;font-weight:700;"
-            f"text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px;'>{label}</div>"
-            f"<div style='color:{c['vc']};font-size:22px;font-weight:900;"
+            f"<td style='padding:4px;'>"
+            f"<div style='background:{s['bg']};border-radius:10px;padding:12px 16px;"
+            f"border-top:3px solid {s['accent']};'>"
+            f"<div style='color:rgba(255,255,255,0.65);font-size:10px;font-weight:700;"
+            f"text-transform:uppercase;letter-spacing:0.8px;margin-bottom:7px;'>{label}</div>"
+            f"<div style='color:#ffffff;font-size:24px;font-weight:900;"
             f"letter-spacing:-0.5px;line-height:1;'>{val}</div>"
             f"</div></td>"
         )
 
     parts = [f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
-<body style="margin:0;padding:0;background:#dce8f7;font-family:Segoe UI,Inter,Arial,sans-serif;">
-<div style="max-width:900px;margin:20px auto;border-radius:16px;
-     box-shadow:0 12px 40px rgba(10,38,71,0.18);overflow:hidden;">
+<body style="margin:0;padding:0;background:#f0f4f8;font-family:Segoe UI,Inter,Arial,sans-serif;">
+<div style="max-width:900px;margin:20px auto;border-radius:14px;
+     box-shadow:0 8px 30px rgba(10,38,71,0.15);overflow:hidden;">
 
   <!-- Header -->
   <div style="background:#0B2342;padding:16px 22px;">
-    <div style="color:#ffffff;font-size:17px;font-weight:900;letter-spacing:-0.03em;">
+    <div style="color:#ffffff;font-size:17px;font-weight:900;letter-spacing:-0.02em;">
       📌 EMC Income Analysis Report
     </div>
     <div style="color:#7fa8d4;font-size:11px;margin-top:4px;">
@@ -324,19 +323,15 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     </div>
   </div>
 
-  <!-- KPI Section -->
-  <div style="background:#EDF2FB;padding:14px 16px 6px 16px;">
-    <table style="width:100%;border-collapse:collapse;margin-bottom:6px;">
+  <!-- KPI Row -->
+  <div style="background:#0f2d4a;padding:12px 12px 14px 12px;">
+    <table style="width:100%;border-collapse:collapse;">
       <tr>
         {_kpi_card("Total Visits", total_visits, 0)}
         {_kpi_card("New Patients", new_patients, 1)}
-        {_kpi_card("Established Patients", established, 2)}
-      </tr>
-    </table>
-    <table style="width:66.6%;border-collapse:collapse;margin-bottom:14px;">
-      <tr>
+        {_kpi_card("Established", established, 2)}
         {_kpi_card("Follow Up", follow_up, 3)}
-        {_kpi_card("Pending Patients", pending_patients, 4)}
+        {_kpi_card("Pending", pending_patients, 4)}
       </tr>
     </table>
   </div>
