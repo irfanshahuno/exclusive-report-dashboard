@@ -287,31 +287,26 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     df_ins = _safe_df(dfs.get("Income | Insurance Wise Revenue"))
     df_dx  = _safe_df(dfs.get("Income | Doctor x Insurance Revenue"))
 
-    CARD_STYLES = [
-        {"bg": "#1A5276", "accent": "#2E86C1"},  # navy blue  — Total Visits
-        {"bg": "#1E8449", "accent": "#27AE60"},  # green      — New Patients
-        {"bg": "#1A5276", "accent": "#5DADE2"},  # steel blue — Established
-        {"bg": "#784212", "accent": "#E67E22"},  # amber      — Follow Up
-        {"bg": "#4A235A", "accent": "#9B59B6"},  # purple     — Pending
-    ]
+    CARD_ACCENTS = ["#2E86C1", "#27AE60", "#16A085", "#E67E22", "#8E44AD"]
 
     def _kpi_card(label, val, idx=0):
-        s = CARD_STYLES[idx % len(CARD_STYLES)]
+        accent = CARD_ACCENTS[idx % len(CARD_ACCENTS)]
         return (
-            f"<td style='padding:4px;'>"
-            f"<div style='background:{s['bg']};border-radius:10px;padding:12px 16px;"
-            f"border-top:3px solid {s['accent']};'>"
-            f"<div style='color:rgba(255,255,255,0.65);font-size:10px;font-weight:700;"
-            f"text-transform:uppercase;letter-spacing:0.8px;margin-bottom:7px;'>{label}</div>"
-            f"<div style='color:#ffffff;font-size:24px;font-weight:900;"
+            f"<td style='padding:5px;'>"
+            f"<div style='background:#ffffff;border-top:3px solid {accent};"
+            f"border-radius:0 0 8px 8px;padding:12px 16px 14px 16px;"
+            f"box-shadow:0 2px 8px rgba(10,38,71,0.10);'>"
+            f"<div style='color:#8A9BB5;font-size:10px;font-weight:700;"
+            f"text-transform:uppercase;letter-spacing:0.8px;margin-bottom:8px;'>{label}</div>"
+            f"<div style='color:#0B2342;font-size:26px;font-weight:900;"
             f"letter-spacing:-0.5px;line-height:1;'>{val}</div>"
             f"</div></td>"
         )
 
     parts = [f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
 <body style="margin:0;padding:0;background:#f0f4f8;font-family:Segoe UI,Inter,Arial,sans-serif;">
-<div style="max-width:900px;margin:20px auto;border-radius:14px;
-     box-shadow:0 8px 30px rgba(10,38,71,0.15);overflow:hidden;">
+<div style="max-width:900px;margin:20px auto;border-radius:12px;
+     box-shadow:0 8px 30px rgba(10,38,71,0.13);overflow:hidden;">
 
   <!-- Header -->
   <div style="background:#0B2342;padding:16px 22px;">
@@ -323,22 +318,22 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     </div>
   </div>
 
-  <!-- KPI Row -->
-  <div style="background:#0f2d4a;padding:12px 12px 14px 12px;">
+  <!-- KPI Cards -->
+  <div style="background:#f0f4f8;padding:16px 12px 12px 12px;">
     <table style="width:100%;border-collapse:collapse;">
       <tr>
         {_kpi_card("Total Visits", total_visits, 0)}
         {_kpi_card("New Patients", new_patients, 1)}
-        {_kpi_card("Established", established, 2)}
+        {_kpi_card("Established Patients", established, 2)}
         {_kpi_card("Follow Up", follow_up, 3)}
-        {_kpi_card("Pending", pending_patients, 4)}
+        {_kpi_card("Pending Patients", pending_patients, 4)}
       </tr>
     </table>
   </div>
 
-  <!-- Tables Section -->
+  <!-- Tables -->
   <div style="background:#ffffff;padding:16px 18px 20px 18px;">
-    <div style="background:#0B2342;border-radius:8px;padding:10px 16px;margin-bottom:14px;">
+    <div style="background:#0B2342;border-radius:8px;padding:10px 16px;margin-bottom:16px;">
       <span style="color:#ffffff;font-size:13px;font-weight:800;">
         📊 Income Analysis — Doctor Revenue
       </span>
