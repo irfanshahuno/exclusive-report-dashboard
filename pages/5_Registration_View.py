@@ -160,6 +160,8 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
         if df.empty:
             return ""
         cols = list(df.columns)
+        # Determine which columns are text (left-align) vs numeric (right-align)
+        text_cols = {c for c in cols if not pd.api.types.is_numeric_dtype(df[c])}
         h = (f"<table style='width:100%;border-collapse:collapse;font-size:12px;"
              f"margin-bottom:2px;'>")
         h += f"<tr>{''.join(_th(c) for c in cols)}</tr>"
@@ -168,7 +170,7 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
             is_tot = first in ("GRAND TOTAL", "TOTAL")
             bg = C_ORANGE if is_tot else (C_ALT if ri % 2 == 0 else C_WHITE)
             fx = f"color:{C_WHITE};font-weight:900;" if is_tot else ""
-            tds = [_td(v, align="left" if ci == 0 else "right",
+            tds = [_td(v, align="left" if cols[ci] in text_cols else "right",
                        extra=f"background:{bg};{fx}")
                    for ci, v in enumerate(row)]
             h += "<tr>" + "".join(tds) + "</tr>"
@@ -236,11 +238,10 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
                 top_border = (f"border-top:2px solid {C_NAVY_SECT};" if (g_idx == 0 and not (ri == 0 and alt == 0)) else "")
 
                 if g_idx == 0:
-                    # Doctor cell: rowspan covers data rows + TOTAL row
                     doc_cell = (
                         f"<td rowspan='{total_rows}' style='padding:8px 10px;"
                         f"border:1px solid {C_BORDER};border-top:2px solid {C_NAVY_SECT};"
-                        f"text-align:center;font-weight:900;vertical-align:middle;"
+                        f"text-align:left;font-weight:900;vertical-align:middle;"
                         f"background:#D6EAF8;white-space:nowrap;font-size:12px;'>"
                         f"{doc_display}</td>"
                     )
@@ -296,8 +297,8 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
             f"<div style='background:#ffffff;border-top:3px solid {accent};"
             f"border-radius:0 0 8px 8px;padding:12px 16px 14px 16px;"
             f"box-shadow:0 2px 8px rgba(10,38,71,0.10);'>"
-            f"<div style='color:#8A9BB5;font-size:10px;font-weight:700;"
-            f"text-transform:uppercase;letter-spacing:0.8px;margin-bottom:8px;'>{label}</div>"
+            f"<div style='color:#34495E;font-size:11px;font-weight:700;"
+            f"text-transform:uppercase;letter-spacing:0.6px;margin-bottom:8px;'>{label}</div>"
             f"<div style='color:#0B2342;font-size:26px;font-weight:900;"
             f"letter-spacing:-0.5px;line-height:1;'>{val}</div>"
             f"</div></td>"
