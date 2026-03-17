@@ -41,9 +41,9 @@ def load_data(input_file: str) -> pd.DataFrame:
     df = pd.read_excel(input_file, engine="openpyxl")
     df.columns = df.columns.str.strip()
 
-    # Fill blank ActivityStatus downward so child/blank rows inherit the previous status
-    if "ActivityStatus" in df.columns:
-        df["ActivityStatus"] = df["ActivityStatus"].replace("", pd.NA).ffill()
+    # Fill blank Status downward so child/blank rows inherit the previous status
+    if "Status" in df.columns:
+        df["Status"] = df["Status"].replace("", pd.NA).ffill()
 
     return df
 
@@ -69,8 +69,8 @@ def compute_measures(df: pd.DataFrame) -> pd.DataFrame:
 
     df["Rejection"], df["Accepted"], df["Balance"] = 0.0, 0.0, 0.0
 
-    if "ActivityStatus" in df.columns and "DenialCode" in df.columns:
-        lower_status = df["ActivityStatus"].astype(str).str.lower().str.strip()
+    if "Status" in df.columns and "DenialCode" in df.columns:
+        lower_status = df["Status"].astype(str).str.lower().str.strip()
         denial_ok = df["DenialCode"].notna() & (df["DenialCode"].astype(str).str.strip() != "")
 
         mask_paid = df["Paid"] > 0
