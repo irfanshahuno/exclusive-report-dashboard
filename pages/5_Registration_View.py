@@ -391,7 +391,7 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                 out[c] = pd.to_numeric(out[c], errors="coerce").round(1)
         return out
 
-    # Clean, short header names for Excel display
+    # Clean display names for Excel (full readable names, no abbreviations for main cols)
     COL_RENAME = {
         "Total_Amount_Service":    "Total Svc",
         "Total_Amount_Insuance":   "Total Ins",
@@ -399,26 +399,55 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
         "Avg_Amount_Service":      "Avg Svc",
         "Avg_Amount_Insuance":     "Avg Ins",
         "Avg_Amount_Insurance":    "Avg Ins",
-        "Avg.Amount":              "Avg",
-        "Radiology_%":             "Rad %",
-        "Procedure_%":             "Proc %",
+        "Avg.Amount":              "Avg Ins",
+        "Avg_Amount":              "Avg Ins",
         "Lab_%":                   "Lab %",
+        "Procedure_Per_Visit":     "Procedure %",
+        "Radiology_Per_Visit":     "Radiology %",
         "Total_Visit":             "Visits",
-        "Total_Amount":            "Total",
-        "Procedure_Per_Visit":     "Proc/Visit",
-        "Radiology_Per_Visit":     "Rad/Visit",
-        "Consultation":            "Consult",
+        "Total_Amount":            "Total Ins",
         "Department":              "Dept",
     }
+
+    # Desired column order (by canonical name, after rename)
+    PREFERRED_ORDER = [
+        "Dept", "Doctor", "Insurance",
+        "Consultation", "Lab", "Radiology", "Procedure",
+        "Visits",
+        "Total Svc", "Total Ins",
+        "Avg Svc", "Avg Ins",
+        "Lab %", "Radiology %", "Procedure %",
+    ]
 
     def _clean_df(df) -> pd.DataFrame:
         if not isinstance(df, pd.DataFrame) or df.empty:
             return pd.DataFrame()
         out = df.copy()
+        # Drop unnamed/blank cols
         bad = [c for c in out.columns if str(c).strip() == "" or str(c).strip().lower().startswith("unnamed")]
         out = out.drop(columns=bad, errors="ignore")
+        # Drop bad % cols (Radiology_% and Procedure_% are computed as % of service amount — misleading)
+        # Replace with per-visit ratios instead
+        for drop_c in ["Radiology_%", "Procedure_%"]:
+            if drop_c in out.columns:
+                out = out.drop(columns=[drop_c])
+        # Compute per-visit ratios
+        visit_col = next((c for c in out.columns if str(c).strip().lower() in
+                          ["total_visit", "total visit", "visits", "visit"]), None)
+        if visit_col is not None:
+            denom = pd.to_numeric(out[visit_col], errors="coerce").replace(0, pd.NA)
+            if "Procedure" in out.columns:
+                out["Procedure_Per_Visit"] = (pd.to_numeric(out["Procedure"], errors="coerce") / denom).round(1).fillna(0)
+            if "Radiology" in out.columns:
+                out["Radiology_Per_Visit"] = (pd.to_numeric(out["Radiology"], errors="coerce") / denom).round(1).fillna(0)
+        # Round all numeric cols to 1 decimal
         out = _round1(out)
+        # Rename to clean display names
         out = out.rename(columns={k: v for k, v in COL_RENAME.items() if k in out.columns})
+        # Reorder columns: put them in PREFERRED_ORDER, then any remaining at end
+        ordered = [c for c in PREFERRED_ORDER if c in out.columns]
+        remaining = [c for c in out.columns if c not in ordered]
+        out = out[ordered + remaining]
         return out
 
     df_doc = _clean_df(dfs.get("Income | Doctor Wise Revenue"))
