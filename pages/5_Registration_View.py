@@ -70,7 +70,8 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
         out = df.copy()
         _int_cols = {"Consultation","Lab","Radiology","Procedure","Visits","Total_Visit","Total Visit"}
         _pct_cols = {"Lab_%","Lab %","Procedure_Per_Visit","Procedure %","Radiology_Per_Visit","Radiology %",
-                     "Avg Svc","Avg Ins","Avg_Amount_Service","Avg_Amount_Insuance","Avg_Amount_Insurance"}
+                     "Avg Service","Avg Insurance","Avg Svc","Avg Ins",
+                     "Avg_Amount_Service","Avg_Amount_Insuance","Avg_Amount_Insurance"}
         for c in out.columns:
             if not pd.api.types.is_numeric_dtype(out[c]):
                 continue
@@ -406,7 +407,9 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
         "Lab_%", "Lab %",
         "Procedure_Per_Visit", "Procedure %",
         "Radiology_Per_Visit", "Radiology %",
-        "Avg Svc", "Avg Ins", "Avg.Amount", "Avg_Amount",
+        "Avg Service", "Avg Insurance",
+        "Avg Svc", "Avg Ins",
+        "Avg.Amount", "Avg_Amount",
         "Avg_Amount_Service", "Avg_Amount_Insuance", "Avg_Amount_Insurance",
     }
 
@@ -430,31 +433,31 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                     out[c] = series
         return out
 
-    # Clean display names for Excel (full readable names, no abbreviations for main cols)
+    # Clean display names for Excel — full readable, consistent
     COL_RENAME = {
-        "Total_Amount_Service":    "Total Svc",
-        "Total_Amount_Insuance":   "Total Ins",
-        "Total_Amount_Insurance":  "Total Ins",
-        "Avg_Amount_Service":      "Avg Svc",
-        "Avg_Amount_Insuance":     "Avg Ins",
-        "Avg_Amount_Insurance":    "Avg Ins",
-        "Avg.Amount":              "Avg Ins",
-        "Avg_Amount":              "Avg Ins",
+        "Total_Amount_Service":    "Total Service",
+        "Total_Amount_Insuance":   "Total Insurance",
+        "Total_Amount_Insurance":  "Total Insurance",
+        "Avg_Amount_Service":      "Avg Service",
+        "Avg_Amount_Insuance":     "Avg Insurance",
+        "Avg_Amount_Insurance":    "Avg Insurance",
+        "Avg.Amount":              "Avg Insurance",
+        "Avg_Amount":              "Avg Insurance",
         "Lab_%":                   "Lab %",
         "Procedure_Per_Visit":     "Procedure %",
         "Radiology_Per_Visit":     "Radiology %",
         "Total_Visit":             "Visits",
-        "Total_Amount":            "Total Ins",
+        "Total_Amount":            "Total Insurance",
         "Department":              "Dept",
     }
 
-    # Desired column order (by canonical name, after rename)
+    # Desired column order — Avg cols BEFORE % cols (matches Excel image)
     PREFERRED_ORDER = [
         "Dept", "Doctor", "Insurance",
         "Consultation", "Lab", "Radiology", "Procedure",
         "Visits",
-        "Total Svc", "Total Ins",
-        "Avg Svc", "Avg Ins",
+        "Total Service", "Total Insurance",
+        "Avg Service", "Avg Insurance",
         "Lab %", "Procedure %", "Radiology %",
     ]
 
@@ -542,9 +545,9 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                 cell = ws.cell(row=start_row, column=ci, value=col)
                 cell.fill = HEADER_FILL
                 cell.font = HEADER_FONT
-                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                 cell.border = BORDER
-            ws.row_dimensions[start_row].height = 20
+            ws.row_dimensions[start_row].height = 30
             start_row += 1
 
             for ri, row_data in enumerate(df.itertuples(index=False, name=None)):
@@ -595,9 +598,9 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                 cell = ws.cell(row=start_row, column=ci, value=col)
                 cell.fill = HEADER_FILL
                 cell.font = HEADER_FONT
-                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                 cell.border = BORDER
-            ws.row_dimensions[start_row].height = 20
+            ws.row_dimensions[start_row].height = 30
             start_row += 1
 
             rows_list = list(df.itertuples(index=False, name=None))
