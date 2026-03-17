@@ -33,6 +33,8 @@ import streamlit as st
 # ==========================
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 import smtplib
 
 
@@ -411,7 +413,13 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     parts.append("</div></div>")
     return "".join(parts)
 
-def _send_email_smtp(subject: str, html_body: str) -> None:
+def _send_email_smtp(
+    subject: str,
+    html_body: str,
+    attachment_bytes: bytes = None,
+    attachment_filename: str = None,
+) -> None:
+    """Send an HTML email via SMTP. Optionally attach a file (e.g. Excel)."""
     host = st.secrets.get("SMTP_HOST", "")
     port = int(st.secrets.get("SMTP_PORT", 465))
     user = st.secrets.get("SMTP_USER", "")
@@ -423,20 +431,115 @@ def _send_email_smtp(subject: str, html_body: str) -> None:
     if not (host and user and pwd and to_addr):
         raise ValueError("Missing SMTP secrets (SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/EMAIL_TO).")
 
-    msg = MIMEMultipart("alternative")
+    # Use 'mixed' when we have an attachment, 'alternative' otherwise
+    msg = MIMEMultipart("mixed" if attachment_bytes else "alternative")
     msg["Subject"] = subject
     msg["From"] = user
     msg["To"] = to_addr
     if cc_addr:
         msg["Cc"] = cc_addr
 
-    msg.attach(MIMEText(html_body, "html"))
+    # Wrap HTML in an 'alternative' sub-part so email clients render it correctly
+    alt_part = MIMEMultipart("alternative")
+    alt_part.attach(MIMEText(html_body, "html"))
+    msg.attach(alt_part)
+
+    # Attach Excel file if provided
+    if attachment_bytes and attachment_filename:
+        part = MIMEBase("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        part.set_payload(attachment_bytes)
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", "attachment", filename=attachment_filename)
+        msg.attach(part)
 
     recipients = [x.strip() for x in (to_addr.split(",") + (cc_addr.split(",") if cc_addr else [])) if x.strip()]
 
     with smtplib.SMTP_SSL(host, port) as s:
         s.login(user, pwd)
         s.sendmail(user, recipients, msg.as_string())
+
+
+def _build_income_excel(dfs: dict, period_label: str) -> bytes:
+    """Build an Excel workbook with Income Analysis sheets and return as bytes.
+
+    Sheets:
+        Doctor Wise Revenue
+        Insurance Wise Revenue
+        Doctor x Insurance Revenue
+    """
+    import io as _io
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    HEADER_FILL  = PatternFill("solid", fgColor="0D1B2A")   # dark navy
+    HEADER_FONT  = Font(color="FFFFFF", bold=True, size=11)
+    TOTAL_FILL   = PatternFill("solid", fgColor="FF6600")    # orange for grand total
+    TOTAL_FONT   = Font(color="FFFFFF", bold=True, size=11)
+    ALT_FILL     = PatternFill("solid", fgColor="F0F4FF")    # light blue alt row
+    THIN         = Side(border_style="thin", color="CCCCCC")
+    BORDER       = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+
+    sheet_map = {
+        "Doctor Wise Revenue":           dfs.get("Income | Doctor Wise Revenue"),
+        "Insurance Wise Revenue":        dfs.get("Income | Insurance Wise Revenue"),
+        "Doctor x Insurance Revenue":    dfs.get("Income | Doctor x Insurance Revenue"),
+    }
+
+    buf = _io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        any_written = False
+        for sheet_name, df in sheet_map.items():
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                continue
+            df_out = df.copy()
+            # drop unnamed/blank columns
+            bad_cols = [c for c in df_out.columns if str(c).strip() == "" or str(c).strip().lower().startswith("unnamed")]
+            df_out = df_out.drop(columns=bad_cols, errors="ignore")
+            df_out.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+            any_written = True
+
+            ws = writer.sheets[sheet_name[:31]]
+            max_col = ws.max_column
+            max_row = ws.max_row
+
+            for col_idx in range(1, max_col + 1):
+                cell = ws.cell(row=1, column=col_idx)
+                cell.fill = HEADER_FILL
+                cell.font = HEADER_FONT
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.border = BORDER
+
+            for row_idx in range(2, max_row + 1):
+                first_val = str(ws.cell(row=row_idx, column=1).value or "").strip().upper()
+                is_total = first_val in ("GRAND TOTAL", "TOTAL")
+                for col_idx in range(1, max_col + 1):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.border = BORDER
+                    cell.alignment = Alignment(horizontal="right" if col_idx > 1 else "left", vertical="center")
+                    if is_total:
+                        cell.fill = TOTAL_FILL
+                        cell.font = TOTAL_FONT
+                    elif row_idx % 2 == 0:
+                        cell.fill = ALT_FILL
+
+            # Auto-fit column widths
+            for col_idx in range(1, max_col + 1):
+                col_letter = get_column_letter(col_idx)
+                max_len = max(
+                    (len(str(ws.cell(row=r, column=col_idx).value or "")) for r in range(1, max_row + 1)),
+                    default=10,
+                )
+                ws.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 40)
+
+            ws.freeze_panes = "A2"
+
+        if not any_written:
+            # Write a placeholder so file isn't empty
+            pd.DataFrame({"Note": ["No Income Analysis data available for this period."]}).to_excel(
+                writer, index=False, sheet_name="No Data"
+            )
+
+    return buf.getvalue()
 
 
 # Employer normalization map (from Employer names.csv 'check' column)
@@ -1231,7 +1334,37 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
     income_keys = [k for k in dfs.keys() if str(k).startswith("Income | ")]
     if income_keys:
         st.markdown("---")
-        st.header("Income Analysis (Doctor Revenue)")
+
+        inc_col1, inc_col2 = st.columns([6, 2])
+        with inc_col1:
+            st.header("Income Analysis (Doctor Revenue)")
+        with inc_col2:
+            st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
+            if st.button("📧 Email Income Analysis", key=f"email_income_{label}_{str(day_ts.date())}"):
+                try:
+                    # --- Build filename: EMC - INCOME ANALYSIS REPORT - DD Month YYYY.xlsx ---
+                    # For ranges/monthly we use the latest day in the period
+                    _report_dt = pd.to_datetime(day_ts)
+                    _fname = _report_dt.strftime("EMC - INCOME ANALYSIS REPORT - %d %B %Y.xlsx")
+
+                    # --- Build Excel attachment ---
+                    _excel_bytes = _build_income_excel(dfs, title)
+
+                    # --- Build HTML email body (Income Analysis only) ---
+                    _html_body = _dfs_to_html(dfs, "Income Analysis (Doctor Revenue)", title)
+
+                    # --- Subject ---
+                    _subject = f"EMC Income Analysis Report – {title}"
+
+                    _send_email_smtp(
+                        subject=_subject,
+                        html_body=_html_body,
+                        attachment_bytes=_excel_bytes,
+                        attachment_filename=_fname,
+                    )
+                    st.success(f"✅ Email sent with attachment: {_fname}")
+                except Exception as _e:
+                    st.error(f"Email failed: {_e}")
 
         df_doc = dfs.get("Income | Doctor Wise Revenue")
         df_ins = dfs.get("Income | Insurance Wise Revenue")
