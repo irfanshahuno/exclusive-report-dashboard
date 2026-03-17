@@ -123,18 +123,18 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
             return ""
         cols = list(df.columns)
         doc_ci = cols.index("Doctor") if "Doctor" in cols else None
-        # Insurance and all other columns (exclude Doctor — it becomes the group header)
         ins_cols = [c for c in cols if c != "Doctor"]
+        n_ins = len(ins_cols)
 
-        h = (f"<table style='width:100%;border-collapse:collapse;font-size:12px;"
-             f"margin-bottom:2px;'>")
-        # Header row (no Doctor column)
-        h += f"<tr>{''.join(_th(c) for c in ins_cols)}</tr>"
+        h = (f"<table style='width:100%;border-collapse:collapse;font-size:12px;margin-bottom:2px;'>")
+        # Header: Doctor col + insurance cols
+        h += (f"<tr>{_th('Doctor')}"
+              + "".join(_th(c) for c in ins_cols)
+              + "</tr>")
 
         rows_list = list(df.itertuples(index=False, name=None))
         ri = 0
         alt = 0
-        n_ins = len(ins_cols)
 
         while ri < len(rows_list):
             row = rows_list[ri]
@@ -142,16 +142,18 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
             is_tot = first in ("GRAND TOTAL", "TOTAL")
 
             if is_tot or doc_ci is None:
-                # Grand total or no doctor col — plain row across ins_cols
                 bg = C_ORANGE if is_tot else (C_ALT if alt % 2 == 0 else C_WHITE)
                 fx = f"color:{C_WHITE};font-weight:900;" if is_tot else ""
+                # Grand total: spans Doctor col + all ins_cols
                 ins_vals = [row[cols.index(c)] for c in ins_cols]
-                tds = [_td(v, "left" if ci == 0 else "right", f"background:{bg};{fx}")
-                       for ci, v in enumerate(ins_vals)]
-                h += "<tr>" + "".join(tds) + "</tr>"
+                h += (f"<tr>"
+                      f"<td style='padding:7px 10px;border:1px solid {C_BORDER};"
+                      f"background:{bg};{fx};font-weight:900;text-align:left;'>GRAND TOTAL</td>"
+                      + "".join(_td(v, "right", f"background:{bg};{fx}") for v in ins_vals)
+                      + "</tr>")
                 alt += 1; ri += 1; continue
 
-            # Gather group for this doctor
+            # Gather group
             cur = str(row[doc_ci] or "").strip().upper()
             grp = []
             j = ri
@@ -163,22 +165,29 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
                 grp.append(rd); j += 1
 
             doc_display = str(row[doc_ci] or "").strip()
+            n_grp = len(grp)
+            # +1 for the TOTAL row
+            total_rows = n_grp + 1
 
-            # ── Doctor header row (full width, navy) ──
-            h += (f"<tr><td colspan='{n_ins}' style='padding:8px 12px;"
-                  f"background:{C_NAVY_SECT};color:{C_WHITE};font-weight:900;font-size:13px;"
-                  f"border:1px solid {C_BORDER};text-align:left;'>"
-                  f"{doc_display}</td></tr>")
-
-            # ── Insurance data rows ──
             group_totals = {c: 0.0 for c in ins_cols if c != "Insurance"}
-            for g_row in grp:
+
+            for g_idx, g_row in enumerate(grp):
                 bg = C_ALT if alt % 2 == 0 else C_WHITE
                 ins_vals = [g_row[cols.index(c)] for c in ins_cols]
-                tds = [_td(v, "left" if ci == 0 else "right", f"background:{bg};")
-                       for ci, v in enumerate(ins_vals)]
-                h += "<tr>" + "".join(tds) + "</tr>"
-                # accumulate per-doctor totals
+
+                if g_idx == 0:
+                    # Doctor cell: rowspan covers data rows + TOTAL row
+                    doc_cell = (
+                        f"<td rowspan='{total_rows}' style='padding:8px 10px;"
+                        f"border:1px solid {C_BORDER};text-align:left;"
+                        f"font-weight:900;vertical-align:middle;"
+                        f"background:#D6EAF8;white-space:nowrap;font-size:12px;'>"
+                        f"{doc_display}</td>"
+                    )
+                    h += "<tr>" + doc_cell + "".join(_td(v, "left" if ci == 0 else "right", f"background:{bg};") for ci, v in enumerate(ins_vals)) + "</tr>"
+                else:
+                    h += "<tr>" + "".join(_td(v, "left" if ci == 0 else "right", f"background:{bg};") for ci, v in enumerate(ins_vals)) + "</tr>"
+
                 for c in ins_cols:
                     if c != "Insurance":
                         try:
@@ -187,22 +196,17 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
                             pass
                 alt += 1
 
-            # ── Doctor TOTAL row (medium blue) ──
+            # Doctor TOTAL row (medium blue) — doctor cell already covered by rowspan
             BLUE = "#2E6DA4"
             tot_tds = []
             for ci, c in enumerate(ins_cols):
-                if c == "Insurance":
-                    v = "TOTAL"
-                else:
-                    raw = group_totals.get(c, 0)
-                    v = round(raw, 1) if raw else 0
+                v = "TOTAL" if c == "Insurance" else round(group_totals.get(c, 0), 1)
                 tot_tds.append(
                     f"<td style='padding:7px 10px;border:1px solid {C_BORDER};"
                     f"text-align:{'left' if ci==0 else 'right'};"
                     f"background:{BLUE};color:{C_WHITE};font-weight:700;'>{v}</td>"
                 )
             h += "<tr>" + "".join(tot_tds) + "</tr>"
-
             ri = j
 
         return h + "</table>"
@@ -220,36 +224,47 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     df_dx  = _safe_df(dfs.get("Income | Doctor x Insurance Revenue"))
 
     def _kpi_card(label, val):
-        return f"""<td style='padding:6px;'>
-      <div style='background:{C_WHITE};border:1px solid #e2e8f0;border-radius:14px;
-                  padding:14px 18px;box-shadow:0 2px 8px rgba(15,23,42,0.07);'>
-        <div style='color:{C_MUTED};font-size:12px;font-weight:700;'>{label}</div>
-        <div style='color:{C_DARK};font-size:28px;font-weight:900;margin-top:4px;line-height:1.1;'>{val}</div>
-      </div></td>"""
+        # Compact card matching Streamlit UI: light grey bg, tight padding
+        return (f"<td style='padding:4px 6px;'>"
+                f"<div style='background:#f1f5f9;border:1px solid #e2e8f0;border-radius:10px;"
+                f"padding:10px 14px;'>"
+                f"<div style='color:{C_MUTED};font-size:11px;font-weight:700;"
+                f"margin-bottom:2px;'>{label}</div>"
+                f"<div style='color:{C_DARK};font-size:24px;font-weight:900;"
+                f"line-height:1.1;'>{val}</div>"
+                f"</div></td>")
 
     parts = [f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
 <body style="margin:0;padding:0;background:#f1f5f9;font-family:Segoe UI,Arial,sans-serif;">
-<div style="max-width:960px;margin:24px auto;background:{C_WHITE};border-radius:16px;
+<div style="max-width:960px;margin:20px auto;background:{C_WHITE};border-radius:16px;
      box-shadow:0 8px 24px rgba(15,23,42,0.12);overflow:hidden;">
 
-  <div style="background:{C_NAVY};padding:20px 28px;">
-    <div style="color:{C_WHITE};font-size:20px;font-weight:900;letter-spacing:-0.02em;">
+  <div style="background:{C_NAVY};padding:18px 24px;">
+    <div style="color:{C_WHITE};font-size:19px;font-weight:900;letter-spacing:-0.02em;">
       📌 EMC Income Analysis Report
     </div>
-    <div style="color:#94a3b8;font-size:13px;margin-top:4px;">
+    <div style="color:#94a3b8;font-size:12px;margin-top:3px;">
       {picked_label} &nbsp;·&nbsp; Generated: {pd.Timestamp.now().strftime('%d %b %Y %H:%M')}
     </div>
   </div>
 
-  <div style="padding:24px 28px;">
+  <div style="padding:16px 20px;">
 
-    <table style="width:100%;border-collapse:separate;border-spacing:0;margin-bottom:24px;">
-      <tr>{_kpi_card("Total Visits", total_visits)}{_kpi_card("New Patients", new_patients)}{_kpi_card("Established Patients", established)}</tr>
-      <tr>{_kpi_card("Follow Up", follow_up)}{_kpi_card("Unclassified Visits", unclassified)}{_kpi_card("Pending Patients", pending_patients)}</tr>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+      <tr>
+        {_kpi_card("Total Visits", total_visits)}
+        {_kpi_card("New Patients", new_patients)}
+        {_kpi_card("Established Patients", established)}
+      </tr>
+      <tr>
+        {_kpi_card("Follow Up", follow_up)}
+        {_kpi_card("Unclassified Visits", unclassified)}
+        {_kpi_card("Pending Patients", pending_patients)}
+      </tr>
     </table>
 
-    <div style="background:{C_NAVY_SECT};border-radius:10px;padding:10px 14px;margin-bottom:18px;">
-      <span style="color:{C_WHITE};font-size:15px;font-weight:900;">📊 Income Analysis (Doctor Revenue)</span>
+    <div style="background:{C_NAVY_SECT};border-radius:8px;padding:8px 12px;margin-bottom:14px;">
+      <span style="color:{C_WHITE};font-size:14px;font-weight:900;">📊 Income Analysis (Doctor Revenue)</span>
     </div>
 """]
 
@@ -445,8 +460,9 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
             return start_row
 
         def _write_dx_section(ws, start_row, df: pd.DataFrame) -> int:
-            """Doctor x Insurance: doctor name as a full-width header row above its insurance rows.
-            Each doctor group ends with a TOTAL row. Grand Total at the very end.
+            """Doctor x Insurance: doctor name as side-merged cell (light blue),
+            insurance rows beside it, per-doctor TOTAL row, Grand Total at end.
+            Matches image layout exactly.
             """
             if df.empty:
                 return start_row
@@ -462,11 +478,14 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
             if "Doctor" in cols:
                 doc_col_idx = cols.index("Doctor") + 1
 
-            # Column headers (without Doctor column — it becomes the group header row)
+            # ins_cols = all cols except Doctor
             ins_cols = [c for c in cols if c != "Doctor"]
-            ins_col_indices = [cols.index(c) + 1 for c in ins_cols]  # 1-based
+            n_ins = len(ins_cols)
+            total_header_cols = 1 + n_ins  # Doctor col + ins cols
 
-            for ci, col in enumerate(ins_cols, 1):
+            # Header row: Doctor | Insurance | ...
+            header_cols = ["Doctor"] + ins_cols
+            for ci, col in enumerate(header_cols, 1):
                 cell = ws.cell(row=start_row, column=ci, value=col)
                 cell.fill = HEADER_FILL
                 cell.font = HEADER_FONT
@@ -479,103 +498,113 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
             alt = 0
             i = 0
 
+            DOC_FILL   = PatternFill("solid", fgColor="D6EAF8")  # light blue (matches image)
+            DTOT_FILL  = PatternFill("solid", fgColor="2E6DA4")  # medium blue for doctor total
+            DTOT_FONT  = Font(color="FFFFFF", bold=True, size=10)
+
             while i < len(rows_list):
                 row_data = rows_list[i]
                 first_val = str(row_data[0] or "").strip().upper()
                 is_total = first_val in ("GRAND TOTAL", "TOTAL")
 
                 if is_total:
-                    # Grand Total — write across all ins_cols
-                    ins_vals = [row_data[cols.index(c)] for c in ins_cols]
-                    for ci, val in enumerate(ins_vals, 1):
+                    # Grand Total across all columns
+                    all_vals = ["GRAND TOTAL"] + [row_data[cols.index(c)] for c in ins_cols]
+                    for ci, val in enumerate(all_vals, 1):
                         cell = ws.cell(row=start_row, column=ci, value=val if val is not None else "")
                         cell.fill = TOTAL_FILL
                         cell.font = TOTAL_FONT
                         cell.border = BORDER
                         cell.alignment = Alignment(horizontal="right" if ci > 1 else "left", vertical="center")
-                    start_row += 1
-                    i += 1
-                    continue
+                    start_row += 1; i += 1; continue
 
                 if doc_col_idx is None:
-                    # No doctor col — plain row
                     ins_vals = list(row_data)
                     for ci, val in enumerate(ins_vals, 1):
                         cell = ws.cell(row=start_row, column=ci, value=val if val is not None else "")
                         cell.border = BORDER
                         cell.alignment = Alignment(horizontal="right" if ci > 1 else "left", vertical="center")
-                        if alt % 2 == 0:
-                            cell.fill = ALT_FILL
-                    alt += 1; start_row += 1; i += 1
-                    continue
+                        if alt % 2 == 0: cell.fill = ALT_FILL
+                    alt += 1; start_row += 1; i += 1; continue
 
-                # Gather all consecutive rows for this doctor
-                current_doc = str(row_data[doc_col_idx - 1] or "").strip().upper()
+                # Gather group for this doctor
+                cur = str(row_data[doc_col_idx - 1] or "").strip().upper()
                 group = []
                 j = i
                 while j < len(rows_list):
                     rd = rows_list[j]
                     fv = str(rd[0] or "").strip().upper()
-                    if fv in ("GRAND TOTAL", "TOTAL"):
-                        break
-                    if str(rd[doc_col_idx - 1] or "").strip().upper() != current_doc:
-                        break
-                    group.append(rd)
-                    j += 1
+                    if fv in ("GRAND TOTAL", "TOTAL"): break
+                    if str(rd[doc_col_idx - 1] or "").strip().upper() != cur: break
+                    group.append(rd); j += 1
 
                 doc_display = str(row_data[doc_col_idx - 1] or "").strip()
+                n_grp = len(group)
+                total_rows = n_grp + 1  # data rows + TOTAL row
 
-                # ── Doctor header row (spans all ins_cols) ──
-                n_ins = len(ins_cols)
-                cell = ws.cell(row=start_row, column=1, value=doc_display)
-                cell.fill = PatternFill("solid", fgColor="1E3A5F")   # navy
-                cell.font = Font(color="FFFFFF", bold=True, size=11)
-                cell.alignment = Alignment(horizontal="left", vertical="center")
-                cell.border = BORDER
-                if n_ins > 1:
-                    ws.merge_cells(start_row=start_row, start_column=1,
-                                   end_row=start_row, end_column=n_ins)
-                ws.row_dimensions[start_row].height = 17
-                start_row += 1
+                group_start = start_row
+                group_totals = {c: 0.0 for c in ins_cols}
 
-                # ── Insurance data rows ──
-                group_num_totals = {c: 0.0 for c in ins_cols if c != "Insurance"}
-                for g_row in group:
-                    ins_vals = [g_row[cols.index(c)] for c in ins_cols]
+                # Write insurance rows
+                for g_idx, g_row in enumerate(group):
                     bg = ALT_FILL if alt % 2 == 0 else PatternFill()
-                    for ci, val in enumerate(ins_vals, 1):
+
+                    # Column 1: Doctor cell (only write on first row; rowspan via merge later)
+                    if g_idx == 0:
+                        cell = ws.cell(row=start_row, column=1, value=doc_display)
+                        cell.fill = DOC_FILL
+                        cell.font = Font(bold=True, size=11)
+                        cell.border = BORDER
+                        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                    else:
+                        cell = ws.cell(row=start_row, column=1, value="")
+                        cell.fill = DOC_FILL
+                        cell.border = BORDER
+
+                    # Remaining columns: ins_cols
+                    for ci, c in enumerate(ins_cols, 2):
+                        val = g_row[cols.index(c)]
                         cell = ws.cell(row=start_row, column=ci, value=val if val is not None else "")
                         cell.border = BORDER
-                        cell.alignment = Alignment(horizontal="right" if ci > 1 else "left", vertical="center")
-                        if alt % 2 == 0:
-                            cell.fill = ALT_FILL
+                        cell.alignment = Alignment(horizontal="right" if ci > 2 else "left", vertical="center")
+                        if alt % 2 == 0: cell.fill = ALT_FILL
                         # accumulate totals
-                        col_name = ins_cols[ci - 1]
-                        if col_name != "Insurance":
-                            try:
-                                group_num_totals[col_name] += float(pd.to_numeric(val, errors="coerce") or 0)
-                            except Exception:
-                                pass
+                        try:
+                            group_totals[c] += float(pd.to_numeric(val, errors="coerce") or 0)
+                        except Exception:
+                            pass
+
                     alt += 1
                     start_row += 1
 
-                # ── Doctor TOTAL row ──
-                DTOTAL_FILL = PatternFill("solid", fgColor="2E6DA4")  # medium blue
-                DTOTAL_FONT = Font(color="FFFFFF", bold=True, size=10)
-                for ci, col_name in enumerate(ins_cols, 1):
-                    if col_name == "Insurance":
+                # Doctor TOTAL row
+                cell = ws.cell(row=start_row, column=1, value="")  # Doctor col (part of merge)
+                cell.fill = DOC_FILL
+                cell.border = BORDER
+                for ci, c in enumerate(ins_cols, 2):
+                    if c == "Insurance":
                         val = "TOTAL"
                     else:
-                        raw = group_num_totals.get(col_name, 0)
+                        raw = group_totals.get(c, 0)
                         val = round(raw, 1) if raw else 0
                     cell = ws.cell(row=start_row, column=ci, value=val)
-                    cell.fill = DTOTAL_FILL
-                    cell.font = DTOTAL_FONT
+                    cell.fill = DTOT_FILL
+                    cell.font = DTOT_FONT
                     cell.border = BORDER
-                    cell.alignment = Alignment(horizontal="right" if ci > 1 else "left", vertical="center")
+                    cell.alignment = Alignment(horizontal="right" if ci > 2 else "left", vertical="center")
                 start_row += 1
 
-                i = j  # advance past the group
+                # Merge doctor column vertically (data rows + TOTAL row)
+                if total_rows > 1:
+                    ws.merge_cells(start_row=group_start, start_column=1,
+                                   end_row=group_start + total_rows - 1, end_column=1)
+                    merged = ws.cell(row=group_start, column=1)
+                    merged.fill = DOC_FILL
+                    merged.font = Font(bold=True, size=11)
+                    merged.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                    merged.border = BORDER
+
+                i = j
 
             start_row += 1
             return start_row
