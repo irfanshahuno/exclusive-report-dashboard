@@ -405,11 +405,24 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
 
     buf = _io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        # Write a dummy df to create the sheet, then we'll overwrite via openpyxl
         pd.DataFrame().to_excel(writer, sheet_name="Income Analysis", index=False)
         ws = writer.sheets["Income Analysis"]
 
         current_row = 1  # 1-based
+
+        # ── TITLE ROW ──────────────────────────────────────────────────────────
+        title_text = f"EMC - INCOME ANALYSIS REPORT - {period_label.upper()}"
+        title_cell = ws.cell(row=current_row, column=1, value=title_text)
+        title_cell.font = Font(bold=True, size=14, color="0D1B2A")
+        title_cell.fill = PatternFill("solid", fgColor="D6EAF8")
+        title_cell.alignment = Alignment(horizontal="center", vertical="center")
+        # We'll merge across all columns after we know max_col — store row for later
+        title_row = current_row
+        ws.row_dimensions[current_row].height = 28
+        current_row += 1
+        # Blank row after title
+        ws.row_dimensions[current_row].height = 6
+        current_row += 1
 
         def _write_section_header(ws, row, text, n_cols):
             """Write a section title spanning all columns."""
@@ -615,38 +628,52 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
         current_row = _write_df_section(ws, current_row, df_ins, "Insurance Wise Revenue")
         current_row = _write_dx_section(ws, current_row, df_dx)
 
-        # --- Smart column widths: fit ALL columns on one screen (no horizontal scroll) ---
+        # --- Merge title row across all columns now that we know max_col ---
         max_col = ws.max_column
-        max_row_used = ws.max_row
+        if max_col > 1:
+            ws.merge_cells(start_row=title_row, start_column=1,
+                           end_row=title_row, end_column=max_col)
+            # Re-apply style on merged cell
+            tc = ws.cell(row=title_row, column=1)
+            tc.font = Font(bold=True, size=14, color="0D1B2A")
+            tc.fill = PatternFill("solid", fgColor="D6EAF8")
+            tc.alignment = Alignment(horizontal="center", vertical="center")
 
-        # First pass: measure content lengths
-        col_widths = []
+        # --- Smart column widths: fit ALL columns on screen without horizontal scroll ---
+        # Strategy: measure actual content, then scale so total fits in ~190 units
+        # (standard Excel window ~190 col-units wide at 100% zoom)
+        max_row_used = ws.max_row
+        content_widths = []
         for col_idx in range(1, max_col + 1):
             max_len = max(
-                (len(str(ws.cell(row=r, column=col_idx).value or "")) for r in range(1, max_row_used + 1)),
-                default=8,
+                (len(str(ws.cell(row=r, column=col_idx).value or ""))
+                 for r in range(1, max_row_used + 1)),
+                default=6,
             )
-            col_widths.append(max_len)
+            content_widths.append(max_len)
 
-        # Target total width ~200 units (fits A4/standard screen without scrolling)
-        # Col 1 (Doctor): fixed 18, Col 2 (Insurance): fixed 28, rest: numeric, shrink equally
-        TARGET_TOTAL = 200
-        DOC_WIDTH = 18
-        INS_WIDTH = 28
-        n_numeric = max(max_col - 2, 1)
-        remaining = TARGET_TOTAL - DOC_WIDTH - INS_WIDTH
-        num_width = max(min(remaining // n_numeric, 14), 9)  # 9–14 per numeric col
+        # Assign widths: col1 (Dept/Doctor merged) ≤ 22, col2 (Doctor/Insurance) ≤ 28,
+        # numeric cols: content-based but capped at 13
+        raw_widths = []
+        for ci, cw in enumerate(content_widths):
+            if ci == 0:
+                raw_widths.append(min(cw + 2, 22))
+            elif ci == 1:
+                raw_widths.append(min(cw + 2, 28))
+            else:
+                raw_widths.append(min(cw + 2, 13))
+
+        # Scale down proportionally if total exceeds 190
+        total = sum(raw_widths)
+        TARGET = 188
+        scale = min(1.0, TARGET / total) if total > 0 else 1.0
 
         for col_idx in range(1, max_col + 1):
             col_letter = get_column_letter(col_idx)
-            if col_idx == 1:
-                ws.column_dimensions[col_letter].width = DOC_WIDTH
-            elif col_idx == 2:
-                ws.column_dimensions[col_letter].width = INS_WIDTH
-            else:
-                ws.column_dimensions[col_letter].width = num_width
+            w = max(raw_widths[col_idx - 1] * scale, 7)
+            ws.column_dimensions[col_letter].width = round(w, 1)
 
-        ws.freeze_panes = "A2"
+        ws.freeze_panes = "A4"  # freeze below title + blank row
 
     return buf.getvalue()
 
