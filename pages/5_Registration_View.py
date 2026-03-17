@@ -460,84 +460,252 @@ def _send_email_smtp(
 
 
 def _build_income_excel(dfs: dict, period_label: str) -> bytes:
-    """Build an Excel workbook with Income Analysis sheets and return as bytes.
+    """Build ONE combined Excel sheet: Income Analysis (Doctor Revenue).
 
-    Sheets:
-        Doctor Wise Revenue
-        Insurance Wise Revenue
-        Doctor x Insurance Revenue
+    Layout (single sheet 'Income Analysis'):
+        Section 1 — Doctor Wise Revenue
+        [blank row]
+        Section 2 — Insurance Wise Revenue
+        [blank row]
+        Section 3 — Doctor x Insurance Revenue  (doctor name shown ONCE, insurances listed under it)
+
+    Formatting:
+        - Numbers rounded to 1 decimal place
+        - Dark navy headers, orange Grand Total rows, alternating light-blue rows
+        - Doctor name merged/shown only once in Doctor x Insurance section
     """
     import io as _io
     from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
-    HEADER_FILL  = PatternFill("solid", fgColor="0D1B2A")   # dark navy
-    HEADER_FONT  = Font(color="FFFFFF", bold=True, size=11)
-    TOTAL_FILL   = PatternFill("solid", fgColor="FF6600")    # orange for grand total
-    TOTAL_FONT   = Font(color="FFFFFF", bold=True, size=11)
-    ALT_FILL     = PatternFill("solid", fgColor="F0F4FF")    # light blue alt row
-    THIN         = Side(border_style="thin", color="CCCCCC")
-    BORDER       = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+    HEADER_FILL = PatternFill("solid", fgColor="0D1B2A")   # dark navy
+    HEADER_FONT = Font(color="FFFFFF", bold=True, size=11)
+    TOTAL_FILL  = PatternFill("solid", fgColor="FF6600")   # orange
+    TOTAL_FONT  = Font(color="FFFFFF", bold=True, size=11)
+    ALT_FILL    = PatternFill("solid", fgColor="F0F4FF")   # light blue
+    THIN        = Side(border_style="thin", color="CCCCCC")
+    BORDER      = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+    DOC_FONT    = Font(bold=True, size=11)                 # bold for doctor name in merged block
 
-    sheet_map = {
-        "Doctor Wise Revenue":           dfs.get("Income | Doctor Wise Revenue"),
-        "Insurance Wise Revenue":        dfs.get("Income | Insurance Wise Revenue"),
-        "Doctor x Insurance Revenue":    dfs.get("Income | Doctor x Insurance Revenue"),
-    }
+    def _round1(df: pd.DataFrame) -> pd.DataFrame:
+        """Round all numeric columns to 1 decimal place."""
+        out = df.copy()
+        for c in out.columns:
+            if pd.api.types.is_numeric_dtype(out[c]):
+                out[c] = pd.to_numeric(out[c], errors="coerce").round(1)
+        return out
+
+    def _clean_df(df) -> pd.DataFrame:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return pd.DataFrame()
+        out = df.copy()
+        bad = [c for c in out.columns if str(c).strip() == "" or str(c).strip().lower().startswith("unnamed")]
+        out = out.drop(columns=bad, errors="ignore")
+        return _round1(out)
+
+    df_doc = _clean_df(dfs.get("Income | Doctor Wise Revenue"))
+    df_ins = _clean_df(dfs.get("Income | Insurance Wise Revenue"))
+    df_dx  = _clean_df(dfs.get("Income | Doctor x Insurance Revenue"))
 
     buf = _io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        any_written = False
-        for sheet_name, df in sheet_map.items():
-            if not isinstance(df, pd.DataFrame) or df.empty:
-                continue
-            df_out = df.copy()
-            # drop unnamed/blank columns
-            bad_cols = [c for c in df_out.columns if str(c).strip() == "" or str(c).strip().lower().startswith("unnamed")]
-            df_out = df_out.drop(columns=bad_cols, errors="ignore")
-            df_out.to_excel(writer, index=False, sheet_name=sheet_name[:31])
-            any_written = True
+        # Write a dummy df to create the sheet, then we'll overwrite via openpyxl
+        pd.DataFrame().to_excel(writer, sheet_name="Income Analysis", index=False)
+        ws = writer.sheets["Income Analysis"]
 
-            ws = writer.sheets[sheet_name[:31]]
-            max_col = ws.max_column
-            max_row = ws.max_row
+        current_row = 1  # 1-based
 
-            for col_idx in range(1, max_col + 1):
-                cell = ws.cell(row=1, column=col_idx)
+        def _write_section_header(ws, row, text, n_cols):
+            """Write a section title spanning all columns."""
+            cell = ws.cell(row=row, column=1, value=text)
+            cell.font = Font(bold=True, size=13, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="1E3A5F")
+            cell.alignment = Alignment(horizontal="left", vertical="center")
+            cell.border = BORDER
+            if n_cols > 1:
+                ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=n_cols)
+            ws.row_dimensions[row].height = 20
+            return row + 1
+
+        def _write_df_section(ws, start_row, df: pd.DataFrame, section_title: str) -> int:
+            """Write a plain table (Doctor Wise / Insurance Wise) and return next free row."""
+            if df.empty:
+                return start_row
+
+            cols = list(df.columns)
+            n_cols = len(cols)
+
+            # Section title row
+            start_row = _write_section_header(ws, start_row, section_title, n_cols)
+
+            # Header row
+            for ci, col in enumerate(cols, 1):
+                cell = ws.cell(row=start_row, column=ci, value=col)
                 cell.fill = HEADER_FILL
                 cell.font = HEADER_FONT
                 cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                 cell.border = BORDER
+            ws.row_dimensions[start_row].height = 18
+            start_row += 1
 
-            for row_idx in range(2, max_row + 1):
-                first_val = str(ws.cell(row=row_idx, column=1).value or "").strip().upper()
+            # Data rows
+            for ri, row_data in enumerate(df.itertuples(index=False, name=None)):
+                first_val = str(row_data[0] or "").strip().upper()
                 is_total = first_val in ("GRAND TOTAL", "TOTAL")
-                for col_idx in range(1, max_col + 1):
-                    cell = ws.cell(row=row_idx, column=col_idx)
+                for ci, val in enumerate(row_data, 1):
+                    cell = ws.cell(row=start_row, column=ci, value=val if val is not None else "")
                     cell.border = BORDER
-                    cell.alignment = Alignment(horizontal="right" if col_idx > 1 else "left", vertical="center")
+                    cell.alignment = Alignment(
+                        horizontal="right" if ci > 1 else "left",
+                        vertical="center"
+                    )
                     if is_total:
                         cell.fill = TOTAL_FILL
                         cell.font = TOTAL_FONT
-                    elif row_idx % 2 == 0:
+                    elif ri % 2 == 0:
                         cell.fill = ALT_FILL
+                start_row += 1
 
-            # Auto-fit column widths
-            for col_idx in range(1, max_col + 1):
-                col_letter = get_column_letter(col_idx)
-                max_len = max(
-                    (len(str(ws.cell(row=r, column=col_idx).value or "")) for r in range(1, max_row + 1)),
-                    default=10,
-                )
-                ws.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 40)
+            # Blank spacer row
+            start_row += 1
+            return start_row
 
-            ws.freeze_panes = "A2"
+        def _write_dx_section(ws, start_row, df: pd.DataFrame) -> int:
+            """Write Doctor x Insurance table: doctor name appears ONCE (merged), insurances listed under."""
+            if df.empty:
+                return start_row
 
-        if not any_written:
-            # Write a placeholder so file isn't empty
-            pd.DataFrame({"Note": ["No Income Analysis data available for this period."]}).to_excel(
-                writer, index=False, sheet_name="No Data"
+            cols = list(df.columns)
+            n_cols = len(cols)
+
+            # Section title
+            start_row = _write_section_header(ws, start_row, "Doctor x Insurance Revenue", n_cols)
+
+            # Header row
+            for ci, col in enumerate(cols, 1):
+                cell = ws.cell(row=start_row, column=ci, value=col)
+                cell.fill = HEADER_FILL
+                cell.font = HEADER_FONT
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.border = BORDER
+            ws.row_dimensions[start_row].height = 18
+            header_row = start_row
+            start_row += 1
+
+            # Detect doctor column index (1-based)
+            doc_col_idx = None
+            if "Doctor" in cols:
+                doc_col_idx = cols.index("Doctor") + 1
+
+            # Group rows by doctor (preserve order)
+            rows_list = list(df.itertuples(index=False, name=None))
+            alt_toggle = [0]  # mutable counter for alternating rows across groups
+
+            ri_global = 0
+            i = 0
+            while i < len(rows_list):
+                row_data = rows_list[i]
+                first_val = str(row_data[0] or "").strip().upper()
+                is_total = first_val in ("GRAND TOTAL", "TOTAL")
+
+                if is_total:
+                    # Grand total row — write normally across all cols
+                    for ci, val in enumerate(row_data, 1):
+                        cell = ws.cell(row=start_row, column=ci, value=val if val is not None else "")
+                        cell.fill = TOTAL_FILL
+                        cell.font = TOTAL_FONT
+                        cell.border = BORDER
+                        cell.alignment = Alignment(horizontal="right" if ci > 1 else "left", vertical="center")
+                    start_row += 1
+                    i += 1
+                    continue
+
+                if doc_col_idx is None:
+                    # No doctor column — write plain
+                    for ci, val in enumerate(row_data, 1):
+                        cell = ws.cell(row=start_row, column=ci, value=val if val is not None else "")
+                        cell.border = BORDER
+                        cell.alignment = Alignment(horizontal="right" if ci > 1 else "left", vertical="center")
+                        if alt_toggle[0] % 2 == 0:
+                            cell.fill = ALT_FILL
+                    alt_toggle[0] += 1
+                    start_row += 1
+                    i += 1
+                    continue
+
+                # Gather all consecutive rows belonging to this doctor
+                current_doc = row_data[doc_col_idx - 1]
+                current_doc_str = str(current_doc or "").strip().upper()
+                group = []
+                j = i
+                while j < len(rows_list):
+                    rd = rows_list[j]
+                    fv = str(rd[0] or "").strip().upper()
+                    if fv in ("GRAND TOTAL", "TOTAL"):
+                        break
+                    rd_doc = str(rd[doc_col_idx - 1] or "").strip().upper()
+                    if rd_doc != current_doc_str:
+                        break
+                    group.append(rd)
+                    j += 1
+
+                group_start_row = start_row
+                group_size = len(group)
+
+                for g_idx, g_row in enumerate(group):
+                    use_alt = alt_toggle[0] % 2 == 0
+                    for ci, val in enumerate(g_row, 1):
+                        if ci == doc_col_idx and g_idx > 0:
+                            # Doctor name already shown in first row — blank subsequent rows
+                            val = ""
+                        cell = ws.cell(row=start_row, column=ci, value=val if val is not None else "")
+                        cell.border = BORDER
+                        cell.alignment = Alignment(
+                            horizontal="right" if ci > 1 else "left",
+                            vertical="center" if ci != doc_col_idx else "top"
+                        )
+                        if use_alt:
+                            cell.fill = ALT_FILL
+                        if ci == doc_col_idx and g_idx == 0:
+                            cell.font = DOC_FONT
+                    alt_toggle[0] += 1
+                    start_row += 1
+
+                # Merge doctor name cell vertically across the group rows
+                if group_size > 1 and doc_col_idx:
+                    ws.merge_cells(
+                        start_row=group_start_row,
+                        start_column=doc_col_idx,
+                        end_row=group_start_row + group_size - 1,
+                        end_column=doc_col_idx,
+                    )
+                    # Reapply alignment/font on merged cell
+                    merged_cell = ws.cell(row=group_start_row, column=doc_col_idx)
+                    merged_cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+                    merged_cell.font = DOC_FONT
+
+                i = j  # advance past the group
+
+            start_row += 1
+            return start_row
+
+        # --- Write 3 sections ---
+        current_row = _write_df_section(ws, current_row, df_doc, "Doctor Wise Revenue")
+        current_row = _write_df_section(ws, current_row, df_ins, "Insurance Wise Revenue")
+        current_row = _write_dx_section(ws, current_row, df_dx)
+
+        # --- Auto-fit column widths ---
+        max_col = ws.max_column
+        max_row_used = ws.max_row
+        for col_idx in range(1, max_col + 1):
+            col_letter = get_column_letter(col_idx)
+            max_len = max(
+                (len(str(ws.cell(row=r, column=col_idx).value or "")) for r in range(1, max_row_used + 1)),
+                default=10,
             )
+            ws.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 42)
+
+        ws.freeze_panes = "A2"
 
     return buf.getvalue()
 
@@ -1215,22 +1383,30 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
     # NOTE: day_ts is used only for display/keying; weekly/monthly uses latest saved day.
     title = picked_label_override or f"{label} ({fmt_day(day_ts)})"
 
-    if heading == "subheader":
-        st.subheader(title)
-    else:
-        st.header(title)
-
-    # Email button (works for Daily / Weekly / Monthly)
-    if st.button("📧 Email summary", key=f"email_{label}_{str(day_ts.date())}"):
-        try:
-            subject = f"Registration Summary - {title}"
-            html_body = _dfs_to_html(dfs, "Registration Summary", title)
-            _send_email_smtp(subject, html_body)
-            st.success("Email sent ✅")
-        except Exception as e:
-            st.error(f"Email failed: {e}")
-
-    st.caption("Tip: Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/EMAIL_TO/EMAIL_CC in Streamlit Secrets for this app.")
+    _hdr_col1, _hdr_col2 = st.columns([6, 2])
+    with _hdr_col1:
+        if heading == "subheader":
+            st.subheader(title)
+        else:
+            st.header(title)
+    with _hdr_col2:
+        st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
+        if st.button("📧 Email Income Analysis", key=f"email_income_top_{label}_{str(day_ts.date())}"):
+            try:
+                _report_dt = pd.to_datetime(day_ts)
+                _fname = _report_dt.strftime("EMC - INCOME ANALYSIS REPORT - %d %B %Y.xlsx")
+                _excel_bytes = _build_income_excel(dfs, title)
+                _html_body = _dfs_to_html(dfs, "Income Analysis (Doctor Revenue)", title)
+                _subject = f"EMC Income Analysis Report – {title}"
+                _send_email_smtp(
+                    subject=_subject,
+                    html_body=_html_body,
+                    attachment_bytes=_excel_bytes,
+                    attachment_filename=_fname,
+                )
+                st.success(f"✅ Email sent with attachment: {_fname}")
+            except Exception as _e:
+                st.error(f"Email failed: {_e}")
     def _sort_with_total(df: pd.DataFrame, label_col: str, count_col: str = "Count", total_label: str = "TOTAL") -> pd.DataFrame:
         """Sort by count desc, keep TOTAL row at bottom if present."""
         if df is None or df.empty or count_col not in df.columns or label_col not in df.columns:
@@ -1334,37 +1510,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
     income_keys = [k for k in dfs.keys() if str(k).startswith("Income | ")]
     if income_keys:
         st.markdown("---")
-
-        inc_col1, inc_col2 = st.columns([6, 2])
-        with inc_col1:
-            st.header("Income Analysis (Doctor Revenue)")
-        with inc_col2:
-            st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
-            if st.button("📧 Email Income Analysis", key=f"email_income_{label}_{str(day_ts.date())}"):
-                try:
-                    # --- Build filename: EMC - INCOME ANALYSIS REPORT - DD Month YYYY.xlsx ---
-                    # For ranges/monthly we use the latest day in the period
-                    _report_dt = pd.to_datetime(day_ts)
-                    _fname = _report_dt.strftime("EMC - INCOME ANALYSIS REPORT - %d %B %Y.xlsx")
-
-                    # --- Build Excel attachment ---
-                    _excel_bytes = _build_income_excel(dfs, title)
-
-                    # --- Build HTML email body (Income Analysis only) ---
-                    _html_body = _dfs_to_html(dfs, "Income Analysis (Doctor Revenue)", title)
-
-                    # --- Subject ---
-                    _subject = f"EMC Income Analysis Report – {title}"
-
-                    _send_email_smtp(
-                        subject=_subject,
-                        html_body=_html_body,
-                        attachment_bytes=_excel_bytes,
-                        attachment_filename=_fname,
-                    )
-                    st.success(f"✅ Email sent with attachment: {_fname}")
-                except Exception as _e:
-                    st.error(f"Email failed: {_e}")
+        st.header("Income Analysis (Doctor Revenue)")
 
         df_doc = dfs.get("Income | Doctor Wise Revenue")
         df_ins = dfs.get("Income | Insurance Wise Revenue")
