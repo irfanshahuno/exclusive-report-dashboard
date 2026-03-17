@@ -228,7 +228,8 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
             # +1 for the TOTAL row
             total_rows = n_grp + 1
 
-            group_totals = {c: 0.0 for c in ins_cols if c != "Insurance"}
+            grp_df = pd.DataFrame(grp, columns=cols)
+            group_totals = _doctor_x_group_total_values(df, grp_df, ins_cols)
 
             for g_idx, g_row in enumerate(grp):
                 bg = C_ALT if alt % 2 == 0 else C_WHITE
@@ -252,12 +253,6 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
                 else:
                     h += "<tr>" + "".join(_td(v, "left" if ci == 0 else "right", f"background:{bg};") for ci, v in enumerate(ins_vals)) + "</tr>"
 
-                for c in ins_cols:
-                    if c != "Insurance":
-                        try:
-                            group_totals[c] += float(pd.to_numeric(g_row[cols.index(c)], errors="coerce") or 0)
-                        except Exception:
-                            pass
                 alt += 1
 
             # Doctor TOTAL row (medium blue) — doctor cell already covered by rowspan
@@ -544,9 +539,9 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
         out = out[ordered + remaining]
         return out
 
-    df_doc = _clean_df(dfs.get("Income | Doctor Wise Revenue"))
-    df_ins = _clean_df(dfs.get("Income | Insurance Wise Revenue"))
-    df_dx  = _clean_df(dfs.get("Income | Doctor x Insurance Revenue"))
+    df_doc = _clean_df(_recompute_income_metrics(dfs.get("Income | Doctor Wise Revenue")))
+    df_ins = _clean_df(_recompute_income_metrics(dfs.get("Income | Insurance Wise Revenue")))
+    df_dx  = _clean_df(_recompute_income_metrics(dfs.get("Income | Doctor x Insurance Revenue")))
 
     buf = _io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -708,7 +703,8 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                 n_grp = len(group)
                 total_rows = n_grp + 1
                 group_start = start_row
-                group_totals = {c: 0.0 for c in ins_cols}
+                grp_df = pd.DataFrame(group, columns=cols)
+                group_totals = _doctor_x_group_total_values(df, grp_df, ins_cols)
 
                 # Write insurance data rows
                 for g_idx, g_row in enumerate(group):
@@ -1238,6 +1234,132 @@ st.set_page_config(page_title="Registration Summary (View Only)", layout="wide",
 
 
 # ---------------------------
+# Income total fixes
+# ---------------------------
+def _find_first_existing(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def _coerce_num(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").fillna(0)
+
+
+def _recompute_income_metrics(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Fix income tables so averages are weighted, not summed.
+
+    - Avg Service     = Total Service / Visits
+    - Avg Insurance   = Total Insurance / Visits
+    - Procedure %     = Procedure / Visits
+    - Radiology %     = Radiology / Visits
+    - Lab %           = Lab / Total Service * 100
+    - GRAND TOTAL row is rebuilt from the detail rows
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame() if df is None else df
+
+    out = df.copy()
+    first_col = out.columns[0] if len(out.columns) else None
+    if first_col is None:
+        return out
+
+    total_mask = out[first_col].astype(str).str.strip().str.upper().isin(["TOTAL", "GRAND TOTAL"])
+    detail = out.loc[~total_mask].copy()
+
+    visit_col = _find_first_existing(detail, ["Total_Visit", "Visits", "Total Visit", "Visit"])
+    total_service_col = _find_first_existing(detail, ["Total_Amount_Service", "Total Service"])
+    total_ins_col = _find_first_existing(detail, ["Total_Amount_Insuance", "Total_Amount_Insurance", "Total Insurance"])
+    avg_service_col = _find_first_existing(detail, ["Avg_Amount_Service", "Avg Service"])
+    avg_ins_col = _find_first_existing(detail, ["Avg_Amount_Insuance", "Avg_Amount_Insurance", "Avg.Amount", "Avg_Amount", "Avg Insurance"])
+    lab_pct_col = _find_first_existing(detail, ["Lab_%", "Lab %"])
+    proc_ratio_col = _find_first_existing(detail, ["Procedure_Per_Visit", "Procedure %"])
+    rad_ratio_col = _find_first_existing(detail, ["Radiology_Per_Visit", "Radiology %"])
+
+    if visit_col:
+        denom = _coerce_num(detail[visit_col]).replace(0, pd.NA)
+        if total_service_col and avg_service_col:
+            detail[avg_service_col] = (_coerce_num(detail[total_service_col]) / denom).fillna(0)
+        if total_ins_col and avg_ins_col:
+            detail[avg_ins_col] = (_coerce_num(detail[total_ins_col]) / denom).fillna(0)
+        if "Procedure" in detail.columns and proc_ratio_col:
+            detail[proc_ratio_col] = (_coerce_num(detail["Procedure"]) / denom).fillna(0)
+        if "Radiology" in detail.columns and rad_ratio_col:
+            detail[rad_ratio_col] = (_coerce_num(detail["Radiology"]) / denom).fillna(0)
+
+    if "Lab" in detail.columns and total_service_col and lab_pct_col:
+        denom2 = _coerce_num(detail[total_service_col]).replace(0, pd.NA)
+        detail[lab_pct_col] = ((_coerce_num(detail["Lab"]) / denom2) * 100).fillna(0)
+
+    numeric_cols = [c for c in detail.columns if pd.api.types.is_numeric_dtype(detail[c])]
+
+    if not detail.empty and numeric_cols:
+        grand = {c: "" for c in detail.columns}
+        grand[first_col] = "GRAND TOTAL"
+        for c in numeric_cols:
+            grand[c] = float(_coerce_num(detail[c]).sum())
+
+        total_visits = float(grand.get(visit_col, 0) or 0) if visit_col else 0
+        total_service = float(grand.get(total_service_col, 0) or 0) if total_service_col else 0
+        total_ins = float(grand.get(total_ins_col, 0) or 0) if total_ins_col else 0
+
+        if total_visits:
+            if avg_service_col and total_service_col:
+                grand[avg_service_col] = total_service / total_visits
+            if avg_ins_col and total_ins_col:
+                grand[avg_ins_col] = total_ins / total_visits
+            if proc_ratio_col and "Procedure" in detail.columns:
+                grand[proc_ratio_col] = float(grand.get("Procedure", 0) or 0) / total_visits
+            if rad_ratio_col and "Radiology" in detail.columns:
+                grand[rad_ratio_col] = float(grand.get("Radiology", 0) or 0) / total_visits
+
+        if lab_pct_col and total_service_col and total_service:
+            grand[lab_pct_col] = (float(grand.get("Lab", 0) or 0) / total_service) * 100
+
+        out = pd.concat([detail, pd.DataFrame([grand])], ignore_index=True)
+    else:
+        out = detail
+
+    return out
+
+
+def _doctor_x_group_total_values(df: pd.DataFrame, group_df: pd.DataFrame, ins_cols: List[str]) -> dict:
+    totals = {c: 0.0 for c in ins_cols if c != "Insurance"}
+    for c in totals:
+        totals[c] = float(_coerce_num(group_df[c]).sum()) if c in group_df.columns else 0.0
+
+    visit_col = _find_first_existing(group_df, ["Visits", "Total_Visit", "Total Visit", "Visit"])
+    total_service_col = _find_first_existing(group_df, ["Total Service", "Total_Amount_Service"])
+    total_ins_col = _find_first_existing(group_df, ["Total Insurance", "Total_Amount_Insuance", "Total_Amount_Insurance"])
+    avg_service_col = _find_first_existing(group_df, ["Avg Service", "Avg_Amount_Service"])
+    avg_ins_col = _find_first_existing(group_df, ["Avg Insurance", "Avg_Amount_Insuance", "Avg_Amount_Insurance", "Avg.Amount", "Avg_Amount"])
+    lab_pct_col = _find_first_existing(group_df, ["Lab %", "Lab_%"])
+    proc_ratio_col = _find_first_existing(group_df, ["Procedure %", "Procedure_Per_Visit"])
+    rad_ratio_col = _find_first_existing(group_df, ["Radiology %", "Radiology_Per_Visit"])
+
+    total_visits = float(totals.get(visit_col, 0) or 0) if visit_col else 0
+    total_service = float(totals.get(total_service_col, 0) or 0) if total_service_col else 0
+    total_ins = float(totals.get(total_ins_col, 0) or 0) if total_ins_col else 0
+
+    if total_visits:
+        if avg_service_col:
+            totals[avg_service_col] = total_service / total_visits
+        if avg_ins_col:
+            totals[avg_ins_col] = total_ins / total_visits
+        if proc_ratio_col and "Procedure" in group_df.columns:
+            totals[proc_ratio_col] = float(totals.get("Procedure", 0) or 0) / total_visits
+        if rad_ratio_col and "Radiology" in group_df.columns:
+            totals[rad_ratio_col] = float(totals.get("Radiology", 0) or 0) / total_visits
+
+    if lab_pct_col and total_service:
+        totals[lab_pct_col] = (float(totals.get("Lab", 0) or 0) / total_service) * 100
+
+    return totals
+
+
+
+# ---------------------------
 # Premium UI (management view)
 # ---------------------------
 st.markdown(
@@ -1646,9 +1768,9 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         st.markdown("---")
         st.header("Income Analysis (Doctor Revenue)")
 
-        df_doc = dfs.get("Income | Doctor Wise Revenue")
-        df_ins = dfs.get("Income | Insurance Wise Revenue")
-        df_dx  = dfs.get("Income | Doctor x Insurance Revenue")
+        df_doc = _recompute_income_metrics(dfs.get("Income | Doctor Wise Revenue"))
+        df_ins = _recompute_income_metrics(dfs.get("Income | Insurance Wise Revenue"))
+        df_dx  = _recompute_income_metrics(dfs.get("Income | Doctor x Insurance Revenue"))
 
         def _add_proc_rad_per_visit(df: pd.DataFrame) -> pd.DataFrame:
             """Override Procedure/Radiology per-visit values for display (Procedure/Visits, Radiology/Visits).
