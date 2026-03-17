@@ -391,13 +391,35 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                 out[c] = pd.to_numeric(out[c], errors="coerce").round(1)
         return out
 
+    # Clean, short header names for Excel display
+    COL_RENAME = {
+        "Total_Amount_Service":    "Total Svc",
+        "Total_Amount_Insuance":   "Total Ins",
+        "Total_Amount_Insurance":  "Total Ins",
+        "Avg_Amount_Service":      "Avg Svc",
+        "Avg_Amount_Insuance":     "Avg Ins",
+        "Avg_Amount_Insurance":    "Avg Ins",
+        "Avg.Amount":              "Avg",
+        "Radiology_%":             "Rad %",
+        "Procedure_%":             "Proc %",
+        "Lab_%":                   "Lab %",
+        "Total_Visit":             "Visits",
+        "Total_Amount":            "Total",
+        "Procedure_Per_Visit":     "Proc/Visit",
+        "Radiology_Per_Visit":     "Rad/Visit",
+        "Consultation":            "Consult",
+        "Department":              "Dept",
+    }
+
     def _clean_df(df) -> pd.DataFrame:
         if not isinstance(df, pd.DataFrame) or df.empty:
             return pd.DataFrame()
         out = df.copy()
         bad = [c for c in out.columns if str(c).strip() == "" or str(c).strip().lower().startswith("unnamed")]
         out = out.drop(columns=bad, errors="ignore")
-        return _round1(out)
+        out = _round1(out)
+        out = out.rename(columns={k: v for k, v in COL_RENAME.items() if k in out.columns})
+        return out
 
     df_doc = _clean_df(dfs.get("Income | Doctor Wise Revenue"))
     df_ins = _clean_df(dfs.get("Income | Insurance Wise Revenue"))
@@ -453,9 +475,9 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                 cell = ws.cell(row=start_row, column=ci, value=col)
                 cell.fill = HEADER_FILL
                 cell.font = HEADER_FONT
-                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
                 cell.border = BORDER
-            ws.row_dimensions[start_row].height = 18
+            ws.row_dimensions[start_row].height = 20
             start_row += 1
 
             for ri, row_data in enumerate(df.itertuples(index=False, name=None)):
@@ -506,9 +528,9 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                 cell = ws.cell(row=start_row, column=ci, value=col)
                 cell.fill = HEADER_FILL
                 cell.font = HEADER_FONT
-                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
                 cell.border = BORDER
-            ws.row_dimensions[start_row].height = 18
+            ws.row_dimensions[start_row].height = 20
             start_row += 1
 
             rows_list = list(df.itertuples(index=False, name=None))
