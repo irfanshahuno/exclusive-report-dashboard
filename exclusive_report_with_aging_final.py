@@ -41,9 +41,15 @@ def load_data(input_file: str) -> pd.DataFrame:
     df = pd.read_excel(input_file, engine="openpyxl")
     df.columns = df.columns.str.strip()
 
-    # Fill blank Status downward so child/blank rows inherit the previous status
+    # Fill down blank Status cells from the row above
     if "Status" in df.columns:
-        df["Status"] = df["Status"].replace("", pd.NA).ffill()
+        df["Status"] = (
+            df["Status"]
+            .astype(str)
+            .str.strip()
+            .replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+            .ffill()
+        )
 
     return df
 
@@ -69,24 +75,40 @@ def compute_measures(df: pd.DataFrame) -> pd.DataFrame:
 
     df["Rejection"], df["Accepted"], df["Balance"] = 0.0, 0.0, 0.0
 
-    if "Status" in df.columns and "DenialCode" in df.columns:
-        lower_status = df["Status"].astype(str).str.lower().str.strip()
+    status_col = "Status" if "Status" in df.columns else ("ActivityStatus" if "ActivityStatus" in df.columns else None)
+
+    if status_col and "DenialCode" in df.columns:
+        lower_status = df[status_col].astype(str).str.lower().str.strip()
         denial_ok = df["DenialCode"].notna() & (df["DenialCode"].astype(str).str.strip() != "")
 
         mask_paid = df["Paid"] > 0
-        mask_reject = (df["Paid"] == 0) & (lower_status == "rejected") & denial_ok
+        mask_reject = (
+            (df["Paid"] == 0)
+            & denial_ok
+            & (
+                lower_status.eq("rejected")
+                | lower_status.str.contains("rejection accepted", na=False)
+                | lower_status.str.contains("reject", na=False)
+            )
+        )
 
-        # Only submitted claims should appear in Balance.
-        # Blank / not submitted / other unpaid rows stay excluded from Balance.
+        # Only submitted claims should go to Balance
         mask_submitted = lower_status.str.contains("submitted", na=False)
-        mask_balance = (df["Paid"] == 0) & (~mask_reject) & mask_submitted
+
+        mask_balance = (
+            (df["Paid"] == 0)
+            & ~mask_reject
+            & mask_submitted
+        )
 
         df.loc[mask_paid, "Accepted"] = (df.loc[mask_paid, "ActivityIns"] - df.loc[mask_paid, "Paid"]).clip(lower=0)
         df.loc[mask_reject, "Rejection"] = df.loc[mask_reject, "ActivityIns"]
         df.loc[mask_balance, "Balance"] = df.loc[mask_balance, "ActivityIns"]
+
     else:
         mask_paid = df["Paid"] > 0
         df.loc[mask_paid, "Accepted"] = (df.loc[mask_paid, "ActivityIns"] - df.loc[mask_paid, "Paid"]).clip(lower=0)
+        df.loc[df["Paid"] == 0, "Balance"] = df.loc[df["Paid"] == 0, "ActivityIns"]
 
     return df
 
@@ -179,10 +201,8 @@ def build_monthly_insurance_detail(df: pd.DataFrame) -> pd.DataFrame:
     result = result[["Month", "Insurance", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
     return result
 
-
 def build_monthly_totals(df: pd.DataFrame) -> pd.DataFrame:
     """Same structure as Insurance_Totals but grouped by VisitDate month."""
-    # Find date column
     date_col = next(
         (c for c in ["VisitDate", "SubmissionDate", "ClaimDate"] if c in df.columns), None
     )
@@ -217,7 +237,6 @@ def build_monthly_totals(df: pd.DataFrame) -> pd.DataFrame:
     }
     monthly = pd.concat([monthly, pd.DataFrame([total_row])], ignore_index=True)
     return monthly
-
 
 # -------------------- styling --------------------
 HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
@@ -278,7 +297,6 @@ def main():
     monthly_totals = build_monthly_totals(df)
     monthly_insurance_detail = build_monthly_insurance_detail(df)
 
-    # Write sheets (skip "Exclusive_Report" if disabled)
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
         if WRITE_EXCLUSIVE_SHEET:
             df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
@@ -303,4 +321,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
