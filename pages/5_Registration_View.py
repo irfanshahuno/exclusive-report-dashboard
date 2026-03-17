@@ -68,9 +68,22 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
 
     def _round1_df(df):
         out = df.copy()
+        _int_cols = {"Consultation","Lab","Radiology","Procedure","Visits","Total_Visit","Total Visit"}
+        _pct_cols = {"Lab_%","Lab %","Procedure_Per_Visit","Procedure %","Radiology_Per_Visit","Radiology %",
+                     "Avg Svc","Avg Ins","Avg_Amount_Service","Avg_Amount_Insuance","Avg_Amount_Insurance"}
         for c in out.columns:
-            if pd.api.types.is_numeric_dtype(out[c]):
-                out[c] = pd.to_numeric(out[c], errors="coerce").round(1)
+            if not pd.api.types.is_numeric_dtype(out[c]):
+                continue
+            if c in _int_cols:
+                out[c] = pd.to_numeric(out[c], errors="coerce").round(0).fillna(0).astype(int)
+            elif c in _pct_cols:
+                out[c] = pd.to_numeric(out[c], errors="coerce").round(2)
+            else:
+                series = pd.to_numeric(out[c], errors="coerce").round(1)
+                if series.dropna().apply(lambda x: x == int(x)).all():
+                    out[c] = series.fillna(0).astype(int)
+                else:
+                    out[c] = series
         return out
 
     # ── exact Excel colors ────────────────────────────────────────────────────
@@ -265,8 +278,8 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
       </tr>
       <tr>
         {_kpi_card("Follow Up", follow_up)}
-        {_kpi_card("Unclassified Visits", unclassified)}
         {_kpi_card("Pending Patients", pending_patients)}
+        <td></td>
       </tr>
     </table>
 
@@ -383,12 +396,38 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
     BORDER      = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
     DOC_FONT    = Font(bold=True, size=11)                 # bold for doctor name in merged block
 
-    def _round1(df: pd.DataFrame) -> pd.DataFrame:
-        """Round all numeric columns to 1 decimal place."""
+    # Columns that should be integers (no decimals)
+    INT_COLS = {
+        "Consultation", "Lab", "Radiology", "Procedure",
+        "Visits", "Total_Visit", "Total Visit",
+    }
+    # Columns that need 2 decimal places
+    PCT_COLS = {
+        "Lab_%", "Lab %",
+        "Procedure_Per_Visit", "Procedure %",
+        "Radiology_Per_Visit", "Radiology %",
+        "Avg Svc", "Avg Ins", "Avg.Amount", "Avg_Amount",
+        "Avg_Amount_Service", "Avg_Amount_Insuance", "Avg_Amount_Insurance",
+    }
+
+    def _smart_round(df: pd.DataFrame) -> pd.DataFrame:
+        """Integers for count/amount cols, 2dp for % and avg cols, 1dp for everything else."""
         out = df.copy()
         for c in out.columns:
-            if pd.api.types.is_numeric_dtype(out[c]):
-                out[c] = pd.to_numeric(out[c], errors="coerce").round(1)
+            if not pd.api.types.is_numeric_dtype(out[c]):
+                continue
+            if c in INT_COLS:
+                out[c] = pd.to_numeric(out[c], errors="coerce").round(0).astype("Int64")
+            elif c in PCT_COLS:
+                out[c] = pd.to_numeric(out[c], errors="coerce").round(2)
+            else:
+                # amounts (Total Svc, Total Ins etc) — 1dp but convert whole numbers to int
+                series = pd.to_numeric(out[c], errors="coerce").round(1)
+                # if all values are whole numbers, store as int
+                if series.dropna().apply(lambda x: x == int(x) if pd.notna(x) else True).all():
+                    out[c] = series.round(0).astype("Int64")
+                else:
+                    out[c] = series
         return out
 
     # Clean display names for Excel (full readable names, no abbreviations for main cols)
@@ -416,7 +455,7 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
         "Visits",
         "Total Svc", "Total Ins",
         "Avg Svc", "Avg Ins",
-        "Lab %", "Radiology %", "Procedure %",
+        "Lab %", "Procedure %", "Radiology %",
     ]
 
     def _clean_df(df) -> pd.DataFrame:
@@ -426,25 +465,24 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
         # Drop unnamed/blank cols
         bad = [c for c in out.columns if str(c).strip() == "" or str(c).strip().lower().startswith("unnamed")]
         out = out.drop(columns=bad, errors="ignore")
-        # Drop bad % cols (Radiology_% and Procedure_% are computed as % of service amount — misleading)
-        # Replace with per-visit ratios instead
+        # Drop misleading % cols (Radiology_% and Procedure_% = % of service amount, not useful)
         for drop_c in ["Radiology_%", "Procedure_%"]:
             if drop_c in out.columns:
                 out = out.drop(columns=[drop_c])
-        # Compute per-visit ratios
+        # Compute per-visit ratios (2 decimal places)
         visit_col = next((c for c in out.columns if str(c).strip().lower() in
                           ["total_visit", "total visit", "visits", "visit"]), None)
         if visit_col is not None:
             denom = pd.to_numeric(out[visit_col], errors="coerce").replace(0, pd.NA)
             if "Procedure" in out.columns:
-                out["Procedure_Per_Visit"] = (pd.to_numeric(out["Procedure"], errors="coerce") / denom).round(1).fillna(0)
+                out["Procedure_Per_Visit"] = (pd.to_numeric(out["Procedure"], errors="coerce") / denom).round(2).fillna(0)
             if "Radiology" in out.columns:
-                out["Radiology_Per_Visit"] = (pd.to_numeric(out["Radiology"], errors="coerce") / denom).round(1).fillna(0)
-        # Round all numeric cols to 1 decimal
-        out = _round1(out)
+                out["Radiology_Per_Visit"] = (pd.to_numeric(out["Radiology"], errors="coerce") / denom).round(2).fillna(0)
+        # Apply smart rounding (integers for counts, 2dp for %, 1dp for amounts)
+        out = _smart_round(out)
         # Rename to clean display names
         out = out.rename(columns={k: v for k, v in COL_RENAME.items() if k in out.columns})
-        # Reorder columns: put them in PREFERRED_ORDER, then any remaining at end
+        # Reorder columns
         ordered = [c for c in PREFERRED_ORDER if c in out.columns]
         remaining = [c for c in out.columns if c not in ordered]
         out = out[ordered + remaining]
@@ -1541,7 +1579,6 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             ("New Patients", int(k.get("New Patients", 0))),
             ("Established Patients", int(k.get("Established Patients", 0))),
             ("Follow Up", int(k.get("Follow Up", 0))),
-            ("Unclassified Visits", int(k.get("Unclassified Visits", 0))),
             ("Pending Patients", int(k.get("Pending Patients", 0))),
         ], subtitle=subtitle)
     else:
