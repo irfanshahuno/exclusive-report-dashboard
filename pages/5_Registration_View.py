@@ -288,47 +288,58 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     df_dx  = _safe_df(dfs.get("Income | Doctor x Insurance Revenue"))
 
     def _kpi_card(label, val):
-        # Compact card matching Streamlit UI: light grey bg, tight padding
-        return (f"<td style='padding:4px 6px;'>"
-                f"<div style='background:#f1f5f9;border:1px solid #e2e8f0;border-radius:10px;"
-                f"padding:10px 14px;'>"
-                f"<div style='color:{C_MUTED};font-size:11px;font-weight:700;"
-                f"margin-bottom:2px;'>{label}</div>"
-                f"<div style='color:{C_DARK};font-size:24px;font-weight:900;"
-                f"line-height:1.1;'>{val}</div>"
-                f"</div></td>")
+        return (
+            f"<td style='padding:6px;'>"
+            f"<div style='background:linear-gradient(145deg,#ffffff 0%,#f8faff 100%);"
+            f"border:1.5px solid #dde8f5;border-radius:16px;padding:16px 20px;"
+            f"box-shadow:0 4px 16px rgba(10,38,71,0.08),inset 0 1px 0 rgba(255,255,255,0.95);'>"
+            f"<div style='color:#8A9BB5;font-size:11px;font-weight:700;"
+            f"text-transform:uppercase;letter-spacing:0.7px;margin-bottom:10px;'>{label}</div>"
+            f"<div style='color:#0D1B2E;font-size:28px;font-weight:900;"
+            f"letter-spacing:-0.5px;line-height:1.05;'>{val}</div>"
+            f"</div></td>"
+        )
 
     parts = [f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
-<body style="margin:0;padding:0;background:#f1f5f9;font-family:Segoe UI,Arial,sans-serif;">
-<div style="max-width:960px;margin:20px auto;background:{C_WHITE};border-radius:16px;
-     box-shadow:0 8px 24px rgba(15,23,42,0.12);overflow:hidden;">
+<body style="margin:0;padding:0;background:#EDF2FB;font-family:Segoe UI,Inter,Arial,sans-serif;">
+<div style="max-width:960px;margin:20px auto;background:#EDF2FB;border-radius:18px;
+     box-shadow:0 12px 40px rgba(10,38,71,0.13);overflow:hidden;">
 
-  <div style="background:{C_NAVY};padding:18px 24px;">
-    <div style="color:{C_WHITE};font-size:19px;font-weight:900;letter-spacing:-0.02em;">
+  <!-- ── Header ── -->
+  <div style="background:linear-gradient(135deg,#0D1B2A 0%,#1a3353 100%);padding:20px 26px;">
+    <div style="color:#ffffff;font-size:19px;font-weight:900;letter-spacing:-0.03em;">
       📌 EMC Income Analysis Report
     </div>
-    <div style="color:#94a3b8;font-size:12px;margin-top:3px;">
+    <div style="color:#94a3b8;font-size:12px;margin-top:5px;">
       {picked_label} &nbsp;·&nbsp; Generated: {pd.Timestamp.now().strftime('%d %b %Y %H:%M')}
     </div>
   </div>
 
-  <div style="padding:16px 20px;">
+  <div style="padding:20px 24px;">
 
-    <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+    <!-- ── KPI Cards row 1 ── -->
+    <table style="width:100%;border-collapse:collapse;margin-bottom:6px;">
       <tr>
         {_kpi_card("Total Visits", total_visits)}
         {_kpi_card("New Patients", new_patients)}
         {_kpi_card("Established Patients", established)}
       </tr>
+    </table>
+    <!-- ── KPI Cards row 2 ── -->
+    <table style="width:100%;border-collapse:collapse;margin-bottom:22px;">
       <tr>
         {_kpi_card("Follow Up", follow_up)}
         {_kpi_card("Pending Patients", pending_patients)}
-        <td></td>
+        <td style="padding:6px;"></td>
       </tr>
     </table>
 
-    <div style="background:{C_NAVY_SECT};border-radius:8px;padding:8px 12px;margin-bottom:14px;">
-      <span style="color:{C_WHITE};font-size:14px;font-weight:900;">📊 Income Analysis (Doctor Revenue)</span>
+    <!-- ── Income Analysis banner ── -->
+    <div style="background:linear-gradient(135deg,#1E3A5F 0%,#2d5282 100%);
+                border-radius:10px;padding:11px 16px;margin-bottom:16px;">
+      <span style="color:#ffffff;font-size:14px;font-weight:900;">
+        📊 Income Analysis (Doctor Revenue)
+      </span>
     </div>
 """]
 
