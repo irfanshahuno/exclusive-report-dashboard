@@ -94,6 +94,8 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
             "Department":             "Dept",
         }
         out = out.rename(columns={k: v for k, v in _EMAIL_RENAME.items() if k in out.columns})
+        # Remove any duplicate columns (keep first occurrence)
+        out = out.loc[:, ~out.columns.duplicated(keep="first")]
         # Reorder to match Excel
         _ORDER = [
             "Dept", "Doctor", "Insurance",
