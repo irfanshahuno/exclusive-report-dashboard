@@ -40,6 +40,11 @@ def parse_args():
 def load_data(input_file: str) -> pd.DataFrame:
     df = pd.read_excel(input_file, engine="openpyxl")
     df.columns = df.columns.str.strip()
+
+    # Fill blank ActivityStatus downward so child/blank rows inherit the previous status
+    if "ActivityStatus" in df.columns:
+        df["ActivityStatus"] = df["ActivityStatus"].replace("", pd.NA).ffill()
+
     return df
 
 def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
@@ -65,14 +70,23 @@ def compute_measures(df: pd.DataFrame) -> pd.DataFrame:
     df["Rejection"], df["Accepted"], df["Balance"] = 0.0, 0.0, 0.0
 
     if "ActivityStatus" in df.columns and "DenialCode" in df.columns:
-        lower_status = df["ActivityStatus"].astype(str).str.lower()
-        mask_paid = df["Paid"] > 0
-        mask_reject = (df["Paid"] == 0) & (lower_status == "rejected") & (df["DenialCode"].notna())
-        mask_balance = (df["Paid"] == 0) & ~mask_reject
+        lower_status = df["ActivityStatus"].astype(str).str.lower().str.strip()
+        denial_ok = df["DenialCode"].notna() & (df["DenialCode"].astype(str).str.strip() != "")
 
-        df.loc[mask_paid, "Accepted"] = df["ActivityIns"] - df["Paid"]
-        df.loc[mask_reject, "Rejection"] = df["ActivityIns"]
-        df.loc[mask_balance, "Balance"] = df["ActivityIns"]
+        mask_paid = df["Paid"] > 0
+        mask_reject = (df["Paid"] == 0) & (lower_status == "rejected") & denial_ok
+
+        # Only submitted claims should appear in Balance.
+        # Blank / not submitted / other unpaid rows stay excluded from Balance.
+        mask_submitted = lower_status.str.contains("submitted", na=False)
+        mask_balance = (df["Paid"] == 0) & (~mask_reject) & mask_submitted
+
+        df.loc[mask_paid, "Accepted"] = (df.loc[mask_paid, "ActivityIns"] - df.loc[mask_paid, "Paid"]).clip(lower=0)
+        df.loc[mask_reject, "Rejection"] = df.loc[mask_reject, "ActivityIns"]
+        df.loc[mask_balance, "Balance"] = df.loc[mask_balance, "ActivityIns"]
+    else:
+        mask_paid = df["Paid"] > 0
+        df.loc[mask_paid, "Accepted"] = (df.loc[mask_paid, "ActivityIns"] - df.loc[mask_paid, "Paid"]).clip(lower=0)
 
     return df
 
