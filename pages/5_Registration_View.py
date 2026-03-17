@@ -175,16 +175,22 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
                 bg = C_ALT if alt % 2 == 0 else C_WHITE
                 ins_vals = [g_row[cols.index(c)] for c in ins_cols]
 
+                # Top border style: thick navy separator for first row of each group (except first)
+                top_border = (f"border-top:2px solid {C_NAVY_SECT};" if (g_idx == 0 and not (ri == 0 and alt == 0)) else "")
+
                 if g_idx == 0:
                     # Doctor cell: rowspan covers data rows + TOTAL row
                     doc_cell = (
                         f"<td rowspan='{total_rows}' style='padding:8px 10px;"
-                        f"border:1px solid {C_BORDER};text-align:left;"
-                        f"font-weight:900;vertical-align:middle;"
+                        f"border:1px solid {C_BORDER};border-top:2px solid {C_NAVY_SECT};"
+                        f"text-align:center;font-weight:900;vertical-align:middle;"
                         f"background:#D6EAF8;white-space:nowrap;font-size:12px;'>"
                         f"{doc_display}</td>"
                     )
-                    h += "<tr>" + doc_cell + "".join(_td(v, "left" if ci == 0 else "right", f"background:{bg};") for ci, v in enumerate(ins_vals)) + "</tr>"
+                    h += ("<tr>" + doc_cell
+                          + "".join(_td(v, "left" if ci == 0 else "right",
+                                        f"background:{bg};{top_border}")
+                                    for ci, v in enumerate(ins_vals)) + "</tr>")
                 else:
                     h += "<tr>" + "".join(_td(v, "left" if ci == 0 else "right", f"background:{bg};") for ci, v in enumerate(ins_vals)) + "</tr>"
 
@@ -203,6 +209,7 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
                 v = "TOTAL" if c == "Insurance" else round(group_totals.get(c, 0), 1)
                 tot_tds.append(
                     f"<td style='padding:7px 10px;border:1px solid {C_BORDER};"
+                    f"border-bottom:2px solid {C_NAVY_SECT};"
                     f"text-align:{'left' if ci==0 else 'right'};"
                     f"background:{BLUE};color:{C_WHITE};font-weight:700;'>{v}</td>"
                 )
@@ -424,10 +431,8 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
             cols = list(df.columns)
             n_cols = len(cols)
 
-            # Section title row
             start_row = _write_section_header(ws, start_row, section_title, n_cols)
 
-            # Header row
             for ci, col in enumerate(cols, 1):
                 cell = ws.cell(row=start_row, column=ci, value=col)
                 cell.fill = HEADER_FILL
@@ -437,17 +442,13 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
             ws.row_dimensions[start_row].height = 18
             start_row += 1
 
-            # Data rows
             for ri, row_data in enumerate(df.itertuples(index=False, name=None)):
                 first_val = str(row_data[0] or "").strip().upper()
                 is_total = first_val in ("GRAND TOTAL", "TOTAL")
                 for ci, val in enumerate(row_data, 1):
                     cell = ws.cell(row=start_row, column=ci, value=val if val is not None else "")
                     cell.border = BORDER
-                    cell.alignment = Alignment(
-                        horizontal="right" if ci > 1 else "left",
-                        vertical="center"
-                    )
+                    cell.alignment = Alignment(horizontal="right" if ci > 1 else "left", vertical="center")
                     if is_total:
                         cell.fill = TOTAL_FILL
                         cell.font = TOTAL_FONT
@@ -455,14 +456,13 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                         cell.fill = ALT_FILL
                 start_row += 1
 
-            # Blank spacer row
             start_row += 1
             return start_row
 
         def _write_dx_section(ws, start_row, df: pd.DataFrame) -> int:
             """Doctor x Insurance: doctor name as side-merged cell (light blue),
-            insurance rows beside it, per-doctor TOTAL row, Grand Total at end.
-            Matches image layout exactly.
+            insurance rows beside it, per-doctor TOTAL row, thick separator between groups,
+            Grand Total at end. All columns sized to fit screen without scrolling.
             """
             if df.empty:
                 return start_row
@@ -470,20 +470,16 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
             cols = list(df.columns)
             n_cols = len(cols)
 
-            # Section title
             start_row = _write_section_header(ws, start_row, "Doctor x Insurance Revenue", n_cols)
 
-            # Detect doctor column index (1-based)
             doc_col_idx = None
             if "Doctor" in cols:
                 doc_col_idx = cols.index("Doctor") + 1
 
-            # ins_cols = all cols except Doctor
             ins_cols = [c for c in cols if c != "Doctor"]
             n_ins = len(ins_cols)
-            total_header_cols = 1 + n_ins  # Doctor col + ins cols
 
-            # Header row: Doctor | Insurance | ...
+            # Header row
             header_cols = ["Doctor"] + ins_cols
             for ci, col in enumerate(header_cols, 1):
                 cell = ws.cell(row=start_row, column=ci, value=col)
@@ -497,10 +493,15 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
             rows_list = list(df.itertuples(index=False, name=None))
             alt = 0
             i = 0
+            is_first_group = True
 
-            DOC_FILL   = PatternFill("solid", fgColor="D6EAF8")  # light blue (matches image)
-            DTOT_FILL  = PatternFill("solid", fgColor="2E6DA4")  # medium blue for doctor total
-            DTOT_FONT  = Font(color="FFFFFF", bold=True, size=10)
+            DOC_FILL  = PatternFill("solid", fgColor="D6EAF8")
+            DTOT_FILL = PatternFill("solid", fgColor="2E6DA4")
+            DTOT_FONT = Font(color="FFFFFF", bold=True, size=10)
+
+            # Thick separator border (top of doctor group)
+            SEP_SIDE  = Side(border_style="medium", color="1E3A5F")
+            THIN      = Side(border_style="thin", color="CCCCCC")
 
             while i < len(rows_list):
                 row_data = rows_list[i]
@@ -508,7 +509,6 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                 is_total = first_val in ("GRAND TOTAL", "TOTAL")
 
                 if is_total:
-                    # Grand Total across all columns
                     all_vals = ["GRAND TOTAL"] + [row_data[cols.index(c)] for c in ins_cols]
                     for ci, val in enumerate(all_vals, 1):
                         cell = ws.cell(row=start_row, column=ci, value=val if val is not None else "")
@@ -527,7 +527,7 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                         if alt % 2 == 0: cell.fill = ALT_FILL
                     alt += 1; start_row += 1; i += 1; continue
 
-                # Gather group for this doctor
+                # Gather group
                 cur = str(row_data[doc_col_idx - 1] or "").strip().upper()
                 group = []
                 j = i
@@ -540,35 +540,34 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
 
                 doc_display = str(row_data[doc_col_idx - 1] or "").strip()
                 n_grp = len(group)
-                total_rows = n_grp + 1  # data rows + TOTAL row
-
+                total_rows = n_grp + 1
                 group_start = start_row
                 group_totals = {c: 0.0 for c in ins_cols}
 
-                # Write insurance rows
+                # Write insurance data rows
                 for g_idx, g_row in enumerate(group):
-                    bg = ALT_FILL if alt % 2 == 0 else PatternFill()
+                    # Top border: thick for first row of each group (except very first)
+                    top_side = SEP_SIDE if (g_idx == 0 and not is_first_group) else THIN
 
-                    # Column 1: Doctor cell (only write on first row; rowspan via merge later)
                     if g_idx == 0:
                         cell = ws.cell(row=start_row, column=1, value=doc_display)
                         cell.fill = DOC_FILL
                         cell.font = Font(bold=True, size=11)
-                        cell.border = BORDER
                         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                        cell.border = Border(left=SEP_SIDE if not is_first_group else THIN,
+                                             right=THIN, top=top_side, bottom=THIN)
                     else:
                         cell = ws.cell(row=start_row, column=1, value="")
                         cell.fill = DOC_FILL
-                        cell.border = BORDER
+                        cell.border = Border(left=SEP_SIDE if not is_first_group else THIN,
+                                             right=THIN, top=THIN, bottom=THIN)
 
-                    # Remaining columns: ins_cols
                     for ci, c in enumerate(ins_cols, 2):
                         val = g_row[cols.index(c)]
                         cell = ws.cell(row=start_row, column=ci, value=val if val is not None else "")
-                        cell.border = BORDER
                         cell.alignment = Alignment(horizontal="right" if ci > 2 else "left", vertical="center")
+                        cell.border = Border(left=THIN, right=THIN, top=top_side if g_idx == 0 else THIN, bottom=THIN)
                         if alt % 2 == 0: cell.fill = ALT_FILL
-                        # accumulate totals
                         try:
                             group_totals[c] += float(pd.to_numeric(val, errors="coerce") or 0)
                         except Exception:
@@ -578,23 +577,19 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                     start_row += 1
 
                 # Doctor TOTAL row
-                cell = ws.cell(row=start_row, column=1, value="")  # Doctor col (part of merge)
+                cell = ws.cell(row=start_row, column=1, value="")
                 cell.fill = DOC_FILL
                 cell.border = BORDER
                 for ci, c in enumerate(ins_cols, 2):
-                    if c == "Insurance":
-                        val = "TOTAL"
-                    else:
-                        raw = group_totals.get(c, 0)
-                        val = round(raw, 1) if raw else 0
-                    cell = ws.cell(row=start_row, column=ci, value=val)
+                    v = "TOTAL" if c == "Insurance" else round(group_totals.get(c, 0), 1)
+                    cell = ws.cell(row=start_row, column=ci, value=v)
                     cell.fill = DTOT_FILL
                     cell.font = DTOT_FONT
                     cell.border = BORDER
                     cell.alignment = Alignment(horizontal="right" if ci > 2 else "left", vertical="center")
                 start_row += 1
 
-                # Merge doctor column vertically (data rows + TOTAL row)
+                # Merge doctor cell vertically across all rows in group
                 if total_rows > 1:
                     ws.merge_cells(start_row=group_start, start_column=1,
                                    end_row=group_start + total_rows - 1, end_column=1)
@@ -602,8 +597,14 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                     merged.fill = DOC_FILL
                     merged.font = Font(bold=True, size=11)
                     merged.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                    merged.border = BORDER
+                    merged.border = Border(
+                        left=SEP_SIDE if not is_first_group else THIN,
+                        right=THIN,
+                        top=SEP_SIDE if not is_first_group else THIN,
+                        bottom=THIN
+                    )
 
+                is_first_group = False
                 i = j
 
             start_row += 1
@@ -614,16 +615,36 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
         current_row = _write_df_section(ws, current_row, df_ins, "Insurance Wise Revenue")
         current_row = _write_dx_section(ws, current_row, df_dx)
 
-        # --- Auto-fit column widths ---
+        # --- Smart column widths: fit ALL columns on one screen (no horizontal scroll) ---
         max_col = ws.max_column
         max_row_used = ws.max_row
+
+        # First pass: measure content lengths
+        col_widths = []
         for col_idx in range(1, max_col + 1):
-            col_letter = get_column_letter(col_idx)
             max_len = max(
                 (len(str(ws.cell(row=r, column=col_idx).value or "")) for r in range(1, max_row_used + 1)),
-                default=10,
+                default=8,
             )
-            ws.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 42)
+            col_widths.append(max_len)
+
+        # Target total width ~200 units (fits A4/standard screen without scrolling)
+        # Col 1 (Doctor): fixed 18, Col 2 (Insurance): fixed 28, rest: numeric, shrink equally
+        TARGET_TOTAL = 200
+        DOC_WIDTH = 18
+        INS_WIDTH = 28
+        n_numeric = max(max_col - 2, 1)
+        remaining = TARGET_TOTAL - DOC_WIDTH - INS_WIDTH
+        num_width = max(min(remaining // n_numeric, 14), 9)  # 9–14 per numeric col
+
+        for col_idx in range(1, max_col + 1):
+            col_letter = get_column_letter(col_idx)
+            if col_idx == 1:
+                ws.column_dimensions[col_letter].width = DOC_WIDTH
+            elif col_idx == 2:
+                ws.column_dimensions[col_letter].width = INS_WIDTH
+            else:
+                ws.column_dimensions[col_letter].width = num_width
 
         ws.freeze_panes = "A2"
 
