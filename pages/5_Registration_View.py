@@ -446,6 +446,9 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
 
             start_row = _write_section_header(ws, start_row, section_title, n_cols)
 
+            # Detect which columns are numeric (for right-alignment)
+            num_flags = [pd.api.types.is_numeric_dtype(df[c]) for c in cols]
+
             for ci, col in enumerate(cols, 1):
                 cell = ws.cell(row=start_row, column=ci, value=col)
                 cell.fill = HEADER_FILL
@@ -461,7 +464,12 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                 for ci, val in enumerate(row_data, 1):
                     cell = ws.cell(row=start_row, column=ci, value=val if val is not None else "")
                     cell.border = BORDER
-                    cell.alignment = Alignment(horizontal="right" if ci > 1 else "left", vertical="center")
+                    # Left-align text columns, right-align numeric columns
+                    is_num = num_flags[ci - 1]
+                    cell.alignment = Alignment(
+                        horizontal="right" if is_num else "left",
+                        vertical="center"
+                    )
                     if is_total:
                         cell.fill = TOTAL_FILL
                         cell.font = TOTAL_FONT
@@ -578,7 +586,9 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
                     for ci, c in enumerate(ins_cols, 2):
                         val = g_row[cols.index(c)]
                         cell = ws.cell(row=start_row, column=ci, value=val if val is not None else "")
-                        cell.alignment = Alignment(horizontal="right" if ci > 2 else "left", vertical="center")
+                        # Left-align text columns, right-align numeric
+                        col_is_num = pd.api.types.is_numeric_dtype(df.dtypes.get(c, object))
+                        cell.alignment = Alignment(horizontal="right" if col_is_num else "left", vertical="center")
                         cell.border = Border(left=THIN, right=THIN, top=top_side if g_idx == 0 else THIN, bottom=THIN)
                         if alt % 2 == 0: cell.fill = ALT_FILL
                         try:
@@ -640,9 +650,9 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
             tc.alignment = Alignment(horizontal="center", vertical="center")
 
         # --- Smart column widths: fit ALL columns on screen without horizontal scroll ---
-        # Strategy: measure actual content, then scale so total fits in ~190 units
-        # (standard Excel window ~190 col-units wide at 100% zoom)
         max_row_used = ws.max_row
+
+        # Measure actual max content length per column
         content_widths = []
         for col_idx in range(1, max_col + 1):
             max_len = max(
@@ -652,26 +662,51 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
             )
             content_widths.append(max_len)
 
-        # Assign widths: col1 (Dept/Doctor merged) ≤ 22, col2 (Doctor/Insurance) ≤ 28,
-        # numeric cols: content-based but capped at 13
-        raw_widths = []
-        for ci, cw in enumerate(content_widths):
-            if ci == 0:
-                raw_widths.append(min(cw + 2, 22))
-            elif ci == 1:
-                raw_widths.append(min(cw + 2, 28))
-            else:
-                raw_widths.append(min(cw + 2, 13))
+        # Identify text vs numeric columns by checking the Doctor Wise df columns
+        # Col 1 = Department/Doctor (text), Col 2 = Doctor/Insurance (text), rest = numeric
+        # We use a simple heuristic: if average cell content is mostly digits → numeric
+        def _is_numeric_col(col_idx):
+            vals = []
+            for r in range(4, min(max_row_used + 1, 20)):
+                v = ws.cell(row=r, column=col_idx).value
+                if v is not None and str(v).strip():
+                    vals.append(v)
+            if not vals:
+                return False
+            num_count = sum(1 for v in vals if isinstance(v, (int, float)))
+            return num_count / len(vals) > 0.5
 
-        # Scale down proportionally if total exceeds 190
-        total = sum(raw_widths)
+        # Assign raw widths: text cols = content + padding (min 14), numeric = content + 2 (cap 14)
+        raw_widths = []
+        is_numeric = []
+        for ci in range(max_col):
+            cw = content_widths[ci]
+            numeric = _is_numeric_col(ci + 1)
+            is_numeric.append(numeric)
+            if numeric:
+                raw_widths.append(min(cw + 2, 14))
+            else:
+                raw_widths.append(min(max(cw + 2, 14), 32))  # text: 14–32
+
+        # Only scale numeric columns if total is too wide; text columns stay fixed
+        text_total = sum(w for w, n in zip(raw_widths, is_numeric) if not n)
+        num_cols_list = [(i, w) for i, (w, n) in enumerate(zip(raw_widths, is_numeric)) if n]
+        num_total = sum(w for _, w in num_cols_list)
+
         TARGET = 188
-        scale = min(1.0, TARGET / total) if total > 0 else 1.0
+        num_budget = max(TARGET - text_total, len(num_cols_list) * 7)
+        num_scale = min(1.0, num_budget / num_total) if num_total > 0 else 1.0
+
+        final_widths = []
+        for ci in range(max_col):
+            if is_numeric[ci]:
+                final_widths.append(max(round(raw_widths[ci] * num_scale, 1), 7))
+            else:
+                final_widths.append(raw_widths[ci])
 
         for col_idx in range(1, max_col + 1):
             col_letter = get_column_letter(col_idx)
-            w = max(raw_widths[col_idx - 1] * scale, 7)
-            ws.column_dimensions[col_letter].width = round(w, 1)
+            ws.column_dimensions[col_letter].width = final_widths[col_idx - 1]
 
         ws.freeze_panes = "A4"  # freeze below title + blank row
 
