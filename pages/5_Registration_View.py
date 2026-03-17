@@ -39,10 +39,10 @@ import smtplib
 
 
 def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
-    """Premium HTML email body:
-    - KPI cards on top (Total Visits, New Patients, etc.)
-    - Income Analysis tables (Doctor Wise / Insurance Wise / Doctor x Insurance)
-    Falls back gracefully if some tables are missing.
+    """HTML email body — exact same colors as Excel:
+    - Dark navy (#0D1B2A) headers, orange (#FF6600) grand total, light-blue (#F0F4FF) alt rows
+    - KPI cards matching Streamlit UI (white card, navy label, bold number)
+    - Doctor x Insurance: doctor name shown once via HTML rowspan
     """
     def _num(x, default=0):
         try:
@@ -50,367 +50,204 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
         except Exception:
             return default
 
-    def _kpi_value(metric: str, default=0):
+    def _kpi_value(metric, default=0):
         kpi = dfs.get("KPI")
-        if isinstance(kpi, pd.DataFrame) and (not kpi.empty) and {"Metric","Value"}.issubset(kpi.columns):
+        if isinstance(kpi, pd.DataFrame) and not kpi.empty and {"Metric", "Value"}.issubset(kpi.columns):
             try:
-                s = kpi.set_index("Metric")["Value"]
-                return s.get(metric, default)
+                return kpi.set_index("Metric")["Value"].get(metric, default)
             except Exception:
                 return default
         return default
-
-    def _pick_avg_col(df: pd.DataFrame):
-        if df is None or df.empty:
-            return None
-        cols = list(df.columns)
-        # prefer exact/common names
-        preferred = [
-            "Avg.Amount", "Avg_Amount", "Avg Amount",
-            "Avg_Amount_Insuance", "Avg_Amount_Insurance",
-            "Avg_Amount_Service", "AvgAmount", "Avg",
-        ]
-        for p in preferred:
-            for c in cols:
-                if str(c).strip().lower() == str(p).strip().lower():
-                    return c
-        # heuristic
-        for c in cols:
-            cl = str(c).lower()
-            if "avg" in cl and "amount" in cl:
-                return c
-        return None
-
-    def _pick_lab_col(df: pd.DataFrame):
-        if df is None or df.empty:
-            return None
-        cols = list(df.columns)
-        preferred = ["Lab %", "Lab_%", "Lab%", "Lab Percent", "Lab_Percent"]
-        for p in preferred:
-            for c in cols:
-                if str(c).strip().lower() == str(p).strip().lower():
-                    return c
-        for c in cols:
-            cl = str(c).lower()
-            if "lab" in cl and ("%" in cl or "percent" in cl):
-                return c
-        return None
 
     def _safe_df(df):
         if not isinstance(df, pd.DataFrame) or df.empty:
             return pd.DataFrame()
         out = df.copy()
-        # drop unnamed cols
-        bad = [c for c in out.columns if str(c).strip()=="" or str(c).strip().lower().startswith("unnamed")]
-        if bad:
-            out = out.drop(columns=bad, errors="ignore")
+        bad = [c for c in out.columns if str(c).strip() == "" or str(c).strip().lower().startswith("unnamed")]
+        return out.drop(columns=bad, errors="ignore")
+
+    def _round1_df(df):
+        out = df.copy()
+        for c in out.columns:
+            if pd.api.types.is_numeric_dtype(out[c]):
+                out[c] = pd.to_numeric(out[c], errors="coerce").round(1)
         return out
 
-    def _html_table(df: pd.DataFrame, cols, header_bg="#111827", title_text=None):
-        df = _safe_df(df)
+    # ── exact Excel colors ────────────────────────────────────────────────────
+    C_NAVY      = "#0D1B2A"
+    C_NAVY_SECT = "#1E3A5F"
+    C_ORANGE    = "#FF6600"
+    C_ALT       = "#F0F4FF"
+    C_WHITE     = "#FFFFFF"
+    C_BORDER    = "#CCCCCC"
+    C_DARK      = "#0f172a"
+    C_MUTED     = "#64748b"
+
+    def _td(val, align="right", extra=""):
+        v = "" if (val is None or (isinstance(val, float) and pd.isna(val))) else val
+        return (f"<td style='padding:7px 10px;border:1px solid {C_BORDER};"
+                f"text-align:{align};{extra}'>{v}</td>")
+
+    def _th(label):
+        return (f"<th style='padding:8px 10px;border:1px solid {C_BORDER};"
+                f"text-align:center;color:{C_WHITE};background:{C_NAVY};font-size:12px;"
+                f"font-weight:700;white-space:nowrap;'>{label}</th>")
+
+    def _section_banner(text, n_cols=99):
+        return (f"<tr><td colspan='{n_cols}' style='background:{C_NAVY_SECT};color:{C_WHITE};"
+                f"font-size:14px;font-weight:900;padding:10px 14px;border:none;'>"
+                f"{text}</td></tr>")
+
+    def _render_plain(df):
+        df = _round1_df(_safe_df(df))
         if df.empty:
             return ""
-        # keep only existing cols
-        cols = [c for c in cols if c in df.columns]
-        if not cols:
-            cols = list(df.columns)[:6]
-        show = df[cols].copy()
+        cols = list(df.columns)
+        h = (f"<table style='width:100%;border-collapse:collapse;font-size:12px;"
+             f"margin-bottom:2px;'>")
+        h += f"<tr>{''.join(_th(c) for c in cols)}</tr>"
+        for ri, row in enumerate(df.itertuples(index=False, name=None)):
+            first = str(row[0] or "").strip().upper()
+            is_tot = first in ("GRAND TOTAL", "TOTAL")
+            bg = C_ORANGE if is_tot else (C_ALT if ri % 2 == 0 else C_WHITE)
+            fx = f"color:{C_WHITE};font-weight:900;" if is_tot else ""
+            tds = [_td(v, align="left" if ci == 0 else "right",
+                       extra=f"background:{bg};{fx}")
+                   for ci, v in enumerate(row)]
+            h += "<tr>" + "".join(tds) + "</tr>"
+        return h + "</table>"
 
-        # coerce numeric + round
-        for c in show.columns:
-            if c in cols and c not in ["Doctor","Insurance","Department"]:
-                show[c] = pd.to_numeric(show[c], errors="coerce")
-        for c in show.columns:
-            if pd.api.types.is_numeric_dtype(show[c]):
-                show[c] = show[c].round(2)
+    def _render_dx(df):
+        df = _round1_df(_safe_df(df))
+        if df.empty:
+            return ""
+        cols = list(df.columns)
+        doc_ci = cols.index("Doctor") if "Doctor" in cols else None
+        h = (f"<table style='width:100%;border-collapse:collapse;font-size:12px;"
+             f"margin-bottom:2px;'>")
+        h += f"<tr>{''.join(_th(c) for c in cols)}</tr>"
+        rows_list = list(df.itertuples(index=False, name=None))
+        ri = 0
+        alt = 0
+        while ri < len(rows_list):
+            row = rows_list[ri]
+            first = str(row[0] or "").strip().upper()
+            is_tot = first in ("GRAND TOTAL", "TOTAL")
+            if is_tot or doc_ci is None:
+                bg = C_ORANGE if is_tot else (C_ALT if alt % 2 == 0 else C_WHITE)
+                fx = f"color:{C_WHITE};font-weight:900;" if is_tot else ""
+                tds = [_td(v, "left" if ci == 0 else "right", f"background:{bg};{fx}")
+                       for ci, v in enumerate(row)]
+                h += "<tr>" + "".join(tds) + "</tr>"
+                alt += 1; ri += 1; continue
+            # gather group
+            cur = str(row[doc_ci] or "").strip().upper()
+            grp = []
+            j = ri
+            while j < len(rows_list):
+                rd = rows_list[j]
+                fv = str(rd[0] or "").strip().upper()
+                if fv in ("GRAND TOTAL", "TOTAL"): break
+                if str(rd[doc_ci] or "").strip().upper() != cur: break
+                grp.append(rd); j += 1
+            for g_idx, g_row in enumerate(grp):
+                bg = C_ALT if alt % 2 == 0 else C_WHITE
+                tds = []
+                for ci, v in enumerate(g_row):
+                    if ci == doc_ci:
+                        if g_idx == 0:
+                            tds.append(
+                                f"<td rowspan='{len(grp)}' style='padding:7px 10px;"
+                                f"border:1px solid {C_BORDER};text-align:left;"
+                                f"font-weight:900;vertical-align:top;"
+                                f"background:{C_ALT};white-space:nowrap;'>"
+                                f"{v if v else ''}</td>")
+                    else:
+                        tds.append(_td(v, "left" if ci == 0 else "right",
+                                       f"background:{bg};"))
+                h += "<tr>" + "".join(tds) + "</tr>"
+                alt += 1
+            ri = j
+        return h + "</table>"
 
-        # build table html manually for consistent styling
-        ths = "".join([f"<th style='padding:8px 10px;text-align:left;border:1px solid #e5e7eb;'>{c}</th>" for c in show.columns])
-        rows = []
-        for i, r in enumerate(show.itertuples(index=False, name=None)):
-            bg = "#ffffff" if i % 2 == 0 else "#f8fafc"
-            tds = []
-            for v in r:
-                if v is None or (isinstance(v, float) and pd.isna(v)):
-                    v = ""
-                tds.append(f"<td style='padding:8px 10px;border:1px solid #e5e7eb;'>{v}</td>")
-            rows.append(f"<tr style='background:{bg};'>" + "".join(tds) + "</tr>")
-        caption = f"<div style='font-size:13px;font-weight:800;color:#334155;margin:10px 0 6px 0;'>{title_text}</div>" if title_text else ""
-        return (
-            caption
-            + f"<table style='width:100%;border-collapse:collapse;font-size:13px;'>"
-              f"<tr style='background:{header_bg};color:#fff;'>{ths}</tr>"
-              + "".join(rows)
-              + "</table>"
-        )
+    # ── KPI values ────────────────────────────────────────────────────────────
+    total_visits     = int(_num(_kpi_value("Total Visits", 0)) or 0)
+    new_patients     = int(_num(_kpi_value("New Patients", 0)) or 0)
+    established      = int(_num(_kpi_value("Established Patients", 0)) or 0)
+    follow_up        = int(_num(_kpi_value("Follow Up", 0)) or 0)
+    unclassified     = int(_num(_kpi_value("Unclassified Visits", 0)) or 0)
+    pending_patients = int(_num(_kpi_value("Pending Patients", 0)) or 0)
 
-    # ---------- KPI values ----------
-    total_visits = int(_num(_kpi_value("Total Visits", 0), 0) or 0)
-    new_patients = int(_num(_kpi_value("New Patients", 0), 0) or 0)
-    established = int(_num(_kpi_value("Established Patients", 0), 0) or 0)
-    follow_up = int(_num(_kpi_value("Follow Up", 0), 0) or 0)
-    unclassified = int(_num(_kpi_value("Unclassified Visits", 0), 0) or 0)
-    pending_patients = int(_num(_kpi_value("Pending Patients", 0), 0) or 0)
-
-    # ---------- Income tables ----------
     df_doc = _safe_df(dfs.get("Income | Doctor Wise Revenue"))
     df_ins = _safe_df(dfs.get("Income | Insurance Wise Revenue"))
     df_dx  = _safe_df(dfs.get("Income | Doctor x Insurance Revenue"))
 
-    def _pick_by_names(df: pd.DataFrame, names):
-        if df is None or df.empty:
-            return None
-        cols = list(df.columns)
-        for n in names:
-            for c in cols:
-                if str(c).strip().lower() == str(n).strip().lower():
-                    return c
-        # heuristic match (ignore non-alnum)
-        def _norm(s):
-            return re.sub(r"[^a-z0-9]+", "", str(s).lower())
-        nset = {_norm(n) for n in names}
-        for c in cols:
-            if _norm(c) in nset:
-                return c
-        return None
+    def _kpi_card(label, val):
+        return f"""<td style='padding:6px;'>
+      <div style='background:{C_WHITE};border:1px solid #e2e8f0;border-radius:14px;
+                  padding:14px 18px;box-shadow:0 2px 8px rgba(15,23,42,0.07);'>
+        <div style='color:{C_MUTED};font-size:12px;font-weight:700;'>{label}</div>
+        <div style='color:{C_DARK};font-size:28px;font-weight:900;margin-top:4px;line-height:1.1;'>{val}</div>
+      </div></td>"""
 
-    # Pick columns from Income tables (names vary by file/version)
-    avg_doc = _pick_avg_col(df_doc)
-    labp_doc = _pick_lab_col(df_doc)
+    parts = [f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:Segoe UI,Arial,sans-serif;">
+<div style="max-width:960px;margin:24px auto;background:{C_WHITE};border-radius:16px;
+     box-shadow:0 8px 24px rgba(15,23,42,0.12);overflow:hidden;">
 
-    avg_ins = _pick_avg_col(df_ins)
-    labp_ins = _pick_lab_col(df_ins)
+  <div style="background:{C_NAVY};padding:20px 28px;">
+    <div style="color:{C_WHITE};font-size:20px;font-weight:900;letter-spacing:-0.02em;">
+      📌 EMC Income Analysis Report
+    </div>
+    <div style="color:#94a3b8;font-size:13px;margin-top:4px;">
+      {picked_label} &nbsp;·&nbsp; Generated: {pd.Timestamp.now().strftime('%d %b %Y %H:%M')}
+    </div>
+  </div>
 
-    avg_dx  = _pick_avg_col(df_dx)
+  <div style="padding:24px 28px;">
 
-    # common service columns
-    consult_doc = _pick_by_names(df_doc, ["Consultation", "Consult", "Consult Amount"])
-    lab_doc_amt = _pick_by_names(df_doc, ["Lab", "Lab Amount"])
-    rad_doc_amt = _pick_by_names(
-        df_doc,
-        ["Radiology", "Radiology Amount", "Radiology Amt", "Imaging", "Imaging Amount"]
-    )
-    proc_doc = _pick_by_names(df_doc, ["Procedure", "Procedures"])
-    visit_doc = _pick_by_names(df_doc, ["Total Visit", "Total Visits", "Total_Visit"])
-    tot_doc_amt = _pick_by_names(df_doc, ["Total Amount", "Total_Amount", "TotalAmount"])
+    <table style="width:100%;border-collapse:separate;border-spacing:0;margin-bottom:24px;">
+      <tr>{_kpi_card("Total Visits", total_visits)}{_kpi_card("New Patients", new_patients)}{_kpi_card("Established Patients", established)}</tr>
+      <tr>{_kpi_card("Follow Up", follow_up)}{_kpi_card("Unclassified Visits", unclassified)}{_kpi_card("Pending Patients", pending_patients)}</tr>
+    </table>
 
-    consult_ins = _pick_by_names(df_ins, ["Consultation", "Consult", "Consult Amount"])
-    lab_ins_amt = _pick_by_names(df_ins, ["Lab", "Lab Amount"])
-    rad_ins_amt = _pick_by_names(
-        df_ins,
-        ["Radiology", "Radiology Amount", "Radiology Amt", "Imaging", "Imaging Amount"]
-    )
-    proc_ins = _pick_by_names(df_ins, ["Procedure", "Procedures"])
-    visit_ins = _pick_by_names(df_ins, ["Total Visit", "Total Visits", "Total_Visit"])
-    tot_ins_amt = _pick_by_names(df_ins, ["Total Amount", "Total_Amount", "TotalAmount"])
+    <div style="background:{C_NAVY_SECT};border-radius:10px;padding:10px 14px;margin-bottom:18px;">
+      <span style="color:{C_WHITE};font-size:15px;font-weight:900;">📊 Income Analysis (Doctor Revenue)</span>
+    </div>
+"""]
 
-    consult_dx = _pick_by_names(df_dx, ["Consultation", "Consult", "Consult Amount"])
-    lab_dx_amt = _pick_by_names(df_dx, ["Lab", "Lab Amount"])
-    rad_dx_amt = _pick_by_names(
-        df_dx,
-        ["Radiology", "Radiology Amount", "Radiology Amt", "Imaging", "Imaging Amount"]
-    )
-    proc_dx = _pick_by_names(df_dx, ["Procedure", "Procedures"])
-    visit_dx = _pick_by_names(df_dx, ["Total Visit", "Total Visits", "Total_Visit"])
-    tot_dx_amt = _pick_by_names(df_dx, ["Total Amount", "Total_Amount", "TotalAmount"])
-
-    def _ensure_total_service(df: pd.DataFrame, c_cons, c_lab, c_rad, c_proc):
-        """Ensure a 'Total_Amount_Service' column exists (sum of Consultation+Lab+Radiology+Procedure).
-        Keeps backward-compat with older files that may already have Total_Service.
-        """
-        if df is None or df.empty:
-            return df
-        if "Total_Amount_Service" in df.columns:
-            return df
-        if "Total_Service" in df.columns:
-            out = df.copy()
-            out["Total_Amount_Service"] = pd.to_numeric(out["Total_Service"], errors="coerce")
-            return out
-        if c_cons and c_lab and c_rad and c_proc:
-            out = df.copy()
-            out["Total_Amount_Service"] = (
-                pd.to_numeric(out[c_cons], errors="coerce").fillna(0)
-                + pd.to_numeric(out[c_lab], errors="coerce").fillna(0)
-                + pd.to_numeric(out[c_rad], errors="coerce").fillna(0)
-                + pd.to_numeric(out[c_proc], errors="coerce").fillna(0)
-            )
-            return out
-        return df
-
-    # Add Total_Amount_Service if possible (user asked: show total service + total amount) (user asked: show total service + total amount)
-    df_doc = _ensure_total_service(df_doc, consult_doc, lab_doc_amt, rad_doc_amt, proc_doc)
-    df_ins = _ensure_total_service(df_ins, consult_ins, lab_ins_amt, rad_ins_amt, proc_ins)
-    df_dx  = _ensure_total_service(df_dx,  consult_dx,  lab_dx_amt,  rad_dx_amt,  proc_dx)
-    # extra amount/avg columns (service vs insurance)
-    tot_service_doc = _pick_by_names(df_doc, ["Total_Amount_Service", "Total Amount Service", "TotalAmountService"])
-    tot_ins_doc     = _pick_by_names(df_doc, ["Total_Amount_Insurance", "Total_Amount_Insuance", "Total Amount Insurance", "TotalAmountInsurance"])
-    avg_service_doc = _pick_by_names(df_doc, ["Avg_Amount_Service", "Avg Amount Service", "AvgAmountService"])
-    avg_ins_doc     = _pick_by_names(df_doc, ["Avg_Amount_Insurance", "Avg_Amount_Insuance", "Avg Amount Insurance", "AvgAmountInsurance"])
-
-    tot_service_ins = _pick_by_names(df_ins, ["Total_Amount_Service", "Total Amount Service", "TotalAmountService"])
-    tot_ins_ins     = _pick_by_names(df_ins, ["Total_Amount_Insurance", "Total_Amount_Insuance", "Total Amount Insurance", "TotalAmountInsurance"])
-    avg_service_ins = _pick_by_names(df_ins, ["Avg_Amount_Service", "Avg Amount Service", "AvgAmountService"])
-    avg_ins_ins     = _pick_by_names(df_ins, ["Avg_Amount_Insurance", "Avg_Amount_Insuance", "Avg Amount Insurance", "AvgAmountInsurance"])
-
-    tot_service_dx  = _pick_by_names(df_dx,  ["Total_Amount_Service", "Total Amount Service", "TotalAmountService"])
-    tot_ins_dx      = _pick_by_names(df_dx,  ["Total_Amount_Insurance", "Total_Amount_Insuance", "Total Amount Insurance", "TotalAmountInsurance"])
-    avg_service_dx  = _pick_by_names(df_dx,  ["Avg_Amount_Service", "Avg Amount Service", "AvgAmountService"])
-    avg_ins_dx      = _pick_by_names(df_dx,  ["Avg_Amount_Insurance", "Avg_Amount_Insuance", "Avg Amount Insurance", "AvgAmountInsurance"])
-
-
-
-    # prefer show columns in requested style (match dashboard columns)
-    def _dedupe(seq):
-        seen=set()
-        out=[]
-        for x in seq:
-            if x is None: 
-                continue
-            if x not in seen:
-                seen.add(x)
-                out.append(x)
-        return out
-
-    def _col(df, names):
-        return _pick_by_names(df, names)
-
-    # Canonical -> actual columns (Doctor Wise)
-    c_dep   = _col(df_doc, ["Department"])
-    c_doc   = _col(df_doc, ["Doctor"])
-    c_cons  = consult_doc
-    c_lab   = lab_doc_amt
-    c_proc  = proc_doc
-    c_vis   = visit_doc
-    c_tsvc  = _col(df_doc, ["Total_Amount_Service", "Total_Service", "Total Service", "TotalAmountService"])
-    c_tins  = _col(df_doc, ["Total_Amount_Insurance", "Total_Amount_Insuance", "Total Amount Insurance", "TotalAmountInsurance"])
-    c_asvc  = _col(df_doc, ["Avg_Amount_Service", "Avg Amount Service", "AvgAmountService"])
-    c_ains  = _col(df_doc, ["Avg_Amount_Insurance", "Avg_Amount_Insuance", "Avg.Amount", "Avg_Amount", "Avg Amount", "AvgAmountInsurance"])
-    c_labp  = labp_doc
-
-    doc_cols = _dedupe([c for c in [c_dep, c_doc, c_cons, c_lab, c_proc, c_vis, c_tsvc, c_tins, c_asvc, c_ains, c_labp] if c])
-
-    # Insurance Wise
-    c_ins   = _col(df_ins, ["Insurance"])
-    c_consI = consult_ins
-    c_labI  = lab_ins_amt
-    c_procI = proc_ins
-    c_visI  = visit_ins
-    c_tsvcI = _col(df_ins, ["Total_Amount_Service", "Total_Service", "Total Service", "TotalAmountService"])
-    c_tinsI = _col(df_ins, ["Total_Amount_Insurance", "Total_Amount_Insuance", "Total Amount Insurance", "TotalAmountInsurance"])
-    c_asvcI = _col(df_ins, ["Avg_Amount_Service", "Avg Amount Service", "AvgAmountService"])
-    c_ainsI = _col(df_ins, ["Avg_Amount_Insurance", "Avg_Amount_Insuance", "Avg.Amount", "Avg_Amount", "Avg Amount", "AvgAmountInsurance"])
-    c_labpI = labp_ins
-
-    ins_cols = _dedupe([c for c in [c_ins, c_consI, c_labI, c_procI, c_visI, c_tsvcI, c_tinsI, c_asvcI, c_ainsI, c_labpI] if c])
-
-    # Doctor x Insurance (grouped by Doctor then Insurance)
-    c_dx_doc = _col(df_dx, ["Doctor"])
-    c_dx_ins = _col(df_dx, ["Insurance"])
-    c_consX  = consult_dx
-    c_labX   = lab_dx_amt
-    c_procX  = proc_dx
-    c_visX   = visit_dx
-    c_tsvcX  = _col(df_dx, ["Total_Amount_Service", "Total_Service", "Total Service", "TotalAmountService"])
-    c_tinsX  = _col(df_dx, ["Total_Amount_Insurance", "Total_Amount_Insuance", "Total Amount Insurance", "TotalAmountInsurance"])
-    c_asvcX  = _col(df_dx, ["Avg_Amount_Service", "Avg Amount Service", "AvgAmountService"])
-    c_ainsX  = _col(df_dx, ["Avg_Amount_Insurance", "Avg_Amount_Insuance", "Avg.Amount", "Avg_Amount", "Avg Amount", "AvgAmountInsurance"])
-
-    dx_cols = _dedupe([c for c in [c_dx_doc, c_dx_ins, c_consX, c_labX, c_procX, c_visX, c_tsvcX, c_tinsX, c_asvcX, c_ainsX] if c])
-
-
-    # ---------- HTML layout ----------
-    style = """
-    <style>
-      body{font-family:Segoe UI,Arial,sans-serif;background:#f4f6f9;margin:0;padding:0;}
-      .wrap{padding:18px;}
-      .card{background:#ffffff;border-radius:14px;padding:18px;box-shadow:0 6px 18px rgba(15,23,42,0.10);}
-      .top{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;}
-      .title{font-size:18px;font-weight:900;color:#0f172a;}
-      .sub{margin-top:4px;color:#64748b;font-size:13px;}
-      .muted{color:#94a3b8;font-size:12px;text-align:right;}
-      .kpi-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:12px;}
-      .kpi{border:1px solid #e2e8f0;border-radius:14px;padding:12px;background:#f8fafc;}
-      .kpi-l{color:#64748b;font-size:12px;font-weight:800;}
-      .kpi-v{color:#0f172a;font-size:26px;font-weight:900;margin-top:3px;}
-      hr{border:none;border-top:1px solid #e2e8f0;margin:16px 0;}
-      .sec-h{font-size:16px;font-weight:900;color:#0f172a;margin:0 0 8px 0;}
-      .note{color:#94a3b8;font-size:12px;margin-top:14px;}
-    </style>
-    """
-
-    parts = []
-    parts.append(style)
-    parts.append("<div class='wrap'><div class='card'>")
-
-    parts.append(
-        "<div class='top'>"
-        f"<div><div class='title'>📌 EMC Management Summary</div>"
-        f"<div class='sub'>Scope: <b>{picked_label}</b></div></div>"
-        f"<div class='muted'>Generated: {pd.Timestamp.now().strftime('%d %b %Y %H:%M')}</div>"
-        "</div>"
-    )
-
-    # KPI cards
-    parts.append("<div class='kpi-grid'>")
-    def _kpi_box(label, val):
-        return f"<div class='kpi'><div class='kpi-l'>{label}</div><div class='kpi-v'>{val}</div></div>"
-    parts.append(_kpi_box("Total Visits", total_visits))
-    parts.append(_kpi_box("New Patients", new_patients))
-    parts.append(_kpi_box("Established Patients", established))
-    parts.append(_kpi_box("Follow Up", follow_up))
-    parts.append(_kpi_box("Unclassified Visits", unclassified))
-    parts.append(_kpi_box("Pending Patients", pending_patients))
-    parts.append("</div>")
-
-    # Income Analysis section
-    parts.append("<hr>")
-    parts.append(f"<div class='sec-h'>📊 {title}</div>")
-
-    # Doctor Wise
     if not df_doc.empty:
-        parts.append(_html_table(df_doc, doc_cols, header_bg="#6366f1", title_text="Doctor Wise (Avg.Amount | Lab %)"))
-    # Insurance Wise
+        parts.append(
+            f"<table style='width:100%;border-collapse:collapse;margin-bottom:2px;'>"
+            f"{_section_banner('Doctor Wise Revenue')}</table>"
+            f"{_render_plain(df_doc)}"
+            f"<div style='height:20px;'></div>"
+        )
+
     if not df_ins.empty:
-        parts.append("<div style='height:12px'></div>")
-        parts.append(_html_table(df_ins, ins_cols, header_bg="#f59e0b", title_text="Insurance Wise (Avg.Amount | Lab %)"))
-    # Doctor x Insurance (grouped by Doctor)
-    if not df_dx.empty and ("Doctor" in df_dx.columns):
-        parts.append("<div style='height:12px'></div>")
-        parts.append("<div style='font-size:13px;font-weight:800;color:#334155;margin:10px 0 6px 0;'>Doctor x Insurance</div>")
+        parts.append(
+            f"<table style='width:100%;border-collapse:collapse;margin-bottom:2px;'>"
+            f"{_section_banner('Insurance Wise Revenue')}</table>"
+            f"{_render_plain(df_ins)}"
+            f"<div style='height:20px;'></div>"
+        )
 
-        # Ensure stable ordering: by Doctor then Total Amount desc (if available) else Avg desc
-        _dx = df_dx.copy()
-        sort_cols = []
-        if "Doctor" in _dx.columns:
-            sort_cols.append("Doctor")
-        if tot_dx_amt and tot_dx_amt in _dx.columns:
-            _dx[tot_dx_amt] = pd.to_numeric(_dx[tot_dx_amt], errors="coerce")
-            sort_cols.append(tot_dx_amt)
-        elif avg_dx and avg_dx in _dx.columns:
-            _dx[avg_dx] = pd.to_numeric(_dx[avg_dx], errors="coerce")
-            sort_cols.append(avg_dx)
+    if not df_dx.empty:
+        parts.append(
+            f"<table style='width:100%;border-collapse:collapse;margin-bottom:2px;'>"
+            f"{_section_banner('Doctor x Insurance Revenue')}</table>"
+            f"{_render_dx(df_dx)}"
+            f"<div style='height:20px;'></div>"
+        )
 
-        if len(sort_cols) >= 2:
-            _dx = _dx.sort_values(by=sort_cols, ascending=[True, False], na_position="last")
-        else:
-            _dx = _dx.sort_values(by=["Doctor"], ascending=True, na_position="last")
+    parts.append(f"""
+    <div style="color:{C_MUTED};font-size:11px;border-top:1px solid #e2e8f0;padding-top:10px;margin-top:8px;">
+      This is an automated report generated by the EMC dashboard.
+    </div>
+  </div>
+</div>
+</body></html>""")
 
-        # Render each doctor as its own mini-table
-        for doc_name, g in _dx.groupby("Doctor", dropna=False):
-            doc_label = "" if (doc_name is None or (isinstance(doc_name, float) and pd.isna(doc_name))) else str(doc_name)
-            parts.append(
-                f"<div style='margin-top:12px;padding:10px 12px;border-radius:12px;background:#ecfeff;border:1px solid #a5f3fc;'>"
-                f"<div style='font-size:13px;font-weight:900;color:#0f172a;'>👨‍⚕️ {doc_label}</div>"
-                f"</div>"
-            )
-            parts.append(_html_table(g, [c for c in dx_cols if c != 'Doctor'], header_bg="#10b981", title_text=None))
-    elif not df_dx.empty:
-        # fallback
-        parts.append("<div style='height:12px'></div>")
-        parts.append(_html_table(df_dx, dx_cols, header_bg="#10b981", title_text="Doctor x Insurance"))
-
-    parts.append("<div class='note'>This is an automated report generated by the EMC dashboard.</div>")
-    parts.append("</div></div>")
     return "".join(parts)
 
 def _send_email_smtp(
