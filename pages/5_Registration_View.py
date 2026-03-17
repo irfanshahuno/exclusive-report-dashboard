@@ -64,7 +64,48 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
             return pd.DataFrame()
         out = df.copy()
         bad = [c for c in out.columns if str(c).strip() == "" or str(c).strip().lower().startswith("unnamed")]
-        return out.drop(columns=bad, errors="ignore")
+        out = out.drop(columns=bad, errors="ignore")
+        # Drop misleading % cols
+        for drop_c in ["Radiology_%", "Procedure_%"]:
+            if drop_c in out.columns:
+                out = out.drop(columns=[drop_c])
+        # Compute per-visit ratios
+        visit_col = next((c for c in out.columns if str(c).strip().lower() in
+                          ["total_visit", "total visit", "visits", "visit"]), None)
+        if visit_col is not None:
+            denom = pd.to_numeric(out[visit_col], errors="coerce").replace(0, pd.NA)
+            if "Procedure" in out.columns and "Procedure_Per_Visit" not in out.columns:
+                out["Procedure_Per_Visit"] = (pd.to_numeric(out["Procedure"], errors="coerce") / denom).round(2).fillna(0)
+            if "Radiology" in out.columns and "Radiology_Per_Visit" not in out.columns:
+                out["Radiology_Per_Visit"] = (pd.to_numeric(out["Radiology"], errors="coerce") / denom).round(2).fillna(0)
+        # Rename to match Excel display names
+        _EMAIL_RENAME = {
+            "Total_Amount_Service":   "Total Service",
+            "Total_Amount_Insuance":  "Total Insurance",
+            "Total_Amount_Insurance": "Total Insurance",
+            "Avg_Amount_Service":     "Avg Service",
+            "Avg_Amount_Insuance":    "Avg Insurance",
+            "Avg_Amount_Insurance":   "Avg Insurance",
+            "Avg.Amount":             "Avg Insurance",
+            "Lab_%":                  "Lab %",
+            "Procedure_Per_Visit":    "Procedure %",
+            "Radiology_Per_Visit":    "Radiology %",
+            "Total_Visit":            "Visits",
+            "Department":             "Dept",
+        }
+        out = out.rename(columns={k: v for k, v in _EMAIL_RENAME.items() if k in out.columns})
+        # Reorder to match Excel
+        _ORDER = [
+            "Dept", "Doctor", "Insurance",
+            "Consultation", "Lab", "Radiology", "Procedure",
+            "Visits",
+            "Total Service", "Total Insurance",
+            "Avg Service", "Avg Insurance",
+            "Lab %", "Procedure %", "Radiology %",
+        ]
+        ordered = [c for c in _ORDER if c in out.columns]
+        remaining = [c for c in out.columns if c not in ordered]
+        return out[ordered + remaining]
 
     def _round1_df(df):
         out = df.copy()
@@ -741,64 +782,51 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
             tc.fill = PatternFill("solid", fgColor="D6EAF8")
             tc.alignment = Alignment(horizontal="center", vertical="center")
 
-        # --- Smart column widths: fit ALL columns on screen without horizontal scroll ---
+        # --- Smart column widths based on header name ---
         max_row_used = ws.max_row
 
-        # Measure actual max content length per column
-        content_widths = []
+        # Minimum widths by header name (ensures text fits without wrap)
+        MIN_WIDTHS = {
+            "Total Service":   16,
+            "Total Insurance": 16,
+            "Avg Service":     14,
+            "Avg Insurance":   14,
+            "Lab %":           10,
+            "Procedure %":     13,
+            "Radiology %":     13,
+            "Consultation":    14,
+            "Visits":          9,
+            "Doctor":          22,
+            "Insurance":       28,
+            "Dept":            18,
+        }
+
         for col_idx in range(1, max_col + 1):
-            max_len = max(
+            col_letter = get_column_letter(col_idx)
+            header_val = str(ws.cell(row=3, column=col_idx).value or "")  # row 3 = first section header row
+            # Also check row 1+2 area for any header
+            for r in range(1, min(max_row_used + 1, 8)):
+                v = ws.cell(row=r, column=col_idx).value
+                if v and str(v).strip() and str(v).strip() != header_val:
+                    if str(v).strip() in MIN_WIDTHS:
+                        header_val = str(v).strip()
+                        break
+
+            # Measure max content width in this column
+            max_content = max(
                 (len(str(ws.cell(row=r, column=col_idx).value or ""))
                  for r in range(1, max_row_used + 1)),
                 default=6,
             )
-            content_widths.append(max_len)
-
-        # Identify text vs numeric columns by checking the Doctor Wise df columns
-        # Col 1 = Department/Doctor (text), Col 2 = Doctor/Insurance (text), rest = numeric
-        # We use a simple heuristic: if average cell content is mostly digits → numeric
-        def _is_numeric_col(col_idx):
-            vals = []
-            for r in range(4, min(max_row_used + 1, 20)):
-                v = ws.cell(row=r, column=col_idx).value
-                if v is not None and str(v).strip():
-                    vals.append(v)
-            if not vals:
-                return False
-            num_count = sum(1 for v in vals if isinstance(v, (int, float)))
-            return num_count / len(vals) > 0.5
-
-        # Assign raw widths: text cols = content + padding (min 14), numeric = content + 2 (cap 14)
-        raw_widths = []
-        is_numeric = []
-        for ci in range(max_col):
-            cw = content_widths[ci]
-            numeric = _is_numeric_col(ci + 1)
-            is_numeric.append(numeric)
-            if numeric:
-                raw_widths.append(min(cw + 2, 14))
-            else:
-                raw_widths.append(min(max(cw + 2, 14), 32))  # text: 14–32
-
-        # Only scale numeric columns if total is too wide; text columns stay fixed
-        text_total = sum(w for w, n in zip(raw_widths, is_numeric) if not n)
-        num_cols_list = [(i, w) for i, (w, n) in enumerate(zip(raw_widths, is_numeric)) if n]
-        num_total = sum(w for _, w in num_cols_list)
-
-        TARGET = 188
-        num_budget = max(TARGET - text_total, len(num_cols_list) * 7)
-        num_scale = min(1.0, num_budget / num_total) if num_total > 0 else 1.0
-
-        final_widths = []
-        for ci in range(max_col):
-            if is_numeric[ci]:
-                final_widths.append(max(round(raw_widths[ci] * num_scale, 1), 7))
-            else:
-                final_widths.append(raw_widths[ci])
-
-        for col_idx in range(1, max_col + 1):
-            col_letter = get_column_letter(col_idx)
-            ws.column_dimensions[col_letter].width = final_widths[col_idx - 1]
+            # Base width from content
+            base = max_content + 2
+            # Apply minimum from header name map
+            min_w = MIN_WIDTHS.get(header_val, 0)
+            final_w = max(base, min_w, 9)
+            # Cap very wide text cols
+            if final_w > 30:
+                final_w = 30
+            ws.column_dimensions[col_letter].width = round(final_w, 1)
 
         ws.freeze_panes = "A4"  # freeze below title + blank row
 
@@ -1672,18 +1700,68 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             x = _sort_income(df)
             x = _move_grand_total_bottom(x)
             x = x.copy()
-            # round key numeric display columns
-            for col in ["Avg_Amount_Service", "Avg_Amount_Insuance", "Lab_%", "Procedure_Per_Visit", "Radiology_Per_Visit"]:
-                if col in x.columns:
-                    x[col] = pd.to_numeric(x[col], errors="coerce").round(2)
 
-            # Rename for UI (user requested)
+            # Drop misleading % cols
+            for c in ["Radiology_%", "Procedure_%"]:
+                if c in x.columns:
+                    x = x.drop(columns=[c])
+
+            # Compute per-visit ratios if not already present
+            visit_col = next((c for c in x.columns if str(c).strip().lower() in
+                              ["total_visit", "total visit", "visits", "visit"]), None)
+            if visit_col is not None:
+                denom = pd.to_numeric(x[visit_col], errors="coerce").replace(0, pd.NA)
+                if "Procedure" in x.columns and "Procedure_Per_Visit" not in x.columns:
+                    x["Procedure_Per_Visit"] = (pd.to_numeric(x["Procedure"], errors="coerce") / denom).round(2).fillna(0)
+                if "Radiology" in x.columns and "Radiology_Per_Visit" not in x.columns:
+                    x["Radiology_Per_Visit"] = (pd.to_numeric(x["Radiology"], errors="coerce") / denom).round(2).fillna(0)
+
+            # Smart rounding: integers for counts, 2dp for avg/%, 1dp for amounts
+            _int_c = {"Consultation","Lab","Radiology","Procedure","Total_Visit","Visits"}
+            _pct_c = {"Lab_%","Avg_Amount_Service","Avg_Amount_Insuance","Avg_Amount_Insurance",
+                      "Procedure_Per_Visit","Radiology_Per_Visit"}
+            for col in x.columns:
+                if not pd.api.types.is_numeric_dtype(x[col]):
+                    continue
+                if col in _int_c:
+                    x[col] = pd.to_numeric(x[col], errors="coerce").round(0).fillna(0).astype(int)
+                elif col in _pct_c:
+                    x[col] = pd.to_numeric(x[col], errors="coerce").round(2)
+                else:
+                    s = pd.to_numeric(x[col], errors="coerce").round(1)
+                    if s.dropna().apply(lambda v: v == int(v)).all():
+                        x[col] = s.fillna(0).astype(int)
+                    else:
+                        x[col] = s
+
+            # Full rename to clean display names
             x = x.rename(columns={
-                "Procedure_Per_Visit": "Procedure %",
-                "Radiology_Per_Visit": "Radiology %",
+                "Total_Amount_Service":   "Total Service",
+                "Total_Amount_Insuance":  "Total Insurance",
+                "Total_Amount_Insurance": "Total Insurance",
+                "Avg_Amount_Service":     "Avg Service",
+                "Avg_Amount_Insuance":    "Avg Insurance",
+                "Avg_Amount_Insurance":   "Avg Insurance",
+                "Avg.Amount":             "Avg Insurance",
+                "Lab_%":                  "Lab %",
+                "Procedure_Per_Visit":    "Procedure %",
+                "Radiology_Per_Visit":    "Radiology %",
+                "Total_Visit":            "Visits",
+                "Department":             "Dept",
             })
 
-            return x
+            # Reorder columns
+            _ORDER = [
+                "Dept", "Doctor", "Insurance",
+                "Consultation", "Lab", "Radiology", "Procedure",
+                "Visits",
+                "Total Service", "Total Insurance",
+                "Avg Service", "Avg Insurance",
+                "Lab %", "Procedure %", "Radiology %",
+            ]
+            ordered = [c for c in _ORDER if c in x.columns]
+            remaining = [c for c in x.columns if c not in ordered]
+            return x[ordered + remaining]
 
 
         with tabs[0]:
