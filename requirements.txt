@@ -11,3 +11,4 @@ xlrd==2.0.1
 boto3
 botocore
 streamlit
+pdfplumber
