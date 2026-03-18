@@ -3,7 +3,8 @@ import pandas as pd
 import boto3
 import io
 import re
-from datetime import datetime
+import pdfplumber
+from collections import defaultdict
 
 st.set_page_config(page_title="Klaim Financial Tracker", layout="wide", page_icon="💰")
 
@@ -12,54 +13,31 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .block-container { padding-top: 1.5rem; }
-
 .kpi-card {
-    background: white;
-    border-radius: 12px;
-    padding: 18px 22px;
+    background: white; border-radius: 12px; padding: 18px 22px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.07);
-    border-left: 5px solid #1F3864;
-    height: 100%;
+    border-left: 5px solid #1F3864; height: 100%;
 }
-.kpi-card.loss  { border-left-color: #e74c3c; }
-.kpi-card.gain  { border-left-color: #27ae60; }
-.kpi-card.warn  { border-left-color: #f39c12; }
-.kpi-card.info  { border-left-color: #2980b9; }
-.kpi-card.purple{ border-left-color: #8e44ad; }
-
+.kpi-card.loss   { border-left-color: #e74c3c; }
+.kpi-card.gain   { border-left-color: #27ae60; }
+.kpi-card.warn   { border-left-color: #f39c12; }
+.kpi-card.info   { border-left-color: #2980b9; }
 .kpi-label { font-size: 11px; color: #888; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 4px; }
 .kpi-value { font-size: 22px; font-weight: 700; color: #1F3864; }
 .kpi-value.red    { color: #e74c3c; }
 .kpi-value.green  { color: #27ae60; }
 .kpi-value.orange { color: #f39c12; }
 .kpi-sub { font-size: 11px; color: #aaa; margin-top: 2px; }
-
 .section-hdr {
     font-size: 15px; font-weight: 700; color: #1F3864;
     border-bottom: 2px solid #e8edf3;
     padding-bottom: 6px; margin: 20px 0 12px 0;
 }
-.rpa-card {
-    background: white; border-radius: 10px;
-    padding: 14px 18px; margin-bottom: 8px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
-    border-left: 4px solid #1F3864;
-    cursor: pointer;
-}
-.rpa-card:hover { border-left-color: #ED7D31; }
-.tag {
-    display:inline-block; padding:2px 10px; border-radius:20px;
-    font-size:11px; font-weight:600;
-}
-.tag-pending  { background:#fff3cd; color:#856404; }
-.tag-paid     { background:#d1e7dd; color:#0a3622; }
-.tag-denied   { background:#f8d7da; color:#842029; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── AWS ─────────────────────────────────────────────────────────────────
-BUCKET = "emc-rcm-storage-2026"
-KLAIM_PREFIX   = "klaim-data/"
+BUCKET         = "emc-rcm-storage-2026"
+KLAIM_PREFIX   = "klaim-pdfs/"
 BILLING_PREFIX = "billing-data/"
 
 @st.cache_resource
@@ -76,444 +54,338 @@ def list_s3_files(prefix):
     resp = s3.list_objects_v2(Bucket=BUCKET, Prefix=prefix)
     return [o["Key"] for o in resp.get("Contents", [])]
 
-def read_s3_csv(key):
+def read_s3_bytes(key):
     s3 = get_s3()
-    obj = s3.get_object(Bucket=BUCKET, Key=key)
-    return pd.read_csv(io.BytesIO(obj["Body"].read()))
+    return s3.get_object(Bucket=BUCKET, Key=key)["Body"].read()
 
-def read_s3_excel(key):
-    s3 = get_s3()
-    obj = s3.get_object(Bucket=BUCKET, Key=key)
-    df = pd.read_excel(io.BytesIO(obj["Body"].read()))
-    df.columns = [c.strip() for c in df.columns]
-    return df
+def upload_s3(key, data, ctype="application/octet-stream"):
+    get_s3().put_object(Bucket=BUCKET, Key=key, Body=data, ContentType=ctype)
 
-def upload_s3(key, data_bytes, content_type="application/octet-stream"):
-    s3 = get_s3()
-    s3.put_object(Bucket=BUCKET, Key=key, Body=data_bytes, ContentType=content_type)
+INSURERS = ['NEXTCARE-AD','DAMAN-AD','FMC-AD','DUBAI-INSCO-AD',
+            'ORIENT-AD','QATAR-AD','TAKAFUL-EMARAT-AD']
 
-# ── Extract RPA ref from filename ────────────────────────────────────────
-def extract_rpa_ref(filename):
-    """Extract RPA reference like 2603_008173_EXCELLENT_0145 from filename"""
-    base = filename.split("/")[-1]
-    # Try pattern NNNN_NNNNNN_WORD_NNNN
-    m = re.search(r'(\d{4}_\d{6}_[A-Z]+_\d{4})', base, re.IGNORECASE)
-    if m:
-        return m.group(1).upper()
-    # Fallback: strip extension
-    return re.sub(r'\.(csv|xlsx)$', '', base, flags=re.IGNORECASE)
+def parse_klaim_pdf(pdf_bytes):
+    claims = []
+    meta   = {}
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        p1_text = pdf.pages[0].extract_text() or ""
+        ref = re.search(r'(\d{4}/\d{6}/\w+/\d{4})', p1_text)
+        meta["rpa_ref"] = ref.group(1) if ref else "UNKNOWN"
+        dt = re.search(r'Purchase Date:\s*(\d+ \w+ \d{4})', p1_text)
+        meta["deal_date"] = dt.group(1) if dt else ""
+        fac = re.search(r'as\s+(EXCELLENT|EASYHEALTHMC|PHARMACY)', p1_text)
+        meta["facility"] = fac.group(1) if fac else "EXCELLENT"
+        fee = re.search(r'Security registration fee\s+AED\s+([\d,]+)', p1_text)
+        meta["fees"] = float(fee.group(1).replace(",","")) if fee else 0.0
 
-def rpa_ref_to_slash(ref):
-    """Convert 2603_008173_EXCELLENT_0145 -> 2603/008173/EXCELLENT/0145"""
-    return ref.replace("_", "/")
+        for page in pdf.pages:
+            words = page.extract_words()
+            rows  = defaultdict(list)
+            for w in words:
+                rows[round(w['top']/4)*4].append(w)
+            for y in sorted(rows):
+                line = ' '.join(w['text'] for w in sorted(rows[y], key=lambda w: w['x0']))
+                cm   = re.search(r'(MF\d+[-\w]+)', line)
+                if not cm:
+                    continue
+                nums = re.findall(r'\d+\.\d+', line)
+                if len(nums) < 3:
+                    continue
+                ins = next((i for i in INSURERS if i in line), "UNKNOWN")
+                dm  = re.search(r'(\d+ \w+ \d{4})', line)
+                claims.append({
+                    "Claim ID":       cm.group(1),
+                    "Insurer":        ins,
+                    "Sub Date":       dm.group(1) if dm else "",
+                    "Claim Value":    float(nums[0]),
+                    "Discount %":     float(nums[1]),
+                    "Purchase Price": float(nums[2]),
+                    "Discount Loss":  round(float(nums[0]) - float(nums[2]), 2),
+                })
 
-# ── Financial calculations ────────────────────────────────────────────────
-def calc_financials(klaim_df):
-    """Compute key financial columns from Klaim file"""
-    df = klaim_df.copy()
-    df["Claim net"]                   = pd.to_numeric(df["Claim net"], errors="coerce").fillna(0)
-    df["Paid by insurance"]           = pd.to_numeric(df["Paid by insurance"], errors="coerce").fillna(0)
-    df["Denied by insurance"]         = pd.to_numeric(df["Denied by insurance"], errors="coerce").fillna(0)
-    df["Pending insurance response"]  = pd.to_numeric(df["Pending insurance response"], errors="coerce").fillna(0)
-    df["Pending reconciliation"]      = pd.to_numeric(df["Pending reconciliation"], errors="coerce").fillna(0)
-    return df
-
-def merge_with_billing(klaim_df, billing_df):
-    """Merge Klaim claims with billing summary on Claim ID / UniqueID"""
-    billing_cols = ["UniqueID","Insurance","DepName","DocName","SubDate","Status",
-                    "SubInsShare","Balance","Month","Year","Facility Name"]
-    billing_cols = [c for c in billing_cols if c in billing_df.columns]
-    b = billing_df[billing_cols].copy()
-    b = b.rename(columns={
-        "UniqueID": "Claim ID",
-        "Insurance": "Billing Insurance",
-        "Status": "Billing Status",
-        "SubInsShare": "Billed Amount",
-        "SubDate": "Sub Date",
+    df = pd.DataFrame(claims).drop_duplicates(subset=["Claim ID"])
+    meta.update({
+        "total_claim_value":    round(df["Claim Value"].sum(), 2),
+        "total_purchase_price": round(df["Purchase Price"].sum(), 2),
+        "total_discount_loss":  round(df["Discount Loss"].sum(), 2),
+        "num_claims":           len(df),
     })
-    merged = klaim_df.merge(b, on="Claim ID", how="left")
-    return merged
+    return df, meta
 
-# ── KPI card helper ───────────────────────────────────────────────────────
-def kpi(col, label, value, style="", sub=""):
-    with col:
-        st.markdown(f"""
-        <div class="kpi-card {style}">
-            <div class="kpi-label">{label}</div>
-            <div class="kpi-value {'red' if style=='loss' else 'green' if style=='gain' else 'orange' if style=='warn' else ''}">{value}</div>
-            <div class="kpi-sub">{sub}</div>
-        </div>""", unsafe_allow_html=True)
+def rpa_slug(ref):     return ref.replace("/","_")
+def rpa_display(slug): return slug.replace("_","/")
 
-def fmt(n): return f"AED {n:,.0f}"
-def pct(n): return f"{n:.1f}%"
-
-# ════════════════════════════════════════════════════════════════════════
-# UPLOAD SECTION (sidebar)
-# ════════════════════════════════════════════════════════════════════════
-with st.sidebar:
-    st.markdown("### 💰 Klaim Financial Tracker")
-    st.markdown("---")
-    st.markdown("#### 📤 Upload New RPA Files")
-
-    facility_up = st.selectbox("Facility", ["EXCELLENT", "EASYHEALTHMC", "PHARMACY"], key="up_fac")
-    klaim_file  = st.file_uploader("Klaim CSV file", type=["csv"], key="klaim_up")
-    billing_sum = st.file_uploader("Billing Summary Excel", type=["xlsx","xls"], key="bill_sum_up")
-    billing_det = st.file_uploader("Billing Detail Excel", type=["xlsx","xls"], key="bill_det_up")
-
-    if st.button("⬆️ Upload to S3", use_container_width=True):
-        if not klaim_file:
-            st.error("Please upload at least the Klaim CSV file.")
-        else:
-            try:
-                # Extract RPA ref from klaim filename
-                rpa_ref = extract_rpa_ref(klaim_file.name)
-                fac = facility_up
-
-                # Upload Klaim file
-                k_key = f"{KLAIM_PREFIX}{fac}/{rpa_ref}.csv"
-                upload_s3(k_key, klaim_file.read(), "text/csv")
-
-                if billing_sum:
-                    bs_key = f"{BILLING_PREFIX}{fac}/summary/{rpa_ref}.xlsx"
-                    upload_s3(bs_key, billing_sum.read())
-
-                if billing_det:
-                    bd_key = f"{BILLING_PREFIX}{fac}/detail/{rpa_ref}.xlsx"
-                    upload_s3(bd_key, billing_det.read())
-
-                st.success(f"✅ Uploaded RPA `{rpa_ref}`")
-                st.cache_data.clear()
-            except Exception as e:
-                st.error(f"Upload failed: {e}")
-
-    st.markdown("---")
-    st.markdown("#### 🔍 Filter View")
-    selected_facility = st.selectbox("View Facility", ["All", "EXCELLENT", "EASYHEALTHMC", "PHARMACY"], key="view_fac")
-    selected_layer    = st.radio("Layer", ["📊 Overall", "📋 RPA Level", "🔬 Claim Detail"], key="layer")
-
-# ════════════════════════════════════════════════════════════════════════
-# LOAD ALL KLAIM DATA
-# ════════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=300)
-def load_all_klaim():
+def load_all_rpas():
     try:
-        keys = list_s3_files(KLAIM_PREFIX)
-        keys = [k for k in keys if k.endswith(".csv")]
-        frames = []
+        keys = [k for k in list_s3_files(KLAIM_PREFIX) if k.lower().endswith(".pdf")]
+        all_claims, all_meta = [], []
         for key in keys:
-            df = read_s3_csv(key)
-            df = calc_financials(df)
-            # Extract facility and RPA ref from path
-            parts = key.replace(KLAIM_PREFIX, "").split("/")
-            df["_facility"] = parts[0] if len(parts) > 1 else "UNKNOWN"
-            df["_rpa_ref"]  = extract_rpa_ref(key)
-            df["_s3_key"]   = key
-            frames.append(df)
-        if frames:
-            return pd.concat(frames, ignore_index=True)
-        return pd.DataFrame()
+            df, meta = parse_klaim_pdf(read_s3_bytes(key))
+            slug = re.sub(r'\.pdf$','', key.split("/")[-1], flags=re.I)
+            df["_rpa_slug"] = slug
+            df["_facility"] = meta.get("facility","UNKNOWN")
+            all_claims.append(df)
+            all_meta.append({**meta, "_rpa_slug": slug})
+        return (pd.concat(all_claims, ignore_index=True) if all_claims else pd.DataFrame(),
+                pd.DataFrame(all_meta) if all_meta else pd.DataFrame())
     except Exception as e:
-        st.error(f"Error loading data: {e}")
-        return pd.DataFrame()
+        st.error(f"Load error: {e}")
+        return pd.DataFrame(), pd.DataFrame()
 
-@st.cache_data(ttl=300)
-def load_billing_summary(facility, rpa_ref):
-    key = f"{BILLING_PREFIX}{facility}/summary/{rpa_ref}.xlsx"
+def load_billing(facility, slug):
     try:
-        return read_s3_excel(key)
+        data = read_s3_bytes(f"{BILLING_PREFIX}{facility}/summary/{slug}.xlsx")
+        df   = pd.read_excel(io.BytesIO(data))
+        df.columns = [c.strip() for c in df.columns]
+        return df
     except:
         return None
 
-# ── Header ───────────────────────────────────────────────────────────────
+def kpi(col, label, value, style="", sub=""):
+    cc = {"loss":"red","gain":"green","warn":"orange"}.get(style,"")
+    with col:
+        st.markdown(f"""<div class="kpi-card {style}">
+            <div class="kpi-label">{label}</div>
+            <div class="kpi-value {cc}">{value}</div>
+            <div class="kpi-sub">{sub}</div></div>""", unsafe_allow_html=True)
+
+def fmt(n): return f"AED {n:,.0f}"
+
+# ── Sidebar ───────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### 💰 Klaim Tracker")
+    st.markdown("---")
+    st.markdown("#### 📤 Upload RPA")
+    fac_up  = st.selectbox("Facility", ["EXCELLENT","EASYHEALTHMC","PHARMACY"], key="uf")
+    pdf_up  = st.file_uploader("Klaim PDF", type=["pdf"])
+    bill_up = st.file_uploader("Billing Summary Excel (optional)", type=["xlsx","xls"])
+
+    if st.button("⬆️ Upload to S3", use_container_width=True):
+        if not pdf_up:
+            st.error("Upload the PDF first.")
+        else:
+            with st.spinner("Parsing PDF..."):
+                try:
+                    pdf_b = pdf_up.read()
+                    _, meta = parse_klaim_pdf(pdf_b)
+                    slug    = rpa_slug(meta["rpa_ref"])
+                    upload_s3(f"{KLAIM_PREFIX}{fac_up}/{slug}.pdf", pdf_b, "application/pdf")
+                    if bill_up:
+                        upload_s3(f"{BILLING_PREFIX}{fac_up}/summary/{slug}.xlsx", bill_up.read())
+                    st.success(f"✅ `{rpa_display(slug)}`\n\n"
+                               f"{meta['num_claims']} claims | "
+                               f"Value: AED {meta['total_claim_value']:,.0f} | "
+                               f"Lost: AED {meta['total_discount_loss']:,.0f}")
+                    st.cache_data.clear()
+                except Exception as e:
+                    st.error(f"Failed: {e}")
+
+    st.markdown("---")
+    sel_fac   = st.selectbox("View Facility", ["All","EXCELLENT","EASYHEALTHMC","PHARMACY"], key="vf")
+    sel_layer = st.radio("Layer", ["📊 Overall","📋 RPA Level","🔬 Claim Detail"])
+
+# ── Header ────────────────────────────────────────────────────────────────
 st.markdown("""
-<div style="background:linear-gradient(135deg,#1F3864 0%,#2c5282 100%);
-            padding:20px 28px;border-radius:14px;margin-bottom:20px;
-            display:flex;align-items:center;gap:12px;">
-    <div>
-        <h1 style="color:white;margin:0;font-size:24px;font-weight:700;">💰 Klaim Financial Tracker</h1>
-        <p style="color:#a0bcd8;margin:4px 0 0 0;font-size:13px;">
-            Track your financial exposure — discounts, rejections, and net position across all RPA runs
-        </p>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+<div style="background:linear-gradient(135deg,#1F3864,#2c5282);
+    padding:20px 28px;border-radius:14px;margin-bottom:20px;">
+  <h1 style="color:white;margin:0;font-size:24px;font-weight:700;">💰 Klaim Financial Tracker</h1>
+  <p style="color:#a0bcd8;margin:4px 0 0 0;font-size:13px;">
+    Upload Klaim PDF → auto-extract → track discount loss, fees &amp; net exposure
+  </p>
+</div>""", unsafe_allow_html=True)
 
-all_data = load_all_klaim()
+claims_df, meta_df = load_all_rpas()
 
-if all_data.empty:
-    st.info("📭 No data loaded yet. Upload your first Klaim CSV and billing files using the sidebar.")
+if claims_df.empty:
+    st.info("📭 No data yet. Upload a Klaim PDF using the sidebar.")
     st.stop()
 
-# Apply facility filter
-if selected_facility != "All":
-    view_data = all_data[all_data["_facility"] == selected_facility].copy()
-else:
-    view_data = all_data.copy()
+if sel_fac != "All":
+    claims_df = claims_df[claims_df["_facility"] == sel_fac]
+    if not meta_df.empty and "facility" in meta_df.columns:
+        meta_df = meta_df[meta_df["facility"] == sel_fac]
 
-if view_data.empty:
-    st.warning(f"No data found for facility: {selected_facility}")
+if claims_df.empty:
+    st.warning(f"No data for {sel_fac}.")
     st.stop()
 
-# ════════════════════════════════════════════════════════════════════════
-# LAYER 1 — OVERALL
-# ════════════════════════════════════════════════════════════════════════
-if "Overall" in selected_layer:
-    st.markdown('<div class="section-hdr">📊 Overall Exposure to Klaim</div>', unsafe_allow_html=True)
+# ════════ LAYER 1 — OVERALL ══════════════════════════════════════════════
+if "Overall" in sel_layer:
+    st.markdown('<div class="section-hdr">📊 Overall Exposure</div>', unsafe_allow_html=True)
+    tv   = claims_df["Claim Value"].sum()
+    tp   = claims_df["Purchase Price"].sum()
+    tl   = claims_df["Discount Loss"].sum()
+    tf   = meta_df["fees"].sum() if not meta_df.empty and "fees" in meta_df.columns else 0
+    rpas = claims_df["_rpa_slug"].nunique()
 
-    total_claims   = len(view_data)
-    total_value    = view_data["Claim net"].sum()
-    total_paid     = view_data["Paid by insurance"].sum()
-    total_denied   = view_data["Denied by insurance"].sum()
-    total_pending  = view_data["Pending insurance response"].sum() + view_data["Pending reconciliation"].sum()
-    total_rpas     = view_data["_rpa_ref"].nunique()
-
-    # Discount loss = what Klaim kept (Claim net - what insurance eventually pays back)
-    # Since funds_received = sale_price - fees, and sale_price = claim_net * (1 - discount%)
-    # We approximate discount as claims still pending + difference on paid
-    # Best approximation from available data:
-    recovered      = total_paid  # insurance paid Klaim (Klaim passes this to you minus their cut already taken at sale)
-    denial_loss    = total_denied
-    pending_amt    = total_pending
-
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    kpi(c1, "Total RPA Runs",       f"{total_rpas}",       "info",   f"{total_claims:,} claims")
-    kpi(c2, "Total Claim Value",     fmt(total_value),      "",       "Gross sent to Klaim")
-    kpi(c3, "Paid by Insurance",     fmt(total_paid),       "gain",   f"{total_paid/total_value*100:.1f}% of total" if total_value else "")
-    kpi(c4, "Denied by Insurance",   fmt(total_denied),     "loss",   f"{total_denied/total_value*100:.1f}% of total" if total_value else "")
-    kpi(c5, "Pending Response",      fmt(total_pending),    "warn",   "Awaiting insurer decision")
-    kpi(c6, "Pending Reconciliation",fmt(view_data["Pending reconciliation"].sum()), "purple", "Klaim processing")
-
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+    kpi(c1,"RPA Runs",         f"{rpas}",    "info",  f"{len(claims_df):,} claims")
+    kpi(c2,"Total Claim Value",fmt(tv),       "",      "Gross sold to Klaim")
+    kpi(c3,"Total Received",   fmt(tp),       "gain",  f"{tp/tv*100:.2f}% of value" if tv else "")
+    kpi(c4,"Discount Loss",    fmt(tl),       "loss",  f"{tl/tv*100:.2f}% of value" if tv else "")
+    kpi(c5,"Total Fees",       fmt(tf),       "warn",  "Security reg fees")
+    kpi(c6,"Net Cost to You",  fmt(tl+tf),    "loss",  "Discount + Fees")
     st.markdown("")
 
-    # Breakdown by facility
-    st.markdown('<div class="section-hdr">🏥 Breakdown by Facility</div>', unsafe_allow_html=True)
-    fac_grp = view_data.groupby("_facility").agg(
-        RPAs        =("_rpa_ref","nunique"),
-        Claims      =("Claim ID","count"),
-        Total_Value =("Claim net","sum"),
-        Paid        =("Paid by insurance","sum"),
-        Denied      =("Denied by insurance","sum"),
-        Pending     =("Pending insurance response","sum"),
-    ).reset_index()
-    fac_grp["Denial Rate"] = (fac_grp["Denied"] / fac_grp["Total_Value"] * 100).round(1).astype(str) + "%"
-    fac_grp.columns = ["Facility","RPAs","Claims","Total Value (AED)","Paid (AED)","Denied (AED)","Pending (AED)","Denial Rate"]
-    for col in ["Total Value (AED)","Paid (AED)","Denied (AED)","Pending (AED)"]:
-        fac_grp[col] = fac_grp[col].apply(lambda x: f"{x:,.0f}")
-    st.dataframe(fac_grp, use_container_width=True, hide_index=True)
+    st.markdown('<div class="section-hdr">🏦 By Insurer</div>', unsafe_allow_html=True)
+    ig = claims_df.groupby("Insurer").agg(
+        Claims=("Claim ID","count"),
+        Value =("Claim Value","sum"),
+        Rcvd  =("Purchase Price","sum"),
+        Loss  =("Discount Loss","sum"),
+        AvgD  =("Discount %","mean"),
+    ).reset_index().sort_values("Value", ascending=False)
+    ig["Loss%"] = (ig["Loss"]/ig["Value"]*100).round(2).astype(str)+"%"
+    ig["AvgD"]  = ig["AvgD"].round(2).astype(str)+"%"
+    for c in ["Value","Rcvd","Loss"]:
+        ig[c] = ig[c].apply(lambda x: f"{x:,.2f}")
+    ig.columns = ["Insurer","Claims","Claim Value (AED)","Received (AED)",
+                  "Discount Loss (AED)","Avg Discount %","Loss %"]
+    st.dataframe(ig, use_container_width=True, hide_index=True)
 
-    # Breakdown by Payer
-    st.markdown('<div class="section-hdr">🏦 Breakdown by Payer / Insurer</div>', unsafe_allow_html=True)
-    pay_grp = view_data.groupby("Payer").agg(
-        Claims      =("Claim ID","count"),
-        Total_Value =("Claim net","sum"),
-        Paid        =("Paid by insurance","sum"),
-        Denied      =("Denied by insurance","sum"),
-        Pending     =("Pending insurance response","sum"),
-    ).reset_index().sort_values("Total_Value", ascending=False)
-    pay_grp["Denial Rate"] = (pay_grp["Denied"] / pay_grp["Total_Value"] * 100).round(1).astype(str) + "%"
-    pay_grp.columns = ["Payer","Claims","Total Value (AED)","Paid (AED)","Denied (AED)","Pending (AED)","Denial Rate"]
-    for col in ["Total Value (AED)","Paid (AED)","Denied (AED)","Pending (AED)"]:
-        pay_grp[col] = pay_grp[col].apply(lambda x: f"{x:,.0f}")
-    st.dataframe(pay_grp, use_container_width=True, hide_index=True)
+    if not meta_df.empty and "deal_date" in meta_df.columns:
+        st.markdown('<div class="section-hdr">📅 All RPA Runs</div>', unsafe_allow_html=True)
+        h = meta_df[["rpa_ref","deal_date","facility","num_claims",
+                     "total_claim_value","total_purchase_price",
+                     "total_discount_loss","fees"]].copy()
+        h["net_cost"] = h["total_discount_loss"] + h["fees"]
+        h = h.sort_values("deal_date", ascending=False)
+        for c in ["total_claim_value","total_purchase_price","total_discount_loss","fees","net_cost"]:
+            h[c] = h[c].apply(lambda x: f"{x:,.2f}")
+        h.columns = ["RPA Ref","Date","Facility","Claims","Claim Value",
+                     "Received","Discount Loss","Fees","Net Cost"]
+        st.dataframe(h, use_container_width=True, hide_index=True)
 
-    # Monthly trend
-    st.markdown('<div class="section-hdr">📅 Monthly Trend</div>', unsafe_allow_html=True)
-    if "Deal date" in view_data.columns:
-        view_data["_month"] = pd.to_datetime(view_data["Deal date"], errors="coerce").dt.to_period("M").astype(str)
-        trend = view_data.groupby("_month").agg(
-            Claims=("Claim ID","count"),
-            Value =("Claim net","sum"),
-            Paid  =("Paid by insurance","sum"),
-            Denied=("Denied by insurance","sum"),
-        ).reset_index()
-        trend.columns = ["Month","Claims","Claim Value (AED)","Paid (AED)","Denied (AED)"]
-        st.dataframe(trend, use_container_width=True, hide_index=True)
-
-# ════════════════════════════════════════════════════════════════════════
-# LAYER 2 — RPA LEVEL
-# ════════════════════════════════════════════════════════════════════════
-elif "RPA" in selected_layer:
+# ════════ LAYER 2 — RPA LEVEL ════════════════════════════════════════════
+elif "RPA" in sel_layer:
     st.markdown('<div class="section-hdr">📋 RPA Runs</div>', unsafe_allow_html=True)
+    search = st.text_input("Search", placeholder="e.g. 008173")
 
-    # Filters
-    fc1, fc2, fc3 = st.columns(3)
-    if "Deal date" in view_data.columns:
-        view_data["_deal_date"] = pd.to_datetime(view_data["Deal date"], errors="coerce")
-        months = ["All"] + sorted(view_data["_deal_date"].dt.to_period("M").astype(str).dropna().unique().tolist(), reverse=True)
-        sel_month = fc1.selectbox("Month", months)
-        if sel_month != "All":
-            view_data = view_data[view_data["_deal_date"].dt.to_period("M").astype(str) == sel_month]
+    rg = claims_df.groupby(["_rpa_slug","_facility"]).agg(
+        Claims=("Claim ID","count"),
+        Value =("Claim Value","sum"),
+        Rcvd  =("Purchase Price","sum"),
+        Loss  =("Discount Loss","sum"),
+        AvgD  =("Discount %","mean"),
+        Ins   =("Insurer", lambda x:", ".join(sorted(x.unique()))),
+    ).reset_index()
 
-    search = fc2.text_input("Search RPA reference", placeholder="e.g. 008173")
+    if not meta_df.empty and "_rpa_slug" in meta_df.columns:
+        rg = rg.merge(meta_df[["_rpa_slug","deal_date","fees"]], on="_rpa_slug", how="left")
+    else:
+        rg["deal_date"] = ""; rg["fees"] = 0
 
-    # Build RPA summary table
-    rpa_grp = view_data.groupby(["_rpa_ref","_facility"]).agg(
-        Deal_Date   =("Deal date","first"),
-        Claims      =("Claim ID","count"),
-        Total_Value =("Claim net","sum"),
-        Paid        =("Paid by insurance","sum"),
-        Denied      =("Denied by insurance","sum"),
-        Pending     =("Pending insurance response","sum"),
-        Payers      =("Payer", lambda x: ", ".join(sorted(x.unique()))),
-    ).reset_index().sort_values("Deal_Date", ascending=False)
-
+    rg = rg.sort_values("deal_date", ascending=False)
     if search:
-        rpa_grp = rpa_grp[rpa_grp["_rpa_ref"].str.contains(search, case=False, na=False)]
+        rg = rg[rg["_rpa_slug"].str.contains(search, case=False, na=False)]
 
-    st.markdown(f"**{len(rpa_grp)} RPA run(s) found**")
-
-    sel_rpa = None
-    for _, row in rpa_grp.iterrows():
-        denial_pct = row["Denied"] / row["Total_Value"] * 100 if row["Total_Value"] else 0
-        paid_pct   = row["Paid"]   / row["Total_Value"] * 100 if row["Total_Value"] else 0
-        ref_display = rpa_ref_to_slash(row["_rpa_ref"])
-        date_str = str(row["Deal_Date"])[:10] if pd.notna(row["Deal_Date"]) else "—"
-
-        col_a, col_b = st.columns([5,1])
-        with col_a:
+    st.markdown(f"**{len(rg)} run(s)**")
+    for _, row in rg.iterrows():
+        ca, cb = st.columns([5,1])
+        with ca:
             st.markdown(f"""
-            <div class="rpa-card">
-                <div style="display:flex;justify-content:space-between;align-items:center;">
-                    <div>
-                        <span style="font-weight:700;color:#1F3864;font-size:14px;">{ref_display}</span>
-                        <span style="margin-left:10px;font-size:12px;color:#888;">{row['_facility']} · {date_str}</span>
-                    </div>
-                    <div style="text-align:right;font-size:13px;">
-                        <b>AED {row['Total_Value']:,.0f}</b> &nbsp;|&nbsp;
-                        {row['Claims']} claims &nbsp;|&nbsp;
-                        <span style="color:#27ae60;">Paid: {paid_pct:.1f}%</span> &nbsp;
-                        <span style="color:#e74c3c;">Denied: {denial_pct:.1f}%</span>
-                    </div>
-                </div>
-                <div style="font-size:11px;color:#aaa;margin-top:4px;">Payers: {row['Payers']}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with col_b:
-            if st.button("🔍 Drill In", key=f"drill_{row['_rpa_ref']}"):
-                st.session_state["drill_rpa"]      = row["_rpa_ref"]
-                st.session_state["drill_facility"] = row["_facility"]
+            <div style="background:white;border-radius:10px;padding:14px 18px;
+                margin-bottom:8px;box-shadow:0 1px 4px rgba(0,0,0,0.08);
+                border-left:4px solid #1F3864;">
+              <div style="display:flex;justify-content:space-between;">
+                <b style="color:#1F3864;">{rpa_display(row['_rpa_slug'])}</b>
+                <span style="color:#888;font-size:12px;">{row['_facility']} · {str(row.get('deal_date',''))[:10]}</span>
+              </div>
+              <div style="font-size:13px;margin-top:6px;">
+                <b>AED {row['Value']:,.0f}</b> &nbsp;·&nbsp;
+                <span style="color:#27ae60;">Rcvd AED {row['Rcvd']:,.0f}</span> &nbsp;·&nbsp;
+                <span style="color:#e74c3c;">Lost AED {row['Loss']:,.0f}</span> &nbsp;·&nbsp;
+                <span style="color:#f39c12;">Fees AED {row['fees']:,.0f}</span>
+              </div>
+              <div style="font-size:11px;color:#aaa;margin-top:4px;">
+                {row['Claims']} claims · {row['AvgD']:.2f}% avg discount · {row['Ins']}
+              </div>
+            </div>""", unsafe_allow_html=True)
+        with cb:
+            if st.button("🔍 Drill", key=f"d_{row['_rpa_slug']}"):
+                st.session_state["drpa"] = row["_rpa_slug"]
+                st.session_state["dfac"] = row["_facility"]
                 st.rerun()
 
-    # ── Drill-in modal ────────────────────────────────────────────────
-    if "drill_rpa" in st.session_state:
-        rpa  = st.session_state["drill_rpa"]
-        fac  = st.session_state["drill_facility"]
-        rpa_data = view_data[view_data["_rpa_ref"] == rpa].copy()
-
+    if "drpa" in st.session_state:
+        slug = st.session_state["drpa"]
+        fac  = st.session_state["dfac"]
+        rc   = claims_df[claims_df["_rpa_slug"]==slug].copy()
+        rm   = meta_df[meta_df["_rpa_slug"]==slug].iloc[0] if not meta_df.empty and "_rpa_slug" in meta_df.columns and slug in meta_df["_rpa_slug"].values else {}
         st.markdown("---")
-        st.markdown(f'<div class="section-hdr">🔍 RPA Detail: {rpa_ref_to_slash(rpa)}</div>', unsafe_allow_html=True)
-
-        # Try load billing summary for this RPA
-        billing = load_billing_summary(fac, rpa)
-        if billing is not None:
-            rpa_data = merge_with_billing(rpa_data, billing)
-
-        tv = rpa_data["Claim net"].sum()
+        st.markdown(f'<div class="section-hdr">🔍 {rpa_display(slug)}</div>', unsafe_allow_html=True)
+        tv=rc["Claim Value"].sum(); tp=rc["Purchase Price"].sum(); tl=rc["Discount Loss"].sum()
+        fees = float(rm.get("fees",0)) if hasattr(rm,"get") else 0
         c1,c2,c3,c4,c5 = st.columns(5)
-        kpi(c1, "Claims",          f"{len(rpa_data):,}",                  "info")
-        kpi(c2, "Total Value",     fmt(tv),                                "")
-        kpi(c3, "Paid",            fmt(rpa_data["Paid by insurance"].sum()),"gain", f"{rpa_data['Paid by insurance'].sum()/tv*100:.1f}%" if tv else "")
-        kpi(c4, "Denied",          fmt(rpa_data["Denied by insurance"].sum()),"loss", f"{rpa_data['Denied by insurance'].sum()/tv*100:.1f}%" if tv else "")
-        kpi(c5, "Pending",         fmt(rpa_data["Pending insurance response"].sum()),"warn")
-
+        kpi(c1,"Claims",   f"{len(rc):,}", "info")
+        kpi(c2,"Value",    fmt(tv),        "")
+        kpi(c3,"Received", fmt(tp),        "gain", f"{tp/tv*100:.2f}%" if tv else "")
+        kpi(c4,"Lost",     fmt(tl),        "loss", f"{tl/tv*100:.2f}%" if tv else "")
+        kpi(c5,"Fees",     fmt(fees),      "warn")
         st.markdown("")
-
-        # Payer breakdown
-        pb = rpa_data.groupby("Payer").agg(
+        ig2 = rc.groupby("Insurer").agg(
             Claims=("Claim ID","count"),
-            Value =("Claim net","sum"),
-            Paid  =("Paid by insurance","sum"),
-            Denied=("Denied by insurance","sum"),
-            Pending=("Pending insurance response","sum"),
+            Value =("Claim Value","sum"),
+            Rcvd  =("Purchase Price","sum"),
+            Loss  =("Discount Loss","sum"),
+            AvgD  =("Discount %","mean"),
         ).reset_index()
-        for col in ["Value","Paid","Denied","Pending"]:
-            pb[col] = pb[col].apply(lambda x: f"{x:,.2f}")
-        pb.columns = ["Payer","Claims","Claim Net (AED)","Paid (AED)","Denied (AED)","Pending (AED)"]
-        st.dataframe(pb, use_container_width=True, hide_index=True)
-
-        if st.button("❌ Close Detail"):
-            del st.session_state["drill_rpa"]
-            del st.session_state["drill_facility"]
+        ig2["AvgD"] = ig2["AvgD"].round(2).astype(str)+"%"
+        for c in ["Value","Rcvd","Loss"]:
+            ig2[c] = ig2[c].apply(lambda x: f"{x:,.2f}")
+        ig2.columns = ["Insurer","Claims","Claim Value","Received","Discount Loss","Avg Discount %"]
+        st.dataframe(ig2, use_container_width=True, hide_index=True)
+        if st.button("❌ Close"):
+            del st.session_state["drpa"], st.session_state["dfac"]
             st.rerun()
 
-# ════════════════════════════════════════════════════════════════════════
-# LAYER 3 — CLAIM DETAIL
-# ════════════════════════════════════════════════════════════════════════
-elif "Claim" in selected_layer:
-    st.markdown('<div class="section-hdr">🔬 Claim-Level Detail</div>', unsafe_allow_html=True)
+# ════════ LAYER 3 — CLAIM DETAIL ═════════════════════════════════════════
+else:
+    st.markdown('<div class="section-hdr">🔬 Claim Detail</div>', unsafe_allow_html=True)
+    slugs    = sorted(claims_df["_rpa_slug"].unique().tolist(), reverse=True)
+    sel_slug = st.selectbox("Select RPA", slugs, format_func=rpa_display)
+    fac      = claims_df[claims_df["_rpa_slug"]==sel_slug]["_facility"].iloc[0]
+    rc       = claims_df[claims_df["_rpa_slug"]==sel_slug].copy()
+    rm       = meta_df[meta_df["_rpa_slug"]==sel_slug].iloc[0] if not meta_df.empty and "_rpa_slug" in meta_df.columns and sel_slug in meta_df["_rpa_slug"].values else {}
 
-    # RPA selector
-    rpa_options = sorted(view_data["_rpa_ref"].unique().tolist(), reverse=True)
-    rpa_labels  = {r: rpa_ref_to_slash(r) for r in rpa_options}
-    sel_rpa_key = st.selectbox("Select RPA Run", rpa_options, format_func=lambda x: rpa_labels[x])
-
-    sel_fac = view_data[view_data["_rpa_ref"] == sel_rpa_key]["_facility"].iloc[0]
-    rpa_claims = view_data[view_data["_rpa_ref"] == sel_rpa_key].copy()
-
-    # Try load billing
-    billing = load_billing_summary(sel_fac, sel_rpa_key)
+    billing = load_billing(fac, sel_slug)
     if billing is not None:
-        rpa_claims = merge_with_billing(rpa_claims, billing)
-        st.success(f"✅ Billing data matched — {len(rpa_claims)} claims reconciled")
-    else:
-        st.info("ℹ️ No billing summary file found for this RPA. Upload one via the sidebar.")
+        b = billing[[c for c in ["UniqueID","DepName","DocName","Status","Balance"] if c in billing.columns]]
+        b = b.rename(columns={"UniqueID":"Claim ID","Status":"Billing Status"})
+        rc = rc.merge(b, on="Claim ID", how="left")
+        st.success("✅ Billing data matched")
 
-    # Status filter
-    statuses = ["All"] + rpa_claims["Status"].dropna().unique().tolist()
-    sel_status = st.selectbox("Filter by Status", statuses)
-    if sel_status != "All":
-        rpa_claims = rpa_claims[rpa_claims["Status"] == sel_status]
+    ins_opts = ["All"] + sorted(rc["Insurer"].dropna().unique().tolist())
+    sel_ins  = st.selectbox("Filter by Insurer", ins_opts)
+    if sel_ins != "All":
+        rc = rc[rc["Insurer"]==sel_ins]
 
-    payer_filter = ["All"] + sorted(rpa_claims["Payer"].dropna().unique().tolist())
-    sel_payer = st.selectbox("Filter by Payer", payer_filter)
-    if sel_payer != "All":
-        rpa_claims = rpa_claims[rpa_claims["Payer"] == sel_payer]
-
-    # KPIs
-    tv = rpa_claims["Claim net"].sum()
+    tv=rc["Claim Value"].sum(); tp=rc["Purchase Price"].sum(); tl=rc["Discount Loss"].sum()
+    fees = float(rm.get("fees",0)) if hasattr(rm,"get") else 0
     c1,c2,c3,c4,c5 = st.columns(5)
-    kpi(c1, "Claims Shown",    f"{len(rpa_claims):,}",                      "info")
-    kpi(c2, "Claim Net",       fmt(tv),                                      "")
-    kpi(c3, "Paid",            fmt(rpa_claims["Paid by insurance"].sum()),    "gain")
-    kpi(c4, "Denied",          fmt(rpa_claims["Denied by insurance"].sum()),  "loss")
-    kpi(c5, "Pending",         fmt(rpa_claims["Pending insurance response"].sum()), "warn")
+    kpi(c1,"Claims",   f"{len(rc):,}", "info")
+    kpi(c2,"Value",    fmt(tv),        "")
+    kpi(c3,"Received", fmt(tp),        "gain", f"{tp/tv*100:.2f}%" if tv else "")
+    kpi(c4,"Lost",     fmt(tl),        "loss", f"{tl/tv*100:.2f}%" if tv else "")
+    kpi(c5,"Fees",     fmt(fees),      "warn")
     st.markdown("")
 
-    # Build display table
-    display_cols = ["Claim ID","Payer","Claim net","Status",
-                    "Paid by insurance","Denied by insurance",
-                    "Pending insurance response","Pending reconciliation",
-                    "Submission Date","Encounter Date"]
-    if "Billing Insurance" in rpa_claims.columns:
-        display_cols = ["Claim ID","Payer","Billing Insurance","Claim net","Status",
-                        "Paid by insurance","Denied by insurance",
-                        "Pending insurance response","DepName","DocName",
-                        "Sub Date","Submission Date"]
+    show = ["Claim ID","Insurer","Sub Date","Claim Value","Discount %","Purchase Price","Discount Loss"]
+    if "Billing Status" in rc.columns: show += ["Billing Status","DepName","DocName"]
+    if "Balance" in rc.columns:        show += ["Balance"]
+    disp = rc[[c for c in show if c in rc.columns]].copy()
+    disp["Discount %"] = disp["Discount %"].apply(lambda x: f"{x:.2f}%")
+    for c in ["Claim Value","Purchase Price","Discount Loss"]:
+        if c in disp.columns:
+            disp[c] = disp[c].apply(lambda x: f"{x:,.2f}")
 
-    disp = rpa_claims[[c for c in display_cols if c in rpa_claims.columns]].copy()
+    st.dataframe(disp, use_container_width=True, hide_index=True, height=500)
 
-    # Color rows by status
-    def color_row(row):
-        s = str(row.get("Status",""))
-        if "Denied" in s or "denied" in s.lower():
-            return ["background-color:#fff0f0"]*len(row)
-        elif "Paid" in s or "paid" in s.lower():
-            return ["background-color:#f0fff4"]*len(row)
-        elif "Pending" in s:
-            return ["background-color:#fffbf0"]*len(row)
-        return [""]*len(row)
-
-    styled = disp.style.apply(color_row, axis=1)
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
-
-    # Download
     buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        disp.to_excel(writer, index=False, sheet_name="Claim Detail")
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        rc[[c for c in show if c in rc.columns]].to_excel(w, index=False, sheet_name="Claims")
     buf.seek(0)
-    st.download_button(
-        "⬇️ Download This RPA Claims as Excel",
-        data=buf,
-        file_name=f"Klaim_{sel_rpa_key}_claims.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    st.download_button("⬇️ Download Excel", data=buf,
+        file_name=f"Klaim_{sel_slug}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
