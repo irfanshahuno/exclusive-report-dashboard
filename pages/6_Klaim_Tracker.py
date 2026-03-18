@@ -75,7 +75,7 @@ def parse_klaim_pdf(pdf_bytes):
         meta["deal_date"] = dt.group(1) if dt else ""
         fac = re.search(r'as\s+(EXCELLENT|EASYHEALTHMC|PHARMACY)', p1_text)
         meta["facility"] = fac.group(1) if fac else "EXCELLENT"
-        fee = re.search(r'Security registration fee\s+AED\s+([\d,]+)', p1_text)
+        fee = re.search(r'(?:Security registration fee|registration fee)\s+AED\s+([\d,]+)', p1_text)
         meta["fees"] = float(fee.group(1).replace(",","")) if fee else 0.0
 
         for page in pdf.pages:
@@ -83,25 +83,68 @@ def parse_klaim_pdf(pdf_bytes):
             rows  = defaultdict(list)
             for w in words:
                 rows[round(w['top']/4)*4].append(w)
-            for y in sorted(rows):
-                line = ' '.join(w['text'] for w in sorted(rows[y], key=lambda w: w['x0']))
-                cm   = re.search(r'(MF\d+[-\w]+)', line)
-                if not cm:
+            lines = [(y, ' '.join(w['text'] for w in sorted(rows[y], key=lambda w: w['x0'])))
+                     for y in sorted(rows)]
+
+            i = 0
+            while i < len(lines):
+                y, line = lines[i]
+
+                # NEW FORMAT: full claim ID + numbers on one line
+                cm_new = re.search(r'(MF\d{4}-\w{4}-\d{13}-\d{6}-\d{6})', line)
+                if cm_new:
+                    nums = re.findall(r'(?<!\d)(\d+\.\d+)(?!\d)', line)
+                    ins  = next((x for x in INSURERS if x in line), "UNKNOWN")
+                    dm   = re.search(r'(\d{1,2} \w+ \d{4})', line)
+                    if len(nums) >= 3:
+                        claims.append({
+                            "Claim ID":       cm_new.group(1),
+                            "Insurer":        ins,
+                            "Sub Date":       dm.group(1) if dm else "",
+                            "Claim Value":    float(nums[0]),
+                            "Discount %":     float(nums[1]),
+                            "Purchase Price": float(nums[2]),
+                            "Discount Loss":  round(float(nums[0]) - float(nums[2]), 2),
+                        })
+                    i += 1
                     continue
-                nums = re.findall(r'\d+\.\d+', line)
-                if len(nums) < 3:
-                    continue
-                ins = next((i for i in INSURERS if i in line), "UNKNOWN")
-                dm  = re.search(r'(\d+ \w+ \d{4})', line)
-                claims.append({
-                    "Claim ID":       cm.group(1),
-                    "Insurer":        ins,
-                    "Sub Date":       dm.group(1) if dm else "",
-                    "Claim Value":    float(nums[0]),
-                    "Discount %":     float(nums[1]),
-                    "Purchase Price": float(nums[2]),
-                    "Discount Loss":  round(float(nums[0]) - float(nums[2]), 2),
-                })
+
+                # OLD FORMAT: insurer + numbers on one line, Claim ID split across adjacent lines
+                nums_line = re.findall(r'(?<!\d)(\d+\.\d+)(?!\d)', line)
+                ins_found  = next((x for x in INSURERS if x in line), None)
+                if ins_found and len(nums_line) >= 3 and "MF" not in line:
+                    claim_id = None
+                    for back in range(1, 4):
+                        if i - back < 0: break
+                        prev = lines[i - back][1]
+                        part = re.search(r'(MF\d{4}-\w{4}-\d+[-]*)', prev)
+                        if part:
+                            pid = part.group(1).rstrip("-")
+                            suffix = ""
+                            if i + 1 < len(lines):
+                                nxt = lines[i + 1][1].strip()
+                                if re.match(r'^\d{6}$', nxt):
+                                    suffix = "-" + nxt
+                            mid = ""
+                            if back == 2 and i - 1 >= 0:
+                                mid_line = lines[i - 1][1].strip()
+                                mm = re.match(r'^(\d{13}-\d{6})$', mid_line)
+                                if mm:
+                                    mid = "-" + mm.group(1)
+                            claim_id = pid + mid + suffix
+                            break
+                    dm = re.search(r'(\d{1,2} ?\w+ ?\d{4})', line)
+                    if claim_id:
+                        claims.append({
+                            "Claim ID":       claim_id,
+                            "Insurer":        ins_found,
+                            "Sub Date":       dm.group(1) if dm else "",
+                            "Claim Value":    float(nums_line[0]),
+                            "Discount %":     float(nums_line[1]),
+                            "Purchase Price": float(nums_line[2]),
+                            "Discount Loss":  round(float(nums_line[0]) - float(nums_line[2]), 2),
+                        })
+                i += 1
 
     df = pd.DataFrame(claims).drop_duplicates(subset=["Claim ID"])
     meta.update({
