@@ -1,516 +1,423 @@
-import streamlit as st
-import pandas as pd
-import boto3
+
 import io
-import json
-from datetime import datetime
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+import re
+from typing import Dict, List, Optional
 
-st.set_page_config(page_title="Klaim Financial Tracker", layout="wide", page_icon="💊")
+import numpy as np
+import pandas as pd
+import streamlit as st
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-.main { background: #f0f4f8; }
-.block-container { padding-top: 1rem; }
 
-.kpi-card {
-    background: white; border-radius: 12px; padding: 18px 22px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.07); margin-bottom: 10px;
-    border-left: 5px solid #1F3864;
-}
-.kpi-card.loss  { border-left-color: #e74c3c; }
-.kpi-card.gain  { border-left-color: #27ae60; }
-.kpi-card.warn  { border-left-color: #f39c12; }
-.kpi-card.blue  { border-left-color: #2980b9; }
-.kpi-label { font-size: 11px; color: #888; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
-.kpi-value { font-size: 24px; font-weight: 700; color: #1F3864; margin: 4px 0 0 0; }
-.kpi-value.red    { color: #e74c3c; }
-.kpi-value.green  { color: #27ae60; }
-.kpi-value.orange { color: #f39c12; }
-.kpi-sub { font-size: 11px; color: #aaa; margin-top: 2px; }
+st.set_page_config(page_title="Klaim Exposure Tracker", layout="wide")
 
-.section-hdr {
-    font-size: 15px; font-weight: 700; color: #1F3864;
-    border-bottom: 2px solid #1F3864; padding-bottom: 5px; margin: 20px 0 12px 0;
-}
-.pill-paid     { background:#e2f4ea; color:#27ae60; padding:2px 10px; border-radius:20px; font-size:11px; font-weight:600; }
-.pill-rejected { background:#fde8e8; color:#e74c3c; padding:2px 10px; border-radius:20px; font-size:11px; font-weight:600; }
-.pill-pending  { background:#fff4e0; color:#f39c12; padding:2px 10px; border-radius:20px; font-size:11px; font-weight:600; }
-</style>
-""", unsafe_allow_html=True)
 
-# ── S3 helpers ───────────────────────────────────────────────────────────
-BUCKET = "emc-rcm-storage-2026"
-KLAIM_PREFIX   = "klaim-tracker/klaim-files/"
-BILLING_PREFIX = "klaim-tracker/billing-files/"
-
-@st.cache_resource
-def get_s3():
-    return boto3.client(
-        "s3",
-        aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
-        region_name=st.secrets.get("AWS_REGION", "us-east-1"),
-    )
-
-def list_s3_files(prefix):
-    s3 = get_s3()
-    resp = s3.list_objects_v2(Bucket=BUCKET, Prefix=prefix)
-    files = []
-    for obj in resp.get("Contents", []):
-        key = obj["Key"]
-        if key != prefix:
-            files.append(key)
-    return files
-
-def read_s3_file(key):
-    s3 = get_s3()
-    obj = s3.get_object(Bucket=BUCKET, Key=key)
-    data = obj["Body"].read()
-    if key.endswith(".csv"):
-        return pd.read_csv(io.BytesIO(data))
-    else:
-        return pd.read_excel(io.BytesIO(data))
-
-def upload_s3(file_bytes, key):
-    s3 = get_s3()
-    s3.put_object(Bucket=BUCKET, Key=key, Body=file_bytes)
-
-def clean_cols(df):
-    df.columns = df.columns.str.strip()
+# ---------------------------
+# Helpers
+# ---------------------------
+def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
     return df
 
-# ── Financial calculations ───────────────────────────────────────────────
-def calc_klaim_metrics(kdf):
-    """Given a Klaim dataframe, return per-claim financial summary."""
-    kdf = clean_cols(kdf)
-    kdf["Claim net"]                  = pd.to_numeric(kdf.get("Claim net", 0), errors="coerce").fillna(0)
-    kdf["Paid by insurance"]          = pd.to_numeric(kdf.get("Paid by insurance", 0), errors="coerce").fillna(0)
-    kdf["Denied by insurance"]        = pd.to_numeric(kdf.get("Denied by insurance", 0), errors="coerce").fillna(0)
-    kdf["Pending insurance response"] = pd.to_numeric(kdf.get("Pending insurance response", 0), errors="coerce").fillna(0)
-    kdf["Pending reconciliation"]     = pd.to_numeric(kdf.get("Pending reconciliation", 0), errors="coerce").fillna(0)
-    return kdf
 
-def merge_billing_klaim(bdf, kdf):
-    """Merge billing detail with klaim file on Claim ID = UniqueID."""
-    bdf = clean_cols(bdf)
-    kdf = clean_cols(kdf)
-    bdf["SubInsShare"] = pd.to_numeric(bdf.get("SubInsShare", 0), errors="coerce").fillna(0)
+def to_numeric(series: pd.Series) -> pd.Series:
+    if series is None:
+        return pd.Series(dtype="float64")
+    return pd.to_numeric(
+        series.astype(str)
+        .str.replace(",", "", regex=False)
+        .str.replace("AED", "", regex=False)
+        .str.strip()
+        .replace({"nan": np.nan, "None": np.nan, "": np.nan}),
+        errors="coerce",
+    )
 
-    # Aggregate billing to claim level
-    billing_grp = bdf.groupby("UniqueID").agg(
-        Insurance    =("Insurance", "first"),
-        Doctor       =("DocName", "first"),
-        Department   =("DepName", "first"),
-        SubDate      =("SubDate", "first"),
-        Month        =("Month", "first"),
-        Year         =("Year", "first"),
-        Billing_Net  =("SubInsShare", "sum"),
-        Activities   =("UniqueID", "count"),
-    ).reset_index()
 
-    # Aggregate klaim to claim level
-    kdf = calc_klaim_metrics(kdf)
-    klaim_grp = kdf.groupby("Claim ID").agg(
-        Payer            =("Payer", "first"),
-        Deal_Reference   =("Deal reference", "first"),
-        Deal_Date        =("Deal date", "first"),
-        Klaim_Net        =("Claim net", "sum"),
-        Paid_Insurance   =("Paid by insurance", "sum"),
-        Denied_Insurance =("Denied by insurance", "sum"),
-        Pending_Response =("Pending insurance response", "sum"),
-        Pending_Recon    =("Pending reconciliation", "sum"),
-        Status           =("Status", "first"),
-    ).reset_index()
+def pick_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    cols = {c.lower(): c for c in df.columns}
+    for cand in candidates:
+        if cand.lower() in cols:
+            return cols[cand.lower()]
+    for cand in candidates:
+        for c in df.columns:
+            if cand.lower() == c.lower().strip():
+                return c
+    return None
 
-    merged = pd.merge(klaim_grp, billing_grp,
-                      left_on="Claim ID", right_on="UniqueID", how="left")
 
-    # Financial metrics
-    merged["Discount_Loss"]     = merged["Klaim_Net"] - merged["Paid_Insurance"]
-    merged["Rejection_Charge"]  = merged["Denied_Insurance"]
-    merged["Net_Position"]      = merged["Paid_Insurance"] - merged["Rejection_Charge"]
-    return merged
+def read_any(uploaded_file) -> pd.DataFrame:
+    name = uploaded_file.name.lower()
+    if name.endswith(".csv"):
+        try:
+            return pd.read_csv(uploaded_file)
+        except UnicodeDecodeError:
+            uploaded_file.seek(0)
+            return pd.read_csv(uploaded_file, encoding="latin1")
+    return pd.read_excel(uploaded_file)
 
-# ── KPI card helper ──────────────────────────────────────────────────────
-def kpi(label, value, style="", sub="", fmt="aed"):
-    if fmt == "aed":
-        v_str = f"AED {value:,.0f}"
-    elif fmt == "pct":
-        v_str = f"{value:.1f}%"
-    else:
-        v_str = f"{value:,.0f}"
-    color = {"loss":"red","gain":"green","warn":"orange"}.get(style,"")
-    st.markdown(f"""
-    <div class="kpi-card {style}">
-        <div class="kpi-label">{label}</div>
-        <div class="kpi-value {color}">{v_str}</div>
-        {"<div class='kpi-sub'>"+sub+"</div>" if sub else ""}
-    </div>""", unsafe_allow_html=True)
 
-# ── Header ───────────────────────────────────────────────────────────────
-st.markdown("""
-<div style="background:linear-gradient(135deg,#1F3864,#2c5f8c);padding:22px 30px;
-     border-radius:14px;margin-bottom:20px;">
-  <h1 style="color:white;margin:0;font-size:24px;font-weight:700;">💊 Klaim Financial Tracker</h1>
-  <p style="color:#a8c4e0;margin:4px 0 0 0;font-size:13px;">
-     Track discount losses, rejection charges &amp; net position across all RPA runs
-  </p>
-</div>
-""", unsafe_allow_html=True)
+def normalize_status(s: str) -> str:
+    text = str(s).strip().lower()
+    if not text or text == "nan":
+        return "Unknown"
+    if "takeback" in text or "rejected" in text or "denied" in text:
+        return "Rejected / TakeBack"
+    if text.startswith("submitted"):
+        return "Submitted / Pending"
+    if "accepted" in text or "paid" in text or "remit" in text:
+        return "Paid / Accepted"
+    if "pending" in text:
+        return "Submitted / Pending"
+    return str(s).strip()
 
-# ── Tabs ─────────────────────────────────────────────────────────────────
-tab_overview, tab_rpa, tab_claims, tab_upload = st.tabs([
-    "📊 Overall Exposure", "📋 RPA Level", "🔍 Claim Level", "⬆️ Upload Files"
-])
 
-# ════════════════════════════════════════════════════════════════════════
-# UPLOAD TAB
-# ════════════════════════════════════════════════════════════════════════
-with tab_upload:
-    st.markdown('<div class="section-hdr">Upload New Files to S3</div>', unsafe_allow_html=True)
-
-    col_k, col_b = st.columns(2)
-
-    with col_k:
-        st.markdown("#### 📄 Klaim File (CSV or Excel)")
-        facility_k = st.selectbox("Facility", ["EXCELLENT", "PHARMACY", "EASYHEALTH"], key="fac_k")
-        rpa_ref_k  = st.text_input("RPA Reference (e.g. 2603/008173/EXCELLENT/0145)", key="rpa_ref_k")
-        klaim_file = st.file_uploader("Upload Klaim File", type=["csv","xlsx"], key="kf")
-        if klaim_file and rpa_ref_k:
-            if st.button("Upload Klaim File to S3", key="btn_k"):
-                safe_ref = rpa_ref_k.replace("/", "_")
-                key = f"{KLAIM_PREFIX}{facility_k}/{safe_ref}_{klaim_file.name}"
-                upload_s3(klaim_file.read(), key)
-                st.success(f"✅ Uploaded: {key}")
-
-    with col_b:
-        st.markdown("#### 📊 Billing File (Excel)")
-        facility_b = st.selectbox("Facility", ["EXCELLENT", "PHARMACY", "EASYHEALTH"], key="fac_b")
-        rpa_ref_b  = st.text_input("RPA Reference (matching Klaim file)", key="rpa_ref_b")
-        billing_file = st.file_uploader("Upload Billing File", type=["xlsx","csv"], key="bf")
-        if billing_file and rpa_ref_b:
-            if st.button("Upload Billing File to S3", key="btn_b"):
-                safe_ref = rpa_ref_b.replace("/", "_")
-                key = f"{BILLING_PREFIX}{facility_b}/{safe_ref}_{billing_file.name}"
-                upload_s3(billing_file.read(), key)
-                st.success(f"✅ Uploaded: {key}")
-
-    st.info("💡 Files are stored in S3 and automatically available in all tabs once uploaded.")
-
-# ── Load all data from S3 ────────────────────────────────────────────────
-@st.cache_data(ttl=300)
-def load_all_data():
-    """Load and combine all Klaim + Billing files from S3."""
+def fmt(x) -> str:
     try:
-        klaim_files   = list_s3_files(KLAIM_PREFIX)
-        billing_files = list_s3_files(BILLING_PREFIX)
-    except Exception as e:
-        return None, None, str(e)
+        if pd.isna(x):
+            return "-"
+        return f"{float(x):,.2f}"
+    except Exception:
+        return str(x)
 
-    all_klaim   = []
-    all_billing = []
 
-    for key in klaim_files:
-        try:
-            df = read_s3_file(key)
-            df = clean_cols(df)
-            # Extract facility and RPA ref from path
-            parts = key.replace(KLAIM_PREFIX,"").split("/")
-            df["_facility"] = parts[0] if len(parts) > 0 else "UNKNOWN"
-            df["_s3_key"]   = key
-            all_klaim.append(df)
-        except:
-            pass
+# ---------------------------
+# Standardizers
+# ---------------------------
+def standardize_klaim(df: pd.DataFrame) -> pd.DataFrame:
+    df = clean_columns(df)
+    out = pd.DataFrame()
 
-    for key in billing_files:
-        try:
-            df = read_s3_file(key)
-            df = clean_cols(df)
-            parts = key.replace(BILLING_PREFIX,"").split("/")
-            df["_facility"] = parts[0] if len(parts) > 0 else "UNKNOWN"
-            df["_s3_key"]   = key
-            all_billing.append(df)
-        except:
-            pass
+    # Flexible mapping for common Klaim exports
+    claim_col = pick_col(df, ["Claim ID", "Claim Id", "ClaimID", "Receivable ID"])
+    payer_col = pick_col(df, ["Payer", "Insurance", "Payer name"])
+    claim_net_col = pick_col(df, ["Claim net", "Claim Net", "Net", "Value", "Claim amount"])
+    deal_ref_col = pick_col(df, ["Deal reference", "Deal Reference", "RPA", "Deal no", "Deal number"])
+    deal_date_col = pick_col(df, ["Deal date", "Deal Date", "Transaction date"])
+    status_col = pick_col(df, ["Status", "Claim status"])
+    paid_col = pick_col(df, ["Paid by insurance", "Paid", "Paid amount"])
+    denied_col = pick_col(df, ["Denied by insurance", "Denied", "Rejected amount"])
+    pending_col = pick_col(df, ["Pending insurance response", "Pending", "Outstanding"])
 
-    klaim_all   = pd.concat(all_klaim,   ignore_index=True) if all_klaim   else pd.DataFrame()
-    billing_all = pd.concat(all_billing, ignore_index=True) if all_billing else pd.DataFrame()
-    return klaim_all, billing_all, None
+    if claim_col is None:
+        raise ValueError("Klaim file: could not find Claim ID column.")
 
-klaim_all, billing_all, load_err = load_all_data()
+    out["claim_id"] = df[claim_col].astype(str).str.strip()
+    out["payer"] = df[payer_col].astype(str).str.strip() if payer_col else ""
+    out["claim_net"] = to_numeric(df[claim_net_col]) if claim_net_col else np.nan
+    out["deal_reference"] = df[deal_ref_col].astype(str).str.strip() if deal_ref_col else "Unknown RPA"
+    out["deal_date"] = pd.to_datetime(df[deal_date_col], errors="coerce") if deal_date_col else pd.NaT
+    out["klaim_status_raw"] = df[status_col].astype(str).str.strip() if status_col else ""
+    out["klaim_paid_by_insurance"] = to_numeric(df[paid_col]) if paid_col else 0.0
+    out["klaim_denied_by_insurance"] = to_numeric(df[denied_col]) if denied_col else 0.0
+    out["klaim_pending_insurance"] = to_numeric(df[pending_col]) if pending_col else 0.0
 
-# ── Fallback: use uploaded sample files for demo ─────────────────────────
-if klaim_all is None or klaim_all.empty:
-    st.warning("⚠️ No data loaded from S3. Showing demo mode — upload files in the Upload tab.")
-    # Demo: use session state uploaded files if available
-    klaim_all   = pd.DataFrame()
-    billing_all = pd.DataFrame()
+    out = out.dropna(subset=["claim_id"])
+    out = out[out["claim_id"].astype(str).str.strip() != ""]
+    return out
 
-# ── Helper: merge all data ───────────────────────────────────────────────
-def get_merged_all(kdf, bdf):
-    if kdf.empty:
-        return pd.DataFrame()
-    kdf = calc_klaim_metrics(kdf)
-    # Aggregate klaim
-    klaim_grp = kdf.groupby(["Claim ID","_facility"]).agg(
-        Payer            =("Payer", "first"),
-        Deal_Reference   =("Deal reference", "first"),
-        Deal_Date        =("Deal date", "first"),
-        Klaim_Net        =("Claim net", "sum"),
-        Paid_Insurance   =("Paid by insurance", "sum"),
-        Denied_Insurance =("Denied by insurance", "sum"),
-        Pending_Response =("Pending insurance response", "sum"),
-        Status           =("Status", "first"),
-    ).reset_index()
 
-    if not bdf.empty and "UniqueID" in bdf.columns:
-        bdf["SubInsShare"] = pd.to_numeric(bdf.get("SubInsShare",0), errors="coerce").fillna(0)
-        billing_grp = bdf.groupby("UniqueID").agg(
-            Insurance  =("Insurance","first"),
-            Doctor     =("DocName","first"),
-            Department =("DepName","first"),
-            Month      =("Month","first"),
-            Year       =("Year","first"),
-        ).reset_index()
-        merged = pd.merge(klaim_grp, billing_grp, left_on="Claim ID", right_on="UniqueID", how="left")
-    else:
-        merged = klaim_grp.copy()
-        merged["Insurance"] = merged.get("Payer", "")
+def standardize_summary(df: pd.DataFrame) -> pd.DataFrame:
+    df = clean_columns(df)
+    out = pd.DataFrame()
 
-    merged["Discount_Loss"]    = (merged["Klaim_Net"] - merged["Paid_Insurance"]).clip(lower=0)
-    merged["Rejection_Charge"] = merged["Denied_Insurance"]
-    merged["Net_Position"]     = merged["Paid_Insurance"] - merged["Rejection_Charge"]
-    merged["Deal_Date"]        = pd.to_datetime(merged["Deal_Date"], errors="coerce")
-    merged["Month_Year"]       = merged["Deal_Date"].dt.to_period("M").astype(str)
+    claim_col = pick_col(df, ["UniqueID", "Claim ID", "ClaimID"])
+    if claim_col is None:
+        raise ValueError("Billing summary file: could not find UniqueID / Claim ID column.")
+
+    out["claim_id"] = df[claim_col].astype(str).str.strip()
+    out["visit_no"] = df[pick_col(df, ["VisitNo", "Visit No"])] if pick_col(df, ["VisitNo", "Visit No"]) else ""
+    out["visit_date"] = pd.to_datetime(df[pick_col(df, ["VisitDate", "Visit Date"])], errors="coerce") if pick_col(df, ["VisitDate", "Visit Date"]) else pd.NaT
+    out["insurance"] = df[pick_col(df, ["Insurance"])] if pick_col(df, ["Insurance"]) else ""
+    out["status_raw"] = df[pick_col(df, ["Status"])] if pick_col(df, ["Status"]) else ""
+    out["sub_ins_share"] = to_numeric(df[pick_col(df, ["SubInsShare"])]) if pick_col(df, ["SubInsShare"]) else 0.0
+    out["remit_ins_share"] = to_numeric(df[pick_col(df, ["RemitInsShare"])]) if pick_col(df, ["RemitInsShare"]) else 0.0
+    out["takeback"] = to_numeric(df[pick_col(df, ["TakeBack"])]) if pick_col(df, ["TakeBack"]) else 0.0
+    out["balance"] = to_numeric(df[pick_col(df, ["Balance"])]) if pick_col(df, ["Balance"]) else 0.0
+    out["month"] = df[pick_col(df, ["Month"])] if pick_col(df, ["Month"]) else ""
+    out["year"] = to_numeric(df[pick_col(df, ["Year"])]) if pick_col(df, ["Year"]) else np.nan
+    out["employer"] = df[pick_col(df, ["EmployerName", "Employer Name"])] if pick_col(df, ["EmployerName", "Employer Name"]) else ""
+    out["facility_name"] = df[pick_col(df, ["Facility Name", "FacilityName"])] if pick_col(df, ["Facility Name", "FacilityName"]) else ""
+
+    out["status_group"] = out["status_raw"].apply(normalize_status)
+    out = out.dropna(subset=["claim_id"])
+    out = out[out["claim_id"].astype(str).str.strip() != ""]
+    return out
+
+
+def standardize_detail(df: pd.DataFrame) -> pd.DataFrame:
+    df = clean_columns(df)
+    out = pd.DataFrame()
+
+    claim_col = pick_col(df, ["UniqueID", "Claim ID", "ClaimID"])
+    if claim_col is None:
+        raise ValueError("Billing detail file: could not find UniqueID / Claim ID column.")
+
+    out["claim_id"] = df[claim_col].astype(str).str.strip()
+    out["visit_no"] = df[pick_col(df, ["VisitNo", "Visit No"])] if pick_col(df, ["VisitNo", "Visit No"]) else ""
+    out["insurance"] = df[pick_col(df, ["Insurance"])] if pick_col(df, ["Insurance"]) else ""
+    out["status_raw"] = df[pick_col(df, ["Status"])] if pick_col(df, ["Status"]) else ""
+    out["activity_status"] = df[pick_col(df, ["ActivityStatus", "Activity Status"])] if pick_col(df, ["ActivityStatus", "Activity Status"]) else ""
+    out["code"] = df[pick_col(df, ["Code", "CPT", "Activity Code"])] if pick_col(df, ["Code", "CPT", "Activity Code"]) else ""
+    out["description"] = df[pick_col(df, ["Description"])] if pick_col(df, ["Description"]) else ""
+    out["act_id"] = df[pick_col(df, ["ActID", "Act Id"])] if pick_col(df, ["ActID", "Act Id"]) else ""
+    out["activity_ins"] = to_numeric(df[pick_col(df, ["ActivityIns"])]) if pick_col(df, ["ActivityIns"]) else 0.0
+    out["act_remit_ins_share"] = to_numeric(df[pick_col(df, ["actRemitInsShare", "ActRemitInsShare"])]) if pick_col(df, ["actRemitInsShare", "ActRemitInsShare"]) else 0.0
+    out["tkbk_amount_act"] = to_numeric(df[pick_col(df, ["TKBKAmountAct"])]) if pick_col(df, ["TKBKAmountAct"]) else 0.0
+    out["denial_code"] = df[pick_col(df, ["DenialCode"])] if pick_col(df, ["DenialCode"]) else ""
+    out["item_group"] = df[pick_col(df, ["Item Group", "Item Group "])] if pick_col(df, ["Item Group", "Item Group "]) else ""
+    out = out.dropna(subset=["claim_id"])
+    out = out[out["claim_id"].astype(str).str.strip() != ""]
+    return out
+
+
+# ---------------------------
+# Main calculations
+# ---------------------------
+def allocate_rpa_financials(
+    klaim_df: pd.DataFrame,
+    rpa_summary_df: pd.DataFrame,
+) -> pd.DataFrame:
+    df = klaim_df.copy()
+
+    if rpa_summary_df.empty:
+        df["rpa_total_value"] = np.nan
+        df["rpa_funds_received"] = np.nan
+        df["rpa_fees"] = np.nan
+        df["rpa_sale_price"] = np.nan
+        df["alloc_received"] = np.nan
+        df["alloc_fee"] = np.nan
+        df["alloc_discount_loss"] = np.nan
+        return df
+
+    merged = df.merge(rpa_summary_df, on="deal_reference", how="left")
+    merged["rpa_total_value"] = to_numeric(merged["rpa_total_value"])
+    merged["rpa_sale_price"] = to_numeric(merged["rpa_sale_price"])
+    merged["rpa_funds_received"] = to_numeric(merged["rpa_funds_received"])
+    merged["rpa_fees"] = to_numeric(merged["rpa_fees"])
+
+    ratio = np.where(
+        merged["rpa_total_value"].fillna(0) > 0,
+        merged["claim_net"].fillna(0) / merged["rpa_total_value"].fillna(0),
+        np.nan,
+    )
+
+    merged["alloc_received"] = merged["rpa_funds_received"] * ratio
+    merged["alloc_fee"] = merged["rpa_fees"] * ratio
+    merged["alloc_discount_loss"] = merged["claim_net"] - merged["alloc_received"]
     return merged
 
-merged_all = get_merged_all(klaim_all, billing_all)
 
-# ════════════════════════════════════════════════════════════════════════
-# OVERALL EXPOSURE TAB
-# ════════════════════════════════════════════════════════════════════════
-with tab_overview:
-    if merged_all.empty:
-        st.info("📂 No data yet. Please upload Klaim and Billing files in the **Upload Files** tab.")
-    else:
-        # Filters
-        col_f1, col_f2, col_f3 = st.columns(3)
-        facilities = ["All"] + sorted(merged_all["_facility"].dropna().unique().tolist())
-        sel_fac    = col_f1.selectbox("Facility", facilities, key="ov_fac")
-        months     = ["All"] + sorted(merged_all["Month_Year"].dropna().unique().tolist(), reverse=True)
-        sel_month  = col_f2.selectbox("Month", months, key="ov_month")
-        insurers   = ["All"] + sorted(merged_all["Payer"].dropna().unique().tolist())
-        sel_ins    = col_f3.selectbox("Insurer (Klaim)", insurers, key="ov_ins")
+def build_master(klaim_df: pd.DataFrame, summary_df: pd.DataFrame, detail_df: Optional[pd.DataFrame], rpa_summary_df: pd.DataFrame) -> pd.DataFrame:
+    klaim_fin = allocate_rpa_financials(klaim_df, rpa_summary_df)
+    master = klaim_fin.merge(summary_df, on="claim_id", how="left", suffixes=("_klaim", "_billing"))
 
-        df_ov = merged_all.copy()
-        if sel_fac   != "All": df_ov = df_ov[df_ov["_facility"]     == sel_fac]
-        if sel_month != "All": df_ov = df_ov[df_ov["Month_Year"]    == sel_month]
-        if sel_ins   != "All": df_ov = df_ov[df_ov["Payer"]         == sel_ins]
+    # truth from billing file
+    master["paid_truth"] = master["remit_ins_share"].fillna(0)
+    master["rejected_truth"] = master["takeback"].fillna(0)
+    master["pending_truth"] = master["balance"].fillna(0)
+    master["current_status_truth"] = master["status_group"].fillna("Not Found In Billing")
 
-        st.markdown('<div class="section-hdr">Overall KPIs</div>', unsafe_allow_html=True)
-        c1, c2, c3, c4, c5 = st.columns(5)
-        with c1: kpi("Total Claims Sold",       len(df_ov),                       fmt="num")
-        with c2: kpi("Total Value Sold",         df_ov["Klaim_Net"].sum(),          style="blue")
-        with c3: kpi("Total Discount Loss",      df_ov["Discount_Loss"].sum(),      style="loss", sub="Lost by selling early")
-        with c4: kpi("Total Rejection Charges",  df_ov["Rejection_Charge"].sum(),   style="warn", sub="Clawed back by Klaim")
-        with c5:
-            net = df_ov["Net_Position"].sum()
-            kpi("Net Position", net, style="gain" if net >= 0 else "loss")
+    # convenience metrics
+    master["matched_in_billing"] = np.where(master["status_raw"].notna(), "Matched", "Not Matched")
+    master["expected_chargeback_risk"] = master["rejected_truth"]
+    master["net_cash_position"] = master["alloc_received"] - master["expected_chargeback_risk"]
+    master["economic_cost"] = (master["claim_net"] - master["alloc_received"]).fillna(0) + master["expected_chargeback_risk"].fillna(0)
 
-        # Breakdown by facility
-        st.markdown('<div class="section-hdr">Breakdown by Facility</div>', unsafe_allow_html=True)
-        fac_grp = df_ov.groupby("_facility").agg(
-            Claims   =("Claim ID","count"),
-            Value    =("Klaim_Net","sum"),
-            Discount =("Discount_Loss","sum"),
-            Rejected =("Rejection_Charge","sum"),
-            Net      =("Net_Position","sum"),
-        ).reset_index().rename(columns={"_facility":"Facility"})
-        fac_grp["Discount %"] = (fac_grp["Discount"] / fac_grp["Value"] * 100).round(2)
-        st.dataframe(
-            fac_grp.style
-                .format({"Value":"AED {:,.0f}","Discount":"AED {:,.0f}","Rejected":"AED {:,.0f}",
-                         "Net":"AED {:,.0f}","Discount %":"{:.1f}%"})
-                .background_gradient(subset=["Discount %"], cmap="Reds"),
-            use_container_width=True, hide_index=True
+    if detail_df is not None and not detail_df.empty:
+        detail_agg = (
+            detail_df.groupby("claim_id", as_index=False)
+            .agg(
+                activity_rows=("claim_id", "size"),
+                detail_activity_ins=("activity_ins", "sum"),
+                detail_paid=("act_remit_ins_share", "sum"),
+                detail_takeback=("tkbk_amount_act", "sum"),
+            )
         )
-
-        # Breakdown by Insurer
-        st.markdown('<div class="section-hdr">Breakdown by Insurer</div>', unsafe_allow_html=True)
-        ins_grp = df_ov.groupby("Payer").agg(
-            Claims   =("Claim ID","count"),
-            Value    =("Klaim_Net","sum"),
-            Discount =("Discount_Loss","sum"),
-            Rejected =("Rejection_Charge","sum"),
-            Net      =("Net_Position","sum"),
-        ).reset_index().rename(columns={"Payer":"Insurer"}).sort_values("Value", ascending=False)
-        ins_grp["Discount %"] = (ins_grp["Discount"] / ins_grp["Value"] * 100).round(2)
-        st.dataframe(
-            ins_grp.style
-                .format({"Value":"AED {:,.0f}","Discount":"AED {:,.0f}","Rejected":"AED {:,.0f}",
-                         "Net":"AED {:,.0f}","Discount %":"{:.1f}%"})
-                .background_gradient(subset=["Discount %"], cmap="Reds"),
-            use_container_width=True, hide_index=True
-        )
-
-        # Monthly trend
-        if "Month_Year" in df_ov.columns:
-            st.markdown('<div class="section-hdr">Monthly Trend</div>', unsafe_allow_html=True)
-            trend = df_ov.groupby("Month_Year").agg(
-                Value    =("Klaim_Net","sum"),
-                Discount =("Discount_Loss","sum"),
-                Rejected =("Rejection_Charge","sum"),
-            ).reset_index().sort_values("Month_Year")
-            st.bar_chart(trend.set_index("Month_Year")[["Value","Discount","Rejected"]])
-
-# ════════════════════════════════════════════════════════════════════════
-# RPA LEVEL TAB
-# ════════════════════════════════════════════════════════════════════════
-with tab_rpa:
-    if merged_all.empty:
-        st.info("📂 No data yet. Please upload files in the **Upload Files** tab.")
+        master = master.merge(detail_agg, on="claim_id", how="left")
     else:
-        st.markdown('<div class="section-hdr">Select Facility & RPA Run</div>', unsafe_allow_html=True)
-        col_r1, col_r2 = st.columns(2)
-        facs_rpa  = sorted(merged_all["_facility"].dropna().unique().tolist())
-        sel_fac_r = col_r1.selectbox("Facility", facs_rpa, key="rpa_fac")
-        df_rpa    = merged_all[merged_all["_facility"] == sel_fac_r]
+        master["activity_rows"] = np.nan
+        master["detail_activity_ins"] = np.nan
+        master["detail_paid"] = np.nan
+        master["detail_takeback"] = np.nan
 
-        rpa_list  = sorted(df_rpa["Deal_Reference"].dropna().unique().tolist(), reverse=True)
-        sel_rpa   = col_r2.selectbox("RPA Reference", rpa_list, key="rpa_sel")
+    return master
 
-        df_sel = df_rpa[df_rpa["Deal_Reference"] == sel_rpa]
 
-        st.markdown(f'<div class="section-hdr">RPA: {sel_rpa}</div>', unsafe_allow_html=True)
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: kpi("Claims in this RPA",   len(df_sel),                     fmt="num")
-        with c2: kpi("Total Value",           df_sel["Klaim_Net"].sum())
-        with c3: kpi("Discount Loss",         df_sel["Discount_Loss"].sum(),   style="loss")
-        with c4: kpi("Rejection Charges",     df_sel["Rejection_Charge"].sum(),style="warn")
+def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, df in sheets.items():
+            safe_name = re.sub(r"[\\/*?:\[\]]", "", sheet_name)[:31]
+            df.to_excel(writer, index=False, sheet_name=safe_name)
+    output.seek(0)
+    return output.getvalue()
 
-        # Status breakdown
-        st.markdown('<div class="section-hdr">Status Breakdown</div>', unsafe_allow_html=True)
-        stat_grp = df_sel.groupby("Status").agg(
-            Claims=("Claim ID","count"),
-            Value =("Klaim_Net","sum"),
-        ).reset_index()
-        st.dataframe(stat_grp.style.format({"Value":"AED {:,.0f}"}),
-                     use_container_width=True, hide_index=True)
 
-        # Insurer breakdown for this RPA
-        st.markdown('<div class="section-hdr">By Insurer</div>', unsafe_allow_html=True)
-        ins_rpa = df_sel.groupby("Payer").agg(
-            Claims   =("Claim ID","count"),
-            Value    =("Klaim_Net","sum"),
-            Discount =("Discount_Loss","sum"),
-            Rejected =("Rejection_Charge","sum"),
-        ).reset_index()
-        ins_rpa["Discount %"] = (ins_rpa["Discount"] / ins_rpa["Value"] * 100).round(2)
-        st.dataframe(
-            ins_rpa.style.format({"Value":"AED {:,.0f}","Discount":"AED {:,.0f}",
-                                  "Rejected":"AED {:,.0f}","Discount %":"{:.1f}%"}),
-            use_container_width=True, hide_index=True
-        )
+# ---------------------------
+# UI
+# ---------------------------
+st.title("Klaim Exposure Tracker")
+st.caption("Klaim file = sold claims | Billing summary = truth | Billing detail = drill-down")
 
-# ════════════════════════════════════════════════════════════════════════
-# CLAIM LEVEL TAB
-# ════════════════════════════════════════════════════════════════════════
-with tab_claims:
-    if merged_all.empty:
-        st.info("📂 No data yet. Please upload files in the **Upload Files** tab.")
-    else:
-        st.markdown('<div class="section-hdr">Claim-Level Detail</div>', unsafe_allow_html=True)
+with st.sidebar:
+    st.header("Upload Files")
 
-        col_c1, col_c2, col_c3, col_c4 = st.columns(4)
-        facs_cl   = ["All"] + sorted(merged_all["_facility"].dropna().unique().tolist())
-        sel_fac_c = col_c1.selectbox("Facility", facs_cl, key="cl_fac")
-        rpas_cl   = ["All"] + sorted(merged_all["Deal_Reference"].dropna().unique().tolist(), reverse=True)
-        sel_rpa_c = col_c2.selectbox("RPA", rpas_cl, key="cl_rpa")
-        stats_cl  = ["All"] + sorted(merged_all["Status"].dropna().unique().tolist())
-        sel_sta_c = col_c3.selectbox("Status", stats_cl, key="cl_sta")
-        payers_cl = ["All"] + sorted(merged_all["Payer"].dropna().unique().tolist())
-        sel_pay_c = col_c4.selectbox("Payer", payers_cl, key="cl_pay")
+    klaim_file = st.file_uploader("Klaim CSV/Excel", type=["csv", "xlsx", "xls"], key="klaim")
+    summary_file = st.file_uploader("Billing Summary Excel", type=["xlsx", "xls", "csv"], key="summary")
+    detail_file = st.file_uploader("Billing Detail Excel (optional)", type=["xlsx", "xls", "csv"], key="detail")
 
-        df_cl = merged_all.copy()
-        if sel_fac_c != "All": df_cl = df_cl[df_cl["_facility"]     == sel_fac_c]
-        if sel_rpa_c != "All": df_cl = df_cl[df_cl["Deal_Reference"] == sel_rpa_c]
-        if sel_sta_c != "All": df_cl = df_cl[df_cl["Status"]         == sel_sta_c]
-        if sel_pay_c != "All": df_cl = df_cl[df_cl["Payer"]          == sel_pay_c]
-
-        display_cols = {
-            "Claim ID"       : "Claim ID",
-            "_facility"      : "Facility",
-            "Deal_Reference" : "RPA Reference",
-            "Deal_Date"      : "Deal Date",
-            "Payer"          : "Insurer",
-            "Klaim_Net"      : "Claim Net (AED)",
-            "Paid_Insurance" : "Paid (AED)",
-            "Denied_Insurance":"Rejected (AED)",
-            "Pending_Response":"Pending (AED)",
-            "Discount_Loss"  : "Discount Loss (AED)",
-            "Rejection_Charge":"Rejection Charge (AED)",
-            "Net_Position"   : "Net Position (AED)",
-            "Status"         : "Status",
+    st.markdown("---")
+    st.subheader("RPA financial input")
+    st.caption("Enter one row per RPA if you want funds received / fees / allocated cost.")
+    sample_rpa = pd.DataFrame(
+        {
+            "deal_reference": ["2603/008173/EXCELLENT/0145"],
+            "rpa_total_value": [35208],
+            "rpa_sale_price": [33728],
+            "rpa_fees": [185],
+            "rpa_funds_received": [33543],
         }
-        # Add billing cols if available
-        if "Insurance" in df_cl.columns:
-            display_cols["Insurance"] = "Insurance (Billing)"
-        if "Doctor" in df_cl.columns:
-            display_cols["Doctor"] = "Doctor"
+    )
+    rpa_summary_input = st.data_editor(
+        sample_rpa,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="rpa_editor",
+    )
 
-        df_show = df_cl[[c for c in display_cols.keys() if c in df_cl.columns]].copy()
-        df_show = df_show.rename(columns=display_cols)
+if not klaim_file or not summary_file:
+    st.info("Upload at least Klaim file and Billing Summary file to start.")
+    st.stop()
 
-        st.markdown(f"**{len(df_show):,} claims** | Total Value: **AED {df_cl['Klaim_Net'].sum():,.0f}** | "
-                    f"Discount Lost: **AED {df_cl['Discount_Loss'].sum():,.0f}** | "
-                    f"Rejected: **AED {df_cl['Rejection_Charge'].sum():,.0f}**")
+try:
+    klaim_raw = read_any(klaim_file)
+    summary_raw = read_any(summary_file)
+    detail_raw = read_any(detail_file) if detail_file else pd.DataFrame()
 
-        def color_status(val):
-            if val == "Paid":     return "background-color:#e2f4ea;color:#27ae60;font-weight:600"
-            if val == "Rejected": return "background-color:#fde8e8;color:#e74c3c;font-weight:600"
-            if val == "Pending":  return "background-color:#fff4e0;color:#f39c12;font-weight:600"
-            return ""
+    klaim_std = standardize_klaim(klaim_raw)
+    summary_std = standardize_summary(summary_raw)
+    detail_std = standardize_detail(detail_raw) if not detail_raw.empty else pd.DataFrame()
 
-        aed_cols = [c for c in df_show.columns if "AED" in c]
-        fmt_dict = {c: "AED {:,.0f}" for c in aed_cols}
+    rpa_summary_df = clean_columns(pd.DataFrame(rpa_summary_input))
+    master = build_master(klaim_std, summary_std, detail_std, rpa_summary_df)
 
-        st.dataframe(
-            df_show.style
-                .applymap(color_status, subset=["Status"] if "Status" in df_show.columns else [])
-                .format(fmt_dict),
-            use_container_width=True, hide_index=True, height=500
-        )
+except Exception as e:
+    st.error(f"Error while processing files: {e}")
+    st.stop()
 
-        # Excel download
-        if st.button("📥 Download as Excel", key="dl_claims"):
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Claim Detail"
-            NAVY = "1F3864"
-            headers = df_show.columns.tolist()
-            for ci, h in enumerate(headers, 1):
-                c = ws.cell(row=1, column=ci, value=h)
-                c.font    = Font(bold=True, color="FFFFFF", name="Arial")
-                c.fill    = PatternFill("solid", start_color=NAVY)
-                c.alignment = Alignment(horizontal="center")
-                ws.column_dimensions[get_column_letter(ci)].width = max(len(h)+4, 14)
+# Filters
+st.subheader("Filters")
+f1, f2, f3, f4 = st.columns(4)
 
-            for ri, row in enumerate(df_show.itertuples(index=False), 2):
-                bg = "F2F2F2" if ri % 2 == 0 else "FFFFFF"
-                for ci, v in enumerate(row, 1):
-                    cell = ws.cell(row=ri, column=ci, value=v)
-                    cell.font      = Font(name="Arial", size=10)
-                    cell.fill      = PatternFill("solid", start_color=bg)
-                    cell.alignment = Alignment(horizontal="center")
+rpas = ["All"] + sorted([str(x) for x in master["deal_reference"].dropna().unique()])
+statuses = ["All"] + sorted([str(x) for x in master["current_status_truth"].dropna().unique()])
+insurances = ["All"] + sorted([str(x) for x in master["insurance"].dropna().unique()])
+match_opts = ["All", "Matched", "Not Matched"]
 
-            buf = io.BytesIO()
-            wb.save(buf)
-            buf.seek(0)
-            st.download_button("⬇️ Download Excel", buf,
-                               file_name=f"klaim_claims_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+selected_rpa = f1.selectbox("RPA", rpas)
+selected_status = f2.selectbox("Billing Status", statuses)
+selected_ins = f3.selectbox("Insurance", insurances)
+selected_match = f4.selectbox("Match Status", match_opts)
+
+filtered = master.copy()
+if selected_rpa != "All":
+    filtered = filtered[filtered["deal_reference"].astype(str) == selected_rpa]
+if selected_status != "All":
+    filtered = filtered[filtered["current_status_truth"].astype(str) == selected_status]
+if selected_ins != "All":
+    filtered = filtered[filtered["insurance"].astype(str) == selected_ins]
+if selected_match != "All":
+    filtered = filtered[filtered["matched_in_billing"] == selected_match]
+
+# Layer 1
+st.markdown("## Layer 1 — Overall Exposure")
+c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+c1.metric("Claims Sold", f"{len(filtered):,}")
+c2.metric("Sold Value", fmt(filtered["claim_net"].sum()))
+c3.metric("Paid (Billing)", fmt(filtered["paid_truth"].sum()))
+c4.metric("Rejected / TakeBack", fmt(filtered["rejected_truth"].sum()))
+c5.metric("Pending / Balance", fmt(filtered["pending_truth"].sum()))
+c6.metric("Funds Received*", fmt(filtered["alloc_received"].sum(skipna=True)))
+
+c7, c8, c9, c10 = st.columns(4)
+c7.metric("Economic Cost*", fmt(filtered["economic_cost"].sum(skipna=True)))
+c8.metric("Net Cash Position*", fmt(filtered["net_cash_position"].sum(skipna=True)))
+c9.metric("Matched in Billing", f"{(filtered['matched_in_billing'] == 'Matched').sum():,}")
+c10.metric("Not Matched", f"{(filtered['matched_in_billing'] == 'Not Matched').sum():,}")
+
+st.caption("*Funds Received / Economic Cost / Net Cash Position depend on the RPA input table in the sidebar.")
+
+# Layer 2
+st.markdown("## Layer 2 — RPA Wise")
+rpa_view = (
+    filtered.groupby("deal_reference", dropna=False, as_index=False)
+    .agg(
+        deal_date=("deal_date", "min"),
+        claims=("claim_id", "size"),
+        sold_value=("claim_net", "sum"),
+        funds_received=("alloc_received", "sum"),
+        paid_billing=("paid_truth", "sum"),
+        rejected_takeback=("rejected_truth", "sum"),
+        pending_balance=("pending_truth", "sum"),
+        economic_cost=("economic_cost", "sum"),
+        net_cash_position=("net_cash_position", "sum"),
+    )
+    .sort_values(["deal_date", "deal_reference"], ascending=[False, True])
+)
+st.dataframe(rpa_view, use_container_width=True, height=300)
+
+# Layer 3
+st.markdown("## Layer 3 — Claim Wise")
+claim_cols = [
+    "claim_id", "deal_reference", "deal_date", "payer", "insurance", "visit_no", "visit_date",
+    "claim_net", "alloc_received", "paid_truth", "rejected_truth", "pending_truth",
+    "current_status_truth", "matched_in_billing", "activity_rows", "economic_cost", "net_cash_position"
+]
+claim_view = filtered[claim_cols].copy()
+st.dataframe(claim_view, use_container_width=True, height=420)
+
+# Drill-down
+st.markdown("## Drill-down — Billing Detail")
+selected_claim = st.selectbox("Select Claim ID", [""] + claim_view["claim_id"].astype(str).tolist())
+if selected_claim and not detail_std.empty:
+    drill = detail_std[detail_std["claim_id"].astype(str) == selected_claim].copy()
+    if drill.empty:
+        st.warning("No detail rows found for this claim.")
+    else:
+        st.dataframe(drill, use_container_width=True, height=350)
+else:
+    st.caption("Upload Billing Detail file and select a claim to see activity-level breakdown.")
+
+# Downloads
+st.markdown("## Download")
+download_master = master.copy()
+download_rpa = rpa_view.copy()
+download_claims = claim_view.copy()
+
+excel_bytes = to_excel_bytes(
+    {
+        "Master_Merged": download_master,
+        "RPA_Summary": download_rpa,
+        "Claim_View": download_claims,
+        "Klaim_Standardized": klaim_std,
+        "Billing_Summary_Standardized": summary_std,
+        "Billing_Detail_Standardized": detail_std if not detail_std.empty else pd.DataFrame(),
+    }
+)
+st.download_button(
+    "Download Full Klaim Tracker Excel",
+    data=excel_bytes,
+    file_name="klaim_tracker_output.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+
+st.markdown("## Notes")
+st.write(
+    """
+- Billing Summary is used as the source of truth for Paid / TakeBack / Balance.
+- Billing Detail is used only for drill-down, not for top totals.
+- Klaim file is used for sold claims and RPA mapping.
+- If you enter RPA total value, sale price, fees, and funds received in the sidebar, the app allocates received amount and fees claim-wise.
+"""
+)
