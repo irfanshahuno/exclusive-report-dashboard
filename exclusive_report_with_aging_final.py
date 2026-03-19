@@ -40,17 +40,6 @@ def parse_args():
 def load_data(input_file: str) -> pd.DataFrame:
     df = pd.read_excel(input_file, engine="openpyxl")
     df.columns = df.columns.str.strip()
-
-    # Fill down blank Status cells from the row above
-    if "Status" in df.columns:
-        df["Status"] = (
-            df["Status"]
-            .astype(str)
-            .str.strip()
-            .replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
-            .ffill()
-        )
-
     return df
 
 def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
@@ -75,40 +64,15 @@ def compute_measures(df: pd.DataFrame) -> pd.DataFrame:
 
     df["Rejection"], df["Accepted"], df["Balance"] = 0.0, 0.0, 0.0
 
-    status_col = "Status" if "Status" in df.columns else ("ActivityStatus" if "ActivityStatus" in df.columns else None)
-
-    if status_col and "DenialCode" in df.columns:
-        lower_status = df[status_col].astype(str).str.lower().str.strip()
-        denial_ok = df["DenialCode"].notna() & (df["DenialCode"].astype(str).str.strip() != "")
-
+    if "ActivityStatus" in df.columns and "DenialCode" in df.columns:
+        lower_status = df["ActivityStatus"].astype(str).str.lower()
         mask_paid = df["Paid"] > 0
-        mask_reject = (
-            (df["Paid"] == 0)
-            & denial_ok
-            & (
-                lower_status.eq("rejected")
-                | lower_status.str.contains("rejection accepted", na=False)
-                | lower_status.str.contains("reject", na=False)
-            )
-        )
+        mask_reject = (df["Paid"] == 0) & (lower_status == "rejected") & (df["DenialCode"].notna())
+        mask_balance = (df["Paid"] == 0) & ~mask_reject
 
-        # Only submitted claims should go to Balance
-        mask_submitted = lower_status.str.contains("submitted", na=False)
-
-        mask_balance = (
-            (df["Paid"] == 0)
-            & ~mask_reject
-            & mask_submitted
-        )
-
-        df.loc[mask_paid, "Accepted"] = (df.loc[mask_paid, "ActivityIns"] - df.loc[mask_paid, "Paid"]).clip(lower=0)
-        df.loc[mask_reject, "Rejection"] = df.loc[mask_reject, "ActivityIns"]
-        df.loc[mask_balance, "Balance"] = df.loc[mask_balance, "ActivityIns"]
-
-    else:
-        mask_paid = df["Paid"] > 0
-        df.loc[mask_paid, "Accepted"] = (df.loc[mask_paid, "ActivityIns"] - df.loc[mask_paid, "Paid"]).clip(lower=0)
-        df.loc[df["Paid"] == 0, "Balance"] = df.loc[df["Paid"] == 0, "ActivityIns"]
+        df.loc[mask_paid, "Accepted"] = df["ActivityIns"] - df["Paid"]
+        df.loc[mask_reject, "Rejection"] = df["ActivityIns"]
+        df.loc[mask_balance, "Balance"] = df["ActivityIns"]
 
     return df
 
@@ -173,71 +137,6 @@ def build_insurance_totals(df: pd.DataFrame) -> pd.DataFrame:
     insurance_totals = pd.concat([insurance_totals, pd.DataFrame([total_row])], ignore_index=True)
     return insurance_totals
 
-def build_monthly_insurance_detail(df: pd.DataFrame) -> pd.DataFrame:
-    """For each month, insurance-wise breakdown: Net Amount, Paid, Balance, Rejected, Accepted."""
-    date_col = next(
-        (c for c in ["VisitDate", "SubmissionDate", "ClaimDate"] if c in df.columns), None
-    )
-    if date_col is None:
-        return pd.DataFrame()
-
-    df = df.copy()
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
-    df = df.dropna(subset=[date_col])
-    df["_Month"] = df[date_col].dt.to_period("M").dt.strftime("%B %Y")
-
-    result = (
-        df.groupby(["_Month", "Insurance"], observed=True)[
-            ["ActivityIns", "Paid", "Rejection", "Accepted", "Balance"]
-        ]
-        .sum()
-        .reset_index()
-    )
-    result = result.rename(columns={
-        "_Month": "Month",
-        "ActivityIns": "Net Amount",
-        "Rejection": "Rejected",
-    })
-    result = result[["Month", "Insurance", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
-    return result
-
-def build_monthly_totals(df: pd.DataFrame) -> pd.DataFrame:
-    """Same structure as Insurance_Totals but grouped by VisitDate month."""
-    date_col = next(
-        (c for c in ["VisitDate", "SubmissionDate", "ClaimDate"] if c in df.columns), None
-    )
-    if date_col is None:
-        return pd.DataFrame()
-
-    df = df.copy()
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
-    df = df.dropna(subset=[date_col])
-    df["_Month"] = df[date_col].dt.to_period("M")
-
-    monthly = (
-        df.groupby("_Month", observed=True)[["ActivityIns", "Paid", "Rejection", "Accepted", "Balance"]]
-        .sum()
-        .reset_index()
-    )
-    monthly["_Month"] = monthly["_Month"].dt.strftime("%B %Y")
-    monthly = monthly.rename(columns={
-        "_Month": "Month",
-        "ActivityIns": "Net Amount",
-        "Rejection": "Rejected",
-    })
-    monthly = monthly[["Month", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
-
-    total_row = {
-        "Month":      "Grand Total",
-        "Net Amount": monthly["Net Amount"].sum(),
-        "Paid":       monthly["Paid"].sum(),
-        "Balance":    monthly["Balance"].sum(),
-        "Rejected":   monthly["Rejected"].sum(),
-        "Accepted":   monthly["Accepted"].sum(),
-    }
-    monthly = pd.concat([monthly, pd.DataFrame([total_row])], ignore_index=True)
-    return monthly
-
 # -------------------- styling --------------------
 HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
 TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
@@ -266,7 +165,7 @@ def apply_styling(output_file: str):
                 cell.fill = TOTAL_FILL
                 cell.font = Font(bold=True)
 
-        if ws.title in ("Insurance_Totals", "Monthly_Totals"):
+        if ws.title == "Insurance_Totals":
             for r in range(2, ws.max_row + 1):
                 if ws.cell(row=r, column=1).value == "Grand Total":
                     for c in range(1, ws.max_column + 1):
@@ -294,17 +193,12 @@ def main():
     balance_df = df.loc[df["Balance"] > 0].copy()
     pivot_summary = build_balance_aging_summary(balance_df)
     insurance_totals = build_insurance_totals(df)
-    monthly_totals = build_monthly_totals(df)
-    monthly_insurance_detail = build_monthly_insurance_detail(df)
 
+    # Write sheets (skip "Exclusive_Report" if disabled)
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
         if WRITE_EXCLUSIVE_SHEET:
             df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
         insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
-        if not monthly_totals.empty:
-            monthly_totals.to_excel(writer, sheet_name="Monthly_Totals", index=False)
-        if not monthly_insurance_detail.empty:
-            monthly_insurance_detail.to_excel(writer, sheet_name="Monthly_Insurance_Detail", index=False)
         pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
         balance_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
 
