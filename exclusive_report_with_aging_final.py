@@ -102,27 +102,14 @@ def compute_measures(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[mask_acc_a, "Rejected"] = 0.0
 
     # ---- Step 5: Accepted — Scenario B1 ----
-    # DenialCode is PRCE-001 or COPY-001 AND Paid > 0
+    # DenialCode is PRCE-001 or COPY-001 → amount goes to Accepted
     if "DenialCode" in df.columns:
         denial = df["DenialCode"].astype(str).str.strip().str.upper()
-        mask_b1 = denial.isin(["PRCE-001", "COPY-001"]) & (df["Paid"] > 0)
+        mask_b1 = denial.isin(["PRCE-001", "COPY-001"])
         df.loc[mask_b1, "Accepted"] = df.loc[mask_b1, "ActivityIns"]
         # Remove from Balance and Rejected
         df.loc[mask_b1, "Balance"]  = 0.0
         df.loc[mask_b1, "Rejected"] = 0.0
-
-    # ---- Step 6: Accepted — Scenario B2 ----
-    # Same UniqueID has one row with Rejected > 0 AND another row with Paid > 0
-    # → move the Rejected amount to Accepted for the rejected rows of that UniqueID
-    if "UniqueID" in df.columns:
-        # Find UniqueIDs that have at least one paid row
-        paid_ids = set(df.loc[df["Paid"] > 0, "UniqueID"].unique())
-        # Find rows that are rejected AND belong to a UniqueID that also has a paid row
-        mask_b2 = (df["Rejected"] > 0) & df["UniqueID"].isin(paid_ids)
-        df.loc[mask_b2, "Accepted"] = df.loc[mask_b2, "Rejected"]
-        # Remove from Rejected and Balance
-        df.loc[mask_b2, "Rejected"] = 0.0
-        df.loc[mask_b2, "Balance"]  = 0.0
 
     return df
 
