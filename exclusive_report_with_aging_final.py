@@ -40,13 +40,6 @@ def parse_args():
 def load_data(input_file: str) -> pd.DataFrame:
     df = pd.read_excel(input_file, engine="openpyxl")
     df.columns = df.columns.str.strip()
-
-    # FIX 1: Forward-fill Status column
-    # Source Excel has merged cells in Status — blanks below each value must
-    # inherit the value from the row above them.
-    if "Status" in df.columns:
-        df["Status"] = df["Status"].ffill()
-
     return df
 
 def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
@@ -63,60 +56,29 @@ def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def compute_measures(df: pd.DataFrame) -> pd.DataFrame:
-    # ---- Step 1: Paid ----
-    # Sum all remittance and takeback columns
     df["Paid"] = df[
         ["actRemitInsShare", "actResub1RemitInsShare",
          "actResub2RemitInsShare", "actResub3RemitInsShare",
          "TKBKAmountAct"]
     ].sum(axis=1)
 
-    # Initialise all measure columns to zero
-    df["Balance"]  = 0.0
-    df["Rejected"] = 0.0
-    df["Accepted"] = 0.0
+    df["Rejection"], df["Accepted"], df["Balance"] = 0.0, 0.0, 0.0
 
-    # Normalise Status to lowercase with no leading/trailing spaces
-    status = df["Status"].astype(str).str.strip().str.lower()
+    if "ActivityStatus" in df.columns and "DenialCode" in df.columns:
+        lower_status = df["ActivityStatus"].astype(str).str.lower()
+        mask_paid = df["Paid"] > 0
+        mask_reject = (df["Paid"] == 0) & (lower_status == "rejected") & (df["DenialCode"].notna())
+        mask_balance = (df["Paid"] == 0) & ~mask_reject
 
-    # ---- Step 2: Balance ----
-    # Any "submitted" variation: submitted, submitted(resub-1), submitted(resub-2) etc.
-    mask_submitted = status.str.startswith("submitted")
-    df.loc[mask_submitted, "Balance"] = df.loc[mask_submitted, "ActivityIns"] - df.loc[mask_submitted, "Paid"]
-    # Ensure balance is never negative
-    df["Balance"] = df["Balance"].clip(lower=0)
-
-    # ---- Step 3: Rejected ----
-    # Any "rejected" variation BUT NOT "rejection accepted"
-    mask_rejected = status.str.startswith("rejected") & ~status.str.contains("rejection accepted")
-    df.loc[mask_rejected, "Rejected"] = df.loc[mask_rejected, "ActivityIns"]
-    # Remove from Balance (these rows should have 0 balance)
-    df.loc[mask_rejected, "Balance"] = 0.0
-
-    # ---- Step 4: Accepted — Scenario A ----
-    # Status = "rejection accepted"
-    mask_acc_a = status.str.contains("rejection accepted")
-    df.loc[mask_acc_a, "Accepted"] = df.loc[mask_acc_a, "ActivityIns"]
-    # Remove from Balance and Rejected
-    df.loc[mask_acc_a, "Balance"]  = 0.0
-    df.loc[mask_acc_a, "Rejected"] = 0.0
-
-    # ---- Step 5: Accepted — Scenario B1 ----
-    # DenialCode is PRCE-001 or COPY-001 → amount goes to Accepted
-    if "DenialCode" in df.columns:
-        denial = df["DenialCode"].astype(str).str.strip().str.upper()
-        mask_b1 = denial.isin(["PRCE-001", "COPY-001"])
-        df.loc[mask_b1, "Accepted"] = df.loc[mask_b1, "ActivityIns"]
-        # Remove from Balance and Rejected
-        df.loc[mask_b1, "Balance"]  = 0.0
-        df.loc[mask_b1, "Rejected"] = 0.0
+        df.loc[mask_paid, "Accepted"] = df["ActivityIns"] - df["Paid"]
+        df.loc[mask_reject, "Rejection"] = df["ActivityIns"]
+        df.loc[mask_balance, "Balance"] = df["ActivityIns"]
 
     return df
 
 def add_aging(df: pd.DataFrame) -> pd.DataFrame:
     from datetime import datetime as dt
-    # FIX 3: Use SubDate (not SubmissionDate) as first priority
-    date_candidates = [c for c in ["SubDate", "ClaimDate", "VisitDate"] if c in df.columns]
+    date_candidates = [c for c in ["SubmissionDate", "ClaimDate", "VisitDate"] if c in df.columns]
     if date_candidates:
         for c in date_candidates:
             df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
@@ -158,19 +120,19 @@ def build_balance_aging_summary(balance_df: pd.DataFrame) -> pd.DataFrame:
 
 def build_insurance_totals(df: pd.DataFrame) -> pd.DataFrame:
     insurance_totals = (
-        df.groupby("Insurance", dropna=False)[["ActivityIns", "Paid", "Rejected", "Accepted", "Balance"]]
+        df.groupby("Insurance", dropna=False)[["ActivityIns", "Paid", "Rejection", "Accepted", "Balance"]]
           .sum()
           .reset_index()
     )
-    insurance_totals = insurance_totals.rename(columns={"ActivityIns": "Net Amount"})
+    insurance_totals = insurance_totals.rename(columns={"ActivityIns": "Net Amount", "Rejection": "Rejected"})
     insurance_totals = insurance_totals[["Insurance", "Net Amount", "Paid", "Balance", "Rejected", "Accepted"]]
     total_row = {
         "Insurance": "Grand Total",
         "Net Amount": insurance_totals["Net Amount"].sum(),
-        "Paid":       insurance_totals["Paid"].sum(),
-        "Balance":    insurance_totals["Balance"].sum(),
-        "Rejected":   insurance_totals["Rejected"].sum(),
-        "Accepted":   insurance_totals["Accepted"].sum(),
+        "Paid": insurance_totals["Paid"].sum(),
+        "Balance": insurance_totals["Balance"].sum(),
+        "Rejected": insurance_totals["Rejected"].sum(),
+        "Accepted": insurance_totals["Accepted"].sum(),
     }
     insurance_totals = pd.concat([insurance_totals, pd.DataFrame([total_row])], ignore_index=True)
     return insurance_totals
@@ -222,16 +184,17 @@ def main():
     print(f"📄 Output file : {out_file}")
     print(f"🔑 Input SHA1  : {sha1_short(input_file)}")
 
-    df = load_data(input_file)       # includes ffill of Status
+    df = load_data(input_file)
     df = ensure_numeric(df)
-    df = compute_measures(df)        # new waterfall logic
-    df = add_aging(df)               # SubDate fix
+    df = compute_measures(df)
+    df = add_aging(df)
     df = ensure_insurance_column(df)
 
     balance_df = df.loc[df["Balance"] > 0].copy()
     pivot_summary = build_balance_aging_summary(balance_df)
     insurance_totals = build_insurance_totals(df)
 
+    # Write sheets (skip "Exclusive_Report" if disabled)
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
         if WRITE_EXCLUSIVE_SHEET:
             df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
