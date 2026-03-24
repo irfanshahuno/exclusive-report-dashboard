@@ -271,6 +271,11 @@ def _classify_final_bucket(status_value: str) -> str:
         return "Rejected"
     if re.match(r"^rejection accepted\s*(?:\(\s*resub\s*-\s*\d+\s*\))?$", s):
         return "Accepted"
+    if re.match(r"^approved\s*(?:\(\s*resub\s*-\s*\d+\s*\))?$", s):
+        return "Approved"
+    # Not Submitted (Resub-N) → Rejected; Not Submitted initial → Balance
+    if re.match(r"^not submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", s):
+        return "Rejected"
     return "Balance"
 
 
@@ -495,6 +500,7 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     mask_rej = df["Final Bucket"] == "Rejected"
     mask_acc = df["Final Bucket"] == "Accepted"
     mask_bal = df["Final Bucket"] == "Balance"
+    # "Approved": residual not assigned to any bucket (fully settled, no leftover tracked)
 
     df.loc[mask_rej, "Rejected"] = df.loc[mask_rej, "Residual"]
     df.loc[mask_acc, "Accepted"] = df.loc[mask_acc, "Residual"]
