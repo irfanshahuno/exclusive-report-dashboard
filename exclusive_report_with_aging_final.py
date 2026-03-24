@@ -20,12 +20,9 @@ def sha1_short(path: str) -> str:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="Build UnderProcess report from an input .xlsx"
-    )
+    p = argparse.ArgumentParser(description="Build report from an input .xlsx")
     p.add_argument("input_xlsx", help="Path to source Excel (.xlsx)")
-    p.add_argument("--out", dest="out_xlsx", required=True,
-                   help="Path to write the output workbook (.xlsx)")
+    p.add_argument("--out", dest="out_xlsx", required=True, help="Path to output Excel (.xlsx)")
     args = p.parse_args()
 
     if not os.path.exists(args.input_xlsx):
@@ -67,7 +64,6 @@ def normalize_text(series: pd.Series) -> pd.Series:
 
 
 def compute_measures(df: pd.DataFrame) -> pd.DataFrame:
-    # Paid
     df["Paid"] = df[
         [
             "actRemitInsShare",
@@ -78,44 +74,37 @@ def compute_measures(df: pd.DataFrame) -> pd.DataFrame:
         ]
     ].sum(axis=1)
 
-    # Base columns
     df["UnderProcess"] = pd.to_numeric(df["ActivityIns"], errors="coerce").fillna(0.0) - df["Paid"]
     df["Rejection"] = 0.0
     df["Accepted"] = 0.0
 
-    # Optional text columns
     denial = normalize_text(df["DenialCode"]) if "DenialCode" in df.columns else pd.Series("", index=df.index)
     activity_status = normalize_text(df["ActivityStatus"]) if "ActivityStatus" in df.columns else pd.Series("", index=df.index)
 
-    # 4) If DenialCode exists: move UnderProcess -> Rejection, then clear UnderProcess
     has_denial = denial.ne("") & denial.str.lower().ne("nan")
-    mask_move_to_rejection = has_denial & (df["UnderProcess"] != 0)
-    df.loc[mask_move_to_rejection, "Rejection"] = df.loc[mask_move_to_rejection, "UnderProcess"]
-    df.loc[mask_move_to_rejection, "UnderProcess"] = 0.0
+    move_to_rej = has_denial & (df["UnderProcess"] != 0)
+    df.loc[move_to_rej, "Rejection"] = df.loc[move_to_rej, "UnderProcess"]
+    df.loc[move_to_rej, "UnderProcess"] = 0.0
 
-    # 5) COPY-001 / PRCE-001 : move Rejection -> Accepted
     accepted_codes = {"COPY-001", "PRCE-001"}
-    mask_move_to_accepted = denial.str.upper().isin(accepted_codes) & (df["Rejection"] != 0)
-    df.loc[mask_move_to_accepted, "Accepted"] = df.loc[mask_move_to_accepted, "Rejection"]
-    df.loc[mask_move_to_accepted, "Rejection"] = 0.0
+    move_to_acc = denial.str.upper().isin(accepted_codes) & (df["Rejection"] != 0)
+    df.loc[move_to_acc, "Accepted"] = df.loc[move_to_acc, "Rejection"]
+    df.loc[move_to_acc, "Rejection"] = 0.0
 
-    # 6) If ActivityStatus is Submitted and Rejection has value and UnderProcess is 0,
-    # move Rejection back to UnderProcess
-    mask_submitted_back = (
+    move_back_submitted = (
         activity_status.str.lower().eq("submitted")
         & (df["Rejection"] != 0)
         & (df["UnderProcess"] == 0)
     )
-    df.loc[mask_submitted_back, "UnderProcess"] = df.loc[mask_submitted_back, "Rejection"]
-    df.loc[mask_submitted_back, "Rejection"] = 0.0
+    df.loc[move_back_submitted, "UnderProcess"] = df.loc[move_back_submitted, "Rejection"]
+    df.loc[move_back_submitted, "Rejection"] = 0.0
 
-    # If same value exists in both UnderProcess and Rejection, remove from Rejection
-    mask_duplicate = (
+    duplicate_mask = (
         (df["UnderProcess"].round(2) != 0)
         & (df["Rejection"].round(2) != 0)
         & (df["UnderProcess"].round(2) == df["Rejection"].round(2))
     )
-    df.loc[mask_duplicate, "Rejection"] = 0.0
+    df.loc[duplicate_mask, "Rejection"] = 0.0
 
     return df
 
@@ -150,12 +139,11 @@ def ensure_insurance_column(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def build_underprocess_aging_summary(underprocess_df: pd.DataFrame) -> pd.DataFrame:
+def build_balance_aging_summary(underprocess_df: pd.DataFrame) -> pd.DataFrame:
     labels = ["0-30 Days", "31-45 Days", "46-60 Days", "61-90 Days", ">90 Days"]
 
     if underprocess_df.empty:
-        pivot_summary = pd.DataFrame(columns=["Insurance"] + labels + ["Grand Total"])
-        return pivot_summary
+        return pd.DataFrame(columns=["Insurance"] + labels + ["Grand Total"])
 
     pivot_summary = pd.pivot_table(
         underprocess_df,
@@ -169,8 +157,7 @@ def build_underprocess_aging_summary(underprocess_df: pd.DataFrame) -> pd.DataFr
 
     pivot_summary = pivot_summary.reindex(columns=labels, fill_value=0)
     pivot_summary["Grand Total"] = pivot_summary.sum(axis=1)
-    grand_total_row = pivot_summary.sum(axis=0)
-    pivot_summary.loc["Grand Total"] = grand_total_row
+    pivot_summary.loc["Grand Total"] = pivot_summary.sum(axis=0)
     pivot_summary.reset_index(inplace=True)
     return pivot_summary
 
@@ -186,6 +173,7 @@ def build_insurance_totals(df: pd.DataFrame) -> pd.DataFrame:
         columns={
             "ActivityIns": "Net Amount",
             "Rejection": "Rejected",
+            "UnderProcess": "UnderProcess",
         }
     )
 
@@ -221,7 +209,7 @@ def apply_styling(output_file: str):
     for ws in wb.worksheets:
         style_headers(ws)
 
-        if ws.title in ("UnderProcess_Aging_Summary", "Insurance_Totals"):
+        if ws.title in ("Balance_Aging_Summary", "Insurance_Totals"):
             for r in range(2, ws.max_row + 1):
                 if ws.cell(row=r, column=1).value == "Grand Total":
                     for c in range(1, ws.max_column + 1):
@@ -229,7 +217,7 @@ def apply_styling(output_file: str):
                         cell.fill = TOTAL_FILL
                         cell.font = Font(bold=True)
 
-        if ws.title == "UnderProcess_Aging_Summary" and ws.max_column >= 1:
+        if ws.title == "Balance_Aging_Summary" and ws.max_column >= 1:
             last_col = ws.max_column
             for r in range(1, ws.max_row + 1):
                 cell = ws.cell(row=r, column=last_col)
@@ -255,7 +243,7 @@ def main():
     df = ensure_insurance_column(df)
 
     underprocess_df = df.loc[df["UnderProcess"] > 0].copy()
-    pivot_summary = build_underprocess_aging_summary(underprocess_df)
+    pivot_summary = build_balance_aging_summary(underprocess_df)
     insurance_totals = build_insurance_totals(df)
 
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
@@ -263,8 +251,9 @@ def main():
             df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
 
         insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
-        pivot_summary.to_excel(writer, sheet_name="UnderProcess_Aging_Summary", index=False)
-        underprocess_df.to_excel(writer, sheet_name="UnderProcess_Aging_Detail", index=False)
+        # Keep old sheet names so existing app keeps working
+        pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
+        underprocess_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
 
         meta = pd.DataFrame([{
             "InputFile": os.path.basename(input_file),
