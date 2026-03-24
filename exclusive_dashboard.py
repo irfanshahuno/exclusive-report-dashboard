@@ -407,7 +407,7 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, rejection_url: 
       <!-- ✅ NEEDFUL: remove target=_blank so it opens in same app -->
       <a class="kpi-link" href="{balance_url}" title="{fmt(bal)}">
         <div class="kpi-card balance">
-          <div class="kpi-label">Balance</div>
+          <div class="kpi-label">Under Process</div>
           <div class="kpi-value">{fmt(bal)}</div>
         </div>
       </a>
@@ -924,7 +924,7 @@ def load_center_kpis(center_key: str, year: int):
 
         net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
         paid = ksum(totals_no_gt, "Paid")
-        bal = ksum(totals_no_gt, "Balance")
+        bal = ksum(totals_no_gt, "Under Process", "UnderProcess", "Balance")
         rej = ksum(totals_no_gt, "Rejected", "Rejection")
         acc = ksum(totals_no_gt, "Accepted")
 
@@ -1066,7 +1066,7 @@ if ck not in CENTERS:
             offset += p
 
         legend_items = list(zip(
-            ["Paid", "Balance", "Rejected", "Accepted"],
+            ["Paid", "Under Process", "Rejected", "Accepted"],
             [paid, bal, rej, acc],
             ["#3DD9A0", "#4F9EFF", "#FF6B8A", "#FFD166"],
         ))
@@ -1366,7 +1366,7 @@ try:
 
     net = ksum(totals_no_gt, "Net Amount", "NetAmount", "Net")
     paid = ksum(totals_no_gt, "Paid")
-    bal = ksum(totals_no_gt, "Balance")
+    bal = ksum(totals_no_gt, "Under Process", "UnderProcess", "Balance")
     rej = ksum(totals_no_gt, "Rejected", "Rejection")
     acc = ksum(totals_no_gt, "Accepted")
 
