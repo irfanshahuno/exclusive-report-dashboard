@@ -773,8 +773,8 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
 
 def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFrame:
     """
-    Build per-claim detail report for Final Rejn > 0 claims.
-    Computes RCM columns at row level then filters to rejected rows only.
+    Build per-claim detail report — all claims, all RCM columns correctly populated
+    matching exactly the same logic as build_rcm_summary.
     """
     d = df.copy()
 
@@ -792,27 +792,39 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
 
     # Days for Not Submitted >90 rule
     _days = days_series.reindex(d.index).fillna(0)
-    mask_not_sub_old = (d["_sn"] == "not submitted") & (_days > 90)
 
-    # Per-row pay columns
-    d["Initial pay"]  = d["RemitInsShare"]
-    d["Resb1 pay"]    = d["Resub1RemitInsShare"]
-    d["Resb2 pay"]    = d["Resub2RemitInsShare"]
-    d["Resb3 pay"]    = d["Resub3RemitInsShare"]
-    d["_extra_paid"]  = d["SubInsShare"].where(mask_not_sub_old, 0.0)
-    d["Total pay"]    = d["Initial pay"] + d["Resb1 pay"] + d["Resb2 pay"] + d["Resb3 pay"] + d["_extra_paid"]
+    # Status masks — exact same as build_rcm_summary
+    mask_sub_init      = d["_sn"] == "submitted"
+    mask_sub_resub     = d["_sn"].str.match(r"^submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
+    mask_rej_acc       = d["_sn"].str.match(r"^rejection accepted(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+    mask_not_sub_old   = (d["_sn"] == "not submitted") & (_days > 90)
 
-    # Sub Nt Rmtd
-    mask_sub_init  = d["_sn"] == "submitted"
-    mask_sub_resub = d["_sn"].str.match(r"^submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
-    mask_rej_acc   = d["_sn"].str.match(r"^rejection accepted(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+    # Catch-all unmatched
+    mask_approved      = d["_sn"].str.match(r"^approved(\s*\(.+\))?$", na=False)
+    mask_not_sub_any   = d["_sn"].str.match(r"^not submitted(\s*\(.+\))?$", na=False)
+    mask_rejected      = d["_sn"].str.match(r"^rejected(\s*\(.+\))?$", na=False)
+    mask_any_matched   = mask_sub_init | mask_sub_resub | mask_rej_acc | mask_approved | mask_not_sub_any | mask_rejected
+    mask_unmatched     = (~mask_any_matched) & (d["SubInsShare"] > 0)
 
-    d["Sub Nt Rmtd"]       = d["SubInsShare"].where(mask_sub_init,  0.0)
-    d["Rsub Nt Rmtd"]      = d["Difference"].where(mask_sub_resub,  0.0)
-    d["Rejection Accepted"] = d["Difference"].where(mask_rej_acc,   0.0)
+    # Per-row RCM columns
+    d["Initial pay"]        = d["RemitInsShare"]
+    d["Resb1 pay"]          = d["Resub1RemitInsShare"]
+    d["Resb2 pay"]          = d["Resub2RemitInsShare"]
+    d["Resb3 pay"]          = d["Resub3RemitInsShare"]
+    d["_extra_paid"]        = d["SubInsShare"].where(mask_not_sub_old, 0.0)
+    d["Total pay"]          = d["Initial pay"] + d["Resb1 pay"] + d["Resb2 pay"] + d["Resb3 pay"] + d["_extra_paid"]
 
-    # Final Rejn per row
-    d["Final Rejn"] = (
+    d["Sub Nt Rmtd"]        = 0.0
+    d.loc[mask_sub_init,    "Sub Nt Rmtd"] = d.loc[mask_sub_init,    "SubInsShare"]
+    d.loc[mask_unmatched,   "Sub Nt Rmtd"] = d.loc[mask_unmatched,   "SubInsShare"]
+
+    d["Rsub Nt Rmtd"]       = 0.0
+    d.loc[mask_sub_resub,   "Rsub Nt Rmtd"] = d.loc[mask_sub_resub,  "Difference"]
+
+    d["Rejection Accepted"] = 0.0
+    d.loc[mask_rej_acc,     "Rejection Accepted"] = d.loc[mask_rej_acc, "Difference"]
+
+    d["Final Rejn"]         = (
         d["SubInsShare"]
         - d["Total pay"]
         - d["Sub Nt Rmtd"]
@@ -820,13 +832,10 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
         - d["Rejection Accepted"]
     ).clip(lower=0)
 
-    # Filter only Final Rejn > 0
-    detail = d[d["Final Rejn"] > 0].copy()
-
-    # Pick identifier columns available
+    # Identifier columns — include all available
     id_cols = []
     for c in ["UniqueID","Insurance","DocName","Status","VisitDate","Month","SubInsShare"]:
-        if c in detail.columns:
+        if c in d.columns:
             id_cols.append(c)
 
     report_cols = id_cols + [
@@ -834,7 +843,7 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
         "Sub Nt Rmtd","Rsub Nt Rmtd","Rejection Accepted","Final Rejn"
     ]
 
-    return detail[report_cols].reset_index(drop=True)
+    return d[report_cols].reset_index(drop=True)
 
 
 def build_claim_detail_excel(df_detail: pd.DataFrame) -> bytes:
@@ -1772,7 +1781,7 @@ if result:
         detail_bytes = build_claim_detail_excel(df_detail)
         detail_name  = dl_name.replace(".xlsx", " - Claim Detail.xlsx")
         st.download_button(
-            f"⬇️ Download Claim Detail Report — Final Rejn ({len(df_detail):,} claims)",
+            f"⬇️ Download Claim Detail Report ({len(df_detail):,} claims)",
             data=detail_bytes,
             file_name=detail_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
