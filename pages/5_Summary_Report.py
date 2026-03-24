@@ -390,10 +390,22 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     # Rejection Accepted
     d["_rej_accepted"] = d["SubInsShare"].where(mask_rej_acc, 0.0)
 
-    # Extra Paid: Approved + old Not Submitted
+    # Extra Paid: Approved + old Not Submitted → use SubInsShare as paid amount
+    # (remit columns already counted in initial_pay — take max to avoid double count)
+    d["_remit_total"] = (
+        pd.to_numeric(d["RemitInsShare"], errors="coerce").fillna(0) +
+        pd.to_numeric(d["Resub1RemitInsShare"], errors="coerce").fillna(0) +
+        pd.to_numeric(d["Resub2RemitInsShare"], errors="coerce").fillna(0) +
+        pd.to_numeric(d["Resub3RemitInsShare"], errors="coerce").fillna(0)
+    )
     d["_extra_paid"] = 0.0
-    d.loc[mask_approved,     "_extra_paid"] = d.loc[mask_approved,     "SubInsShare"]
-    d.loc[mask_not_sub_old,  "_extra_paid"] = d.loc[mask_not_sub_old,  "SubInsShare"]
+    # Extra paid = SubInsShare minus whatever remit columns already captured (no double count)
+    d.loc[mask_approved,    "_extra_paid"] = (
+        d.loc[mask_approved,    "SubInsShare"] - d.loc[mask_approved,    "_remit_total"]
+    ).clip(lower=0)
+    d.loc[mask_not_sub_old, "_extra_paid"] = (
+        d.loc[mask_not_sub_old, "SubInsShare"] - d.loc[mask_not_sub_old, "_remit_total"]
+    ).clip(lower=0)
 
     agg = d.groupby(group_col, dropna=False, sort=True).agg(
         claim_count     = ("UniqueID",            "nunique"),
@@ -528,13 +540,10 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     df["Paid"] = df[["RemitInsShare","Resub1RemitInsShare","Resub2RemitInsShare",
                       "Resub3RemitInsShare","Resub4RemitInsShare","TakeBack"]].sum(axis=1)
 
-    # Add SubInsShare for Approved and old Not Submitted rows
-    df.loc[_mask_approved_paid, "Paid"] = (
-        df.loc[_mask_approved_paid, "Paid"] + df.loc[_mask_approved_paid, "SubInsShare"]
-    )
-    df.loc[_mask_not_sub_old, "Paid"] = (
-        df.loc[_mask_not_sub_old, "Paid"] + df.loc[_mask_not_sub_old, "SubInsShare"]
-    )
+    # For Approved and old Not Submitted: Paid = SubInsShare (full claim treated as paid)
+    # Use max(remit columns, SubInsShare) to avoid double counting
+    df.loc[_mask_approved_paid, "Paid"] = df.loc[_mask_approved_paid, ["Paid", "Net Amount"]].max(axis=1)
+    df.loc[_mask_not_sub_old,   "Paid"] = df.loc[_mask_not_sub_old,   ["Paid", "Net Amount"]].max(axis=1)
 
     # Cap Paid at Net Amount
     df["Paid"] = df[["Paid","Net Amount"]].min(axis=1)
