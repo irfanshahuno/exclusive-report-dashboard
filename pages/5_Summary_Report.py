@@ -271,8 +271,6 @@ def _classify_final_bucket(status_value: str) -> str:
         return "Rejected"
     if re.match(r"^rejection accepted\s*(?:\(\s*resub\s*-\s*\d+\s*\))?$", s):
         return "Accepted"
-    if re.match(r"^approved\s*(?:\(\s*resub\s*-\s*\d+\s*\))?$", s):
-        return "Approved"
     return "Balance"
 
 
@@ -390,8 +388,7 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     # Rejection Accepted
     d["_rej_accepted"] = d["SubInsShare"].where(mask_rej_acc, 0.0)
 
-    # Extra Paid: Approved + old Not Submitted → use SubInsShare as paid amount
-    # (remit columns already counted in initial_pay — take max to avoid double count)
+    # Extra Paid: old Not Submitted only (Approved already in remit columns)
     d["_remit_total"] = (
         pd.to_numeric(d["RemitInsShare"], errors="coerce").fillna(0) +
         pd.to_numeric(d["Resub1RemitInsShare"], errors="coerce").fillna(0) +
@@ -399,10 +396,7 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
         pd.to_numeric(d["Resub3RemitInsShare"], errors="coerce").fillna(0)
     )
     d["_extra_paid"] = 0.0
-    # Extra paid = SubInsShare minus whatever remit columns already captured (no double count)
-    d.loc[mask_approved,    "_extra_paid"] = (
-        d.loc[mask_approved,    "SubInsShare"] - d.loc[mask_approved,    "_remit_total"]
-    ).clip(lower=0)
+    # Old Not Submitted: SubInsShare minus remit columns already captured (no double count)
     d.loc[mask_not_sub_old, "_extra_paid"] = (
         d.loc[mask_not_sub_old, "SubInsShare"] - d.loc[mask_not_sub_old, "_remit_total"]
     ).clip(lower=0)
@@ -531,19 +525,12 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     _mask_not_sub_plain = _status_norm_e1 == "not submitted"
     _mask_not_sub_old   = _mask_not_sub_plain & (_days_since_visit > 90)
 
-    # Approved any stage → Paid
-    _mask_approved_paid = _status_norm_e1.str.match(
-        r"^approved\s*(?:\(\s*resub\s*-\s*\d+\s*\))?$", na=False
-    )
-
-    # Base Paid from remit columns
+    # Base Paid from remit columns (Approved already captured here)
     df["Paid"] = df[["RemitInsShare","Resub1RemitInsShare","Resub2RemitInsShare",
                       "Resub3RemitInsShare","Resub4RemitInsShare","TakeBack"]].sum(axis=1)
 
-    # For Approved and old Not Submitted: Paid = SubInsShare (full claim treated as paid)
-    # Use max(remit columns, SubInsShare) to avoid double counting
-    df.loc[_mask_approved_paid, "Paid"] = df.loc[_mask_approved_paid, ["Paid", "Net Amount"]].max(axis=1)
-    df.loc[_mask_not_sub_old,   "Paid"] = df.loc[_mask_not_sub_old,   ["Paid", "Net Amount"]].max(axis=1)
+    # Old Not Submitted (>90 days): treat full SubInsShare as paid
+    df.loc[_mask_not_sub_old, "Paid"] = df.loc[_mask_not_sub_old, ["Paid", "Net Amount"]].max(axis=1)
 
     # Cap Paid at Net Amount
     df["Paid"] = df[["Paid","Net Amount"]].min(axis=1)
@@ -555,12 +542,10 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
 
     df["Final Bucket"] = df["Status"].apply(_classify_final_bucket)
 
-    # Approved and old Not Submitted already absorbed into Paid → Residual = 0 → no Balance
     mask_rej = df["Final Bucket"] == "Rejected"
     mask_acc = df["Final Bucket"] == "Accepted"
-    mask_apr = df["Final Bucket"] == "Approved"
-    # Balance = everything else EXCEPT old Not Submitted (already in Paid)
-    mask_bal = ~(mask_rej | mask_acc | mask_apr | _mask_not_sub_old)
+    # Balance = everything except Rejected, Accepted, and old Not Submitted
+    mask_bal = ~(mask_rej | mask_acc | _mask_not_sub_old)
 
     df.loc[mask_rej, "Rejected"] = df.loc[mask_rej, "Residual"]
     df.loc[mask_acc, "Accepted"] = df.loc[mask_acc, "Residual"]
