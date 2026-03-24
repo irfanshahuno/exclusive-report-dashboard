@@ -767,7 +767,154 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         "rcm_doctor":    rcm_doctor,
         "rcm_month":     rcm_month,
         "rcm_group_col": rcm_group_col,
+        "claim_detail":  _build_claim_detail(df, _days_since_visit),
     }
+
+
+def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFrame:
+    """
+    Build per-claim detail report for Final Rejn > 0 claims.
+    Computes RCM columns at row level then filters to rejected rows only.
+    """
+    d = df.copy()
+
+    # Ensure numeric cols
+    for c in ["SubInsShare","RemitInsShare","Resub1RemitInsShare",
+              "Resub2RemitInsShare","Resub3RemitInsShare","Difference"]:
+        if c not in d.columns:
+            d[c] = 0.0
+        d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
+
+    def _norm(v):
+        return re.sub(r"\s+", " ", str(v or "").strip().lower())
+
+    d["_sn"] = d["Status"].apply(_norm)
+
+    # Days for Not Submitted >90 rule
+    _days = days_series.reindex(d.index).fillna(0)
+    mask_not_sub_old = (d["_sn"] == "not submitted") & (_days > 90)
+
+    # Per-row pay columns
+    d["Initial pay"]  = d["RemitInsShare"]
+    d["Resb1 pay"]    = d["Resub1RemitInsShare"]
+    d["Resb2 pay"]    = d["Resub2RemitInsShare"]
+    d["Resb3 pay"]    = d["Resub3RemitInsShare"]
+    d["_extra_paid"]  = d["SubInsShare"].where(mask_not_sub_old, 0.0)
+    d["Total pay"]    = d["Initial pay"] + d["Resb1 pay"] + d["Resb2 pay"] + d["Resb3 pay"] + d["_extra_paid"]
+
+    # Sub Nt Rmtd
+    mask_sub_init  = d["_sn"] == "submitted"
+    mask_sub_resub = d["_sn"].str.match(r"^submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
+    mask_rej_acc   = d["_sn"].str.match(r"^rejection accepted(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+
+    d["Sub Nt Rmtd"]       = d["SubInsShare"].where(mask_sub_init,  0.0)
+    d["Rsub Nt Rmtd"]      = d["Difference"].where(mask_sub_resub,  0.0)
+    d["Rejection Accepted"] = d["Difference"].where(mask_rej_acc,   0.0)
+
+    # Final Rejn per row
+    d["Final Rejn"] = (
+        d["SubInsShare"]
+        - d["Total pay"]
+        - d["Sub Nt Rmtd"]
+        - d["Rsub Nt Rmtd"]
+        - d["Rejection Accepted"]
+    ).clip(lower=0)
+
+    # Filter only Final Rejn > 0
+    detail = d[d["Final Rejn"] > 0].copy()
+
+    # Pick identifier columns available
+    id_cols = []
+    for c in ["UniqueID","Insurance","DocName","Status","VisitDate","Month","SubInsShare"]:
+        if c in detail.columns:
+            id_cols.append(c)
+
+    report_cols = id_cols + [
+        "Initial pay","Resb1 pay","Resb2 pay","Resb3 pay","Total pay",
+        "Sub Nt Rmtd","Rsub Nt Rmtd","Rejection Accepted","Final Rejn"
+    ]
+
+    return detail[report_cols].reset_index(drop=True)
+
+
+def build_claim_detail_excel(df_detail: pd.DataFrame) -> bytes:
+    """Build styled Excel for claim detail report."""
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Claim Detail"
+
+    def _fill(h): return PatternFill("solid", fgColor=h)
+    def _font(bold=False, color="000000", size=10):
+        return Font(bold=bold, color=color, size=size, name="Calibri")
+    def _border():
+        s = Side(style="thin", color="BFBFBF")
+        return Border(left=s, right=s, top=s, bottom=s)
+    def _align(h="center"):
+        return Alignment(horizontal=h, vertical="center", wrap_text=False)
+
+    # Header row
+    for ci, col in enumerate(df_detail.columns, 1):
+        cell = ws.cell(row=1, column=ci, value=col)
+        cell.fill      = _fill("0A2647")
+        cell.font      = _font(bold=True, color="FFFFFF", size=10)
+        cell.border    = _border()
+        cell.alignment = _align("center")
+    ws.row_dimensions[1].height = 22
+
+    # Data rows
+    pay_cols = {"Initial pay","Resb1 pay","Resb2 pay","Resb3 pay",
+                "Total pay","Sub Nt Rmtd","Rsub Nt Rmtd","Rejection Accepted","Final Rejn","SubInsShare"}
+    for ri, row in enumerate(df_detail.itertuples(index=False), 2):
+        bg = "FFFFFF" if ri % 2 == 0 else "F2F2F2"
+        for ci, (col, val) in enumerate(zip(df_detail.columns, row), 1):
+            cell = ws.cell(row=ri, column=ci, value=val)
+            cell.border    = _border()
+            cell.alignment = _align("left" if col in ("UniqueID","Insurance","DocName","Status") else "right")
+            cell.fill      = _fill(bg)
+            if col == "Final Rejn":
+                cell.font = _font(bold=True, color="C0392B", size=10)
+            else:
+                cell.font = _font(size=10)
+            if col in pay_cols:
+                cell.number_format = "#,##0.00"
+
+    # Grand Total row
+    gt_row = ri + 1
+    ws.row_dimensions[gt_row].height = 20
+    num_cols = {c for c in df_detail.columns if df_detail[c].dtype in ["float64","int64"]}
+    for ci, col in enumerate(df_detail.columns, 1):
+        cell = ws.cell(row=gt_row, column=ci)
+        cell.fill   = _fill("D9D9D9")
+        cell.font   = _font(bold=True, size=10)
+        cell.border = _border()
+        cell.alignment = _align("right")
+        if col in num_cols:
+            cell.value = float(df_detail[col].sum())
+            cell.number_format = "#,##0.00"
+        elif ci == 1:
+            cell.value = "Grand Total"
+            cell.alignment = _align("left")
+
+    # Column widths
+    for ci, col in enumerate(df_detail.columns, 1):
+        if col in ("Insurance","DocName","Status"):
+            ws.column_dimensions[get_column_letter(ci)].width = 30
+        elif col == "UniqueID":
+            ws.column_dimensions[get_column_letter(ci)].width = 20
+        elif col == "VisitDate":
+            ws.column_dimensions[get_column_letter(ci)].width = 14
+        else:
+            ws.column_dimensions[get_column_letter(ci)].width = 16
+
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 def build_excel_output(result: dict) -> bytes:
@@ -1618,6 +1765,20 @@ if result:
                     st.success(f"✅ {msg}")
                 else:
                     st.error(f"❌ Email failed: {msg}")
+
+    # ── Claim Detail Download ─────────────────────────────────────────────────
+    df_detail = result.get("claim_detail")
+    if df_detail is not None and not df_detail.empty:
+        detail_bytes = build_claim_detail_excel(df_detail)
+        detail_name  = dl_name.replace(".xlsx", " - Claim Detail.xlsx")
+        st.download_button(
+            f"⬇️ Download Claim Detail Report — Final Rejn ({len(df_detail):,} claims)",
+            data=detail_bytes,
+            file_name=detail_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key=f"sum_dl_detail_{ck}",
+        )
 
     st.markdown("---")
 
