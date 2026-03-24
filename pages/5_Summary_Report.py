@@ -271,11 +271,6 @@ def _classify_final_bucket(status_value: str) -> str:
         return "Rejected"
     if re.match(r"^rejection accepted\s*(?:\(\s*resub\s*-\s*\d+\s*\))?$", s):
         return "Accepted"
-    if re.match(r"^approved\s*(?:\(\s*resub\s*-\s*\d+\s*\))?$", s):
-        return "Approved"
-    # Not Submitted (Resub-N) → Rejected; Not Submitted initial → Balance
-    if re.match(r"^not submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", s):
-        return "Rejected"
     return "Balance"
 
 
@@ -315,20 +310,6 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     """
     Build the RCM Summary table grouped by any column (Insurance, DocName, etc.)
     Columns match the EMC RCM Summary report exactly.
-
-    Claim count     = count of unique UniqueID
-    Claimed Amount  = sum of SubInsShare
-    Remited Amt     = sum of RemitInsShare + sum of Difference
-    Initial pay     = sum of RemitInsShare
-    Resb1 pay       = sum of Resub1RemitInsShare
-    Resb2 pay       = sum of Resub2RemitInsShare
-    Resb3 pay       = sum of Resub3RemitInsShare
-    Total pay       = Initial + Resb1 + Resb2 + Resb3
-    Sub Nt Rmtd     = SubInsShare where Status == "Submitted" (initial only)
-    Rsub Nt Rmtd    = Difference where Status matches Submitted (Resub-N)
-    Rejection Accepted = SubInsShare where Status == "Rejection Accepted"
-    Final Rejn      = Claimed - (Total pay + Sub Nt Rmtd + Rsub Nt Rmtd + Rej Accepted)
-    Rej. %          = Final Rejn / Claimed Amount * 100
     """
     import re as _re
 
@@ -369,13 +350,11 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     d["_rsub_nt_rmtd"]  = d["Difference"].where(mask_sub_resub,   0.0)
     d["_rej_accepted"]  = d["Difference"].where(mask_rej_acc,      0.0)
 
-    # Catch-all: any status not matched by above 3 masks AND not "approved"/"not submitted"
-    # goes into Sub Nt Rmtd by default (treated as outstanding submitted)
+    # Catch-all unmatched rows with SubInsShare > 0: treat as Sub Nt Rmtd
     mask_approved    = d["_status_norm"].str.match(r"^approved(\s*\(.+\))?$", na=False)
     mask_not_sub     = d["_status_norm"].str.match(r"^not submitted(\s*\(.+\))?$", na=False)
     mask_rejected    = d["_status_norm"].str.match(r"^rejected(\s*\(.+\))?$", na=False)
     mask_any_matched = mask_sub_init | mask_sub_resub | mask_rej_acc | mask_approved | mask_not_sub | mask_rejected
-    # Unmatched rows with SubInsShare > 0: treat as Sub Nt Rmtd
     mask_unmatched   = (~mask_any_matched) & (pd.to_numeric(d["SubInsShare"], errors="coerce").fillna(0) > 0)
     d.loc[mask_unmatched, "_sub_nt_rmtd"] = d.loc[mask_unmatched, "SubInsShare"]
 
@@ -402,9 +381,8 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
                            - agg["rej_accepted"]).clip(lower=0)
     agg["rej_pct"]      = (agg["final_rejn"] / agg["claimed_amt"].replace(0, float("nan")) * 100).fillna(0.0)
 
-    # Build output with clean column names
     out = pd.DataFrame()
-    out[group_col]                          = agg[group_col]
+    out[group_col]                           = agg[group_col]
     out["Claim count"]                      = agg["claim_count"]
     out["Claimed Amount"]                   = agg["claimed_amt"]
     out["Remited Amt"]                      = agg["remited_amt"]
@@ -419,14 +397,11 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     out["Final Rejn"]                       = agg["final_rejn"]
     out["Rej. %"]                           = agg["rej_pct"]
 
-    # Grand Total row — recalculate Final Rejn and Rej% from raw column sums
-    # (never sum Final Rejn or Rej% directly — always derive from components)
     num_cols = out.select_dtypes(include="number").columns.tolist()
     gt = {c: out[c].sum() if c in num_cols else "Grand Total" for c in out.columns}
     gt[group_col] = "Grand Total"
 
-    # Recalculate Final Rejn from summed components (same formula as per-row)
-    gt_claimed  = out["Claimed Amount"].sum()
+    gt_claimed   = out["Claimed Amount"].sum()
     gt_total_pay = out["Total pay"].sum()
     gt_sub       = out["Sub Nt Rmtd (outstanding amount)"].sum()
     gt_rsub      = out["Rsub Nt Rmtd (outstanding amount)"].sum()
@@ -436,28 +411,23 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     gt["Rej. %"]     = (gt_final_rejn / gt_claimed * 100) if gt_claimed else 0.0
 
     out = pd.concat([out, pd.DataFrame([gt])], ignore_index=True)
-
     return out
+
 
 def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     """
     Run the full exclusive_report_status_final.py logic in-memory.
     Returns a dict with all result DataFrames + metadata.
     """
-    # ── Load ──────────────────────────────────────────────────────────────────
     buf = io.BytesIO(uploaded_bytes)
     df = pd.read_excel(buf, engine="openpyxl")
     df.columns = df.columns.astype(str).str.strip()
 
-    # ── Drop blank/footer rows ────────────────────────────────────────────────
-    # Remove completely empty rows
     df = df.dropna(how="all").reset_index(drop=True)
-    # Remove rows where entire row is blank string
     all_blank = df.fillna("").astype(str).apply(
         lambda r: "".join(r.values).strip() == "", axis=1
     )
     df = df[~all_blank].reset_index(drop=True)
-    # Remove footer/total rows: Status is blank AND SubInsShare is 0 or null
     if "SubInsShare" in df.columns and "Status" in df.columns:
         sub_zero   = pd.to_numeric(df["SubInsShare"], errors="coerce").fillna(0) == 0
         stat_blank = df["Status"].astype(str).str.strip().str.lower().isin(
@@ -465,7 +435,6 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         )
         df = df[~(sub_zero & stat_blank)].reset_index(drop=True)
 
-    # Remove any row where UniqueID looks like a Grand Total label
     for _gc in ["UniqueID", "Insurance", "DocName", "Month"]:
         if _gc in df.columns:
             _gt_mask = df[_gc].astype(str).str.strip().str.lower().isin(
@@ -473,7 +442,6 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
             )
             df = df[~_gt_mask].reset_index(drop=True)
 
-    # ── Ensure numeric cols ───────────────────────────────────────────────────
     numeric_cols = ["SubInsShare", "RemitInsShare",
                     "Resub1RemitInsShare", "Resub2RemitInsShare",
                     "Resub3RemitInsShare", "Resub4RemitInsShare", "TakeBack"]
@@ -485,7 +453,6 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     if "Status" not in df.columns:
         df["Status"] = ""
 
-    # ── Compute measures ─────────────────────────────────────────────────────
     df["Net Amount"] = df["SubInsShare"]
     df["Paid"] = df[["RemitInsShare","Resub1RemitInsShare","Resub2RemitInsShare",
                       "Resub3RemitInsShare","Resub4RemitInsShare","TakeBack"]].sum(axis=1)
@@ -500,7 +467,6 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     mask_rej = df["Final Bucket"] == "Rejected"
     mask_acc = df["Final Bucket"] == "Accepted"
     mask_bal = df["Final Bucket"] == "Balance"
-    # "Approved": residual not assigned to any bucket (fully settled, no leftover tracked)
 
     df.loc[mask_rej, "Rejected"] = df.loc[mask_rej, "Residual"]
     df.loc[mask_acc, "Accepted"] = df.loc[mask_acc, "Residual"]
@@ -515,7 +481,6 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     df["Balance Submission No"]     = stage_info.apply(lambda x: x[2])
     df.loc[~mask_bal, ["Balance Status Group","Balance Submission Stage","Balance Submission No"]] = ["","",None]
 
-    # Bucket detail columns
     bucket_defs = [("Submitted",0,"Initial Submitted Balance"),
                    ("Approved", 0,"Initial Approved Balance"),
                    ("Not Submitted",0,"Initial Not Submitted Balance")]
@@ -535,7 +500,6 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         )
         df.loc[mask, col] = df.loc[mask, "Balance"]
 
-    # ── Dates & aging ─────────────────────────────────────────────────────────
     date_cols_all = ["SubDate","Resub1Date","Resub2Date","Resub3Date","Resub4Date","Resub5Date",
                      "Resub6Date","Resub7Date","Resub8Date","Resub9Date","Resub10Date",
                      "SubmissionDate","ClaimDate","VisitDate"]
@@ -551,7 +515,6 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     labels = ["0–30 Days","31–45 Days","46–60 Days","61–90 Days",">90 Days"]
     df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
 
-    # ── Insurance column ──────────────────────────────────────────────────────
     ins_col = next((c for c in ["Insurance","PayerName","Insurer","Plan"] if c in df.columns), None)
     if ins_col is None:
         df["Insurance"] = "Not Available"
@@ -559,18 +522,14 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         df["Insurance"] = df[ins_col]
     df["Insurance"] = df["Insurance"].fillna("Not Available")
 
-    # ── Build summary tables ──────────────────────────────────────────────────
     cols_base = ["Net Amount","Paid","Balance","Rejected","Accepted","Recon Diff"]
 
-    # Insurance Totals
     ins_totals = df.groupby("Insurance", dropna=False)[cols_base].sum().reset_index()
     ins_totals = _add_grand_total_row(ins_totals, "Insurance")
 
-    # Final Bucket Summary
     fb_summary = df.groupby("Final Bucket", dropna=False)[["Net Amount","Paid","Balance","Rejected","Accepted"]].sum().reset_index()
     fb_summary = _add_grand_total_row(fb_summary, "Final Bucket")
 
-    # Monthly Totals
     date_col_m = next((c for c in ["VisitDate","SubDate","SubmissionDate","ClaimDate"] if c in df.columns), None)
     monthly = pd.DataFrame()
     if date_col_m:
@@ -582,7 +541,6 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
             monthly = tmp.groupby("Month", observed=True)[cols_base].sum().reset_index()
             monthly = _add_grand_total_row(monthly, "Month")
 
-    # Balance Aging Summary
     balance_df = df[(df["Balance"] > 0) & df["AgingBucket"].notna()].copy()
     if not balance_df.empty:
         aging_pivot = pd.pivot_table(
@@ -595,7 +553,6 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     else:
         aging_summary = pd.DataFrame(columns=["Insurance"] + labels + ["Grand Total"])
 
-    # Balance Status Stage Summary
     bss_df = df[df["Balance"] > 0].copy()
     if not bss_df.empty:
         bss = (bss_df.groupby(["Balance Status Group","Balance Submission Stage"], dropna=False)["Balance"]
@@ -606,48 +563,37 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     else:
         bss = pd.DataFrame(columns=["Balance Status Group","Balance Submission Stage","Balance"])
 
-    # Recon check
     recon_diff_total = float(df["Recon Diff"].sum())
 
-    # ── KPIs derived from rcm_insurance Grand Total (set after build below) ──
-    # Placeholder — overwritten after rcm_insurance is built
     kpi_net = kpi_paid = kpi_bal = kpi_rej = kpi_acc = 0.0
 
-    # ── RCM Summary (Insurance view) ─────────────────────────────────────────
-    # Ensure Difference column exists
     if "Difference" not in df.columns:
         df["Difference"] = 0.0
     df["Difference"] = pd.to_numeric(df["Difference"], errors="coerce").fillna(0.0)
     if "UniqueID" not in df.columns:
-        df["UniqueID"] = range(len(df))  # fallback sequential
+        df["UniqueID"] = range(len(df))
 
-    ins_col_rcm = next((c for c in ["Insurance","PayerName","Insurer","Plan"] if c in df.columns), None)
-    rcm_group_col = ins_col_rcm if ins_col_rcm else "Insurance"
+    rcm_group_col = ins_col if ins_col else "Insurance"
     if rcm_group_col not in df.columns:
         df[rcm_group_col] = "Not Available"
     df[rcm_group_col] = df[rcm_group_col].fillna("Not Available").astype(str).str.strip()
 
-    # Drop rows where Insurance is blank/Not Available — these are embedded total/summary rows
     df_rcm = df[~df[rcm_group_col].str.lower().isin(
         ["not available", "", "nan", "none", "total", "grand total"]
     )].copy()
 
     rcm_insurance = build_rcm_summary(df_rcm, rcm_group_col)
 
-    # Doctor wise — try DocName, DoctorName, Doctor, PhysicianName
     rcm_doctor = pd.DataFrame()
     doc_col = next((c for c in ["DocName","DoctorName","Doctor","PhysicianName"] if c in df.columns), None)
     if doc_col:
         df_rcm[doc_col] = df_rcm[doc_col].fillna("Not Available").astype(str).str.strip()
-        # Also filter out blank doctor names
         df_doc = df_rcm[~df_rcm[doc_col].str.lower().isin(
             ["not available","","nan","none","total","grand total"]
         )].copy()
         rcm_doctor = build_rcm_summary(df_doc, doc_col)
 
-    # Month wise — source file has a "Month" column directly
     rcm_month = pd.DataFrame()
-    # Priority: direct "Month" column first, then parse from date columns
     date_col_rcm = next((c for c in ["VisitDate","SubDate","SubmissionDate","ClaimDate"] if c in df_rcm.columns), None)
     if "Month" in df_rcm.columns:
         import calendar as _cal
@@ -655,11 +601,8 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         _month_abbr_map = {m.lower(): i for i, m in enumerate(_cal.month_abbr) if m}
 
         def _to_month_label(row):
-            """Convert Month + Year columns to Jan-22 format."""
             import re as _re
             s = str(row["Month"]).strip()
-
-            # Get year — strip index names and try variants
             yr_val = None
             _row_idx_stripped = {str(k).strip(): k for k in row.index}
             for _ycol in ["Year", "year", "YEAR", "yr", "YR"]:
@@ -670,18 +613,15 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
                         break
                     except Exception:
                         pass
-            # Also try to extract year from VisitDate or date columns
             if yr_val is None:
                 for _dcol in ["VisitDate","SubDate","SubmissionDate","ClaimDate"]:
                     _actual = _row_idx_stripped.get(_dcol)
                     if _actual is not None:
                         try:
                             _dval = row[_actual]
-                            # Handle pandas Timestamp directly
                             if hasattr(_dval, "year"):
                                 yr_val = int(_dval.year) % 100
                                 break
-                            # Handle string "2022-01-15"
                             import re as _re2
                             m2 = _re2.match(r"(\d{4})", str(_dval).strip())
                             if m2:
@@ -690,16 +630,13 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
                         except Exception:
                             pass
 
-            # datetime string: "2022-01-01 00:00:00" or "2022-01-01"
             dt_match = _re.match(r"(\d{4})-(\d{2})-\d{2}", s)
             if dt_match:
                 yr = int(dt_match.group(1)) % 100
                 mo = int(dt_match.group(2))
                 return f"{_cal.month_abbr[mo]}-{yr:02d}"
-            # Already Jan-22 format
             if _re.match(r"[A-Za-z]{3}-\d{2}", s):
                 return s.title()[:3] + s[3:]
-            # Full month name "April" + year
             lower = s.lower()
             if lower in _month_name_map:
                 abbr = _cal.month_abbr[_month_name_map[lower]]
@@ -713,7 +650,6 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         tmp_m = tmp_m[tmp_m["Month"].str.lower() != "nan"]
         if not tmp_m.empty:
             rcm_month = build_rcm_summary(tmp_m, "Month")
-            # Sort chronologically
             def _month_sort_key(val):
                 import re as _re
                 try:
@@ -739,7 +675,6 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
             tmp_m["Month"] = tmp_m[date_col_rcm].dt.strftime("%b-%y")
             rcm_month = build_rcm_summary(tmp_m, "Month")
 
-    # ── KPIs from rcm_insurance Grand Total row ─────────────────────────────
     gt_pat_kpi = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
     if rcm_insurance is not None and not rcm_insurance.empty:
         gt_row_kpi = rcm_insurance[rcm_insurance.iloc[:,0].astype(str).str.match(gt_pat_kpi)]
@@ -773,34 +708,25 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
 
 
 def build_excel_output(result: dict) -> bytes:
-    """
-    Build a single-sheet Excel workbook matching the reference format:
-    - Light grey title row with auto date range
-    - Dark green column headers, green text for pay columns
-    - White/light grey alternating rows
-    - Green Grand Total row
-    - All 3 sections (Insurance / Doctor / Month) in one sheet
-    """
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
-    # ── Colour palette (matching screenshot) ─────────────────────────────────
-    C_TITLE_BG   = "D9D9D9"   # light grey  — title bg
-    C_TITLE_FG   = "000000"   # black       — title text
-    C_HDR_BG     = "595959"   # dark grey   — column header bg
-    C_HDR_FG     = "FFFFFF"   # white       — header text
-    C_GREEN_FG   = "00B050"   # green       — Initial/Resb pay col text
-    C_SUBHDR_BG  = "BFBFBF"   # mid grey    — section label row
-    C_SUBHDR_FG  = "000000"   # black       — section label text
-    C_GT_BG      = "D9D9D9"   # grey        — grand total row
-    C_GT_FG      = "000000"   # black bold  — grand total text
-    C_ALT1       = "FFFFFF"   # white       — odd rows
-    C_ALT2       = "F2F2F2"   # light grey  — even rows
-    C_REJ_FG     = "FF0000"   # red         — Rej.% > 0
-    C_BORDER     = "BFBFBF"   # grey border
+    C_TITLE_BG   = "D9D9D9"
+    C_TITLE_FG   = "000000"
+    C_HDR_BG     = "595959"
+    C_HDR_FG     = "FFFFFF"
+    C_GREEN_FG   = "00B050"
+    C_SUBHDR_BG  = "BFBFBF"
+    C_SUBHDR_FG  = "000000"
+    C_GT_BG      = "D9D9D9"
+    C_GT_FG      = "000000"
+    C_ALT1       = "FFFFFF"
+    C_ALT2       = "F2F2F2"
+    C_REJ_FG     = "FF0000"
+    C_BORDER     = "BFBFBF"
 
-    NUM_COLS = 13   # total columns (same as reference)
+    NUM_COLS = 13
 
     def _thin():
         s = Side(style="thin", color=C_BORDER)
@@ -810,8 +736,7 @@ def build_excel_output(result: dict) -> bytes:
         return PatternFill("solid", fgColor=hex_color)
 
     def _font(bold=False, color="000000", size=10, italic=False):
-        return Font(bold=bold, color=color, size=size, italic=italic,
-                    name="Calibri")
+        return Font(bold=bold, color=color, size=size, italic=italic, name="Calibri")
 
     def _align(h="center", v="center", wrap=False):
         return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
@@ -820,19 +745,14 @@ def build_excel_output(result: dict) -> bytes:
     ws = wb.active
     ws.title = "RCM SUMMARY"
 
-    # ── Column widths ─────────────────────────────────────────────────────────
     col_widths = [42, 12, 16, 14, 13, 11, 11, 11, 13, 18, 18, 14, 9]
     for i, w in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
-    cur = 1  # current row pointer
+    cur = 1
 
     def _write_section(df_sec, section_label, start_row):
-        """Write one section (Insurance / Doctor / Month) starting at start_row.
-        Returns next available row."""
         r = start_row
-
-        # Section label row (e.g. "Insurance Name")
         ws.row_dimensions[r].height = 20
         for c in range(1, NUM_COLS + 1):
             cell = ws.cell(row=r, column=c)
@@ -844,7 +764,6 @@ def build_excel_output(result: dict) -> bytes:
         ws.cell(row=r, column=1).alignment = _align("left")
         r += 1
 
-        # Column header row
         ws.row_dimensions[r].height = 36
         GREEN_COLS = {"Initial pay", "Resb1 pay", "Resb2 pay", "Resb3 pay"}
         for ci, col in enumerate(df_sec.columns, 1):
@@ -857,30 +776,13 @@ def build_excel_output(result: dict) -> bytes:
             cell.alignment = _align("center", wrap=True)
         r += 1
 
-        # Data rows
         for row_idx, (_, row) in enumerate(df_sec.iterrows()):
             is_gt = str(row.iloc[0]).strip().lower() in ("grand total", "total")
             ws.row_dimensions[r].height = 18
 
             for ci, val in enumerate(row, 1):
                 cell = ws.cell(row=r, column=ci)
-
-                # Format numbers
-                if ci > 1 and not is_gt:
-                    try:
-                        val = float(val)
-                        col_name = df_sec.columns[ci - 1]
-                        if col_name == "Rej. %":
-                            cell.number_format = "0.00%"
-                            val = val / 100
-                        elif col_name == "Claim count":
-                            cell.number_format = "0"
-                            val = int(val)
-                        else:
-                            cell.number_format = "#,##0.00"
-                    except (ValueError, TypeError):
-                        pass
-                elif ci > 1 and is_gt:
+                if ci > 1:
                     try:
                         val = float(val)
                         col_name = df_sec.columns[ci - 1]
@@ -896,16 +798,15 @@ def build_excel_output(result: dict) -> bytes:
                         pass
 
                 cell.value = val
-
                 if is_gt:
                     cell.fill      = _fill(C_GT_BG)
                     cell.font      = _font(bold=True, color=C_GT_FG, size=10)
+                    cell.alignment = _align("right" if ci > 1 else "left")
                 else:
                     bg = C_ALT1 if row_idx % 2 == 0 else C_ALT2
                     cell.fill = _fill(bg)
-                    # Red Rej.%
                     col_name = df_sec.columns[ci - 1]
-                    if col_name == "Rej. %" and not is_gt:
+                    if col_name == "Rej. %":
                         try:
                             if float(row.iloc[ci - 1]) > 0:
                                 cell.font = _font(bold=True, color=C_REJ_FG, size=10)
@@ -918,23 +819,15 @@ def build_excel_output(result: dict) -> bytes:
                     else:
                         cell.font = _font(size=10)
                     cell.alignment = _align("right" if ci > 1 else "left")
-
                 cell.border = _thin()
-                if is_gt:
-                    cell.alignment = _align("right" if ci > 1 else "left")
             r += 1
+        return r
 
-        return r  # next row after this section
-
-    # ── Build title from date range in data ──────────────────────────────────
     def _get_date_range():
-        """Get start/end month-year from rcm_month rows (e.g. Jan-22, Feb-22)."""
         try:
             import calendar as _cal
             _abbr_map = {m.lower(): i for i, m in enumerate(_cal.month_abbr) if m}
-
             def _mk(v):
-                """Sort key for Mon-YY labels."""
                 p = str(v).strip().split("-")
                 if len(p) == 2:
                     try:
@@ -942,9 +835,7 @@ def build_excel_output(result: dict) -> bytes:
                     except Exception:
                         pass
                 return (9999, 99)
-
             def _expand(lbl):
-                """Jan-22 -> JAN 2022"""
                 p = str(lbl).strip().split("-")
                 if len(p) == 2:
                     mon = p[0].upper()
@@ -952,13 +843,10 @@ def build_excel_output(result: dict) -> bytes:
                     full_yr = (2000 + yr) if yr < 50 else (1900 + yr)
                     return f"{mon} {full_yr}"
                 return lbl.upper()
-
             rcm_m = result.get("rcm_month")
             if rcm_m is not None and not rcm_m.empty:
                 gt_p = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
-                rows = [str(v).strip() for v in rcm_m.iloc[:, 0]
-                        if not gt_p.match(str(v))]
-                # Only use rows that have Mon-YY format (contain "-")
+                rows = [str(v).strip() for v in rcm_m.iloc[:, 0] if not gt_p.match(str(v))]
                 valid = [r for r in rows if "-" in r]
                 if valid:
                     rows_sorted = sorted(valid, key=_mk)
@@ -969,7 +857,6 @@ def build_excel_output(result: dict) -> bytes:
 
     title_text = _get_date_range()
 
-    # ── Title row ─────────────────────────────────────────────────────────────
     ws.merge_cells(start_row=cur, start_column=1, end_row=cur, end_column=NUM_COLS)
     title_cell = ws.cell(row=cur, column=1)
     title_cell.value     = title_text
@@ -978,39 +865,115 @@ def build_excel_output(result: dict) -> bytes:
     title_cell.alignment = _align("center")
     ws.row_dimensions[cur].height = 36
     cur += 1
-
-    # blank row
     ws.row_dimensions[cur].height = 8
     cur += 1
 
-    # ── Insurance section ─────────────────────────────────────────────────────
     rcm_ins = result.get("rcm_insurance")
     if rcm_ins is not None and not rcm_ins.empty:
         cur = _write_section(rcm_ins, "Insurance Name", cur)
         ws.row_dimensions[cur].height = 8
-        cur += 1   # blank separator
+        cur += 1
 
-    # ── Doctor section ────────────────────────────────────────────────────────
     rcm_doc = result.get("rcm_doctor")
     if rcm_doc is not None and not rcm_doc.empty:
         cur = _write_section(rcm_doc, "Doctor Name", cur)
         ws.row_dimensions[cur].height = 8
         cur += 1
 
-    # ── Month section ─────────────────────────────────────────────────────────
     rcm_mon = result.get("rcm_month")
     if rcm_mon is not None and not rcm_mon.empty:
         cur = _write_section(rcm_mon, "Month", cur)
 
-    # freeze panes below title
     ws.freeze_panes = "A3"
-
 
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
     return buf.read()
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NEW DETAIL DOWNLOAD
+# ─────────────────────────────────────────────────────────────────────────────
+def build_rcm_detail_output(result: dict) -> bytes:
+    """
+    Build a detail workbook for the 4 summary buckets:
+    - Sub Nt Rmtd (outstanding amount)
+    - Rsub Nt Rmtd (outstanding amount)
+    - Rejection Accepted
+    - Final Rejn
+    """
+    df = result.get("df")
+    if df is None or df.empty:
+        return b""
+
+    d = df.copy()
+    if "Status" not in d.columns:
+        d["Status"] = ""
+    if "Difference" not in d.columns:
+        d["Difference"] = 0.0
+    if "Rejected" not in d.columns:
+        d["Rejected"] = 0.0
+    if "SubInsShare" not in d.columns:
+        d["SubInsShare"] = 0.0
+
+    d["Difference"] = pd.to_numeric(d["Difference"], errors="coerce").fillna(0.0)
+    d["Rejected"] = pd.to_numeric(d["Rejected"], errors="coerce").fillna(0.0)
+    d["SubInsShare"] = pd.to_numeric(d["SubInsShare"], errors="coerce").fillna(0.0)
+
+    d["_status_norm"] = (
+        d["Status"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .str.replace(r"\s+", " ", regex=True)
+    )
+
+    sub_nt_rmtd = d[d["_status_norm"] == "submitted"].copy()
+    sub_nt_rmtd["Detail Bucket"] = "Sub Nt Rmtd (outstanding amount)"
+    sub_nt_rmtd["Bucket Amount"] = sub_nt_rmtd["SubInsShare"]
+    sub_nt_rmtd = sub_nt_rmtd[sub_nt_rmtd["Bucket Amount"] > 0]
+
+    rsub_nt_rmtd = d[
+        d["_status_norm"].str.match(r"^submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
+    ].copy()
+    rsub_nt_rmtd["Detail Bucket"] = "Rsub Nt Rmtd (outstanding amount)"
+    rsub_nt_rmtd["Bucket Amount"] = rsub_nt_rmtd["Difference"]
+    rsub_nt_rmtd = rsub_nt_rmtd[rsub_nt_rmtd["Bucket Amount"] > 0]
+
+    rejection_accepted = d[
+        d["_status_norm"].str.match(r"^rejection accepted(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+    ].copy()
+    rejection_accepted["Detail Bucket"] = "Rejection Accepted"
+    rejection_accepted["Bucket Amount"] = rejection_accepted["Difference"]
+    rejection_accepted = rejection_accepted[rejection_accepted["Bucket Amount"] > 0]
+
+    final_rejn = d[
+        d["_status_norm"].str.match(r"^rejected(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+    ].copy()
+    final_rejn["Detail Bucket"] = "Final Rejn"
+    final_rejn["Bucket Amount"] = final_rejn["Rejected"]
+    final_rejn = final_rejn[final_rejn["Bucket Amount"] > 0]
+
+    combined_detail = pd.concat(
+        [sub_nt_rmtd, rsub_nt_rmtd, rejection_accepted, final_rejn],
+        ignore_index=True,
+    )
+
+    for x in [sub_nt_rmtd, rsub_nt_rmtd, rejection_accepted, final_rejn, combined_detail]:
+        if "_status_norm" in x.columns:
+            x.drop(columns=["_status_norm"], inplace=True, errors="ignore")
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        sub_nt_rmtd.to_excel(writer, sheet_name="Sub_Nt_Rmtd_Detail", index=False)
+        rsub_nt_rmtd.to_excel(writer, sheet_name="Rsub_Nt_Rmtd_Detail", index=False)
+        rejection_accepted.to_excel(writer, sheet_name="Rejection_Accepted_Detail", index=False)
+        final_rejn.to_excel(writer, sheet_name="Final_Rejn_Detail", index=False)
+        combined_detail.to_excel(writer, sheet_name="All_4_Buckets_Detail", index=False)
+
+    output.seek(0)
+    return output.read()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DISPLAY HELPER — styled dataframe (Grand Total last, highlighted)
@@ -1027,7 +990,6 @@ def _move_gt_last(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _style_gt(df: pd.DataFrame):
-    """Apply Grand Total bold + orange highlight."""
     def _highlight(row):
         if GT_PAT.match(str(row.iloc[0])):
             return ["background-color:#FCE4D6;font-weight:bold"] * len(row)
@@ -1036,7 +998,6 @@ def _style_gt(df: pd.DataFrame):
 
 
 def _fmt_numeric(df: pd.DataFrame) -> pd.DataFrame:
-    """Format numeric columns to 2 decimal places for display."""
     num_cols = df.select_dtypes(include="number").columns.tolist()
     return df.style.format({c: "{:,.2f}" for c in num_cols})
 
@@ -1054,19 +1015,14 @@ def show_table(df: pd.DataFrame, key: str):
     st.dataframe(styled, use_container_width=True, hide_index=True, key=key)
 
 
-
-
 def _result_cache_key(center_key: str) -> str:
-    """S3 key for the cached result JSON for a center."""
     year = st.session_state.get("rcm_year") or datetime.now().year
     return f"{SUMMARY_S3_PREFIX}/{year}/{center_key}/_latest_result_cache.json"
 
 
 def _save_result_to_s3(result: dict, center_key: str):
-    """Serialize the summary tables to JSON and save to S3."""
     import json
     try:
-        # Only serialize the display DataFrames — skip raw df (too large) and bytes
         cache = {
             "filename":     result.get("filename", ""),
             "generated_at": result.get("generated_at", ""),
@@ -1086,11 +1042,10 @@ def _save_result_to_s3(result: dict, center_key: str):
             ContentType="application/json"
         )
     except Exception:
-        pass  # cache save failure is non-fatal
+        pass
 
 
 def _load_result_from_s3(center_key: str) -> dict | None:
-    """Load cached result JSON from S3. Returns None if not found."""
     import json
     try:
         key = _result_cache_key(center_key)
@@ -1098,26 +1053,22 @@ def _load_result_from_s3(center_key: str) -> dict | None:
         if s3 is None: return None
         obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
         cache = json.loads(obj["Body"].read().decode("utf-8"))
-        # Reconstruct DataFrames
         def _from_json(j):
             if j is None: return pd.DataFrame()
             return pd.read_json(j, orient="split")
-        # ── 3-day TTL check ──────────────────────────────────────────────
         generated_at = cache.get("generated_at", "")
         if generated_at:
             try:
                 age = datetime.now() - datetime.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
                 if age.total_seconds() > 3 * 24 * 3600:
-                    return None  # expired — force fresh upload
+                    return None
             except Exception:
                 pass
-        # ─────────────────────────────────────────────────────────────────────
         cache["rcm_insurance"] = _from_json(cache.get("rcm_insurance"))
         cache["rcm_doctor"]    = _from_json(cache.get("rcm_doctor"))
         cache["rcm_month"]     = _from_json(cache.get("rcm_month"))
         cache["xl_bytes"]      = None
 
-        # Always recompute KPIs from rcm_insurance Grand Total — never trust stored kpi
         import re as _re2
         _gt_p = _re2.compile(r"^\s*(grand\s*total|total)\s*$", _re2.I)
         _ins = cache["rcm_insurance"]
@@ -1153,22 +1104,18 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     from email                import encoders
     import calendar as _cal, re as _re
 
-    # Read secrets — handle both flat and nested [email] section formats
     def _get_secret(*keys):
         for k in keys:
-            # flat: EMAIL_SENDER = "..."
             try:
                 v = st.secrets[k]
                 if v: return str(v).strip()
             except Exception:
                 pass
-            # nested: [email] section
             try:
                 v = st.secrets["email"][k]
                 if v: return str(v).strip()
             except Exception:
                 pass
-            # nested: [EMAIL] section
             try:
                 v = st.secrets["EMAIL"][k]
                 if v: return str(v).strip()
@@ -1195,7 +1142,6 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     generated_at  = result.get("generated_at", "")
     filename_orig = result.get("filename", "")
 
-    # Build title
     title_line = "EMC - RCM SUMMARY"
     try:
         _abbr_map = {m.lower(): i for i, m in enumerate(_cal.month_abbr) if m}
@@ -1228,7 +1174,6 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
 
     gt_p2 = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
 
-    # ── Exact Excel colors ────────────────────────────────────────────────────
     E_TITLE_BG  = "#D9D9D9"
     E_HDR_BG    = "#595959"
     E_HDR_FG    = "#FFFFFF"
@@ -1246,7 +1191,6 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
             return ""
         cols = list(df.columns)
 
-        # Section header banner (matching Excel section label row)
         sec_banner = (
             f"<tr><td colspan='{len(cols)}' style='background:{E_SUBHDR_BG};"
             f"font-weight:700;font-size:13px;padding:8px 12px;"
@@ -1254,7 +1198,6 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
             f"{caption}</td></tr>"
         ) if caption else ""
 
-        # Column headers
         ths = "".join(
             f"<th style='padding:7px 10px;background:{E_HDR_BG};color:{E_HDR_FG};"
             f"border:1px solid #888;text-align:{'left' if i==0 else 'right'};"
@@ -1280,7 +1223,6 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
                         if float(val) > 0:
                             extra = f"color:{E_RED};font-weight:600;"
                     except: pass
-                # Format values
                 if col == "Rej. %":
                     try: val = f"{float(val):.2f}%"
                     except: pass
@@ -1308,7 +1250,6 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     doc_html = _df_to_html(result.get("rcm_doctor"),    "Doctor Name")
     mon_html = _df_to_html(result.get("rcm_month"),     "Month")
 
-    # ── KPI cards (matching Streamlit UI style) ───────────────────────────────
     def _kpi_card(label, value, dark=False):
         bg   = "#0A2647" if dark else "#FFFFFF"
         lc   = "rgba(180,205,255,0.75)" if dark else "#8A9BB5"
@@ -1331,7 +1272,6 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
 <div style="max-width:1000px;margin:20px auto;background:#fff;border-radius:14px;
      box-shadow:0 8px 24px rgba(10,38,71,0.10);overflow:hidden;">
 
-  <!-- Title bar -->
   <div style="background:{E_HDR_BG};padding:18px 24px;">
     <div style="color:{E_HDR_FG};font-size:18px;font-weight:700;letter-spacing:-0.3px;">
       {title_line}
@@ -1342,8 +1282,6 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
   </div>
 
   <div style="padding:20px 24px;">
-
-    <!-- KPI Cards -->
     <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
       <tr>
         {_kpi_card("Claimed Amount", net)}
@@ -1354,7 +1292,6 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
       </tr>
     </table>
 
-    <!-- Tables -->
     {ins_html}
     {doc_html}
     {mon_html}
@@ -1384,7 +1321,6 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     all_to = [r.strip() for r in ([recipient] + ([cc] if cc else [])) if r.strip()]
     errors = []
 
-    # Try 1: SSL on configured port (default 465) — matches mail.emc-uae.com
     try:
         import ssl
         ctx = ssl.create_default_context()
@@ -1395,7 +1331,6 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     except Exception as e1:
         errors.append(f"{smtp_port}/SSL: {e1}")
 
-    # Try 2: STARTTLS on port 587
     try:
         with smtplib.SMTP(smtp_host, 587, timeout=20) as srv:
             srv.ehlo(); srv.starttls(); srv.ehlo()
@@ -1405,7 +1340,6 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     except Exception as e2:
         errors.append(f"587/STARTTLS: {e2}")
 
-    # Try 3: STARTTLS on port 25
     try:
         with smtplib.SMTP(smtp_host, 25, timeout=20) as srv:
             srv.ehlo()
@@ -1431,7 +1365,6 @@ if ck not in CENTERS:
 
     st.subheader(f"Choose a center — {sel_year}")
 
-    # ── Year selector (only shown when no year passed via URL) ───────────────
     if not st.query_params.get("year"):
         yr_col, _ = st.columns([2, 5])
         with yr_col:
@@ -1482,7 +1415,6 @@ if st.button("◀ Choose another center", key="sum_back_center"):
 
 st.markdown("---")
 
-# ── File uploader ────────────────────────────────────────────────────────────
 RESULT_KEY = f"sum_result_{ck}"
 
 up = st.file_uploader(
@@ -1492,7 +1424,7 @@ up = st.file_uploader(
     help="Upload the raw claims source file. The summary engine will process it and display results below.",
 )
 
-up_rcm = None  # placeholder — no second uploader in this version
+up_rcm = None
 
 if up is not None:
     if st.button("⚙️ Process File", use_container_width=True, key=f"sum_process_btn_{ck}"):
@@ -1514,13 +1446,12 @@ if up is not None:
                 result["rcm_summary_bytes"] = up_rcm.read() if up_rcm is not None else None
                 result["rcm_summary_name"]  = up_rcm.name  if up_rcm is not None else None
                 st.session_state[RESULT_KEY] = result
-                _save_result_to_s3(result, ck)  # persist for refresh
+                _save_result_to_s3(result, ck)
                 st.rerun()
             except Exception as e:
                 st.error(f"Processing failed: {e}")
                 st.session_state.pop(RESULT_KEY, None)
 
-# ── Show results — restore from S3 if session_state is empty ────────────────
 if RESULT_KEY not in st.session_state:
     cached = _load_result_from_s3(ck)
     if cached:
@@ -1537,19 +1468,19 @@ if result:
     else:
         st.info("✅ Reconciliation check passed — Net = Paid + Balance + Rejected + Accepted.")
 
-    # KPI cards
     net, paid, bal, rej, acc = result["kpi"]
     render_kpi_cards(net, paid, bal, rej, acc)
 
     st.markdown("---")
 
-    # Download full Excel — rebuild if loaded from S3 cache (xl_bytes not stored)
     if result.get("xl_bytes"):
         excel_bytes = result["xl_bytes"]
     else:
         excel_bytes = build_excel_output(result)
+
+    detail_excel_bytes = build_rcm_detail_output(result)
+
     safe_name = re.sub(r"[^\w\-.]", "_", center_cfg["key"])
-    # Build clean filename: EMC - RCM SUMMARY - JAN 2025 - DEC 2025.xlsx
     def _build_excel_filename():
         try:
             import calendar as _cal
@@ -1578,7 +1509,9 @@ if result:
         except Exception:
             pass
         return f"EMC - RCM SUMMARY - {datetime.now().strftime('%b %Y').upper()}.xlsx"
+
     dl_name = _build_excel_filename()
+    detail_dl_name = "EMC - RCM DETAIL - 4 BUCKETS.xlsx"
 
     report_s3_key = build_report_s3_key(center_cfg["key"])
     ok_rep, err_rep = upload_bytes_to_s3(
@@ -1597,8 +1530,8 @@ if result:
     else:
         st.warning(f"Summary report could not be saved to S3: {err_rep}")
 
-    col_dl, col_em = st.columns(2)
-    with col_dl:
+    col_dl1, col_dl2, col_em = st.columns(3)
+    with col_dl1:
         st.download_button(
             "⬇️ Download Full Summary Report (Excel)",
             data=excel_bytes,
@@ -1606,6 +1539,15 @@ if result:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             key=f"sum_dl_{ck}",
+        )
+    with col_dl2:
+        st.download_button(
+            "⬇️ Download Detail 4 Buckets",
+            data=detail_excel_bytes,
+            file_name=detail_dl_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key=f"sum_detail_dl_{ck}",
         )
     with col_em:
         if st.button("📧 Send to Management", use_container_width=True, key=f"sum_email_{ck}"):
@@ -1623,8 +1565,6 @@ if result:
 
     st.markdown("---")
 
-    # ── Tabs ──────────────────────────────────────────────────────────────────
-    # ── 3 RCM tabs ────────────────────────────────────────────────────────────
     tabs = st.tabs([
         "🏥 Insurance",
         "👨‍⚕️ Doctor",
@@ -1632,7 +1572,6 @@ if result:
     ])
 
     def _show_rcm(df_rcm, key):
-        """Shared styled display for all 3 RCM summary views."""
         if df_rcm is None or (hasattr(df_rcm, "empty") and df_rcm.empty):
             st.info("No data available.")
             return
