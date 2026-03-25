@@ -1387,23 +1387,24 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     gt_p2 = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
 
     # ── Outlook-safe color theme ─────────────────────────────────────────────
-    T_HDR_BG    = "#0D4F4F"   # dark teal header
+    # ── Email color theme — Light Professional (Navy/Slate) ─────────────────
+    T_HDR_BG    = "#1B2A4A"   # deep navy header
     T_HDR_FG    = "#FFFFFF"
-    T_ACCENT    = "#0E7C7C"   # teal
-    T_SECT_BG   = "#0E7C7C"   # section banners
+    T_ACCENT    = "#2E6DA4"   # professional blue
+    T_SECT_BG   = "#2E6DA4"
     T_SECT_FG   = "#FFFFFF"
-    T_COL_BG    = "#1A5C5C"   # column header bg
+    T_COL_BG    = "#344F6E"   # slate blue column header
     T_COL_FG    = "#FFFFFF"
-    T_GT_BG     = "#C8E6E6"   # grand total
-    T_GT_FG     = "#0D3333"
+    T_GT_BG     = "#D6E4F0"   # light blue grand total
+    T_GT_FG     = "#1B2A4A"
     T_ALT1      = "#FFFFFF"
-    T_ALT2      = "#EDF7F7"
+    T_ALT2      = "#F0F5FA"   # very light blue stripe
     T_GREEN_VAL = "#1A7A4A"
     T_RED_VAL   = "#C0392B"
-    T_BORDER    = "#7BBCBC"
-    T_BODY_BG   = "#E6F2F2"
-    T_CARD_ACC  = "#E0F4F4"
-    T_CARD_DARK = "#0D4F4F"
+    T_BORDER    = "#C2D4E8"
+    T_BODY_BG   = "#EEF3F8"   # light grey-blue page background
+    T_CARD_ACC  = "#EAF2FB"   # light blue card
+    T_CARD_DARK = "#1B2A4A"   # dark navy card (Under Process)
     GREEN_COLS  = {"Initial pay", "Resb1 pay", "Resb2 pay", "Resb3 pay"}
 
     def _df_to_html(df, caption=""):
@@ -1412,20 +1413,18 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
         cols = list(df.columns)
         nc   = len(cols)
 
-        # Section banner row
         banner = (
             f'<tr><td colspan="{nc}" bgcolor="{T_SECT_BG}" '
             f'style="background:{T_SECT_BG};color:{T_SECT_FG};font-family:Arial,sans-serif;'
-            f'font-size:12px;font-weight:bold;padding:9px 12px;'
-            f'text-transform:uppercase;letter-spacing:0.4px;border:1px solid {T_ACCENT};">'
-            f'&nbsp;&#9646;&nbsp; {caption}</td></tr>'
+            f'font-size:11px;font-weight:bold;padding:8px 12px;'
+            f'text-transform:uppercase;letter-spacing:0.5px;border:1px solid {T_ACCENT};">'
+            f'&nbsp;{caption}</td></tr>'
         ) if caption else ""
 
-        # Column header row
         ths = ""
         for i, c in enumerate(cols):
             align = "left" if i == 0 else "right"
-            gc = "color:#90EE90;" if c in GREEN_COLS else ""
+            gc = "color:#B8D8F0;" if c in GREEN_COLS else ""
             ths += (
                 f'<th bgcolor="{T_COL_BG}" '
                 f'style="background:{T_COL_BG};color:{T_COL_FG};{gc}'
@@ -1439,7 +1438,7 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
             is_gt = bool(gt_p2.match(str(row.iloc[0])))
             bg    = T_GT_BG if is_gt else (T_ALT1 if ri % 2 == 0 else T_ALT2)
             fw    = "font-weight:bold;" if is_gt else ""
-            fg    = f"color:{T_GT_FG};" if is_gt else ""
+            fg    = f"color:{T_GT_FG};" if is_gt else "color:#222222;"
             cells = ""
             for ci, val in enumerate(row):
                 col   = cols[ci]
@@ -1480,32 +1479,31 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     doc_html = _df_to_html(result.get("rcm_doctor"),    "Doctor Name")
     mon_html = _df_to_html(result.get("rcm_month"),     "Month")
 
-    # ── KPI cards — pure table cells, Outlook-safe ────────────────────────────
     def _kpi_card(label, value, dark=False, accent=False):
         if dark:
-            bg, lc, vc, br = T_CARD_DARK, "#7ECECE", "#FFFFFF", "#1A7A7A"
+            bg, lc, vc, br = T_CARD_DARK, "#7BAFD4", "#FFFFFF", "#2E5A8A"
         elif accent:
-            bg, lc, vc, br = T_CARD_ACC,  T_ACCENT,  "#0D3333", T_ACCENT
+            bg, lc, vc, br = T_CARD_ACC,  T_ACCENT,  "#1B2A4A", T_ACCENT
         else:
-            bg, lc, vc, br = "#FFFFFF",   "#5A8A8A",  "#0D3333", T_BORDER
+            bg, lc, vc, br = "#FFFFFF",   "#607D9A",  "#1B2A4A", T_BORDER
         return (
-            f'<td width="20%" style="padding:6px;">'
+            f'<td width="20%" style="padding:5px;">'
             f'<table width="100%" cellpadding="0" cellspacing="0" border="0">'
-            f'<tr><td bgcolor="{bg}" '
-            f'style="background:{bg};border:2px solid {br};padding:12px 14px;">'
+            f'<tr><td bgcolor="{bg}" style="background:{bg};border:1px solid {br};'
+            f'border-top:3px solid {br};padding:12px 14px;">'
             f'<div style="font-family:Arial,sans-serif;font-size:9px;color:{lc};'
             f'font-weight:bold;text-transform:uppercase;letter-spacing:0.8px;'
-            f'padding-bottom:5px;">{label}</div>'
-            f'<div style="font-family:Arial,sans-serif;font-size:19px;'
+            f'padding-bottom:6px;">{label}</div>'
+            f'<div style="font-family:Arial,sans-serif;font-size:18px;'
             f'font-weight:bold;color:{vc};">{_fmt(value)}</div>'
             f'</td></tr></table></td>'
         )
 
     kpi_row = (
-        _kpi_card("Claimed Amount", net, accent=True) +
+        _kpi_card("Claimed Amount", net,  accent=True) +
         _kpi_card("Total Pay",      paid, accent=True) +
-        _kpi_card("Under Process",  bal,  dark=True) +
-        _kpi_card("Final Rejn",     rej) +
+        _kpi_card("Under Process",  bal,  dark=True)   +
+        _kpi_card("Final Rejn",     rej)               +
         _kpi_card("Rej. Accepted",  acc)
     )
 
@@ -1513,29 +1511,32 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
         '<!DOCTYPE html><html><head><meta charset="UTF-8"></head>'
         f'<body style="margin:0;padding:0;background:{T_BODY_BG};">'
         f'<table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="{T_BODY_BG}">'
-        '<tr><td align="center" style="padding:20px 10px;">'
+        '<tr><td align="center" style="padding:24px 10px;">'
         '<table width="1020" cellpadding="0" cellspacing="0" border="0" style="max-width:1020px;border-collapse:collapse;">'
 
         # Title bar
-        f'<tr><td bgcolor="{T_HDR_BG}" style="background:{T_HDR_BG};padding:0;border-bottom:3px solid {T_ACCENT};">'
+        f'<tr><td bgcolor="{T_HDR_BG}" style="background:{T_HDR_BG};padding:0;border-bottom:4px solid {T_ACCENT};">'
         '<table width="100%" cellpadding="0" cellspacing="0" border="0">'
-        f'<tr><td style="padding:18px 24px;">'
-        f'<div style="font-family:Arial,sans-serif;font-size:20px;font-weight:bold;color:{T_HDR_FG};">&#128202;&nbsp; {title_line}</div>'
-        f'<div style="font-family:Arial,sans-serif;font-size:11px;color:#9ECECE;padding-top:4px;">'
+        f'<tr><td style="padding:20px 26px;">'
+        f'<div style="font-family:Arial,sans-serif;font-size:19px;font-weight:bold;color:{T_HDR_FG};letter-spacing:-0.2px;">'
+        f'&#128202;&nbsp; {title_line}</div>'
+        f'<div style="font-family:Arial,sans-serif;font-size:11px;color:#A8BDD4;padding-top:5px;">'
         f'{center_name} &nbsp;&bull;&nbsp; {filename_orig} &nbsp;&bull;&nbsp; Generated: {generated_at}'
         f'</div></td></tr></table></td></tr>'
 
-        # Body
-        '<tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;padding:22px 24px;">'
+        # White body
+        '<tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;padding:24px 26px;">'
 
-        # KPI label banner
-        f'<table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:6px;">'
-        f'<tr><td bgcolor="{T_ACCENT}" style="background:{T_ACCENT};padding:7px 12px;">'
-        f'<span style="font-family:Arial,sans-serif;font-size:10px;font-weight:bold;color:#FFFFFF;text-transform:uppercase;letter-spacing:0.8px;">&#9632;&nbsp; Summary KPIs</span>'
+        # KPI label
+        f'<table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:8px;">'
+        f'<tr><td bgcolor="{T_HDR_BG}" style="background:{T_HDR_BG};padding:7px 14px;'
+        f'border-left:4px solid {T_ACCENT};">'
+        f'<span style="font-family:Arial,sans-serif;font-size:10px;font-weight:bold;'
+        f'color:#FFFFFF;text-transform:uppercase;letter-spacing:1px;">Summary KPIs</span>'
         f'</td></tr></table>'
 
         # KPI cards
-        '<table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:22px;border-collapse:collapse;">'
+        '<table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;">'
         f'<tr>{kpi_row}</tr></table>'
 
         # Data tables
@@ -1543,9 +1544,9 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
 
         # Footer
         f'<table width="100%" cellpadding="0" cellspacing="0" border="0">'
-        f'<tr><td style="border-top:1px solid {T_BORDER};padding-top:10px;">'
-        f'<span style="font-family:Arial,sans-serif;font-size:9px;color:#8AACAC;">'
-        f'&#128203; Auto-generated by Excellent Medical Group RCM Dashboard &nbsp;&bull;&nbsp; Excel report attached.'
+        f'<tr><td style="border-top:2px solid {T_BODY_BG};padding-top:12px;">'
+        f'<span style="font-family:Arial,sans-serif;font-size:9px;color:#9AABBE;">'
+        f'Auto-generated by Excellent Medical Group RCM Dashboard &nbsp;&bull;&nbsp; Excel report attached.'
         f'</span></td></tr></table>'
 
         '</td></tr>'
