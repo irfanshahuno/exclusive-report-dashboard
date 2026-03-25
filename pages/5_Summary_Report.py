@@ -352,13 +352,20 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     # Not Submitted (any variant) → excluded from all columns
     mask_not_sub       = d["_status_norm"].str.match(r"^not submitted", na=False)
 
-    # ── Total Pay = sum of all remit columns (no extra_paid) ──────────────────
+    # ── Total Pay = remit columns − abs(TakeBack) ────────────────────────────
+    for _c in ["Resub4RemitInsShare", "TakeBack"]:
+        if _c not in d.columns:
+            d[_c] = 0.0
+        d[_c] = pd.to_numeric(d[_c], errors="coerce").fillna(0.0)
+
     d["_row_total_pay"] = (
         d["RemitInsShare"] +
         d["Resub1RemitInsShare"] +
         d["Resub2RemitInsShare"] +
-        d["Resub3RemitInsShare"]
-    ).clip(upper=d["SubInsShare"])
+        d["Resub3RemitInsShare"] +
+        d["Resub4RemitInsShare"] -
+        d["TakeBack"].abs()
+    ).clip(lower=0, upper=d["SubInsShare"])
 
     # ── Column assignments using Difference column ────────────────────────────
     # Sub Nt Rmtd: Submitted initial only → SubInsShare
