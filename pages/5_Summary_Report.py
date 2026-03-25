@@ -1,3 +1,4 @@
+# PATCH: outlook-safe-email-layout
 #!/usr/bin/env python3
 # pages/5_Summary_Report.py
 # PATCH: summary Total pay now uses sum of row-level clipped _row_total_pay
@@ -1484,50 +1485,126 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     html_body = f"""<!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset="UTF-8">
+<title>{title_line}</title>
 </head>
-<body style="margin:0;padding:0;background:#EEF2F7;font-family:Calibri,Arial,sans-serif;color:#222;">
-  <div style="max-width:980px;margin:18px auto;padding:0 10px;">
-    <div style="background:#ffffff;border-radius:18px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,0.08);">
+<body style="margin:0;padding:0;background-color:#E9EDF2;font-family:Calibri,Arial,sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#E9EDF2;">
+  <tr>
+    <td align="center" style="padding:16px;">
+      <table role="presentation" width="1000" cellpadding="0" cellspacing="0" border="0" style="width:1000px;max-width:1000px;background-color:#E9EDF2;">
 
-      <!-- Header -->
-      <div style="background:linear-gradient(135deg,#23364D 0%,#1D4E89 100%);padding:26px 26px 30px 26px;">
-        <div style="font-size:18px;line-height:26px;font-weight:800;color:#ffffff;letter-spacing:-0.2px;">
-          {title_line}
-        </div>
-        <div style="margin-top:12px;font-size:12px;line-height:20px;color:#D7E3F4;">
-          {center_name} &nbsp;&middot;&nbsp; {filename_orig}<br>
-          Generated: {generated_at}
-        </div>
-      </div>
+        <!-- Title bar -->
+        <tr>
+          <td style="background-color:#0B2341;color:#FFFFFF;padding:12px 16px;font-size:18px;font-weight:700;line-height:24px;">
+            {title_line}
+          </td>
+        </tr>
 
-      <!-- Body -->
-      <div style="padding:18px 18px 22px 18px;background:#ffffff;">
+        <!-- Subtitle bar -->
+        <tr>
+          <td style="background-color:#12345B;color:#D7E3F4;padding:8px 16px;font-size:12px;line-height:18px;">
+            {center_name} · {filename_orig}<br>
+            Generated: {generated_at}
+          </td>
+        </tr>
 
-        <!-- KPI row -->
-        <table role="presentation" style="width:100%;border-collapse:separate;border-spacing:0 0;margin-bottom:18px;">
-          <tr>
-            {_kpi_card("Claimed Amount", net)}
-            {_kpi_card("Total Pay", paid)}
-            {_kpi_card("Under Process", bal, dark=True)}
-            {_kpi_card("Final Rejn", rej)}
-            {_kpi_card("Rej. Accepted", acc)}
-          </tr>
-        </table>
+        <!-- Spacer -->
+        <tr><td height="16" style="height:16px;font-size:0;line-height:0;">&nbsp;</td></tr>
 
-        <!-- Tables -->
-        {ins_html}
-        {doc_html}
-        {mon_html}
+        <!-- KPI Row -->
+        <tr>
+          <td>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td width="20%" valign="top" style="padding:0 6px 0 0;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #2E86C1;border-collapse:collapse;">
+                    <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#566573;text-transform:uppercase;">Claimed Amount</td></tr>
+                    <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1B2631;">{_fmt(net)}</td></tr>
+                  </table>
+                </td>
+                <td width="20%" valign="top" style="padding:0 6px;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #27AE60;border-collapse:collapse;">
+                    <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#566573;text-transform:uppercase;">Total Pay</td></tr>
+                    <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1B2631;">{_fmt(paid)}</td></tr>
+                  </table>
+                </td>
+                <td width="20%" valign="top" style="padding:0 6px;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border:1px solid #1F5FBF;border-top:4px solid #1F5FBF;border-collapse:collapse;">
+                    <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#1F5FBF;text-transform:uppercase;">Under Process</td></tr>
+                    <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1F5FBF;">{_fmt(bal)}</td></tr>
+                  </table>
+                </td>
+                <td width="20%" valign="top" style="padding:0 6px;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #E67E22;border-collapse:collapse;">
+                    <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#566573;text-transform:uppercase;">Final Rejn</td></tr>
+                    <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1B2631;">{_fmt(rej)}</td></tr>
+                  </table>
+                </td>
+                <td width="20%" valign="top" style="padding:0 0 0 6px;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #8E44AD;border-collapse:collapse;">
+                    <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#566573;text-transform:uppercase;">Rej. Accepted</td></tr>
+                    <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1B2631;">{_fmt(acc)}</td></tr>
+                  </table>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
 
-        <div style="margin-top:12px;border-top:1px solid #D9E2EC;padding-top:10px;
-                    color:#6B7280;font-size:10px;line-height:16px;">
-          Auto-generated by Excellent Medical Group RCM Dashboard. Excel report attached.
-        </div>
-      </div>
-    </div>
-  </div>
+        <!-- Spacer -->
+        <tr><td height="14" style="height:14px;font-size:0;line-height:0;">&nbsp;</td></tr>
+
+        <!-- Insurance section -->
+        <tr>
+          <td style="background-color:#BFBFBF;color:#000000;padding:12px 16px;font-size:14px;font-weight:700;">
+            Insurance Name
+          </td>
+        </tr>
+        <tr>
+          <td style="background-color:#FFFFFF;border:1px solid #D5DDE6;border-top:none;padding:0;">
+            {ins_html}
+          </td>
+        </tr>
+
+        <!-- Doctor section -->
+        <tr><td height="10" style="height:10px;font-size:0;line-height:0;">&nbsp;</td></tr>
+        <tr>
+          <td style="background-color:#BFBFBF;color:#000000;padding:12px 16px;font-size:14px;font-weight:700;">
+            Doctor Name
+          </td>
+        </tr>
+        <tr>
+          <td style="background-color:#FFFFFF;border:1px solid #D5DDE6;border-top:none;padding:0;">
+            {doc_html}
+          </td>
+        </tr>
+
+        <!-- Month section -->
+        <tr><td height="10" style="height:10px;font-size:0;line-height:0;">&nbsp;</td></tr>
+        <tr>
+          <td style="background-color:#BFBFBF;color:#000000;padding:12px 16px;font-size:14px;font-weight:700;">
+            Monthly Summary
+          </td>
+        </tr>
+        <tr>
+          <td style="background-color:#FFFFFF;border:1px solid #D5DDE6;border-top:none;padding:0;">
+            {mon_html}
+          </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr><td height="10" style="height:10px;font-size:0;line-height:0;">&nbsp;</td></tr>
+        <tr>
+          <td style="color:#6B7280;font-size:11px;line-height:16px;padding:8px 2px 2px 2px;">
+            Auto-generated by EMC RCM Dashboard. Excel report attached.
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
 </body>
 </html>"""
 
