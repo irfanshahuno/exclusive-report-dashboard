@@ -388,32 +388,33 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     d.loc[mask_sub_resub,          "_rsub_nt_rmtd"] = d.loc[mask_sub_resub,          "_residual"]
     d.loc[mask_not_sub_resub_fresh,"_rsub_nt_rmtd"] = d.loc[mask_not_sub_resub_fresh,"_residual"]
 
-    # Rejection Accepted → residual
+    # Rejection Accepted → Difference
     d["_rej_accepted"] = 0.0
-    d.loc[mask_rej_acc, "_rej_accepted"] = d.loc[mask_rej_acc, "_residual"]
+    d.loc[mask_rej_acc, "_rej_accepted"] = pd.to_numeric(d.loc[mask_rej_acc, "Difference"], errors="coerce").fillna(0.0)
+
+    # Rejected (any stage) → Final Rejn = Difference
+    d["_final_rejn_direct"] = 0.0
+    d.loc[mask_rejected, "_final_rejn_direct"] = pd.to_numeric(d.loc[mask_rejected, "Difference"], errors="coerce").fillna(0.0)
 
     agg = d.groupby(group_col, dropna=False, sort=True).agg(
-        claim_count  = ("UniqueID",              "nunique"),
-        claimed_amt  = ("SubInsShare",           "sum"),
-        remit_ins    = ("RemitInsShare",         "sum"),
-        difference   = ("Difference",            "sum"),
-        initial_pay  = ("RemitInsShare",         "sum"),
-        resb1_pay    = ("Resub1RemitInsShare",   "sum"),
-        resb2_pay    = ("Resub2RemitInsShare",   "sum"),
-        resb3_pay    = ("Resub3RemitInsShare",   "sum"),
-        sub_nt_rmtd  = ("_sub_nt_rmtd",         "sum"),
-        rsub_nt_rmtd = ("_rsub_nt_rmtd",        "sum"),
-        rej_accepted = ("_rej_accepted",         "sum"),
-        extra_paid   = ("_extra_paid",           "sum"),
+        claim_count       = ("UniqueID",             "nunique"),
+        claimed_amt       = ("SubInsShare",          "sum"),
+        remit_ins         = ("RemitInsShare",        "sum"),
+        difference        = ("Difference",           "sum"),
+        initial_pay       = ("RemitInsShare",        "sum"),
+        resb1_pay         = ("Resub1RemitInsShare",  "sum"),
+        resb2_pay         = ("Resub2RemitInsShare",  "sum"),
+        resb3_pay         = ("Resub3RemitInsShare",  "sum"),
+        sub_nt_rmtd       = ("_sub_nt_rmtd",        "sum"),
+        rsub_nt_rmtd      = ("_rsub_nt_rmtd",       "sum"),
+        rej_accepted      = ("_rej_accepted",        "sum"),
+        extra_paid        = ("_extra_paid",          "sum"),
+        final_rejn_direct = ("_final_rejn_direct",  "sum"),
     ).reset_index()
 
     agg["remited_amt"] = agg["remit_ins"] + agg["difference"]
     agg["total_pay"]   = agg["initial_pay"] + agg["resb1_pay"] + agg["resb2_pay"] + agg["resb3_pay"] + agg["extra_paid"]
-    agg["final_rejn"]  = (agg["claimed_amt"]
-                          - agg["total_pay"]
-                          - agg["sub_nt_rmtd"]
-                          - agg["rsub_nt_rmtd"]
-                          - agg["rej_accepted"]).clip(lower=0)
+    agg["final_rejn"]  = agg["final_rejn_direct"]
     agg["rej_pct"]     = (agg["final_rejn"] / agg["claimed_amt"].replace(0, float("nan")) * 100).fillna(0.0)
 
     out = pd.DataFrame()
@@ -435,13 +436,9 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     # Grand Total row
     num_cols = out.select_dtypes(include="number").columns.tolist()
     gt = {c: out[c].sum() if c in num_cols else "Grand Total" for c in out.columns}
-    gt[group_col] = "Grand Total"
-    gt_claimed    = out["Claimed Amount"].sum()
-    gt_total_pay  = out["Total pay"].sum()
-    gt_sub        = out["Sub Nt Rmtd (outstanding amount)"].sum()
-    gt_rsub       = out["Rsub Nt Rmtd (outstanding amount)"].sum()
-    gt_rej_acc    = out["Rejection Accepted"].sum()
-    gt_final_rejn = max(gt_claimed - gt_total_pay - gt_sub - gt_rsub - gt_rej_acc, 0)
+    gt[group_col]    = "Grand Total"
+    gt_claimed       = out["Claimed Amount"].sum()
+    gt_final_rejn    = out["Final Rejn"].sum()
     gt["Final Rejn"] = gt_final_rejn
     gt["Rej. %"]     = (gt_final_rejn / gt_claimed * 100) if gt_claimed else 0.0
 
@@ -816,7 +813,7 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
     d = df.copy()
 
     for c in ["SubInsShare","RemitInsShare","Resub1RemitInsShare",
-              "Resub2RemitInsShare","Resub3RemitInsShare"]:
+              "Resub2RemitInsShare","Resub3RemitInsShare","Difference"]:
         if c not in d.columns: d[c] = 0.0
         d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
 
@@ -866,15 +863,13 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
     d.loc[mask_sub_resub,           "Rsub Nt Rmtd"] = d.loc[mask_sub_resub,           "_residual"]
     d.loc[mask_not_sub_resub_fresh, "Rsub Nt Rmtd"] = d.loc[mask_not_sub_resub_fresh, "_residual"]
 
-    # ── Rejection Accepted ────────────────────────────────────────────────────
+    # ── Rejection Accepted → Difference ──────────────────────────────────────
     d["Rejection Accepted"] = 0.0
-    d.loc[mask_rej_acc, "Rejection Accepted"] = d.loc[mask_rej_acc, "_residual"]
+    d.loc[mask_rej_acc, "Rejection Accepted"] = d.loc[mask_rej_acc, "Difference"]
 
-    # ── Final Rejn ────────────────────────────────────────────────────────────
-    d["Final Rejn"] = (
-        d["SubInsShare"] - d["Total pay"] - d["Sub Nt Rmtd"]
-        - d["Rsub Nt Rmtd"] - d["Rejection Accepted"]
-    ).clip(lower=0)
+    # ── Final Rejn → Difference for Rejected rows ─────────────────────────────
+    d["Final Rejn"] = 0.0
+    d.loc[mask_rejected, "Final Rejn"] = d.loc[mask_rejected, "Difference"]
 
     id_cols = [c for c in ["UniqueID","Insurance","DocName","Status","VisitDate","Month","SubInsShare"] if c in d.columns]
     return d[id_cols + ["Initial pay","Resb1 pay","Resb2 pay","Resb3 pay","Total pay",
