@@ -1609,30 +1609,17 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     generated_at  = result.get("generated_at", "")
     filename_orig = result.get("filename", "")
 
-    # Build title
+    # Build title from VisitDate min/max
     title_line = "EMC - RCM SUMMARY"
     try:
-        _abbr_map = {m.lower(): i for i, m in enumerate(_cal.month_abbr) if m}
-        def _mk(v):
-            p = str(v).strip().split("-")
-            if len(p) == 2:
-                try: return (int(p[1]), _abbr_map.get(p[0].lower()[:3], 0))
-                except: pass
-            return (9999, 99)
-        def _expand(lbl):
-            p = str(lbl).strip().split("-")
-            if len(p) == 2:
-                yr = int(p[1])
-                return f"{p[0].upper()} {(2000+yr) if yr<50 else (1900+yr)}"
-            return lbl.upper()
-        gt_p = _re.compile(r"^\s*(grand\s*total|total)\s*$", _re.I)
-        rcm_m = result.get("rcm_month")
-        if rcm_m is not None and not rcm_m.empty:
-            rows = [str(v).strip() for v in rcm_m.iloc[:,0] if not gt_p.match(str(v))]
-            valid = [r for r in rows if "-" in r]
-            if valid:
-                s = sorted(valid, key=_mk)
-                title_line = f"EMC - RCM SUMMARY - {_expand(s[0])} - {_expand(s[-1])}"
+        _df = result.get("df")
+        if _df is not None and "VisitDate" in _df.columns:
+            _vd = pd.to_datetime(_df["VisitDate"], errors="coerce", dayfirst=True).dropna()
+            if not _vd.empty:
+                _min = _vd.min()
+                _max = _vd.max()
+                _range = f"{_min.day} {_min.strftime('%b').upper()} {_min.year} - {_max.day} {_max.strftime('%b').upper()} {_max.year}"
+                title_line = f"EMC - RCM SUMMARY - {_range}"
     except Exception:
         pass
 
