@@ -382,6 +382,9 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
 
     # Not Submitted (Resub-N) > 120 days → treat as Paid (will go to Rejection Accepted below)
     _ns_resub_over120 = mask_not_sub_resub & (_vd > 120)
+    # Save residual BEFORE forcing paid, so we can use it for Rejection Accepted
+    d["_ns_resub_residual"] = 0.0
+    d.loc[_ns_resub_over120, "_ns_resub_residual"] = (d.loc[_ns_resub_over120, "_net"] - d.loc[_ns_resub_over120, "_paid"]).clip(lower=0)
     d.loc[_ns_resub_over120, "_paid"] = d.loc[_ns_resub_over120, "_net"]
 
     # ── UNDER PROCESS pool = Net − Paid ──────────────────────────────────────
@@ -404,8 +407,8 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     d.loc[mask_approved_resub, "_up"]           = 0.0
 
     # 4. Not Submitted (Resub-N) > 120 days → Rejection Accepted in summary
-    d.loc[_ns_resub_over120,   "_rej_accepted"] = d.loc[_ns_resub_over120,  "_rej_accepted"] + d.loc[_ns_resub_over120, "_net"]
-    # _up already 0 for these rows (paid above)
+    # Use the residual saved before we forced paid (avoids double-count)
+    d.loc[_ns_resub_over120, "_rej_accepted"] = d.loc[_ns_resub_over120, "_rej_accepted"] + d.loc[_ns_resub_over120, "_ns_resub_residual"]
 
     # 5. Sub Nt Rmtd ← Submitted (initial) + Not Submitted plain ≤ 90 days
     _ns_under90 = mask_not_sub_plain & ~_ns_over90
