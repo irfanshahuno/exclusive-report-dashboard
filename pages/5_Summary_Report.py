@@ -584,6 +584,7 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     df["Balance Status Group"]      = stage_info.apply(lambda x: x[0])
     df["Balance Submission Stage"]  = stage_info.apply(lambda x: x[1])
     df["Balance Submission No"]     = stage_info.apply(lambda x: x[2])
+    mask_bal = df["Balance"] > 0
     df.loc[~mask_bal, ["Balance Status Group","Balance Submission Stage","Balance Submission No"]] = ["","",None]
 
     # Bucket detail columns
