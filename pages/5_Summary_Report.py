@@ -404,6 +404,13 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     d.loc[mask_approved_resub,     "_final_rejn_direct"] = d.loc[mask_approved_resub,     "Difference"]
     d.loc[mask_not_sub_resub_old,  "_final_rejn_direct"] = d.loc[mask_not_sub_resub_old,  "Difference"]
 
+    # ── Reconciliation catch-all ──────────────────────────────────────────────
+    # Any remaining gap (SubInsShare - Total Pay - all columns) goes to Sub Nt Rmtd
+    d["_accounted"] = (d["_row_total_pay"] + d["_sub_nt_rmtd"] + d["_rsub_nt_rmtd"] +
+                       d["_rej_accepted"] + d["_final_rejn_direct"])
+    d["_gap"] = (d["SubInsShare"] - d["_accounted"]).clip(lower=0)
+    d["_sub_nt_rmtd"] = d["_sub_nt_rmtd"] + d["_gap"]
+
     agg = d.groupby(group_col, dropna=False, sort=True).agg(
         claim_count       = ("UniqueID",             "nunique"),
         claimed_amt       = ("SubInsShare",          "sum"),
@@ -889,6 +896,13 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
     d.loc[mask_rejected,          "Final Rejn"] = d.loc[mask_rejected,          "Difference"]
     d.loc[mask_approved_resub,    "Final Rejn"] = d.loc[mask_approved_resub,    "Difference"]
     d.loc[mask_not_sub_resub_old, "Final Rejn"] = d.loc[mask_not_sub_resub_old, "Difference"]
+
+    # ── Reconciliation catch-all ──────────────────────────────────────────────
+    # Any remaining gap goes to Sub Nt Rmtd to ensure SubInsShare = sum of all columns
+    d["_accounted"] = (d["Total pay"] + d["Sub Nt Rmtd"] + d["Rsub Nt Rmtd"] +
+                       d["Rejection Accepted"] + d["Final Rejn"])
+    d["_gap"] = (d["SubInsShare"] - d["_accounted"]).clip(lower=0)
+    d["Sub Nt Rmtd"] = d["Sub Nt Rmtd"] + d["_gap"]
 
     id_cols = [c for c in ["UniqueID","Insurance","DocName","Status","VisitDate","Month","SubInsShare"] if c in d.columns]
     return d[id_cols + ["Initial pay","Resb1 pay","Resb2 pay","Resb3 pay","Total pay",
