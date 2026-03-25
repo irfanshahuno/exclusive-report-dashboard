@@ -814,16 +814,14 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
     d["_extra_paid"] = d["SubInsShare"].where(mask_not_sub_old, 0.0)
     d["Total pay"]   = d["Initial pay"] + d["Resb1 pay"] + d["Resb2 pay"] + d["Resb3 pay"] + d["_extra_paid"]
 
-    # ── Sub Nt Rmtd: Submitted plain + Not Submitted fresh + unmatched ────────
+    # ── Sub Nt Rmtd: ONLY Submitted plain + unmatched (same as summary) ───────
     d["Sub Nt Rmtd"] = 0.0
-    d.loc[mask_sub_init,      "Sub Nt Rmtd"] = d.loc[mask_sub_init,      "SubInsShare"]
-    d.loc[mask_not_sub_fresh, "Sub Nt Rmtd"] = d.loc[mask_not_sub_fresh, "SubInsShare"]
-    d.loc[mask_unmatched,     "Sub Nt Rmtd"] = d.loc[mask_unmatched,     "SubInsShare"]
+    d.loc[mask_sub_init,  "Sub Nt Rmtd"] = d.loc[mask_sub_init,  "SubInsShare"]
+    d.loc[mask_unmatched, "Sub Nt Rmtd"] = d.loc[mask_unmatched, "SubInsShare"]
 
-    # ── Rsub Nt Rmtd: Submitted Resub-N (Difference) + Not Submitted Resub-N (SubInsShare) ──
+    # ── Rsub Nt Rmtd: ONLY Submitted Resub-N using Difference (same as summary) ──
     d["Rsub Nt Rmtd"] = 0.0
-    d.loc[mask_sub_resub,     "Rsub Nt Rmtd"] = d.loc[mask_sub_resub,     "Difference"]
-    d.loc[mask_not_sub_resub, "Rsub Nt Rmtd"] = d.loc[mask_not_sub_resub, "SubInsShare"]
+    d.loc[mask_sub_resub, "Rsub Nt Rmtd"] = d.loc[mask_sub_resub, "Difference"]
 
     # ── Rejection Accepted: uses Difference (same as summary) ────────────────
     d["Rejection Accepted"] = 0.0
@@ -849,12 +847,12 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
 
 
 def build_claim_detail_excel(df_detail: pd.DataFrame) -> bytes:
-    """Build styled Excel for claim detail report."""
+    """Build styled Excel for claim detail report — fast bulk pandas write."""
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
-    wb = Workbook()
+    wb = Workbook(write_only=False)
     ws = wb.active
     ws.title = "Claim Detail"
 
@@ -864,54 +862,60 @@ def build_claim_detail_excel(df_detail: pd.DataFrame) -> bytes:
     def _border():
         s = Side(style="thin", color="BFBFBF")
         return Border(left=s, right=s, top=s, bottom=s)
-    def _align(h="center"):
-        return Alignment(horizontal=h, vertical="center", wrap_text=False)
 
-    # Header row
-    for ci, col in enumerate(df_detail.columns, 1):
+    cols = df_detail.columns.tolist()
+    num_cols = set(df_detail.select_dtypes(include="number").columns.tolist())
+    text_cols = {"UniqueID","Insurance","DocName","Status"}
+
+    # ── Header row ────────────────────────────────────────────────────────────
+    for ci, col in enumerate(cols, 1):
         cell = ws.cell(row=1, column=ci, value=col)
         cell.fill      = _fill("0A2647")
         cell.font      = _font(bold=True, color="FFFFFF", size=10)
         cell.border    = _border()
-        cell.alignment = _align("center")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 22
 
-    # Data rows
-    pay_cols = {"Initial pay","Resb1 pay","Resb2 pay","Resb3 pay",
-                "Total pay","Sub Nt Rmtd","Rsub Nt Rmtd","Rejection Accepted","Final Rejn","SubInsShare"}
-    for ri, row in enumerate(df_detail.itertuples(index=False), 2):
+    # ── Bulk write data using pandas values ───────────────────────────────────
+    data = df_detail.values.tolist()
+    for ri, row_data in enumerate(data, 2):
         bg = "FFFFFF" if ri % 2 == 0 else "F2F2F2"
-        for ci, (col, val) in enumerate(zip(df_detail.columns, row), 1):
+        fill = _fill(bg)
+        for ci, (col, val) in enumerate(zip(cols, row_data), 1):
+            # Convert NaT/NaN to None for cleaner Excel
+            if pd.isna(val) if not isinstance(val, str) else False:
+                val = None
             cell = ws.cell(row=ri, column=ci, value=val)
-            cell.border    = _border()
-            cell.alignment = _align("left" if col in ("UniqueID","Insurance","DocName","Status") else "right")
-            cell.fill      = _fill(bg)
+            cell.fill   = fill
+            cell.border = _border()
+            cell.alignment = Alignment(
+                horizontal="left" if col in text_cols else "right",
+                vertical="center"
+            )
             if col == "Final Rejn":
                 cell.font = _font(bold=True, color="C0392B", size=10)
             else:
                 cell.font = _font(size=10)
-            if col in pay_cols:
+            if col in num_cols:
                 cell.number_format = "#,##0.00"
 
-    # Grand Total row
-    gt_row = ri + 1
-    ws.row_dimensions[gt_row].height = 20
-    num_cols = {c for c in df_detail.columns if df_detail[c].dtype in ["float64","int64"]}
-    for ci, col in enumerate(df_detail.columns, 1):
+    # ── Grand Total row ───────────────────────────────────────────────────────
+    gt_row = len(data) + 2
+    for ci, col in enumerate(cols, 1):
         cell = ws.cell(row=gt_row, column=ci)
         cell.fill   = _fill("D9D9D9")
         cell.font   = _font(bold=True, size=10)
         cell.border = _border()
-        cell.alignment = _align("right")
         if col in num_cols:
-            cell.value = float(df_detail[col].sum())
-            cell.number_format = "#,##0.00"
+            cell.value          = float(df_detail[col].sum())
+            cell.number_format  = "#,##0.00"
+            cell.alignment      = Alignment(horizontal="right", vertical="center")
         elif ci == 1:
-            cell.value = "Grand Total"
-            cell.alignment = _align("left")
+            cell.value     = "Grand Total"
+            cell.alignment = Alignment(horizontal="left", vertical="center")
 
-    # Column widths
-    for ci, col in enumerate(df_detail.columns, 1):
+    # ── Column widths ─────────────────────────────────────────────────────────
+    for ci, col in enumerate(cols, 1):
         if col in ("Insurance","DocName","Status"):
             ws.column_dimensions[get_column_letter(ci)].width = 30
         elif col == "UniqueID":
@@ -1780,16 +1784,26 @@ if result:
     # ── Claim Detail Download ─────────────────────────────────────────────────
     df_detail = result.get("claim_detail")
     if df_detail is not None and not df_detail.empty:
-        detail_bytes = build_claim_detail_excel(df_detail)
-        detail_name  = dl_name.replace(".xlsx", " - Claim Detail.xlsx")
-        st.download_button(
-            f"⬇️ Download Claim Detail Report ({len(df_detail):,} claims)",
-            data=detail_bytes,
-            file_name=detail_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        detail_name = dl_name.replace(".xlsx", " - Claim Detail.xlsx")
+        DETAIL_KEY  = f"sum_detail_bytes_{ck}"
+
+        if st.button(
+            f"⚙️ Prepare Claim Detail Report ({len(df_detail):,} claims)",
             use_container_width=True,
-            key=f"sum_dl_detail_{ck}",
-        )
+            key=f"sum_prepare_detail_{ck}",
+        ):
+            with st.spinner("Building claim detail Excel..."):
+                st.session_state[DETAIL_KEY] = build_claim_detail_excel(df_detail)
+
+        if DETAIL_KEY in st.session_state:
+            st.download_button(
+                f"⬇️ Download Claim Detail Report ({len(df_detail):,} claims)",
+                data=st.session_state[DETAIL_KEY],
+                file_name=detail_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=f"sum_dl_detail_{ck}",
+            )
 
     st.markdown("---")
 
