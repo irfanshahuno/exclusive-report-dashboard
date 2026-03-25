@@ -960,7 +960,9 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
     d["Resb3 pay"]   = d["Resub3RemitInsShare"]
     d["Total pay"]   = d["_paid"]
 
-    id_cols = [c for c in ["UniqueID", "Insurance", "DocName", "Status", "VisitDate", "Month", "SubInsShare"] if c in d.columns]
+    id_cols = [c for c in ["UniqueID", "MemberID", "EncPatID", "EncType", "EncStart", "EncEnd",
+                           "DepName", "DocName", "Insurance", "ReceiverID", "Status",
+                           "VisitDate", "Month", "SubInsShare"] if c in d.columns]
     return d[id_cols + ["Initial pay", "Resb1 pay", "Resb2 pay", "Resb3 pay", "Total pay",
                         "Sub Nt Rmtd", "Rsub Nt Rmtd", "Rejection Accepted", "Final Rejn"]].reset_index(drop=True)
 
