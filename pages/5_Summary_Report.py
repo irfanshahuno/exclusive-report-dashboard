@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # pages/5_Summary_Report.py
+# PATCH: summary Total pay now uses sum of row-level clipped _row_total_pay
 # Summary Report page — mirrors center selection flow.
 # User selects a center → uploads a source file → runs exclusive_report_status_final.py
 # logic in-memory → displays results (Insurance_Totals, Final_Bucket_Summary, Monthly_Totals,
@@ -356,18 +357,13 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     ).clip(upper=d["SubInsShare"])
 
     # ── Column assignments using Difference column ────────────────────────────
-    # Sub Nt Rmtd: Submitted initial → Residual (Net − Paid)
-    for c in ["Paid", "Residual"]:
-        if c not in d.columns:
-            d[c] = 0.0
-        d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
-
+    # Sub Nt Rmtd: Submitted initial only → SubInsShare
     d["_sub_nt_rmtd"] = 0.0
-    d.loc[mask_sub_init, "_sub_nt_rmtd"] = d.loc[mask_sub_init, "Residual"]
+    d.loc[mask_sub_init, "_sub_nt_rmtd"] = d.loc[mask_sub_init, "SubInsShare"]
 
-    # Rsub Nt Rmtd: Submitted(Resub-N) → Residual (Net − Paid)
+    # Rsub Nt Rmtd: Submitted(Resub-N) → Difference
     d["_rsub_nt_rmtd"] = 0.0
-    d.loc[mask_sub_resub, "_rsub_nt_rmtd"] = d.loc[mask_sub_resub, "Residual"]
+    d.loc[mask_sub_resub, "_rsub_nt_rmtd"] = d.loc[mask_sub_resub, "Difference"]
 
     # Rejection Accepted → Difference
     d["_rej_accepted"] = 0.0
@@ -391,14 +387,15 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
         resb1_pay         = ("Resub1RemitInsShare",   "sum"),
         resb2_pay         = ("Resub2RemitInsShare",   "sum"),
         resb3_pay         = ("Resub3RemitInsShare",   "sum"),
+        total_pay         = ("_row_total_pay",        "sum"),
         sub_nt_rmtd       = ("_sub_nt_rmtd",         "sum"),
         rsub_nt_rmtd      = ("_rsub_nt_rmtd",        "sum"),
         rej_accepted      = ("_rej_accepted",         "sum"),
         final_rejn_direct = ("_final_rejn_direct",   "sum"),
     ).reset_index()
 
-    agg["remited_amt"] = agg["initial_pay"]
-    agg["total_pay"]   = agg["initial_pay"] + agg["resb1_pay"] + agg["resb2_pay"] + agg["resb3_pay"]
+    agg["remited_amt"] = agg["remit_ins"] + agg["difference"]
+
     # Final Rejn = directly assigned (Approved Resub + Rejected) via Difference column
     agg["final_rejn"]  = agg["final_rejn_direct"].clip(lower=0)
     agg["rej_pct"]     = (agg["final_rejn"] / agg["claimed_amt"].replace(0, float("nan")) * 100).fillna(0.0)
