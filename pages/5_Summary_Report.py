@@ -363,26 +363,31 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
                 mask_rej_acc | mask_approved_plain | mask_approved_resub | mask_rejected)
     mask_unmatched = (~mask_any) & (pd.to_numeric(d["SubInsShare"], errors="coerce").fillna(0) > 0)
 
-    # ── Per-row Total Pay = remit cols only (no special treatment for Not Submitted old) ──
+    # ── Not Submitted plain >90 days: fill RemitInsShare with SubInsShare if zero ──
+    _remit_col = pd.to_numeric(d["RemitInsShare"], errors="coerce").fillna(0)
+    _remit_col_fixed = _remit_col.copy()
+    _remit_col_fixed[mask_not_sub_old & (_remit_col == 0)] = d.loc[mask_not_sub_old & (_remit_col == 0), "SubInsShare"]
+    d["_RemitInsShare_adj"] = _remit_col_fixed
+
+    # ── Per-row Total Pay using adjusted RemitInsShare ────────────────────────
     d["_remit_total"] = (
-        pd.to_numeric(d["RemitInsShare"],       errors="coerce").fillna(0) +
+        d["_RemitInsShare_adj"] +
         pd.to_numeric(d["Resub1RemitInsShare"], errors="coerce").fillna(0) +
         pd.to_numeric(d["Resub2RemitInsShare"], errors="coerce").fillna(0) +
         pd.to_numeric(d["Resub3RemitInsShare"], errors="coerce").fillna(0)
     )
-    d["_extra_paid"]    = 0.0  # no longer used
     d["_row_total_pay"] = d["_remit_total"].clip(upper=d["SubInsShare"])
 
     # ── Residual = SubInsShare - Total Pay ────────────────────────────────────
     d["_residual"] = (d["SubInsShare"] - d["_row_total_pay"]).clip(lower=0)
 
     # ── Column assignments ────────────────────────────────────────────────────
-    # Sub Nt Rmtd: Submitted plain + Not Submitted (all) → SubInsShare
+    # Sub Nt Rmtd: Submitted plain + Not Submitted fresh (<90d) + unmatched
     d["_sub_nt_rmtd"] = 0.0
     d.loc[mask_sub_init,      "_sub_nt_rmtd"] = d.loc[mask_sub_init,      "SubInsShare"]
     d.loc[mask_not_sub_fresh, "_sub_nt_rmtd"] = d.loc[mask_not_sub_fresh, "SubInsShare"]
-    d.loc[mask_not_sub_old,   "_sub_nt_rmtd"] = d.loc[mask_not_sub_old,   "SubInsShare"]
     d.loc[mask_unmatched,     "_sub_nt_rmtd"] = d.loc[mask_unmatched,     "SubInsShare"]
+    # Not Submitted old >90d → NOT in Sub Nt Rmtd (RemitInsShare/SubInsShare goes to Total Pay)
 
     # Rsub Nt Rmtd: Submitted Resub + Not Submitted Resub fresh → Difference
     d["_rsub_nt_rmtd"] = 0.0
@@ -404,7 +409,7 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
         claimed_amt       = ("SubInsShare",          "sum"),
         remit_ins         = ("RemitInsShare",        "sum"),
         difference        = ("Difference",           "sum"),
-        initial_pay       = ("RemitInsShare",        "sum"),
+        initial_pay       = ("_RemitInsShare_adj",   "sum"),
         resb1_pay         = ("Resub1RemitInsShare",  "sum"),
         resb2_pay         = ("Resub2RemitInsShare",  "sum"),
         resb3_pay         = ("Resub3RemitInsShare",  "sum"),
@@ -512,9 +517,18 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     )
     _mask_approved_resub = _status_norm_e1.str.match(r"^approved\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
 
-    # Paid = remit cols only, no TakeBack
-    df["Paid"] = df[["RemitInsShare","Resub1RemitInsShare","Resub2RemitInsShare",
-                      "Resub3RemitInsShare","Resub4RemitInsShare"]].sum(axis=1)
+    # Not Submitted plain >90 days: fill RemitInsShare with SubInsShare if zero
+    _mask_not_sub_old_e1 = (_status_norm_e1 == "not submitted") & (_days_since_visit > 90)
+    _remit_e1 = pd.to_numeric(df["RemitInsShare"], errors="coerce").fillna(0)
+    _remit_e1_adj = _remit_e1.copy()
+    _remit_e1_adj[_mask_not_sub_old_e1 & (_remit_e1 == 0)] = df.loc[_mask_not_sub_old_e1 & (_remit_e1 == 0), "Net Amount"]
+
+    # Paid = adjusted RemitInsShare + Resub1-4, no TakeBack
+    df["Paid"] = (_remit_e1_adj +
+                  pd.to_numeric(df["Resub1RemitInsShare"], errors="coerce").fillna(0) +
+                  pd.to_numeric(df["Resub2RemitInsShare"], errors="coerce").fillna(0) +
+                  pd.to_numeric(df["Resub3RemitInsShare"], errors="coerce").fillna(0) +
+                  pd.to_numeric(df["Resub4RemitInsShare"], errors="coerce").fillna(0))
     df["Paid"]     = df[["Paid","Net Amount"]].min(axis=1)
     df["Residual"] = (df["Net Amount"] - df["Paid"]).clip(lower=0)
 
@@ -838,8 +852,13 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
                                 mask_rej_acc | mask_approved_plain | mask_approved_resub | mask_rejected)
     mask_unmatched           = (~mask_any) & (d["SubInsShare"] > 0)
 
-    # ── Total Pay = remit cols only ───────────────────────────────────────────
-    d["Initial pay"] = d["RemitInsShare"]
+    # ── Not Submitted plain >90 days: fill RemitInsShare with SubInsShare if zero ──
+    _remit_col_d = pd.to_numeric(d["RemitInsShare"], errors="coerce").fillna(0)
+    _remit_adj_d = _remit_col_d.copy()
+    _remit_adj_d[mask_not_sub_old & (_remit_col_d == 0)] = d.loc[mask_not_sub_old & (_remit_col_d == 0), "SubInsShare"]
+
+    # ── Total Pay using adjusted RemitInsShare ────────────────────────────────
+    d["Initial pay"] = _remit_adj_d
     d["Resb1 pay"]   = d["Resub1RemitInsShare"]
     d["Resb2 pay"]   = d["Resub2RemitInsShare"]
     d["Resb3 pay"]   = d["Resub3RemitInsShare"]
@@ -849,12 +868,12 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
     # ── Residual ──────────────────────────────────────────────────────────────
     d["_residual"] = (d["SubInsShare"] - d["Total pay"]).clip(lower=0)
 
-    # ── Sub Nt Rmtd: Submitted plain + Not Submitted (all) → SubInsShare ────────
+    # ── Sub Nt Rmtd: Submitted plain + Not Submitted fresh (<90d) + unmatched ──
     d["Sub Nt Rmtd"] = 0.0
     d.loc[mask_sub_init,      "Sub Nt Rmtd"] = d.loc[mask_sub_init,      "SubInsShare"]
     d.loc[mask_not_sub_fresh, "Sub Nt Rmtd"] = d.loc[mask_not_sub_fresh, "SubInsShare"]
-    d.loc[mask_not_sub_old,   "Sub Nt Rmtd"] = d.loc[mask_not_sub_old,   "SubInsShare"]
     d.loc[mask_unmatched,     "Sub Nt Rmtd"] = d.loc[mask_unmatched,     "SubInsShare"]
+    # Not Submitted old >90d → NOT in Sub Nt Rmtd (goes to Total Pay)
 
     # ── Rsub Nt Rmtd: Submitted Resub + Not Submitted Resub <90d → Difference ──
     d["Rsub Nt Rmtd"] = 0.0
