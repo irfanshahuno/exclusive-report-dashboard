@@ -347,20 +347,17 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     mask_sub_init      = d["_status_norm"] == "submitted"
     mask_sub_resub     = d["_status_norm"].str.match(r"^submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
     mask_approved_resub= d["_status_norm"].str.match(r"^approved\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
-    # Final Rejection: "rejected" or "rejected (resub-N)"
     mask_rejected      = d["_status_norm"].str.match(r"^rejected(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
-    # Rejection Accepted: "rejection accepted" or "rejection accepted (resub-N)"
     mask_rej_acc       = d["_status_norm"].str.match(r"^rejection accepted(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
-    # Not Submitted (any variant) → excluded from all columns
-    mask_not_sub       = d["_status_norm"].str.match(r"^not submitted", na=False)
+    mask_not_sub_plain = d["_status_norm"] == "not submitted"
 
-    # ── Ensure Resub4RemitInsShare and TakeBack exist ───────────────────────
+    # ── Ensure Resub4RemitInsShare and TakeBack exist ─────────────────────────
     for _c in ["Resub4RemitInsShare", "TakeBack"]:
         if _c not in d.columns:
             d[_c] = 0.0
         d[_c] = pd.to_numeric(d[_c], errors="coerce").fillna(0.0)
 
-    # ── Under Process pool = Net − Paid ──────────────────────────────────────
+    # ── PAID = remit columns − abs(TakeBack), capped at Net ───────────────────
     d["_net"]  = d["SubInsShare"]
     d["_paid"] = (
         d["RemitInsShare"] +
@@ -370,46 +367,67 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
         d["Resub4RemitInsShare"] -
         d["TakeBack"].abs()
     ).clip(lower=0)
-    d["_paid"]          = d[["_paid", "_net"]].min(axis=1)
-    d["_under_process"] = (d["_net"] - d["_paid"]).clip(lower=0)
+    d["_paid"] = d[["_paid", "_net"]].min(axis=1)
 
-    # ── Slice Under Process by Status, remove each slice from pool ────────────
+    # ── Not Submitted plain > 90 days → treat as Paid ────────────────────────
+    if visit_days_series is not None:
+        _vd = visit_days_series.reindex(d.index).fillna(0)
+    else:
+        _vd = pd.Series(0, index=d.index)
+    _ns_over90 = mask_not_sub_plain & (_vd > 90)
+    d.loc[_ns_over90, "_paid"] = d.loc[_ns_over90, "_net"]
 
-    # 1. Final Rejn — Rejected / Rejected (Resub-N)
+    # ── UNDER PROCESS pool = Net − Paid ──────────────────────────────────────
+    d["_up"] = (d["_net"] - d["_paid"]).clip(lower=0)
+
+    # ── SLICE Under Process by Status, remove each slice ─────────────────────
+
+    # 1. Final Rejn ← Rejected / Rejected(Resub-N)
     d["_final_rejn"] = 0.0
-    d.loc[mask_rejected, "_final_rejn"]    = d.loc[mask_rejected, "_under_process"]
-    d.loc[mask_rejected, "_under_process"] = 0.0
+    d.loc[mask_rejected,    "_final_rejn"] = d.loc[mask_rejected,    "_up"]
+    d.loc[mask_rejected,    "_up"]         = 0.0
 
-    # 2. Rejection Accepted — Rejection Accepted / Rejection Accepted (Resub-N)
+    # 2. Rejection Accepted ← Rejection Accepted / Rejection Accepted(Resub-N)
     d["_rej_accepted"] = 0.0
-    d.loc[mask_rej_acc, "_rej_accepted"]  = d.loc[mask_rej_acc, "_under_process"]
-    d.loc[mask_rej_acc, "_under_process"] = 0.0
+    d.loc[mask_rej_acc,     "_rej_accepted"] = d.loc[mask_rej_acc,   "_up"]
+    d.loc[mask_rej_acc,     "_up"]           = 0.0
 
-    # 3. Sub Nt Rmtd — Submitted (initial only)
+    # 3. Final Rejn also ← Approved(Resub-N) → goes to Final Rejn in summary
+    d.loc[mask_approved_resub, "_final_rejn"] = d.loc[mask_approved_resub, "_final_rejn"] + d.loc[mask_approved_resub, "_up"]
+    d.loc[mask_approved_resub, "_up"]         = 0.0
+
+    # 4. Sub Nt Rmtd ← Submitted (initial) including Not Submitted plain ≤ 90 days
+    _ns_under90 = mask_not_sub_plain & ~_ns_over90
     d["_sub_nt_rmtd"] = 0.0
-    d.loc[mask_sub_init, "_sub_nt_rmtd"]   = d.loc[mask_sub_init, "_under_process"]
-    d.loc[mask_sub_init, "_under_process"] = 0.0
+    d.loc[mask_sub_init,  "_sub_nt_rmtd"] = d.loc[mask_sub_init,  "_up"]
+    d.loc[mask_sub_init,  "_up"]          = 0.0
+    d.loc[_ns_under90,    "_sub_nt_rmtd"] = d.loc[_ns_under90,    "_up"]
+    d.loc[_ns_under90,    "_up"]          = 0.0
 
-    # 4. Rsub Nt Rmtd — Submitted (Resub-1, 2, 3 ...)
+    # 5. Rsub Nt Rmtd ← Submitted(Resub-N)
     d["_rsub_nt_rmtd"] = 0.0
-    d.loc[mask_sub_resub, "_rsub_nt_rmtd"]  = d.loc[mask_sub_resub, "_under_process"]
-    d.loc[mask_sub_resub, "_under_process"] = 0.0
+    d.loc[mask_sub_resub, "_rsub_nt_rmtd"] = d.loc[mask_sub_resub, "_up"]
+    d.loc[mask_sub_resub, "_up"]           = 0.0
 
-    # 5. Remaining Under Process — Approved, Not Submitted, etc.
-    d["_balance_remaining"] = d["_under_process"]
+    # 6. Not Submitted plain > 90 days → Initial Pay (already moved to _paid above)
+    # _up for these rows is already 0
+
+    # ── Initial pay: base remit + Not Submitted >90 days ─────────────────────
+    d["_initial_pay"] = d["RemitInsShare"].copy()
+    d.loc[_ns_over90, "_initial_pay"] = d.loc[_ns_over90, "_initial_pay"] + d.loc[_ns_over90, "_net"]
 
     agg = d.groupby(group_col, dropna=False, sort=True).agg(
-        claim_count  = ("UniqueID",            "nunique"),
-        claimed_amt  = ("SubInsShare",         "sum"),
-        initial_pay  = ("RemitInsShare",       "sum"),
-        resb1_pay    = ("Resub1RemitInsShare",  "sum"),
-        resb2_pay    = ("Resub2RemitInsShare",  "sum"),
-        resb3_pay    = ("Resub3RemitInsShare",  "sum"),
-        total_pay    = ("_paid",               "sum"),
-        sub_nt_rmtd  = ("_sub_nt_rmtd",       "sum"),
-        rsub_nt_rmtd = ("_rsub_nt_rmtd",      "sum"),
-        rej_accepted = ("_rej_accepted",       "sum"),
-        final_rejn   = ("_final_rejn",         "sum"),
+        claim_count  = ("UniqueID",          "nunique"),
+        claimed_amt  = ("SubInsShare",       "sum"),
+        initial_pay  = ("_initial_pay",      "sum"),
+        resb1_pay    = ("Resub1RemitInsShare","sum"),
+        resb2_pay    = ("Resub2RemitInsShare","sum"),
+        resb3_pay    = ("Resub3RemitInsShare","sum"),
+        total_pay    = ("_paid",             "sum"),
+        sub_nt_rmtd  = ("_sub_nt_rmtd",     "sum"),
+        rsub_nt_rmtd = ("_rsub_nt_rmtd",    "sum"),
+        rej_accepted = ("_rej_accepted",     "sum"),
+        final_rejn   = ("_final_rejn",       "sum"),
     ).reset_index()
 
     agg["final_rejn"] = agg["final_rejn"].clip(lower=0)
@@ -497,7 +515,7 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     # ── Compute measures ─────────────────────────────────────────────────────
     df["Net Amount"] = df["SubInsShare"]
 
-    # ── Not Submitted plain >90 days from VisitDate → treat as Paid ──────────
+    # ── Date column for aging ─────────────────────────────────────────────────
     _visit_col = next((c for c in ["VisitDate","SubDate","SubmissionDate","ClaimDate"] if c in df.columns), None)
     if _visit_col:
         df[_visit_col] = pd.to_datetime(df[_visit_col], errors="coerce", dayfirst=True)
@@ -506,8 +524,7 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     else:
         _days_since_visit = pd.Series(0, index=df.index)
 
-    # ── PAID ─────────────────────────────────────────────────────────────────
-    # Sum all remit columns; TakeBack: if negative make positive, then subtract
+    # ── PAID: remit columns − abs(TakeBack), capped at Net ───────────────────
     remit_sum = (
         df["RemitInsShare"] +
         df["Resub1RemitInsShare"] +
@@ -515,40 +532,50 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         df["Resub3RemitInsShare"] +
         df["Resub4RemitInsShare"]
     )
-    takeback_adj = df["TakeBack"].abs()  # always positive
-    df["Paid"] = (remit_sum - takeback_adj).clip(lower=0)
-    # Cap Paid at Net Amount
+    df["Paid"] = (remit_sum - df["TakeBack"].abs()).clip(lower=0)
     df["Paid"] = df[["Paid", "Net Amount"]].min(axis=1)
 
-    # ── UNDER PROCESS (initial) = Net - Paid ─────────────────────────────────
+    # ── UNDER PROCESS pool = Net − Paid ──────────────────────────────────────
     df["Residual"] = (df["Net Amount"] - df["Paid"]).clip(lower=0)
 
-    # ── STATUS CLASSIFICATION ─────────────────────────────────────────────────
-    # Normalize status for matching
+    # ── STATUS MASKS ─────────────────────────────────────────────────────────
     _s = df["Status"].str.strip().str.lower().str.replace(r"\s+", " ", regex=True)
 
-    # Final Rejection: Status matches "rejected" or "rejected (resub-N)"
-    mask_rej = _s.str.match(r"^rejected(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+    mask_rej          = _s.str.match(r"^rejected(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+    mask_rej_acc      = _s.str.match(r"^rejection accepted(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+    mask_app_resub    = _s.str.match(r"^approved\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
+    mask_not_sub_plain= _s == "not submitted"
 
-    # Rejection Accepted: Status matches "rejection accepted" or "rejection accepted (resub-N)"
-    mask_acc = _s.str.match(r"^rejection accepted(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+    # Not Submitted plain > 90 days → treated as Paid (add to Paid, remove from Residual)
+    _ns_over90 = mask_not_sub_plain & (_days_since_visit > 90)
+    df.loc[_ns_over90, "Paid"]    = df.loc[_ns_over90, "Net Amount"]
+    df.loc[_ns_over90, "Residual"] = 0.0
 
-    # Balance: everything else (Submitted, Approved, Not Submitted, etc.)
-    mask_bal = ~mask_rej & ~mask_acc
-
-    # ── ASSIGN BUCKETS ────────────────────────────────────────────────────────
+    # ── SLICE Under Process by Status ────────────────────────────────────────
     df["Rejected"] = 0.0
     df["Accepted"] = 0.0
     df["Balance"]  = 0.0
 
-    df.loc[mask_rej, "Rejected"] = df.loc[mask_rej, "Residual"]
-    df.loc[mask_acc, "Accepted"] = df.loc[mask_acc, "Residual"]
-    df.loc[mask_bal, "Balance"]  = df.loc[mask_bal, "Residual"]
+    # 1. Final Rejection → Rejected
+    df.loc[mask_rej, "Rejected"]  = df.loc[mask_rej, "Residual"]
+    df.loc[mask_rej, "Residual"]  = 0.0
 
-    # Final Bucket label (used downstream for aging/summary tables)
+    # 2. Rejection Accepted → Accepted
+    df.loc[mask_rej_acc, "Accepted"] = df.loc[mask_rej_acc, "Residual"]
+    df.loc[mask_rej_acc, "Residual"] = 0.0
+
+    # 3. Approved (Resub-N) → Accepted (Engine 1)
+    df.loc[mask_app_resub, "Accepted"] = df.loc[mask_app_resub, "Accepted"] + df.loc[mask_app_resub, "Residual"]
+    df.loc[mask_app_resub, "Residual"] = 0.0
+
+    # 4. Everything left → Balance
+    df["Balance"] = df["Residual"]
+
+    # Final Bucket label
     df["Final Bucket"] = "Balance"
-    df.loc[mask_rej, "Final Bucket"] = "Rejected"
-    df.loc[mask_acc, "Final Bucket"] = "Accepted"
+    df.loc[mask_rej,       "Final Bucket"] = "Rejected"
+    df.loc[mask_rej_acc,   "Final Bucket"] = "Accepted"
+    df.loc[mask_app_resub, "Final Bucket"] = "Accepted"
 
     df["Recon Total"] = df[["Paid","Balance","Rejected","Accepted"]].sum(axis=1)
     df["Recon Diff"]  = (df["Net Amount"] - df["Recon Total"]).round(2)
