@@ -1518,31 +1518,31 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
               <tr>
                 <td width="20%" valign="top" style="padding:0 6px 0 0;">
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #2E86C1;border-collapse:collapse;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #3B82F6;border-collapse:collapse;">
                     <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#566573;text-transform:uppercase;">Claimed Amount</td></tr>
                     <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1B2631;">{_fmt(net)}</td></tr>
                   </table>
                 </td>
                 <td width="20%" valign="top" style="padding:0 6px;">
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #27AE60;border-collapse:collapse;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #2563EB;border-collapse:collapse;">
                     <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#566573;text-transform:uppercase;">Total Pay</td></tr>
                     <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1B2631;">{_fmt(paid)}</td></tr>
                   </table>
                 </td>
                 <td width="20%" valign="top" style="padding:0 6px;">
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border:1px solid #1F5FBF;border-top:4px solid #1F5FBF;border-collapse:collapse;">
-                    <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#1F5FBF;text-transform:uppercase;">Under Process</td></tr>
-                    <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1F5FBF;">{_fmt(bal)}</td></tr>
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border:1px solid #1D4ED8;border-top:4px solid #1D4ED8;border-collapse:collapse;">
+                    <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#1D4ED8;text-transform:uppercase;">Under Process</td></tr>
+                    <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1D4ED8;">{_fmt(bal)}</td></tr>
                   </table>
                 </td>
                 <td width="20%" valign="top" style="padding:0 6px;">
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #E67E22;border-collapse:collapse;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #64748B;border-collapse:collapse;">
                     <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#566573;text-transform:uppercase;">Final Rejn</td></tr>
                     <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1B2631;">{_fmt(rej)}</td></tr>
                   </table>
                 </td>
                 <td width="20%" valign="top" style="padding:0 0 0 6px;">
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #8E44AD;border-collapse:collapse;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #475569;border-collapse:collapse;">
                     <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#566573;text-transform:uppercase;">Rej. Accepted</td></tr>
                     <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1B2631;">{_fmt(acc)}</td></tr>
                   </table>
@@ -1554,13 +1554,7 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
 
         <!-- Spacer -->
         <tr><td height="14" style="height:14px;font-size:0;line-height:0;">&nbsp;</td></tr>
-
         <!-- Insurance section -->
-        <tr>
-          <td style="background-color:#BFBFBF;color:#000000;padding:12px 16px;font-size:14px;font-weight:700;">
-            Insurance Name
-          </td>
-        </tr>
         <tr>
           <td style="background-color:#FFFFFF;border:1px solid #D5DDE6;border-top:none;padding:0;">
             {ins_html}
