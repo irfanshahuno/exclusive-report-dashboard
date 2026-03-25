@@ -1473,20 +1473,22 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
             label_color = "#D1F2EB"
             value_color = "#FFFFFF"
             border = "#0E6655"
+            shadow = "0 3px 8px rgba(14,102,85,0.18)"
         else:
             bg = "#F4F8F8"
             label_color = "#5D6D7E"
             value_color = "#1C2833"
             border = "#E1E8E8"
+            shadow = "0 2px 6px rgba(0,0,0,0.06)"
 
         return (
-            f"<td style='padding:6px;vertical-align:top;'>"
+            f"<td style='padding:4px;vertical-align:top;'>"
             f"<div style='background:{bg};border:1px solid {border};"
-            f"border-radius:12px;padding:10px 12px;min-width:95px;{'' if dark else ''}"
+            f"border-radius:8px;padding:10px 12px;min-width:95px;"
             f"box-shadow:{shadow};'>"
-            f"<div style='font-size:10px;line-height:12px;color:{lc};font-weight:700;"
-            f"text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px;'>{label}</div>"
-            f"<div style='font-size:16px;line-height:18px;font-weight:800;color:{vc};"
+            f"<div style='font-size:10px;line-height:12px;color:{label_color};font-weight:700;"
+            f"text-transform:uppercase;letter-spacing:.35px;margin-bottom:4px;'>{label}</div>"
+            f"<div style='font-size:16px;line-height:18px;font-weight:800;color:{value_color};"
             f"font-family:Calibri,Arial,sans-serif;white-space:nowrap;'>{_fmt(value)}</div>"
             f"</div></td>"
         )
