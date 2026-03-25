@@ -506,19 +506,22 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     else:
         _days_since_visit = pd.Series(0, index=df.index)
 
-    _status_norm_e1   = df["Status"].apply(_normalize_status)
-    _mask_not_sub_old = (
-        (_status_norm_e1 == "not submitted") & (_days_since_visit > 90)
+    _status_norm_e1          = df["Status"].apply(_normalize_status)
+    _mask_not_sub_old        = (_status_norm_e1 == "not submitted") & (_days_since_visit > 90)
+    _mask_not_sub_resub_old  = (
+        _status_norm_e1.str.match(r"^not submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
+        & (_days_since_visit > 90)
     )
+    _mask_approved_resub = _status_norm_e1.str.match(r"^approved\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
 
     # Base Paid from remit columns
     df["Paid"] = df[["RemitInsShare","Resub1RemitInsShare","Resub2RemitInsShare",
                       "Resub3RemitInsShare","Resub4RemitInsShare","TakeBack"]].sum(axis=1)
 
-    # Old Not Submitted: force Paid = Net Amount (fully written off to Paid)
+    # Not Submitted plain >90 days → force Paid = Net Amount
     df.loc[_mask_not_sub_old, "Paid"] = df.loc[_mask_not_sub_old, "Net Amount"]
 
-    df["Paid"] = df[["Paid","Net Amount"]].min(axis=1)
+    df["Paid"]     = df[["Paid","Net Amount"]].min(axis=1)
     df["Residual"] = (df["Net Amount"] - df["Paid"]).clip(lower=0)
 
     df["Rejected"] = 0.0
@@ -528,12 +531,15 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     df["Final Bucket"] = df["Status"].apply(_classify_final_bucket)
     mask_rej = df["Final Bucket"] == "Rejected"
     mask_acc = df["Final Bucket"] == "Accepted"
-    # Balance = everything except Rejected, Accepted, and old Not Submitted (already in Paid)
-    mask_bal = (df["Final Bucket"] == "Balance") & (~_mask_not_sub_old)
+    # Balance = everything except Rejected, Accepted, old Not Submitted plain,
+    #           old Not Submitted Resub, and Approved Resub
+    mask_to_rej = _mask_not_sub_resub_old | _mask_approved_resub
+    mask_bal    = (df["Final Bucket"] == "Balance") & (~_mask_not_sub_old) & (~mask_to_rej)
 
-    df.loc[mask_rej, "Rejected"] = df.loc[mask_rej, "Residual"]
-    df.loc[mask_acc, "Accepted"] = df.loc[mask_acc, "Residual"]
-    df.loc[mask_bal, "Balance"]  = df.loc[mask_bal, "Residual"]
+    df.loc[mask_rej,    "Rejected"] = df.loc[mask_rej,    "Residual"]
+    df.loc[mask_acc,    "Accepted"] = df.loc[mask_acc,    "Residual"]
+    df.loc[mask_bal,    "Balance"]  = df.loc[mask_bal,    "Residual"]
+    df.loc[mask_to_rej, "Rejected"] = df.loc[mask_to_rej, "Residual"]
 
     df["Recon Total"] = df[["Paid","Balance","Rejected","Accepted"]].sum(axis=1)
     df["Recon Diff"]  = (df["Net Amount"] - df["Recon Total"]).round(2)
@@ -798,7 +804,7 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         "rcm_doctor":    rcm_doctor,
         "rcm_month":     rcm_month,
         "rcm_group_col": rcm_group_col,
-        "claim_detail":  _build_claim_detail(df, _days_since_visit),
+        "claim_detail":  _build_claim_detail(df_rcm, _days_since_visit),
     }
 
 
