@@ -851,7 +851,7 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         "rcm_doctor":    rcm_doctor,
         "rcm_month":     rcm_month,
         "rcm_group_col": rcm_group_col,
-        "claim_detail":  _build_claim_detail(df, _days_since_visit),
+        "claim_detail":  _build_claim_detail(df_rcm, _days_since_visit),
     }
 
 
