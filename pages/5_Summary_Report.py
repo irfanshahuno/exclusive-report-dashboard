@@ -1843,11 +1843,16 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
 
     msg = MIMEMultipart("mixed")
 
+    # Split comma-separated recipient and cc strings into individual addresses
+    _to_list = [r.strip() for r in recipient.split(",") if r.strip()] if recipient else []
+    _cc_list = [r.strip() for r in cc.split(",")        if r.strip()] if cc        else []
+    all_to   = _to_list + _cc_list
+
     msg["Subject"] = f"{title_line} — {center_name}"
     msg["From"]    = sender
-    msg["To"]      = recipient
-    if cc:
-        msg["Cc"] = cc
+    msg["To"]      = ", ".join(_to_list)
+    if _cc_list:
+        msg["Cc"]  = ", ".join(_cc_list)
     msg.attach(MIMEText(html_body, "html"))
 
     part = MIMEBase("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -1855,8 +1860,6 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     encoders.encode_base64(part)
     part.add_header("Content-Disposition", f'attachment; filename="{excel_filename}"')
     msg.attach(part)
-
-    all_to = [r.strip() for r in ([recipient] + ([cc] if cc else [])) if r.strip()]
     errors = []
 
     # Try 1: SSL on configured port (default 465) — matches mail.emc-uae.com
