@@ -308,66 +308,94 @@ def _add_grand_total_row(df: pd.DataFrame, key_col: str) -> pd.DataFrame:
 
 def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Series = None) -> pd.DataFrame:
     """
-    Build the RCM Summary table grouped by any column (Insurance, DocName, Month, etc.)
-    using the SAME prepared detail-report logic, so summary figures match claim detail.
+    Build the RCM Summary table grouped by any column (Insurance, DocName, etc.)
 
-    Business rules are taken from _build_claim_detail().
+    Business rules:
+      Submitted          → Sub Nt Rmtd    = SubInsShare
+      Submitted(Resub-N) → Rsub Nt Rmtd  = Difference
+      Approved (plain)   → Nothing        (fully paid, Difference = 0)
+      Approved(Resub-N)  → Final Rejn     = Difference
+      Rejected (any)     → Final Rejn     = Difference
+      Rejection Accepted → Rej Accepted   = Difference
+      Not Submitted(any) → Nothing        (excluded from all columns)
     """
-    d = _build_claim_detail(df, visit_days_series).copy()
+    import re as _re
 
-    # Ensure grouping column exists in detail frame
-    if group_col not in d.columns:
-        if group_col in df.columns:
-            d[group_col] = df[group_col].values
-        else:
-            d[group_col] = "Not Available"
+    d = df.copy()
 
-    d[group_col] = d[group_col].fillna("Not Available").astype(str).str.strip()
-
-    # Keep only real group values
-    d = d[~d[group_col].str.lower().isin(
-        ["not available", "", "nan", "none", "total", "grand total"]
-    )].copy()
-
-    # Numeric safety
-    num_cols = [
-        "SubInsShare",
-        "Initial pay", "Resb1 pay", "Resb2 pay", "Resb3 pay", "Total pay",
-        "Sub Nt Rmtd", "Rsub Nt Rmtd", "Rejection Accepted", "Final Rejn"
-    ]
-    for c in num_cols:
+    for c in ["SubInsShare", "RemitInsShare", "Resub1RemitInsShare",
+              "Resub2RemitInsShare", "Resub3RemitInsShare", "Difference",
+              "UniqueID", "Status"]:
         if c not in d.columns:
-            d[c] = 0.0
+            d[c] = 0 if c not in ("UniqueID", "Status") else ("" if c == "Status" else 0)
+
+    for c in ["SubInsShare", "RemitInsShare", "Resub1RemitInsShare",
+              "Resub2RemitInsShare", "Resub3RemitInsShare", "Difference"]:
         d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
 
-    # Difference is still needed for Remited Amt
-    if "Difference" in df.columns:
-        d["_difference"] = pd.to_numeric(df["Difference"], errors="coerce").fillna(0.0).values
-    else:
-        d["_difference"] = 0.0
+    def _norm(v):
+        return _re.sub(r"\s+", " ", str(v or "").strip().lower())
 
-    if "UniqueID" not in d.columns:
-        d["UniqueID"] = range(len(d))
+    d["_status_norm"] = d["Status"].apply(_norm)
+
+    # ── Status masks ──────────────────────────────────────────────────────────
+    mask_sub_init      = d["_status_norm"] == "submitted"
+    mask_sub_resub     = d["_status_norm"].str.match(r"^submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
+    mask_approved_resub= d["_status_norm"].str.match(r"^approved\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
+    mask_rejected      = d["_status_norm"].str.match(r"^rejected(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+    mask_rej_acc       = d["_status_norm"].str.match(r"^rejection accepted(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+    # Not Submitted (any variant) → excluded from all columns
+    mask_not_sub       = d["_status_norm"].str.match(r"^not submitted", na=False)
+
+    # ── Total Pay = sum of all remit columns (no extra_paid) ──────────────────
+    d["_row_total_pay"] = (
+        d["RemitInsShare"] +
+        d["Resub1RemitInsShare"] +
+        d["Resub2RemitInsShare"] +
+        d["Resub3RemitInsShare"]
+    ).clip(upper=d["SubInsShare"])
+
+    # ── Column assignments using Difference column ────────────────────────────
+    # Sub Nt Rmtd: Submitted initial only → SubInsShare
+    d["_sub_nt_rmtd"] = 0.0
+    d.loc[mask_sub_init, "_sub_nt_rmtd"] = d.loc[mask_sub_init, "SubInsShare"]
+
+    # Rsub Nt Rmtd: Submitted(Resub-N) → Difference
+    d["_rsub_nt_rmtd"] = 0.0
+    d.loc[mask_sub_resub, "_rsub_nt_rmtd"] = d.loc[mask_sub_resub, "Difference"]
+
+    # Rejection Accepted → Difference
+    d["_rej_accepted"] = 0.0
+    d.loc[mask_rej_acc, "_rej_accepted"] = d.loc[mask_rej_acc, "Difference"]
+
+    # Final Rejn: Approved(Resub-N) + Rejected(any) → Difference
+    d["_final_rejn_direct"] = 0.0
+    d.loc[mask_approved_resub, "_final_rejn_direct"] = d.loc[mask_approved_resub, "Difference"]
+    d.loc[mask_rejected,       "_final_rejn_direct"] = d.loc[mask_rejected,       "Difference"]
+
+    # Not Submitted: zero out all assigned columns
+    for col in ["_sub_nt_rmtd", "_rsub_nt_rmtd", "_rej_accepted", "_final_rejn_direct"]:
+        d.loc[mask_not_sub, col] = 0.0
 
     agg = d.groupby(group_col, dropna=False, sort=True).agg(
-        claim_count=("UniqueID", "nunique"),
-        claimed_amt=("SubInsShare", "sum"),
-        initial_pay=("Initial pay", "sum"),
-        resb1_pay=("Resb1 pay", "sum"),
-        resb2_pay=("Resb2 pay", "sum"),
-        resb3_pay=("Resb3 pay", "sum"),
-        total_pay=("Total pay", "sum"),
-        sub_nt_rmtd=("Sub Nt Rmtd", "sum"),
-        rsub_nt_rmtd=("Rsub Nt Rmtd", "sum"),
-        rej_accepted=("Rejection Accepted", "sum"),
-        final_rejn=("Final Rejn", "sum"),
-        difference=("_difference", "sum"),
+        claim_count       = ("UniqueID",              "nunique"),
+        claimed_amt       = ("SubInsShare",           "sum"),
+        remit_ins         = ("RemitInsShare",         "sum"),
+        initial_pay       = ("RemitInsShare",         "sum"),
+        resb1_pay         = ("Resub1RemitInsShare",   "sum"),
+        resb2_pay         = ("Resub2RemitInsShare",   "sum"),
+        resb3_pay         = ("Resub3RemitInsShare",   "sum"),
+        sub_nt_rmtd       = ("_sub_nt_rmtd",         "sum"),
+        rsub_nt_rmtd      = ("_rsub_nt_rmtd",        "sum"),
+        rej_accepted      = ("_rej_accepted",         "sum"),
+        final_rejn_direct = ("_final_rejn_direct",   "sum"),
     ).reset_index()
 
-    agg["remited_amt"] = agg["initial_pay"] + agg["difference"]
-    agg["rej_pct"] = (
-        agg["final_rejn"] / agg["claimed_amt"].replace(0, float("nan")) * 100
-    ).fillna(0.0)
+    agg["remited_amt"] = agg["remit_ins"]
+    agg["total_pay"]   = agg["initial_pay"] + agg["resb1_pay"] + agg["resb2_pay"] + agg["resb3_pay"]
+    # Final Rejn = directly assigned (Approved Resub + Rejected) via Difference column
+    agg["final_rejn"]  = agg["final_rejn_direct"].clip(lower=0)
+    agg["rej_pct"]     = (agg["final_rejn"] / agg["claimed_amt"].replace(0, float("nan")) * 100).fillna(0.0)
 
     out = pd.DataFrame()
     out[group_col]                           = agg[group_col]
@@ -389,13 +417,17 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     num_cols = out.select_dtypes(include="number").columns.tolist()
     gt = {c: out[c].sum() if c in num_cols else "Grand Total" for c in out.columns}
     gt[group_col] = "Grand Total"
-    gt_claimed = out["Claimed Amount"].sum()
+    gt_claimed    = out["Claimed Amount"].sum()
+    gt_total_pay  = out["Total pay"].sum()
+    gt_sub        = out["Sub Nt Rmtd (outstanding amount)"].sum()
+    gt_rsub       = out["Rsub Nt Rmtd (outstanding amount)"].sum()
+    gt_rej_acc    = out["Rejection Accepted"].sum()
     gt_final_rejn = out["Final Rejn"].sum()
-    gt["Rej. %"] = (gt_final_rejn / gt_claimed * 100) if gt_claimed else 0.0
+    gt["Final Rejn"] = gt_final_rejn
+    gt["Rej. %"]     = (gt_final_rejn / gt_claimed * 100) if gt_claimed else 0.0
 
     out = pd.concat([out, pd.DataFrame([gt])], ignore_index=True)
     return out
-
 
 def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     """
@@ -738,7 +770,7 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         "rcm_doctor":    rcm_doctor,
         "rcm_month":     rcm_month,
         "rcm_group_col": rcm_group_col,
-        "claim_detail":  _build_claim_detail(df_rcm, _days_since_visit),
+        "claim_detail":  _build_claim_detail(df, _days_since_visit),
     }
 
 
