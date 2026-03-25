@@ -506,22 +506,22 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         _days_since_visit = pd.Series(0, index=df.index)
 
     _status_norm_e1          = df["Status"].apply(_normalize_status)
-    _mask_not_sub_old        = (_status_norm_e1 == "not submitted") & (_days_since_visit > 90)
     _mask_not_sub_resub_old  = (
         _status_norm_e1.str.match(r"^not submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
         & (_days_since_visit > 90)
     )
     _mask_approved_resub = _status_norm_e1.str.match(r"^approved\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
 
-    # Base Paid from remit columns
+    # Paid = remit cols only, no TakeBack
     df["Paid"] = df[["RemitInsShare","Resub1RemitInsShare","Resub2RemitInsShare",
-                      "Resub3RemitInsShare","Resub4RemitInsShare","TakeBack"]].sum(axis=1)
+                      "Resub3RemitInsShare","Resub4RemitInsShare"]].sum(axis=1)
+    df["Paid"] = df[["Paid","Net Amount"]].min(axis=1)
 
-    # Not Submitted plain >90 days → force Paid = Net Amount
-    df.loc[_mask_not_sub_old, "Paid"] = df.loc[_mask_not_sub_old, "Net Amount"]
-
-    df["Paid"]     = df[["Paid","Net Amount"]].min(axis=1)
-    df["Residual"] = (df["Net Amount"] - df["Paid"]).clip(lower=0)
+    # Residual = Difference column value
+    if "Difference" not in df.columns:
+        df["Difference"] = 0.0
+    df["Difference"] = pd.to_numeric(df["Difference"], errors="coerce").fillna(0.0)
+    df["Residual"] = df["Difference"]
 
     df["Rejected"] = 0.0
     df["Accepted"] = 0.0
@@ -530,10 +530,11 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     df["Final Bucket"] = df["Status"].apply(_classify_final_bucket)
     mask_rej = df["Final Bucket"] == "Rejected"
     mask_acc = df["Final Bucket"] == "Accepted"
-    # Balance = everything except Rejected, Accepted, old Not Submitted plain,
-    #           old Not Submitted Resub, and Approved Resub
+
+    # Not Submitted Resub >90d + Approved Resub → Rejected
     mask_to_rej = _mask_not_sub_resub_old | _mask_approved_resub
-    mask_bal    = (df["Final Bucket"] == "Balance") & (~_mask_not_sub_old) & (~mask_to_rej)
+    # Balance = everything else
+    mask_bal = (df["Final Bucket"] == "Balance") & (~mask_to_rej)
 
     df.loc[mask_rej,    "Rejected"] = df.loc[mask_rej,    "Residual"]
     df.loc[mask_acc,    "Accepted"] = df.loc[mask_acc,    "Residual"]
