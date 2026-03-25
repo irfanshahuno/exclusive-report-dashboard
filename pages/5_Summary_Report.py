@@ -515,13 +515,8 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     # Paid = remit cols only, no TakeBack
     df["Paid"] = df[["RemitInsShare","Resub1RemitInsShare","Resub2RemitInsShare",
                       "Resub3RemitInsShare","Resub4RemitInsShare"]].sum(axis=1)
-    df["Paid"] = df[["Paid","Net Amount"]].min(axis=1)
-
-    # Residual = Difference column value
-    if "Difference" not in df.columns:
-        df["Difference"] = 0.0
-    df["Difference"] = pd.to_numeric(df["Difference"], errors="coerce").fillna(0.0)
-    df["Residual"] = df["Difference"]
+    df["Paid"]     = df[["Paid","Net Amount"]].min(axis=1)
+    df["Residual"] = (df["Net Amount"] - df["Paid"]).clip(lower=0)
 
     df["Rejected"] = 0.0
     df["Accepted"] = 0.0
