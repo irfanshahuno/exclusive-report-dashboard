@@ -866,10 +866,14 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series, df_source: pd.
     EXTRA_COLS = ["MemberID", "EncPatID", "EncType", "EncStart", "EncEnd",
                   "DepName", "ReceiverID"]
     if df_source is not None and "UniqueID" in df_source.columns and "UniqueID" in d.columns:
-        for _ec in EXTRA_COLS:
-            if _ec in df_source.columns and _ec not in d.columns:
-                _map = df_source.set_index("UniqueID")[_ec]
-                d[_ec] = d["UniqueID"].map(_map)
+        _avail = [c for c in EXTRA_COLS if c in df_source.columns]
+        if _avail:
+            _src_extra = df_source[["UniqueID"] + _avail].drop_duplicates(subset="UniqueID")
+            # Drop cols already in d to avoid conflicts
+            _avail_new = [c for c in _avail if c not in d.columns]
+            if _avail_new:
+                _src_extra = _src_extra[["UniqueID"] + _avail_new]
+                d = d.merge(_src_extra, on="UniqueID", how="left")
 
     # ── Drop footer/total rows — same as run_summary_engine ──────────────────
     # Remove rows with no UniqueID or UniqueID looks like a total label
