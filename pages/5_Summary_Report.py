@@ -983,15 +983,12 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series, df_source: pd.
 
 def build_insurance_aging_excel(df_detail: pd.DataFrame, df_source: pd.DataFrame) -> bytes:
     """
-    Per-claim Insurance Aging Detail.
-    ID cols + aging bucket columns for Sub Nt Rmtd and Rsub Nt Rmtd.
+    Per-claim Insurance Aging Detail — simple flat layout.
+    ID cols | Total Outstanding | Aging Days | Sub Nt Rmtd | Rsub Nt Rmtd
     """
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
-
-    AGING_BINS   = [-1, 30, 45, 60, 90, 120, float("inf")]
-    AGING_LABELS = ["0-30 Days", "31-45 Days", "46-60 Days", "61-90 Days", "91-120 Days", ">120 Days"]
 
     d = df_detail.copy()
 
@@ -1002,18 +999,17 @@ def build_insurance_aging_excel(df_detail: pd.DataFrame, df_source: pd.DataFrame
         _avail = [c for c in EXTRA if c in df_source.columns]
         if _avail:
             _src = df_source[["UniqueID"] + _avail].drop_duplicates(subset="UniqueID")
-            _new = [c for c in _avail if c not in d.columns]
-            _drop = [c for c in _avail if c in d.columns]
-            if _drop:
-                d = d.drop(columns=_drop)
-            d = d.merge(_src[["UniqueID"] + _avail], on="UniqueID", how="left")
+            for _c in _avail:
+                if _c in d.columns:
+                    d = d.drop(columns=[_c])
+            d = d.merge(_src, on="UniqueID", how="left")
 
     # ── Prep columns ──────────────────────────────────────────────────────────
-    d["SubDate"]  = pd.to_datetime(d.get("SubDate"),  errors="coerce", dayfirst=True)
+    d["SubDate"] = pd.to_datetime(d.get("SubDate"), errors="coerce", dayfirst=True)
     if "VisitDate" in d.columns:
         d["VisitDate"] = pd.to_datetime(d["VisitDate"], errors="coerce", dayfirst=True)
-    for _c in ["InsGroup", "InsPlan", "MemberID", "EncPatID", "EncType",
-               "EncStart", "EncEnd", "DepName", "ReceiverID"]:
+
+    for _c in ["InsGroup","InsPlan","MemberID","EncPatID","EncType","EncStart","EncEnd","DepName","ReceiverID"]:
         if _c not in d.columns:
             d[_c] = ""
         d[_c] = d[_c].fillna("").astype(str).str.strip()
@@ -1023,18 +1019,18 @@ def build_insurance_aging_excel(df_detail: pd.DataFrame, df_source: pd.DataFrame
         d["Insurance"] = d[ins_col]
     d["Insurance"] = d["Insurance"].fillna("").astype(str).str.strip()
 
-    # ── Aging date: SubDate → fallback VisitDate ──────────────────────────────
+    # ── Aging Days: SubDate → fallback VisitDate ──────────────────────────────
     _aging_date = d["SubDate"].copy()
     if "VisitDate" in d.columns:
         _aging_date = _aging_date.fillna(d["VisitDate"])
     today = pd.Timestamp(datetime.today().date())
-    d["_days"]   = (today - _aging_date).dt.days.fillna(999)
-    d["_bucket"] = pd.cut(d["_days"], bins=AGING_BINS, labels=AGING_LABELS)
-    d["_bucket"] = d["_bucket"].astype(str).replace("nan", ">120 Days")
+    d["Aging Days"] = (today - _aging_date).dt.days.fillna(0).astype(int)
+
+    # ── Total Outstanding ─────────────────────────────────────────────────────
+    d["Total Outstanding"] = d["Sub Nt Rmtd"].fillna(0) + d["Rsub Nt Rmtd"].fillna(0)
 
     # ── Keep only rows with outstanding ──────────────────────────────────────
-    d["_combined"] = d["Sub Nt Rmtd"].fillna(0) + d["Rsub Nt Rmtd"].fillna(0)
-    d = d[d["_combined"] > 0].copy().reset_index(drop=True)
+    d = d[d["Total Outstanding"] > 0].copy().reset_index(drop=True)
 
     if d.empty:
         wb = Workbook()
@@ -1044,46 +1040,30 @@ def build_insurance_aging_excel(df_detail: pd.DataFrame, df_source: pd.DataFrame
         wb.save(buf)
         return buf.getvalue()
 
-    # ── Build aging value columns per row ─────────────────────────────────────
-    for lbl in AGING_LABELS:
-        mask = d["_bucket"] == lbl
-        d[f"Total {lbl}"]        = 0.0
-        d[f"Sub Nt Rmtd {lbl}"]  = 0.0
-        d[f"Rsub Nt Rmtd {lbl}"] = 0.0
-        d.loc[mask, f"Total {lbl}"]        = d.loc[mask, "_combined"]
-        d.loc[mask, f"Sub Nt Rmtd {lbl}"]  = d.loc[mask, "Sub Nt Rmtd"].fillna(0)
-        d.loc[mask, f"Rsub Nt Rmtd {lbl}"] = d.loc[mask, "Rsub Nt Rmtd"].fillna(0)
-
-    # ── Define output columns ─────────────────────────────────────────────────
-    ID_COLS   = [c for c in ["UniqueID","MemberID","EncPatID","EncType","EncStart","EncEnd",
-                              "DepName","DocName","Insurance","ReceiverID","InsGroup","InsPlan",
-                              "Status","VisitDate","SubDate","SubInsShare"] if c in d.columns]
-    comb_cols = [f"Total {b}"         for b in AGING_LABELS]
-    sub_cols  = [f"Sub Nt Rmtd {b}"   for b in AGING_LABELS]
-    rsub_cols = [f"Rsub Nt Rmtd {b}"  for b in AGING_LABELS]
-    NUM_COLS  = ["Sub Nt Rmtd", "Rsub Nt Rmtd"] + comb_cols + sub_cols + rsub_cols
-    out_cols  = ID_COLS + ["Sub Nt Rmtd", "Rsub Nt Rmtd"] + comb_cols + sub_cols + rsub_cols
-
+    # ── Output columns ────────────────────────────────────────────────────────
+    ID_COLS  = [c for c in ["UniqueID","MemberID","EncPatID","EncType","EncStart","EncEnd",
+                             "DepName","DocName","Insurance","ReceiverID","InsGroup","InsPlan",
+                             "Status","VisitDate","SubDate","SubInsShare"] if c in d.columns]
+    out_cols = ID_COLS + ["Total Outstanding", "Aging Days", "Sub Nt Rmtd", "Rsub Nt Rmtd"]
     out = d[[c for c in out_cols if c in d.columns]].copy()
 
+    TEXT_COLS = {"UniqueID","MemberID","EncPatID","EncType","EncStart","EncEnd",
+                 "DepName","DocName","Insurance","ReceiverID","InsGroup","InsPlan",
+                 "Status","VisitDate","SubDate"}
+
     # Grand Total row
-    num_c = [c for c in out.columns if c in NUM_COLS or out[c].dtype in [float, int]]
     gt = {}
     for c in out.columns:
-        try:
-            gt[c] = out[c].sum() if pd.api.types.is_numeric_dtype(out[c]) else ("Grand Total" if c == "UniqueID" else "")
-        except Exception:
-            gt[c] = ""
+        if pd.api.types.is_numeric_dtype(out[c]):
+            gt[c] = out[c].sum()
+        else:
+            gt[c] = "Grand Total" if c == "UniqueID" else ""
     out = pd.concat([out, pd.DataFrame([gt])], ignore_index=True)
 
     # ── Write Excel ───────────────────────────────────────────────────────────
     wb = Workbook()
     ws = wb.active
     ws.title = "Insurance Aging"
-
-    TEXT_COLS = {"UniqueID","MemberID","EncPatID","EncType","EncStart","EncEnd",
-                 "DepName","DocName","Insurance","ReceiverID","InsGroup","InsPlan",
-                 "Status","VisitDate","SubDate"}
 
     def _fill(h): return PatternFill("solid", fgColor=h)
     def _font(bold=False, color="000000", size=10):
@@ -1099,7 +1079,7 @@ def build_insurance_aging_excel(df_detail: pd.DataFrame, df_source: pd.DataFrame
         cell.font      = _font(bold=True, color="FFFFFF", size=10)
         cell.border    = _border()
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws.row_dimensions[1].height = 30
+    ws.row_dimensions[1].height = 22
 
     gt_row = len(out) + 1
     for ri, row_data in enumerate(out.values.tolist(), 2):
@@ -1115,7 +1095,7 @@ def build_insurance_aging_excel(df_detail: pd.DataFrame, df_source: pd.DataFrame
             is_num = col not in TEXT_COLS
             cell.alignment = Alignment(horizontal="right" if is_num else "left", vertical="center")
             if is_num and isinstance(val, (int, float)) and val is not None:
-                cell.number_format = "#,##0.00"
+                cell.number_format = "#,##0" if col == "Aging Days" else "#,##0.00"
 
     for i, col in enumerate(final_cols, 1):
         ltr = get_column_letter(i)
