@@ -1386,59 +1386,56 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
 
     gt_p2 = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
 
-    # ── Exact Excel colors ────────────────────────────────────────────────────
-    E_TITLE_BG  = "#D9D9D9"
-    E_HDR_BG    = "#595959"
-    E_HDR_FG    = "#FFFFFF"
-    E_SUBHDR_BG = "#BFBFBF"
-    E_GT_BG     = "#D9D9D9"
-    E_ALT1      = "#FFFFFF"
-    E_ALT2      = "#F2F2F2"
-    E_GREEN     = "#1E8449"
-    E_RED       = "#C0392B"
-    E_BORDER    = "#BFBFBF"
-    GREEN_COLS  = {"Initial pay", "Resb1 pay", "Resb2 pay", "Resb3 pay"}
+    # ── Email color theme — Teal/Emerald ────────────────────────────────────
+    C_HEADER_BG  = "#0D4F4F"
+    C_ACCENT     = "#0E7C7C"
+    C_SECT_BG    = "#0E7C7C"
+    C_SECT_FG    = "#FFFFFF"
+    C_COL_BG     = "#1A5C5C"
+    C_COL_FG     = "#FFFFFF"
+    C_GT_BG      = "#D4EDEC"
+    C_GT_FG      = "#0D4F4F"
+    C_ALT1       = "#FFFFFF"
+    C_ALT2       = "#EDF7F7"
+    C_GREEN      = "#1A7A4A"
+    C_RED        = "#C0392B"
+    C_BORDER     = "#B2D8D8"
+    GREEN_COLS   = {"Initial pay", "Resb1 pay", "Resb2 pay", "Resb3 pay"}
 
     def _df_to_html(df, caption=""):
         if df is None or df.empty:
             return ""
         cols = list(df.columns)
-
-        # Section header banner (matching Excel section label row)
-        sec_banner = (
-            f"<tr><td colspan='{len(cols)}' style='background:{E_SUBHDR_BG};"
-            f"font-weight:700;font-size:13px;padding:8px 12px;"
-            f"border:1px solid {E_BORDER};color:#000;text-align:left;'>"
-            f"{caption}</td></tr>"
+        nc = len(cols)
+        banner = (
+            f"<tr><td colspan='{nc}' style='background:{C_SECT_BG};color:{C_SECT_FG};"
+            f"font-weight:700;font-size:12px;padding:9px 12px;text-transform:uppercase;"
+            f"letter-spacing:0.5px;border:1px solid {C_ACCENT};'>"
+            f"&#9646;&nbsp; {caption}</td></tr>"
         ) if caption else ""
-
-        # Column headers
         ths = "".join(
-            f"<th style='padding:7px 10px;background:{E_HDR_BG};color:{E_HDR_FG};"
-            f"border:1px solid #888;text-align:{'left' if i==0 else 'right'};"
-            f"font-size:11px;white-space:nowrap;"
-            f"{'color:#90EE90;' if c in GREEN_COLS else ''}'>{c}</th>"
+            f"<th style='padding:8px 10px;background:{C_COL_BG};color:{C_COL_FG};"
+            f"border:1px solid {C_ACCENT};text-align:{'left' if i==0 else 'right'};"
+            f"font-size:11px;white-space:nowrap;font-weight:600;"
+            f"{'color:#7FFFD4;' if c in GREEN_COLS else ''}'{c}</th>"
             for i, c in enumerate(cols)
         )
-
         rows_html = ""
         for ri, (_, row) in enumerate(df.iterrows()):
             is_gt = bool(gt_p2.match(str(row.iloc[0])))
-            bg = E_GT_BG if is_gt else (E_ALT1 if ri % 2 == 0 else E_ALT2)
-            fw = "font-weight:700;" if is_gt else ""
+            bg = C_GT_BG if is_gt else (C_ALT1 if ri % 2 == 0 else C_ALT2)
+            fw = f"font-weight:700;color:{C_GT_FG};" if is_gt else ""
             cells = ""
             for ci, val in enumerate(row):
                 col = cols[ci]
                 align = "left" if ci == 0 else "right"
                 extra = ""
                 if col in GREEN_COLS and not is_gt:
-                    extra = f"color:{E_GREEN};"
+                    extra = f"color:{C_GREEN};"
                 if col == "Rej. %" and not is_gt:
                     try:
-                        if float(val) > 0:
-                            extra = f"color:{E_RED};font-weight:600;"
+                        if float(val) > 0: extra = f"color:{C_RED};font-weight:600;"
                     except: pass
-                # Format values
                 if col == "Rej. %":
                     try: val = f"{float(val):.2f}%"
                     except: pass
@@ -1449,16 +1446,15 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
                     try: val = f"{float(val):,.2f}"
                     except: pass
                 cells += (
-                    f"<td style='padding:6px 10px;border:1px solid {E_BORDER};"
+                    f"<td style='padding:6px 10px;border:1px solid {C_BORDER};"
                     f"text-align:{align};background:{bg};{fw}{extra}"
                     f"font-size:11px;font-family:Calibri,Arial,sans-serif;'>{val}</td>"
                 )
             rows_html += f"<tr>{cells}</tr>"
-
         return (
-            f"<table style='border-collapse:collapse;width:100%;"
-            f"font-size:11px;font-family:Calibri,Arial,sans-serif;margin-bottom:20px;'>"
-            f"<thead><tr>{sec_banner}</tr><tr>{ths}</tr></thead>"
+            f"<table style='border-collapse:collapse;width:100%;font-size:11px;"
+            f"font-family:Calibri,Arial,sans-serif;margin-bottom:24px;'>"
+            f"<thead><tr>{banner}</tr><tr>{ths}</tr></thead>"
             f"<tbody>{rows_html}</tbody></table>"
         )
 
@@ -1466,60 +1462,49 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     doc_html = _df_to_html(result.get("rcm_doctor"),    "Doctor Name")
     mon_html = _df_to_html(result.get("rcm_month"),     "Month")
 
-    # ── KPI cards (matching Streamlit UI style) ───────────────────────────────
-    def _kpi_card(label, value, dark=False):
-        bg   = "#0A2647" if dark else "#FFFFFF"
-        lc   = "rgba(180,205,255,0.75)" if dark else "#8A9BB5"
-        vc   = "#FFFFFF" if dark else "#0D1B2E"
-        bord = "rgba(180,210,255,0.25)" if dark else "#C5D8F5"
+    def _kpi_card(label, value, style="default"):
+        s = {
+            "default": {"bg":"#FFFFFF",  "br":"#B2D8D8", "lc":"#5A8A8A", "vc":"#0D3333"},
+            "dark":    {"bg":"#0D4F4F",  "br":"#1A7A7A", "lc":"#7ECECE", "vc":"#FFFFFF"},
+            "accent":  {"bg":"#E8F7F7",  "br":"#0E7C7C", "lc":"#0E7C7C", "vc":"#0D3333"},
+        }.get(style, {"bg":"#FFFFFF","br":"#B2D8D8","lc":"#5A8A8A","vc":"#0D3333"})
         return (
             f"<td style='padding:6px;'>"
-            f"<div style='background:{bg};border:1.5px solid {bord};"
-            f"border-radius:14px;padding:14px 18px;"
-            f"box-shadow:0 4px 12px rgba(10,38,71,0.08);min-width:130px;'>"
-            f"<div style='font-size:11px;color:{lc};font-weight:600;"
-            f"text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;'>{label}</div>"
-            f"<div style='font-size:22px;font-weight:800;color:{vc};"
-            f"font-family:Inter,Arial,sans-serif;'>{_fmt(value)}</div>"
+            f"<div style='background:{s['bg']};border:1.5px solid {s['br']};"
+            f"border-radius:12px;padding:14px 16px;min-width:115px;"
+            f"box-shadow:0 2px 8px rgba(13,79,79,0.10);'>"
+            f"<div style='font-size:10px;color:{s['lc']};font-weight:700;"
+            f"text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px;'>{label}</div>"
+            f"<div style='font-size:20px;font-weight:800;color:{s['vc']};"
+            f"font-family:Arial,sans-serif;letter-spacing:-0.5px;'>{_fmt(value)}</div>"
             f"</div></td>"
         )
 
     html_body = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
-<body style="margin:0;padding:0;background:#EDF2FB;font-family:Calibri,Arial,sans-serif;color:#222;">
-<div style="max-width:1000px;margin:20px auto;background:#fff;border-radius:14px;
-     box-shadow:0 8px 24px rgba(10,38,71,0.10);overflow:hidden;">
-
-  <!-- Title bar -->
-  <div style="background:{E_HDR_BG};padding:18px 24px;">
-    <div style="color:{E_HDR_FG};font-size:18px;font-weight:700;letter-spacing:-0.3px;">
-      {title_line}
+<body style="margin:0;padding:0;background:#EAF4F4;font-family:Calibri,Arial,sans-serif;">
+<div style="max-width:1050px;margin:24px auto;background:#fff;border-radius:16px;
+     box-shadow:0 8px 32px rgba(13,79,79,0.14);overflow:hidden;">
+  <div style="background:#0D4F4F;padding:20px 28px;border-bottom:3px solid #0E7C7C;">
+    <div style="color:#fff;font-size:20px;font-weight:800;letter-spacing:-0.3px;">
+      &#128202;&nbsp; {title_line}
     </div>
-    <div style="color:#ccc;font-size:12px;margin-top:4px;">
-      {center_name} &nbsp;·&nbsp; {filename_orig} &nbsp;·&nbsp; Generated: {generated_at}
+    <div style="color:#9ECECE;font-size:12px;margin-top:5px;">
+      {center_name} &nbsp;&bull;&nbsp; {filename_orig} &nbsp;&bull;&nbsp; Generated: {generated_at}
     </div>
   </div>
-
-  <div style="padding:20px 24px;">
-
-    <!-- KPI Cards -->
-    <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
-      <tr>
-        {_kpi_card("Claimed Amount", net)}
-        {_kpi_card("Total Pay", paid)}
-        {_kpi_card("Under Process", bal, dark=True)}
-        {_kpi_card("Final Rejn", rej)}
-        {_kpi_card("Rej. Accepted", acc)}
-      </tr>
-    </table>
-
-    <!-- Tables -->
-    {ins_html}
-    {doc_html}
-    {mon_html}
-
-    <div style="color:#999;font-size:10px;border-top:1px solid #e0e0e0;
-                padding-top:10px;margin-top:8px;">
-      Auto-generated by Excellent Medical Group RCM Dashboard. Excel report attached.
+  <div style="padding:24px 28px;">
+    <div style="font-size:11px;font-weight:700;color:#0E7C7C;text-transform:uppercase;
+                letter-spacing:0.8px;margin-bottom:10px;">&#9632;&nbsp; Summary KPIs</div>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:28px;"><tr>
+      {_kpi_card("Claimed Amount", net, "accent")}
+      {_kpi_card("Total Pay", paid, "accent")}
+      {_kpi_card("Under Process", bal, "dark")}
+      {_kpi_card("Final Rejn", rej, "default")}
+      {_kpi_card("Rej. Accepted", acc, "default")}
+    </tr></table>
+    {ins_html}{doc_html}{mon_html}
+    <div style="color:#8AACAC;font-size:10px;border-top:1px solid #B2D8D8;padding-top:12px;margin-top:4px;">
+      &#128203; Auto-generated by Excellent Medical Group RCM Dashboard &nbsp;&bull;&nbsp; Excel report attached.
     </div>
   </div>
 </div>
