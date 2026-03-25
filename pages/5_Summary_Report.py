@@ -3,6 +3,7 @@
 # PATCH: summary Total pay now uses sum of row-level clipped _row_total_pay
 # PATCH: email-body-style-like-preview
 # PATCH: blue-email-theme
+# PATCH: flat-blue-report-email-style
 # Summary Report page — mirrors center selection flow.
 # User selects a center → uploads a source file → runs exclusive_report_status_final.py
 # logic in-memory → displays results (Insurance_Totals, Final_Bucket_Summary, Monthly_Totals,
@@ -1469,30 +1470,16 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
     mon_html = _df_to_html(result.get("rcm_month"),     "Month")
     # ── KPI cards / email body (mobile-friendly, matches preview style) ───────
     def _kpi_card(label, value, dark=False):
-        if dark:
-            bg = "#0B4FAF"
-            label_color = "#DCEBFF"
-            value_color = "#FFFFFF"
-            border = "#0A469A"
-            shadow = "0 4px 10px rgba(11,79,175,0.22)"
-        else:
-            bg = "#FFFFFF"
-            label_color = "#4B5563"
-            value_color = "#111827"
-            border = "#E5E7EB"
-            shadow = "0 2px 6px rgba(0,0,0,0.05)"
-
-        return (
-            f"<td style='padding:4px;vertical-align:top;'>"
-            f"<div style='background:{bg};border:1px solid {border};"
-            f"border-radius:8px;padding:10px 12px;min-width:95px;"
-            f"box-shadow:{shadow};'>"
-            f"<div style='font-size:10px;line-height:12px;color:{label_color};font-weight:700;"
-            f"text-transform:uppercase;letter-spacing:.35px;margin-bottom:4px;'>{label}</div>"
-            f"<div style='font-size:16px;line-height:18px;font-weight:800;color:{value_color};"
-            f"font-family:Calibri,Arial,sans-serif;white-space:nowrap;'>{_fmt(value)}</div>"
-            f"</div></td>"
-        )
+        def _kpi_card(label, value, color="#2E86C1"):
+            return (
+                f"<td style='padding:6px;vertical-align:top;'>"
+                f"<div style='background:#F4F6F7;border-top:4px solid {color};padding:10px;min-width:120px;'>"
+                f"<div style='font-size:11px;font-weight:700;color:#566573;text-transform:uppercase;margin-bottom:6px;'>"
+                f"{label}</div>"
+                f"<div style='font-size:22px;font-weight:800;color:#1B2631;font-family:Calibri,Arial,sans-serif;'>"
+                f"{_fmt(value)}</div>"
+                f"</div></td>"
+            )
 
     html_body = f"""<!DOCTYPE html>
 <html>
