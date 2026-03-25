@@ -363,38 +363,41 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
                 mask_rej_acc | mask_approved_plain | mask_approved_resub | mask_rejected)
     mask_unmatched = (~mask_any) & (pd.to_numeric(d["SubInsShare"], errors="coerce").fillna(0) > 0)
 
-    # ── Per-row Total Pay (remit cols + extra_paid for Not Submitted old) ─────
+    # ── Per-row Total Pay = remit cols only (no special treatment for Not Submitted old) ──
     d["_remit_total"] = (
         pd.to_numeric(d["RemitInsShare"],       errors="coerce").fillna(0) +
         pd.to_numeric(d["Resub1RemitInsShare"], errors="coerce").fillna(0) +
         pd.to_numeric(d["Resub2RemitInsShare"], errors="coerce").fillna(0) +
         pd.to_numeric(d["Resub3RemitInsShare"], errors="coerce").fillna(0)
     )
-    d["_extra_paid"] = d["SubInsShare"].where(mask_not_sub_old, 0.0)
-    d["_row_total_pay"] = (d["_remit_total"] + d["_extra_paid"]).clip(upper=d["SubInsShare"])
+    d["_extra_paid"]    = 0.0  # no longer used
+    d["_row_total_pay"] = d["_remit_total"].clip(upper=d["SubInsShare"])
 
     # ── Residual = SubInsShare - Total Pay ────────────────────────────────────
     d["_residual"] = (d["SubInsShare"] - d["_row_total_pay"]).clip(lower=0)
 
     # ── Column assignments ────────────────────────────────────────────────────
-    # Sub Nt Rmtd
+    # Sub Nt Rmtd: Submitted plain + Not Submitted (all) → SubInsShare
     d["_sub_nt_rmtd"] = 0.0
-    d.loc[mask_sub_init,       "_sub_nt_rmtd"] = d.loc[mask_sub_init,       "SubInsShare"]
-    d.loc[mask_not_sub_fresh,  "_sub_nt_rmtd"] = d.loc[mask_not_sub_fresh,  "SubInsShare"]
-    d.loc[mask_unmatched,      "_sub_nt_rmtd"] = d.loc[mask_unmatched,      "SubInsShare"]
+    d.loc[mask_sub_init,      "_sub_nt_rmtd"] = d.loc[mask_sub_init,      "SubInsShare"]
+    d.loc[mask_not_sub_fresh, "_sub_nt_rmtd"] = d.loc[mask_not_sub_fresh, "SubInsShare"]
+    d.loc[mask_not_sub_old,   "_sub_nt_rmtd"] = d.loc[mask_not_sub_old,   "SubInsShare"]
+    d.loc[mask_unmatched,     "_sub_nt_rmtd"] = d.loc[mask_unmatched,     "SubInsShare"]
 
-    # Rsub Nt Rmtd: Submitted Resub + Not Submitted Resub fresh → residual
+    # Rsub Nt Rmtd: Submitted Resub + Not Submitted Resub fresh → Difference
     d["_rsub_nt_rmtd"] = 0.0
-    d.loc[mask_sub_resub,          "_rsub_nt_rmtd"] = d.loc[mask_sub_resub,          "_residual"]
-    d.loc[mask_not_sub_resub_fresh,"_rsub_nt_rmtd"] = d.loc[mask_not_sub_resub_fresh,"_residual"]
+    d.loc[mask_sub_resub,           "_rsub_nt_rmtd"] = d.loc[mask_sub_resub,           "Difference"]
+    d.loc[mask_not_sub_resub_fresh, "_rsub_nt_rmtd"] = d.loc[mask_not_sub_resub_fresh, "Difference"]
 
     # Rejection Accepted → Difference
     d["_rej_accepted"] = 0.0
-    d.loc[mask_rej_acc, "_rej_accepted"] = pd.to_numeric(d.loc[mask_rej_acc, "Difference"], errors="coerce").fillna(0.0)
+    d.loc[mask_rej_acc, "_rej_accepted"] = d.loc[mask_rej_acc, "Difference"]
 
-    # Rejected (any stage) → Final Rejn = Difference
+    # Final Rejn = Difference for: Rejected + Approved(Resub-N) + Not Submitted Resub >90d
     d["_final_rejn_direct"] = 0.0
-    d.loc[mask_rejected, "_final_rejn_direct"] = pd.to_numeric(d.loc[mask_rejected, "Difference"], errors="coerce").fillna(0.0)
+    d.loc[mask_rejected,           "_final_rejn_direct"] = d.loc[mask_rejected,           "Difference"]
+    d.loc[mask_approved_resub,     "_final_rejn_direct"] = d.loc[mask_approved_resub,     "Difference"]
+    d.loc[mask_not_sub_resub_old,  "_final_rejn_direct"] = d.loc[mask_not_sub_resub_old,  "Difference"]
 
     agg = d.groupby(group_col, dropna=False, sort=True).agg(
         claim_count       = ("UniqueID",             "nunique"),
@@ -408,12 +411,11 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
         sub_nt_rmtd       = ("_sub_nt_rmtd",        "sum"),
         rsub_nt_rmtd      = ("_rsub_nt_rmtd",       "sum"),
         rej_accepted      = ("_rej_accepted",        "sum"),
-        extra_paid        = ("_extra_paid",          "sum"),
         final_rejn_direct = ("_final_rejn_direct",  "sum"),
     ).reset_index()
 
     agg["remited_amt"] = agg["remit_ins"] + agg["difference"]
-    agg["total_pay"]   = agg["initial_pay"] + agg["resb1_pay"] + agg["resb2_pay"] + agg["resb3_pay"] + agg["extra_paid"]
+    agg["total_pay"]   = agg["initial_pay"] + agg["resb1_pay"] + agg["resb2_pay"] + agg["resb3_pay"]
     agg["final_rejn"]  = agg["final_rejn_direct"]
     agg["rej_pct"]     = (agg["final_rejn"] / agg["claimed_amt"].replace(0, float("nan")) * 100).fillna(0.0)
 
@@ -840,36 +842,38 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
                                 mask_rej_acc | mask_approved_plain | mask_approved_resub | mask_rejected)
     mask_unmatched           = (~mask_any) & (d["SubInsShare"] > 0)
 
-    # ── Total Pay ─────────────────────────────────────────────────────────────
+    # ── Total Pay = remit cols only ───────────────────────────────────────────
     d["Initial pay"] = d["RemitInsShare"]
     d["Resb1 pay"]   = d["Resub1RemitInsShare"]
     d["Resb2 pay"]   = d["Resub2RemitInsShare"]
     d["Resb3 pay"]   = d["Resub3RemitInsShare"]
-    d["_extra_paid"] = d["SubInsShare"].where(mask_not_sub_old, 0.0)
     d["Total pay"]   = (d["Initial pay"] + d["Resb1 pay"] + d["Resb2 pay"] +
-                        d["Resb3 pay"] + d["_extra_paid"]).clip(upper=d["SubInsShare"])
+                        d["Resb3 pay"]).clip(upper=d["SubInsShare"])
 
     # ── Residual ──────────────────────────────────────────────────────────────
     d["_residual"] = (d["SubInsShare"] - d["Total pay"]).clip(lower=0)
 
-    # ── Sub Nt Rmtd ───────────────────────────────────────────────────────────
+    # ── Sub Nt Rmtd: Submitted plain + Not Submitted (all) → SubInsShare ────────
     d["Sub Nt Rmtd"] = 0.0
     d.loc[mask_sub_init,      "Sub Nt Rmtd"] = d.loc[mask_sub_init,      "SubInsShare"]
     d.loc[mask_not_sub_fresh, "Sub Nt Rmtd"] = d.loc[mask_not_sub_fresh, "SubInsShare"]
+    d.loc[mask_not_sub_old,   "Sub Nt Rmtd"] = d.loc[mask_not_sub_old,   "SubInsShare"]
     d.loc[mask_unmatched,     "Sub Nt Rmtd"] = d.loc[mask_unmatched,     "SubInsShare"]
 
-    # ── Rsub Nt Rmtd ──────────────────────────────────────────────────────────
+    # ── Rsub Nt Rmtd: Submitted Resub + Not Submitted Resub <90d → Difference ──
     d["Rsub Nt Rmtd"] = 0.0
-    d.loc[mask_sub_resub,           "Rsub Nt Rmtd"] = d.loc[mask_sub_resub,           "_residual"]
-    d.loc[mask_not_sub_resub_fresh, "Rsub Nt Rmtd"] = d.loc[mask_not_sub_resub_fresh, "_residual"]
+    d.loc[mask_sub_resub,           "Rsub Nt Rmtd"] = d.loc[mask_sub_resub,           "Difference"]
+    d.loc[mask_not_sub_resub_fresh, "Rsub Nt Rmtd"] = d.loc[mask_not_sub_resub_fresh, "Difference"]
 
     # ── Rejection Accepted → Difference ──────────────────────────────────────
     d["Rejection Accepted"] = 0.0
     d.loc[mask_rej_acc, "Rejection Accepted"] = d.loc[mask_rej_acc, "Difference"]
 
-    # ── Final Rejn → Difference for Rejected rows ─────────────────────────────
+    # ── Final Rejn → Difference for: Rejected + Approved(Resub-N) + Not Submitted Resub >90d ──
     d["Final Rejn"] = 0.0
-    d.loc[mask_rejected, "Final Rejn"] = d.loc[mask_rejected, "Difference"]
+    d.loc[mask_rejected,          "Final Rejn"] = d.loc[mask_rejected,          "Difference"]
+    d.loc[mask_approved_resub,    "Final Rejn"] = d.loc[mask_approved_resub,    "Difference"]
+    d.loc[mask_not_sub_resub_old, "Final Rejn"] = d.loc[mask_not_sub_resub_old, "Difference"]
 
     id_cols = [c for c in ["UniqueID","Insurance","DocName","Status","VisitDate","Month","SubInsShare"] if c in d.columns]
     return d[id_cols + ["Initial pay","Resb1 pay","Resb2 pay","Resb3 pay","Total pay",
