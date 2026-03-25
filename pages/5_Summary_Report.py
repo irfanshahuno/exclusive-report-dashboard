@@ -1518,31 +1518,31 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
               <tr>
                 <td width="20%" valign="top" style="padding:0 6px 0 0;">
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #3B82F6;border-collapse:collapse;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #F97316;border-collapse:collapse;">
                     <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#566573;text-transform:uppercase;">Claimed Amount</td></tr>
                     <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1B2631;">{_fmt(net)}</td></tr>
                   </table>
                 </td>
                 <td width="20%" valign="top" style="padding:0 6px;">
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #2563EB;border-collapse:collapse;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #FB923C;border-collapse:collapse;">
                     <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#566573;text-transform:uppercase;">Total Pay</td></tr>
                     <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1B2631;">{_fmt(paid)}</td></tr>
                   </table>
                 </td>
                 <td width="20%" valign="top" style="padding:0 6px;">
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border:1px solid #1D4ED8;border-top:4px solid #1D4ED8;border-collapse:collapse;">
-                    <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#1D4ED8;text-transform:uppercase;">Under Process</td></tr>
-                    <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1D4ED8;">{_fmt(bal)}</td></tr>
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border:1px solid #EA580C;border-top:4px solid #EA580C;border-collapse:collapse;">
+                    <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#EA580C;text-transform:uppercase;">Under Process</td></tr>
+                    <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#EA580C;">{_fmt(bal)}</td></tr>
                   </table>
                 </td>
                 <td width="20%" valign="top" style="padding:0 6px;">
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #64748B;border-collapse:collapse;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #FB923C;border-collapse:collapse;">
                     <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#566573;text-transform:uppercase;">Final Rejn</td></tr>
                     <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1B2631;">{_fmt(rej)}</td></tr>
                   </table>
                 </td>
                 <td width="20%" valign="top" style="padding:0 0 0 6px;">
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #475569;border-collapse:collapse;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#F4F6F7;border-top:4px solid #FDBA74;border-collapse:collapse;">
                     <tr><td style="padding:10px 12px 4px 12px;font-size:11px;font-weight:700;color:#566573;text-transform:uppercase;">Rej. Accepted</td></tr>
                     <tr><td style="padding:0 12px 12px 12px;font-size:22px;font-weight:700;color:#1B2631;">{_fmt(acc)}</td></tr>
                   </table>
