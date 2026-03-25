@@ -1749,6 +1749,12 @@ if up is not None:
                 result["source_s3_error"] = err_src or ""
                 result["rcm_summary_bytes"] = up_rcm.read() if up_rcm is not None else None
                 result["rcm_summary_name"]  = up_rcm.name  if up_rcm is not None else None
+
+                # Clear any old prepared detail files for this center so month-range changes never reuse stale bytes
+                detail_key_base = f"sum_detail_bytes_{ck}"
+                for _k in [k for k in list(st.session_state.keys()) if str(k).startswith(detail_key_base)]:
+                    del st.session_state[_k]
+
                 st.session_state[RESULT_KEY] = result
                 _save_result_to_s3(result, ck)  # persist for refresh
                 st.rerun()
@@ -1861,7 +1867,7 @@ if result:
     df_detail = result.get("claim_detail")
     if df_detail is not None and not df_detail.empty:
         detail_name = dl_name.replace(".xlsx", " - Claim Detail.xlsx")
-        DETAIL_KEY  = f"sum_detail_bytes_{ck}"
+        DETAIL_KEY  = f"sum_detail_bytes_{ck}_{result.get('generated_at','')}_{result.get('row_count',0)}"
 
         if st.button(
             f"⚙️ Prepare Claim Detail Report ({len(df_detail):,} claims)",
