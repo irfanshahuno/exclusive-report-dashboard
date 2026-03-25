@@ -406,9 +406,9 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     d.loc[mask_approved_resub, "_final_rejn"]   = d.loc[mask_approved_resub, "_final_rejn"] + d.loc[mask_approved_resub, "_up"]
     d.loc[mask_approved_resub, "_up"]           = 0.0
 
-    # 4. Not Submitted (Resub-N) > 120 days → Rejection Accepted in summary
+    # 4. Not Submitted (Resub-N) > 120 days → Final Rejn in summary (Rejected in Engine 1)
     # Use the residual saved before we forced paid (avoids double-count)
-    d.loc[_ns_resub_over120, "_rej_accepted"] = d.loc[_ns_resub_over120, "_rej_accepted"] + d.loc[_ns_resub_over120, "_ns_resub_residual"]
+    d.loc[_ns_resub_over120, "_final_rejn"] = d.loc[_ns_resub_over120, "_final_rejn"] + d.loc[_ns_resub_over120, "_ns_resub_residual"]
 
     # 5. Sub Nt Rmtd ← Submitted (initial) + Not Submitted plain ≤ 90 days
     _ns_under90 = mask_not_sub_plain & ~_ns_over90
