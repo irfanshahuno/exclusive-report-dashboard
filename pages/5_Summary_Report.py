@@ -316,7 +316,7 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     Build the RCM Summary table grouped by any column (Insurance, DocName, etc.)
 
     Business rules:
-      Submitted          → Sub Nt Rmtd    = SubInsShare
+      Submitted          → Sub Nt Rmtd    = remaining amount after Total pay
       Submitted(Resub-N) → Rsub Nt Rmtd  = Difference
       Approved (plain)   → Nothing        (fully paid, Difference = 0)
       Approved(Resub-N)  → Final Rejn     = Difference
@@ -360,10 +360,12 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
         d["Resub3RemitInsShare"]
     ).clip(upper=d["SubInsShare"])
 
-    # ── Column assignments using Difference column ────────────────────────────
-    # Sub Nt Rmtd: Submitted initial only → SubInsShare
+    # ── Column assignments using balanced row logic ───────────────────────────
+    # Submitted initial should contribute only the remaining amount after Total pay
     d["_sub_nt_rmtd"] = 0.0
-    d.loc[mask_sub_init, "_sub_nt_rmtd"] = d.loc[mask_sub_init, "SubInsShare"]
+    d.loc[mask_sub_init, "_sub_nt_rmtd"] = (
+        d.loc[mask_sub_init, "SubInsShare"] - d.loc[mask_sub_init, "_row_total_pay"]
+    ).clip(lower=0)
 
     # Rsub Nt Rmtd: Submitted(Resub-N) → Difference
     d["_rsub_nt_rmtd"] = 0.0
@@ -786,7 +788,7 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
     Build per-claim detail — same business rules as build_rcm_summary.
 
     Business rules:
-      Submitted          → Sub Nt Rmtd    = SubInsShare
+      Submitted          → Sub Nt Rmtd    = remaining amount after Total pay
       Submitted(Resub-N) → Rsub Nt Rmtd  = Difference
       Approved (plain)   → Nothing        (fully paid)
       Approved(Resub-N)  → Final Rejn     = Difference
@@ -822,9 +824,11 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
     d["Total pay"]   = (d["Initial pay"] + d["Resb1 pay"] + d["Resb2 pay"] +
                         d["Resb3 pay"]).clip(upper=d["SubInsShare"])
 
-    # ── Sub Nt Rmtd: Submitted initial → SubInsShare ──────────────────────────
+    # ── Sub Nt Rmtd: Submitted initial → remaining amount after Total pay ─────
     d["Sub Nt Rmtd"] = 0.0
-    d.loc[mask_sub_init, "Sub Nt Rmtd"] = d.loc[mask_sub_init, "SubInsShare"]
+    d.loc[mask_sub_init, "Sub Nt Rmtd"] = (
+        d.loc[mask_sub_init, "SubInsShare"] - d.loc[mask_sub_init, "Total pay"]
+    ).clip(lower=0)
 
     # ── Rsub Nt Rmtd: Submitted(Resub-N) → Difference ────────────────────────
     d["Rsub Nt Rmtd"] = 0.0
@@ -1749,11 +1753,12 @@ if up is not None:
                 result["source_s3_error"] = err_src or ""
                 result["rcm_summary_bytes"] = up_rcm.read() if up_rcm is not None else None
                 result["rcm_summary_name"]  = up_rcm.name  if up_rcm is not None else None
-                # FIX: clear any previously prepared detail Excel for this center
+
+                # Clear any previously prepared detail files for this center
                 DETAIL_KEY_BASE = f"sum_detail_bytes_{ck}"
-                keys_to_remove = [k for k in list(st.session_state.keys()) if str(k).startswith(DETAIL_KEY_BASE)]
-                for k in keys_to_remove:
-                    del st.session_state[k]
+                for _k in list(st.session_state.keys()):
+                    if str(_k).startswith(DETAIL_KEY_BASE):
+                        del st.session_state[_k]
 
                 st.session_state[RESULT_KEY] = result
                 _save_result_to_s3(result, ck)  # persist for refresh
@@ -1867,7 +1872,7 @@ if result:
     df_detail = result.get("claim_detail")
     if df_detail is not None and not df_detail.empty:
         detail_name = dl_name.replace(".xlsx", " - Claim Detail.xlsx")
-        DETAIL_KEY  = f"sum_detail_bytes_{ck}_{result.get('generated_at', '')}_{result.get('row_count', 0)}"
+        DETAIL_KEY  = f"sum_detail_bytes_{ck}_{result.get('generated_at','')}_{result.get('row_count',0)}"
 
         if st.button(
             f"⚙️ Prepare Claim Detail Report ({len(df_detail):,} claims)",
