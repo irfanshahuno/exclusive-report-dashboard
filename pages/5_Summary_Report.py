@@ -851,16 +851,25 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
         "rcm_doctor":    rcm_doctor,
         "rcm_month":     rcm_month,
         "rcm_group_col": rcm_group_col,
-        "claim_detail":  _build_claim_detail(df_rcm, _days_since_visit),
+        "claim_detail":  _build_claim_detail(df_rcm, _days_since_visit, df_source=df),
     }
 
 
-def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFrame:
+def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series, df_source: pd.DataFrame = None) -> pd.DataFrame:
     """
     Build per-claim detail using exact same logic as build_rcm_summary (Engine 2).
     Totals of each column will match the summary grand total exactly.
     """
     d = df.copy()
+
+    # ── Merge extra columns from source df if available ───────────────────────
+    EXTRA_COLS = ["MemberID", "EncPatID", "EncType", "EncStart", "EncEnd",
+                  "DepName", "ReceiverID"]
+    if df_source is not None and "UniqueID" in df_source.columns and "UniqueID" in d.columns:
+        for _ec in EXTRA_COLS:
+            if _ec in df_source.columns and _ec not in d.columns:
+                _map = df_source.set_index("UniqueID")[_ec]
+                d[_ec] = d["UniqueID"].map(_map)
 
     # ── Drop footer/total rows — same as run_summary_engine ──────────────────
     # Remove rows with no UniqueID or UniqueID looks like a total label
