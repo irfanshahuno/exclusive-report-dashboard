@@ -773,12 +773,11 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
 
 def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFrame:
     """
-    Build per-claim detail report — all claims, all RCM columns correctly populated
-    matching exactly the same logic as build_rcm_summary.
+    Build per-claim detail report — all claims, all RCM columns correctly populated.
+    Grand Total must match summary exactly.
     """
     d = df.copy()
 
-    # Ensure numeric cols
     for c in ["SubInsShare","RemitInsShare","Resub1RemitInsShare",
               "Resub2RemitInsShare","Resub3RemitInsShare","Difference"]:
         if c not in d.columns:
@@ -789,42 +788,49 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
         return re.sub(r"\s+", " ", str(v or "").strip().lower())
 
     d["_sn"] = d["Status"].apply(_norm)
-
-    # Days for Not Submitted >90 rule
     _days = days_series.reindex(d.index).fillna(0)
 
-    # Status masks — exact same as build_rcm_summary
-    mask_sub_init      = d["_sn"] == "submitted"
-    mask_sub_resub     = d["_sn"].str.match(r"^submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
-    mask_rej_acc       = d["_sn"].str.match(r"^rejection accepted(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
-    mask_not_sub_old   = (d["_sn"] == "not submitted") & (_days > 90)
+    # ── Status masks ──────────────────────────────────────────────────────────
+    mask_sub_init       = d["_sn"] == "submitted"
+    mask_sub_resub      = d["_sn"].str.match(r"^submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
+    mask_not_sub_plain  = d["_sn"] == "not submitted"
+    mask_not_sub_old    = mask_not_sub_plain & (_days > 90)
+    mask_not_sub_fresh  = mask_not_sub_plain & (_days <= 90)
+    mask_not_sub_resub  = d["_sn"].str.match(r"^not submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
+    mask_rej_acc        = d["_sn"].str.match(r"^rejection accepted(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+    mask_rejected       = d["_sn"].str.match(r"^rejected(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
 
-    # Catch-all unmatched
-    mask_approved      = d["_sn"].str.match(r"^approved(\s*\(.+\))?$", na=False)
-    mask_not_sub_any   = d["_sn"].str.match(r"^not submitted(\s*\(.+\))?$", na=False)
-    mask_rejected      = d["_sn"].str.match(r"^rejected(\s*\(.+\))?$", na=False)
-    mask_any_matched   = mask_sub_init | mask_sub_resub | mask_rej_acc | mask_approved | mask_not_sub_any | mask_rejected
-    mask_unmatched     = (~mask_any_matched) & (d["SubInsShare"] > 0)
+    # Catch-all unmatched (same as build_rcm_summary)
+    mask_approved       = d["_sn"].str.match(r"^approved(\s*\(.+\))?$", na=False)
+    mask_not_sub_any    = d["_sn"].str.match(r"^not submitted(\s*\(.+\))?$", na=False)
+    mask_any_matched    = mask_sub_init | mask_sub_resub | mask_rej_acc | mask_approved | mask_not_sub_any | mask_rejected
+    mask_unmatched      = (~mask_any_matched) & (d["SubInsShare"] > 0)
 
-    # Per-row RCM columns
-    d["Initial pay"]        = d["RemitInsShare"]
-    d["Resb1 pay"]          = d["Resub1RemitInsShare"]
-    d["Resb2 pay"]          = d["Resub2RemitInsShare"]
-    d["Resb3 pay"]          = d["Resub3RemitInsShare"]
-    d["_extra_paid"]        = d["SubInsShare"].where(mask_not_sub_old, 0.0)
-    d["Total pay"]          = d["Initial pay"] + d["Resb1 pay"] + d["Resb2 pay"] + d["Resb3 pay"] + d["_extra_paid"]
+    # ── Pay columns ───────────────────────────────────────────────────────────
+    d["Initial pay"] = d["RemitInsShare"]
+    d["Resb1 pay"]   = d["Resub1RemitInsShare"]
+    d["Resb2 pay"]   = d["Resub2RemitInsShare"]
+    d["Resb3 pay"]   = d["Resub3RemitInsShare"]
+    d["_extra_paid"] = d["SubInsShare"].where(mask_not_sub_old, 0.0)
+    d["Total pay"]   = d["Initial pay"] + d["Resb1 pay"] + d["Resb2 pay"] + d["Resb3 pay"] + d["_extra_paid"]
 
-    d["Sub Nt Rmtd"]        = 0.0
-    d.loc[mask_sub_init,    "Sub Nt Rmtd"] = d.loc[mask_sub_init,    "SubInsShare"]
-    d.loc[mask_unmatched,   "Sub Nt Rmtd"] = d.loc[mask_unmatched,   "SubInsShare"]
+    # ── Sub Nt Rmtd: Submitted plain + Not Submitted fresh + unmatched ────────
+    d["Sub Nt Rmtd"] = 0.0
+    d.loc[mask_sub_init,      "Sub Nt Rmtd"] = d.loc[mask_sub_init,      "SubInsShare"]
+    d.loc[mask_not_sub_fresh, "Sub Nt Rmtd"] = d.loc[mask_not_sub_fresh, "SubInsShare"]
+    d.loc[mask_unmatched,     "Sub Nt Rmtd"] = d.loc[mask_unmatched,     "SubInsShare"]
 
-    d["Rsub Nt Rmtd"]       = 0.0
-    d.loc[mask_sub_resub,   "Rsub Nt Rmtd"] = d.loc[mask_sub_resub,  "Difference"]
+    # ── Rsub Nt Rmtd: Submitted Resub-N (Difference) + Not Submitted Resub-N (SubInsShare) ──
+    d["Rsub Nt Rmtd"] = 0.0
+    d.loc[mask_sub_resub,     "Rsub Nt Rmtd"] = d.loc[mask_sub_resub,     "Difference"]
+    d.loc[mask_not_sub_resub, "Rsub Nt Rmtd"] = d.loc[mask_not_sub_resub, "SubInsShare"]
 
+    # ── Rejection Accepted: uses Difference (same as summary) ────────────────
     d["Rejection Accepted"] = 0.0
-    d.loc[mask_rej_acc,     "Rejection Accepted"] = d.loc[mask_rej_acc, "Difference"]
+    d.loc[mask_rej_acc, "Rejection Accepted"] = d.loc[mask_rej_acc, "Difference"]
 
-    d["Final Rejn"]         = (
+    # ── Final Rejn: residual after all columns accounted for ─────────────────
+    d["Final Rejn"] = (
         d["SubInsShare"]
         - d["Total pay"]
         - d["Sub Nt Rmtd"]
@@ -832,12 +838,8 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
         - d["Rejection Accepted"]
     ).clip(lower=0)
 
-    # Identifier columns — include all available
-    id_cols = []
-    for c in ["UniqueID","Insurance","DocName","Status","VisitDate","Month","SubInsShare"]:
-        if c in d.columns:
-            id_cols.append(c)
-
+    # ── Select output columns ─────────────────────────────────────────────────
+    id_cols = [c for c in ["UniqueID","Insurance","DocName","Status","VisitDate","Month","SubInsShare"] if c in d.columns]
     report_cols = id_cols + [
         "Initial pay","Resb1 pay","Resb2 pay","Resb3 pay","Total pay",
         "Sub Nt Rmtd","Rsub Nt Rmtd","Rejection Accepted","Final Rejn"
