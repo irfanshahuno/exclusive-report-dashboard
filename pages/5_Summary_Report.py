@@ -1481,7 +1481,7 @@ def send_rcm_email(excel_bytes: bytes, excel_filename: str, result: dict, center
 
         return (
             f"<td style='padding:6px;vertical-align:top;'>"
-            f"<div style='background:{bg};border:1px solid {bord};"
+            f"<div style='background:{bg};border:1px solid {border};"
             f"border-radius:12px;padding:10px 12px;min-width:95px;{'' if dark else ''}"
             f"box-shadow:{shadow};'>"
             f"<div style='font-size:10px;line-height:12px;color:{lc};font-weight:700;"
