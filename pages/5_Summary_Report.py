@@ -1367,41 +1367,16 @@ def build_excel_output(result: dict) -> bytes:
 
     # ── Build title from date range in data ──────────────────────────────────
     def _get_date_range():
-        """Get start/end month-year from rcm_month rows (e.g. Jan-22, Feb-22)."""
+        """Get start/end date from VisitDate column — e.g. 1 JAN 2025 - 23 JUN 2025"""
         try:
-            import calendar as _cal
-            _abbr_map = {m.lower(): i for i, m in enumerate(_cal.month_abbr) if m}
-
-            def _mk(v):
-                """Sort key for Mon-YY labels."""
-                p = str(v).strip().split("-")
-                if len(p) == 2:
-                    try:
-                        return (int(p[1]), _abbr_map.get(p[0].lower()[:3], 0))
-                    except Exception:
-                        pass
-                return (9999, 99)
-
-            def _expand(lbl):
-                """Jan-22 -> JAN 2022"""
-                p = str(lbl).strip().split("-")
-                if len(p) == 2:
-                    mon = p[0].upper()
-                    yr  = int(p[1])
-                    full_yr = (2000 + yr) if yr < 50 else (1900 + yr)
-                    return f"{mon} {full_yr}"
-                return lbl.upper()
-
-            rcm_m = result.get("rcm_month")
-            if rcm_m is not None and not rcm_m.empty:
-                gt_p = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
-                rows = [str(v).strip() for v in rcm_m.iloc[:, 0]
-                        if not gt_p.match(str(v))]
-                # Only use rows that have Mon-YY format (contain "-")
-                valid = [r for r in rows if "-" in r]
-                if valid:
-                    rows_sorted = sorted(valid, key=_mk)
-                    return f"EMC - RCM SUMMARY - {_expand(rows_sorted[0])} - {_expand(rows_sorted[-1])}"
+            _df = result.get("df")
+            if _df is not None and "VisitDate" in _df.columns:
+                _vd = pd.to_datetime(_df["VisitDate"], errors="coerce", dayfirst=True).dropna()
+                if not _vd.empty:
+                    _min = _vd.min()
+                    _max = _vd.max()
+                    _range = f"{_min.day} {_min.strftime('%b').upper()} {_min.year} - {_max.day} {_max.strftime('%b').upper()} {_max.year}"
+                    return f"EMC - RCM SUMMARY - {_range}"
         except Exception:
             pass
         return "EMC - RCM SUMMARY"
@@ -2062,38 +2037,36 @@ if result:
     else:
         excel_bytes = build_excel_output(result)
     safe_name = re.sub(r"[^\w\-.]", "_", center_cfg["key"])
-    # Build clean filename: EMC - RCM SUMMARY - JAN 2025 - DEC 2025.xlsx
+    # Build filename using VisitDate min/max: EMC - RCM SUMMARY - 1 JAN 2025 - 23 JUN 2025.xlsx
     def _build_excel_filename():
         try:
-            import calendar as _cal
-            _abbr_map = {m.lower(): i for i, m in enumerate(_cal.month_abbr) if m}
-            def _mk(v):
-                p = str(v).strip().split("-")
-                if len(p) == 2:
-                    try: return (int(p[1]), _abbr_map.get(p[0].lower()[:3], 0))
-                    except: pass
-                return (9999, 99)
-            def _expand_full(lbl):
-                p = str(lbl).strip().split("-")
-                if len(p) == 2:
-                    yr = int(p[1])
-                    full_yr = (2000 + yr) if yr < 50 else (1900 + yr)
-                    return f"{p[0].upper()} {full_yr}"
-                return lbl.upper()
-            rcm_m = result.get("rcm_month")
-            if rcm_m is not None and not rcm_m.empty:
-                gt_p_ = re.compile(r"^\s*(grand\s*total|total)\s*$", re.I)
-                rows_ = [str(v).strip() for v in rcm_m.iloc[:,0] if not gt_p_.match(str(v))]
-                valid_ = [r for r in rows_ if "-" in r]
-                if valid_:
-                    s_ = sorted(valid_, key=_mk)
-                    return f"EMC - RCM SUMMARY - {_expand_full(s_[0])} - {_expand_full(s_[-1])}.xlsx"
+            _df = result.get("df")
+            if _df is not None and "VisitDate" in _df.columns:
+                _vd = pd.to_datetime(_df["VisitDate"], errors="coerce", dayfirst=True).dropna()
+                if not _vd.empty:
+                    _min = _vd.min()
+                    _max = _vd.max()
+                    _range = f"{_min.day} {_min.strftime('%b').upper()} {_min.year} - {_max.day} {_max.strftime('%b').upper()} {_max.year}"
+                    return f"EMC - RCM SUMMARY - {_range}.xlsx"
         except Exception:
             pass
         return f"EMC - RCM SUMMARY - {datetime.now().strftime('%b %Y').upper()}.xlsx"
     dl_name = _build_excel_filename()
     # Extract date range label from filename e.g. "JAN 2025 - JUN 2025"
-    _date_range_label = dl_name.replace("EMC - RCM SUMMARY - ", "").replace(".xlsx", "").strip()
+    # ── Date range from VisitDate min/max ────────────────────────────────────
+    def _get_visit_date_range():
+        try:
+            _df = result.get("df")
+            if _df is not None and "VisitDate" in _df.columns:
+                _vd = pd.to_datetime(_df["VisitDate"], errors="coerce", dayfirst=True).dropna()
+                if not _vd.empty:
+                    _min = _vd.min()
+                    _max = _vd.max()
+                    return f"{_min.day} {_min.strftime('%b').upper()} {_min.year} - {_max.day} {_max.strftime('%b').upper()} {_max.year}"
+        except Exception:
+            pass
+        return dl_name.replace("EMC - RCM SUMMARY - ", "").replace(".xlsx", "").strip()
+    _date_range_label = _get_visit_date_range()
 
     report_s3_key = build_report_s3_key(center_cfg["key"])
     ok_rep, err_rep = upload_bytes_to_s3(
