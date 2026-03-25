@@ -380,13 +380,6 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     _ns_over90        = mask_not_sub_plain & (_vd > 90)
     d.loc[_ns_over90, "_paid"] = d.loc[_ns_over90, "_net"]
 
-    # Not Submitted (Resub-N) > 120 days → treat as Paid (will go to Rejection Accepted below)
-    _ns_resub_over120 = mask_not_sub_resub & (_vd > 120)
-    # Save residual BEFORE forcing paid, so we can use it for Rejection Accepted
-    d["_ns_resub_residual"] = 0.0
-    d.loc[_ns_resub_over120, "_ns_resub_residual"] = (d.loc[_ns_resub_over120, "_net"] - d.loc[_ns_resub_over120, "_paid"]).clip(lower=0)
-    d.loc[_ns_resub_over120, "_paid"] = d.loc[_ns_resub_over120, "_net"]
-
     # ── UNDER PROCESS pool = Net − Paid ──────────────────────────────────────
     d["_up"] = (d["_net"] - d["_paid"]).clip(lower=0)
 
@@ -403,12 +396,12 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     d.loc[mask_rej_acc,        "_up"]           = 0.0
 
     # 3. Approved(Resub-N) → Final Rejn in summary
-    d.loc[mask_approved_resub, "_final_rejn"]   = d.loc[mask_approved_resub, "_final_rejn"] + d.loc[mask_approved_resub, "_up"]
-    d.loc[mask_approved_resub, "_up"]           = 0.0
+    d.loc[mask_approved_resub, "_final_rejn"]  = d.loc[mask_approved_resub, "_final_rejn"] + d.loc[mask_approved_resub, "_up"]
+    d.loc[mask_approved_resub, "_up"]          = 0.0
 
-    # 4. Not Submitted (Resub-N) > 120 days → Final Rejn in summary (Rejected in Engine 1)
-    # Use the residual saved before we forced paid (avoids double-count)
-    d.loc[_ns_resub_over120, "_final_rejn"] = d.loc[_ns_resub_over120, "_final_rejn"] + d.loc[_ns_resub_over120, "_ns_resub_residual"]
+    # 4. Not Submitted (Resub-N) → Final Rejn (all, no day condition)
+    d.loc[mask_not_sub_resub,  "_final_rejn"]  = d.loc[mask_not_sub_resub,  "_final_rejn"] + d.loc[mask_not_sub_resub, "_up"]
+    d.loc[mask_not_sub_resub,  "_up"]          = 0.0
 
     # 5. Sub Nt Rmtd ← Submitted (initial) + Not Submitted plain ≤ 90 days
     _ns_under90 = mask_not_sub_plain & ~_ns_over90
@@ -418,13 +411,10 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     d.loc[_ns_under90,   "_sub_nt_rmtd"] = d.loc[_ns_under90,   "_up"]
     d.loc[_ns_under90,   "_up"]          = 0.0
 
-    # 6. Rsub Nt Rmtd ← Submitted(Resub-N) + Not Submitted(Resub-N) ≤ 120 days
-    _ns_resub_under120 = mask_not_sub_resub & ~_ns_resub_over120
+    # 6. Rsub Nt Rmtd ← Submitted(Resub-N)
     d["_rsub_nt_rmtd"] = 0.0
-    d.loc[mask_sub_resub,       "_rsub_nt_rmtd"] = d.loc[mask_sub_resub,       "_up"]
-    d.loc[mask_sub_resub,       "_up"]           = 0.0
-    d.loc[_ns_resub_under120,   "_rsub_nt_rmtd"] = d.loc[_ns_resub_under120,   "_up"]
-    d.loc[_ns_resub_under120,   "_up"]           = 0.0
+    d.loc[mask_sub_resub, "_rsub_nt_rmtd"] = d.loc[mask_sub_resub, "_up"]
+    d.loc[mask_sub_resub, "_up"]           = 0.0
 
     # ── Initial pay: base remit + Not Submitted plain >90 days ───────────────
     d["_initial_pay"] = d["RemitInsShare"].copy()
@@ -566,9 +556,6 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     df.loc[_ns_over90, "Paid"]     = df.loc[_ns_over90, "Net Amount"]
     df.loc[_ns_over90, "Residual"] = 0.0
 
-    # Not Submitted (Resub-N) > 120 days → Rejected (Engine 1)
-    _ns_resub_over120 = mask_not_sub_resub & (_days_since_visit > 120)
-
     # ── SLICE Under Process by Status ────────────────────────────────────────
     df["Rejected"] = 0.0
     df["Accepted"] = 0.0
@@ -586,19 +573,19 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     df.loc[mask_app_resub, "Accepted"] = df.loc[mask_app_resub, "Accepted"] + df.loc[mask_app_resub, "Residual"]
     df.loc[mask_app_resub, "Residual"] = 0.0
 
-    # 4. Not Submitted (Resub-N) > 120 days → Rejected
-    df.loc[_ns_resub_over120, "Rejected"] = df.loc[_ns_resub_over120, "Rejected"] + df.loc[_ns_resub_over120, "Residual"]
-    df.loc[_ns_resub_over120, "Residual"] = 0.0
+    # 4. Not Submitted (Resub-N) → Rejected (all, no day condition)
+    df.loc[mask_not_sub_resub, "Rejected"] = df.loc[mask_not_sub_resub, "Rejected"] + df.loc[mask_not_sub_resub, "Residual"]
+    df.loc[mask_not_sub_resub, "Residual"] = 0.0
 
     # 5. Everything left → Balance
     df["Balance"] = df["Residual"]
 
     # Final Bucket label
     df["Final Bucket"] = "Balance"
-    df.loc[mask_rej,            "Final Bucket"] = "Rejected"
-    df.loc[mask_rej_acc,        "Final Bucket"] = "Accepted"
-    df.loc[mask_app_resub,      "Final Bucket"] = "Accepted"
-    df.loc[_ns_resub_over120,   "Final Bucket"] = "Rejected"
+    df.loc[mask_rej,           "Final Bucket"] = "Rejected"
+    df.loc[mask_rej_acc,       "Final Bucket"] = "Accepted"
+    df.loc[mask_app_resub,     "Final Bucket"] = "Accepted"
+    df.loc[mask_not_sub_resub, "Final Bucket"] = "Rejected"
 
     df["Recon Total"] = df[["Paid","Balance","Rejected","Accepted"]].sum(axis=1)
     df["Recon Diff"]  = (df["Net Amount"] - df["Recon Total"]).round(2)
