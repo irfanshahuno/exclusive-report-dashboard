@@ -862,6 +862,19 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
     """
     d = df.copy()
 
+    # ── Drop footer/total rows — same as run_summary_engine ──────────────────
+    # Remove rows with no UniqueID or UniqueID looks like a total label
+    if "UniqueID" in d.columns:
+        d = d[~d["UniqueID"].astype(str).str.strip().str.lower().isin(
+            ["grand total", "total", "", "nan", "none"]
+        )].copy()
+    # Remove rows where Insurance is blank/Not Available
+    _ins_col = next((c for c in ["Insurance","PayerName","Insurer","Plan"] if c in d.columns), None)
+    if _ins_col:
+        d = d[~d[_ins_col].fillna("").astype(str).str.strip().str.lower().isin(
+            ["not available", "", "nan", "none", "total", "grand total"]
+        )].copy()
+
     for c in ["SubInsShare", "RemitInsShare", "Resub1RemitInsShare",
               "Resub2RemitInsShare", "Resub3RemitInsShare", "Resub4RemitInsShare", "TakeBack"]:
         if c not in d.columns: d[c] = 0.0
@@ -951,6 +964,141 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
     return d[id_cols + ["Initial pay", "Resb1 pay", "Resb2 pay", "Resb3 pay", "Total pay",
                         "Sub Nt Rmtd", "Rsub Nt Rmtd", "Rejection Accepted", "Final Rejn"]].reset_index(drop=True)
 
+
+
+def build_insurance_aging_excel(df_detail: pd.DataFrame, df_source: pd.DataFrame) -> bytes:
+    """
+    Build Insurance Aging Detail Excel.
+    Columns: Insurance | InsGroup | Total Outstanding | Sub Nt Rmtd 0-30 ... >120 | Rsub Nt Rmtd 0-30 ... >120
+    Aging based on SubDate column.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    AGING_BINS   = [-1, 30, 45, 60, 90, 120, float("inf")]
+    AGING_LABELS = ["0-30 Days", "31-45 Days", "46-60 Days", "61-90 Days", "91-120 Days", ">120 Days"]
+
+    # ── Merge SubDate and InsGroup from source into detail ────────────────────
+    d = df_detail.copy()
+
+    # Get SubDate from source
+    if "SubDate" in df_source.columns and "UniqueID" in df_source.columns and "UniqueID" in d.columns:
+        sub_map = df_source.set_index("UniqueID")["SubDate"]
+        d["SubDate"] = d["UniqueID"].map(sub_map)
+    elif "SubDate" in d.columns:
+        pass  # already there
+    else:
+        d["SubDate"] = pd.NaT
+
+    # Get InsGroup from source
+    if "InsGroup" in df_source.columns and "UniqueID" in df_source.columns and "UniqueID" in d.columns:
+        grp_map = df_source.set_index("UniqueID")["InsGroup"]
+        d["InsGroup"] = d["UniqueID"].map(grp_map)
+    elif "InsGroup" in d.columns:
+        pass
+    else:
+        d["InsGroup"] = "N/A"
+
+    d["SubDate"]  = pd.to_datetime(d["SubDate"], errors="coerce", dayfirst=True)
+    d["InsGroup"] = d["InsGroup"].fillna("N/A").astype(str).str.strip()
+
+    today = pd.Timestamp(datetime.today().date())
+    d["_days"] = (today - d["SubDate"]).dt.days.fillna(0)
+    d["_bucket"] = pd.cut(d["_days"], bins=AGING_BINS, labels=AGING_LABELS)
+
+    # Insurance col
+    ins_col = next((c for c in ["Insurance","PayerName","Insurer","Plan"] if c in d.columns), None)
+    if ins_col and ins_col != "Insurance":
+        d["Insurance"] = d[ins_col]
+    d["Insurance"] = d["Insurance"].fillna("N/A").astype(str).str.strip()
+
+    # ── Build pivot for Sub Nt Rmtd ──────────────────────────────────────────
+    sub_rows = d[d["Sub Nt Rmtd"] > 0].copy()
+    rsub_rows = d[d["Rsub Nt Rmtd"] > 0].copy()
+
+    def _pivot(src, val_col):
+        if src.empty:
+            idx = pd.MultiIndex.from_tuples([], names=["Insurance","InsGroup"])
+            return pd.DataFrame(columns=AGING_LABELS, index=idx).fillna(0.0)
+        return pd.pivot_table(
+            src, index=["Insurance","InsGroup"], columns="_bucket",
+            values=val_col, aggfunc="sum", fill_value=0, observed=False
+        ).reindex(columns=AGING_LABELS, fill_value=0)
+
+    sub_pivot  = _pivot(sub_rows,  "Sub Nt Rmtd")
+    rsub_pivot = _pivot(rsub_rows, "Rsub Nt Rmtd")
+
+    # Combine all insurance/insgroup pairs
+    all_idx = sub_pivot.index.union(rsub_pivot.index)
+    sub_pivot  = sub_pivot.reindex(all_idx,  fill_value=0)
+    rsub_pivot = rsub_pivot.reindex(all_idx, fill_value=0)
+
+    # ── Build output DataFrame ────────────────────────────────────────────────
+    rows = []
+    for (ins, grp) in all_idx:
+        sub_vals  = [sub_pivot.loc[(ins,grp), b]  if (ins,grp) in sub_pivot.index  else 0.0 for b in AGING_LABELS]
+        rsub_vals = [rsub_pivot.loc[(ins,grp), b] if (ins,grp) in rsub_pivot.index else 0.0 for b in AGING_LABELS]
+        total = sum(sub_vals) + sum(rsub_vals)
+        rows.append([ins, grp, total] + sub_vals + rsub_vals)
+
+    sub_cols  = [f"Sub Nt Rmtd {b}"  for b in AGING_LABELS]
+    rsub_cols = [f"Rsub Nt Rmtd {b}" for b in AGING_LABELS]
+    all_cols  = ["Insurance", "InsGroup", "Total Outstanding"] + sub_cols + rsub_cols
+    out = pd.DataFrame(rows, columns=all_cols)
+
+    # Grand Total row
+    num_c = out.select_dtypes(include="number").columns.tolist()
+    gt = {c: out[c].sum() if c in num_c else ("Grand Total" if c == "Insurance" else "") for c in all_cols}
+    out = pd.concat([out, pd.DataFrame([gt])], ignore_index=True)
+
+    # ── Write Excel ───────────────────────────────────────────────────────────
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Insurance Aging"
+
+    def _fill(h): return PatternFill("solid", fgColor=h)
+    def _font(bold=False, color="000000", size=10):
+        return Font(bold=bold, color=color, size=size, name="Calibri")
+    def _border():
+        s = Side(style="thin", color="BFBFBF")
+        return Border(left=s, right=s, top=s, bottom=s)
+
+    # Header
+    for ci, col in enumerate(all_cols, 1):
+        cell = ws.cell(row=1, column=ci, value=col)
+        cell.fill      = _fill("0A2647")
+        cell.font      = _font(bold=True, color="FFFFFF", size=10)
+        cell.border    = _border()
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[1].height = 30
+
+    gt_row = len(out) + 1
+    for ri, row_data in enumerate(out.values.tolist(), 2):
+        is_gt = ri == gt_row
+        bg    = "FCE4D6" if is_gt else ("FFFFFF" if ri % 2 == 0 else "F2F2F2")
+        for ci, (col, val) in enumerate(zip(all_cols, row_data), 1):
+            if not isinstance(val, str) and pd.isna(val):
+                val = None
+            cell = ws.cell(row=ri, column=ci, value=val)
+            cell.fill      = _fill(bg)
+            cell.font      = _font(bold=is_gt, size=10)
+            cell.border    = _border()
+            is_num = col not in ("Insurance", "InsGroup")
+            cell.alignment = Alignment(horizontal="right" if is_num else "left", vertical="center")
+            if is_num and isinstance(val, (int, float)) and val is not None:
+                cell.number_format = "#,##0.00"
+
+    # Column widths
+    ws.column_dimensions["A"].width = 35
+    ws.column_dimensions["B"].width = 20
+    ws.column_dimensions["C"].width = 18
+    for i in range(4, len(all_cols) + 1):
+        ws.column_dimensions[get_column_letter(i)].width = 16
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 def build_claim_detail_excel(df_detail: pd.DataFrame) -> bytes:
     """Build styled Excel for claim detail report — fast bulk pandas write."""
@@ -1983,6 +2131,31 @@ if result:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key=f"sum_dl_detail_{ck}",
+            )
+
+    # ── Insurance Aging Detail Download ──────────────────────────────────────
+    df_detail2 = result.get("claim_detail")
+    df_source2 = result.get("df")
+    if df_detail2 is not None and not df_detail2.empty and df_source2 is not None:
+        aging_name = dl_name.replace(".xlsx", " - Insurance Aging.xlsx")
+        AGING_KEY  = f"sum_aging_bytes_{ck}"
+
+        if st.button(
+            "⚙️ Prepare Insurance Aging Detail",
+            use_container_width=True,
+            key=f"sum_prepare_aging_{ck}",
+        ):
+            with st.spinner("Building insurance aging Excel..."):
+                st.session_state[AGING_KEY] = build_insurance_aging_excel(df_detail2, df_source2)
+
+        if AGING_KEY in st.session_state:
+            st.download_button(
+                "⬇️ Download Insurance Aging Detail",
+                data=st.session_state[AGING_KEY],
+                file_name=aging_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=f"sum_dl_aging_{ck}",
             )
 
     st.markdown("---")
