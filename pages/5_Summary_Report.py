@@ -857,21 +857,13 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
 
 def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFrame:
     """
-    Build per-claim detail — same business rules as build_rcm_summary.
-
-    Business rules:
-      Submitted          → Sub Nt Rmtd    = SubInsShare
-      Submitted(Resub-N) → Rsub Nt Rmtd  = Difference
-      Approved (plain)   → Nothing        (fully paid)
-      Approved(Resub-N)  → Final Rejn     = Difference
-      Rejected (any)     → Final Rejn     = Difference
-      Rejection Accepted → Rej Accepted   = Difference
-      Not Submitted(any) → Nothing        (excluded from all columns)
+    Build per-claim detail using exact same logic as build_rcm_summary (Engine 2).
+    Totals of each column will match the summary grand total exactly.
     """
     d = df.copy()
 
     for c in ["SubInsShare", "RemitInsShare", "Resub1RemitInsShare",
-              "Resub2RemitInsShare", "Resub3RemitInsShare", "Difference"]:
+              "Resub2RemitInsShare", "Resub3RemitInsShare", "Resub4RemitInsShare", "TakeBack"]:
         if c not in d.columns: d[c] = 0.0
         d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
 
@@ -886,36 +878,74 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series) -> pd.DataFram
     mask_approved_resub = d["_sn"].str.match(r"^approved\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
     mask_rejected       = d["_sn"].str.match(r"^rejected(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
     mask_rej_acc        = d["_sn"].str.match(r"^rejection accepted(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
-    mask_not_sub        = d["_sn"].str.match(r"^not submitted", na=False)
+    mask_not_sub_plain  = d["_sn"] == "not submitted"
+    mask_not_sub_resub  = d["_sn"].str.match(r"^not submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
 
-    # ── Total Pay = sum of remit columns only ─────────────────────────────────
-    d["Initial pay"] = d["RemitInsShare"]
+    # ── Visit days ────────────────────────────────────────────────────────────
+    if days_series is not None:
+        _vd = days_series.reindex(d.index).fillna(0)
+    else:
+        _vd = pd.Series(0, index=d.index)
+
+    # ── PAID = remit columns − abs(TakeBack), capped at Net ───────────────────
+    d["_net"]  = d["SubInsShare"]
+    d["_paid"] = (
+        d["RemitInsShare"] +
+        d["Resub1RemitInsShare"] +
+        d["Resub2RemitInsShare"] +
+        d["Resub3RemitInsShare"] +
+        d["Resub4RemitInsShare"] -
+        d["TakeBack"].abs()
+    ).clip(lower=0)
+    d["_paid"] = d[["_paid", "_net"]].min(axis=1)
+
+    # Not Submitted plain > 90 days → treat as Paid
+    _ns_over90 = mask_not_sub_plain & (_vd > 90)
+    d.loc[_ns_over90, "_paid"] = d.loc[_ns_over90, "_net"]
+
+    # ── UNDER PROCESS pool = Net − Paid ──────────────────────────────────────
+    d["_up"] = (d["_net"] - d["_paid"]).clip(lower=0)
+
+    # ── SLICE Under Process by Status, remove each slice ─────────────────────
+
+    # 1. Final Rejn ← Rejected / Rejected(Resub-N)
+    d["Final Rejn"] = 0.0
+    d.loc[mask_rejected,       "Final Rejn"] = d.loc[mask_rejected,       "_up"]
+    d.loc[mask_rejected,       "_up"]        = 0.0
+
+    # 2. Rejection Accepted ← Rejection Accepted / Rejection Accepted(Resub-N)
+    d["Rejection Accepted"] = 0.0
+    d.loc[mask_rej_acc,        "Rejection Accepted"] = d.loc[mask_rej_acc, "_up"]
+    d.loc[mask_rej_acc,        "_up"]                = 0.0
+
+    # 3. Approved(Resub-N) → Final Rejn
+    d.loc[mask_approved_resub, "Final Rejn"] = d.loc[mask_approved_resub, "Final Rejn"] + d.loc[mask_approved_resub, "_up"]
+    d.loc[mask_approved_resub, "_up"]        = 0.0
+
+    # 4. Not Submitted (Resub-N) → Final Rejn (all)
+    d.loc[mask_not_sub_resub,  "Final Rejn"] = d.loc[mask_not_sub_resub,  "Final Rejn"] + d.loc[mask_not_sub_resub, "_up"]
+    d.loc[mask_not_sub_resub,  "_up"]        = 0.0
+
+    # 5. Sub Nt Rmtd ← Submitted (initial) + Not Submitted plain ≤ 90 days
+    _ns_under90 = mask_not_sub_plain & ~_ns_over90
+    d["Sub Nt Rmtd"] = 0.0
+    d.loc[mask_sub_init, "Sub Nt Rmtd"] = d.loc[mask_sub_init, "_up"]
+    d.loc[mask_sub_init, "_up"]         = 0.0
+    d.loc[_ns_under90,   "Sub Nt Rmtd"] = d.loc[_ns_under90,   "_up"]
+    d.loc[_ns_under90,   "_up"]         = 0.0
+
+    # 6. Rsub Nt Rmtd ← Submitted(Resub-N)
+    d["Rsub Nt Rmtd"] = 0.0
+    d.loc[mask_sub_resub, "Rsub Nt Rmtd"] = d.loc[mask_sub_resub, "_up"]
+    d.loc[mask_sub_resub, "_up"]          = 0.0
+
+    # ── Pay columns ───────────────────────────────────────────────────────────
+    d["Initial pay"] = d["RemitInsShare"].copy()
+    d.loc[_ns_over90, "Initial pay"] = d.loc[_ns_over90, "Initial pay"] + d.loc[_ns_over90, "_net"]
     d["Resb1 pay"]   = d["Resub1RemitInsShare"]
     d["Resb2 pay"]   = d["Resub2RemitInsShare"]
     d["Resb3 pay"]   = d["Resub3RemitInsShare"]
-    d["Total pay"]   = (d["Initial pay"] + d["Resb1 pay"] + d["Resb2 pay"] +
-                        d["Resb3 pay"]).clip(upper=d["SubInsShare"])
-
-    # ── Sub Nt Rmtd: Submitted initial → SubInsShare ──────────────────────────
-    d["Sub Nt Rmtd"] = 0.0
-    d.loc[mask_sub_init, "Sub Nt Rmtd"] = d.loc[mask_sub_init, "SubInsShare"]
-
-    # ── Rsub Nt Rmtd: Submitted(Resub-N) → Difference ────────────────────────
-    d["Rsub Nt Rmtd"] = 0.0
-    d.loc[mask_sub_resub, "Rsub Nt Rmtd"] = d.loc[mask_sub_resub, "Difference"]
-
-    # ── Rejection Accepted → Difference ──────────────────────────────────────
-    d["Rejection Accepted"] = 0.0
-    d.loc[mask_rej_acc, "Rejection Accepted"] = d.loc[mask_rej_acc, "Difference"]
-
-    # ── Final Rejn: Approved(Resub-N) + Rejected(any) → Difference ───────────
-    d["Final Rejn"] = 0.0
-    d.loc[mask_approved_resub, "Final Rejn"] = d.loc[mask_approved_resub, "Difference"]
-    d.loc[mask_rejected,       "Final Rejn"] = d.loc[mask_rejected,       "Difference"]
-
-    # ── Not Submitted: clear all columns ─────────────────────────────────────
-    for col in ["Sub Nt Rmtd", "Rsub Nt Rmtd", "Rejection Accepted", "Final Rejn"]:
-        d.loc[mask_not_sub, col] = 0.0
+    d["Total pay"]   = d["_paid"]
 
     id_cols = [c for c in ["UniqueID", "Insurance", "DocName", "Status", "VisitDate", "Month", "SubInsShare"] if c in d.columns]
     return d[id_cols + ["Initial pay", "Resb1 pay", "Resb2 pay", "Resb3 pay", "Total pay",
