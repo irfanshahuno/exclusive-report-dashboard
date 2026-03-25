@@ -347,7 +347,9 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     mask_sub_init      = d["_status_norm"] == "submitted"
     mask_sub_resub     = d["_status_norm"].str.match(r"^submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
     mask_approved_resub= d["_status_norm"].str.match(r"^approved\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
+    # Final Rejection: "rejected" or "rejected (resub-N)"
     mask_rejected      = d["_status_norm"].str.match(r"^rejected(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+    # Rejection Accepted: "rejection accepted" or "rejection accepted (resub-N)"
     mask_rej_acc       = d["_status_norm"].str.match(r"^rejection accepted(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
     # Not Submitted (any variant) → excluded from all columns
     mask_not_sub       = d["_status_norm"].str.match(r"^not submitted", na=False)
@@ -358,6 +360,7 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
             d[_c] = 0.0
         d[_c] = pd.to_numeric(d[_c], errors="coerce").fillna(0.0)
 
+    # TakeBack: make positive then subtract from remit sum
     d["_row_total_pay"] = (
         d["RemitInsShare"] +
         d["Resub1RemitInsShare"] +
@@ -503,25 +506,49 @@ def run_summary_engine(uploaded_bytes: bytes, filename: str) -> dict:
     else:
         _days_since_visit = pd.Series(0, index=df.index)
 
-    # Paid from remit columns only — Not Submitted rows contribute nothing
-    df["Paid"] = df[["RemitInsShare","Resub1RemitInsShare","Resub2RemitInsShare",
-                      "Resub3RemitInsShare","Resub4RemitInsShare","TakeBack"]].sum(axis=1)
+    # ── PAID ─────────────────────────────────────────────────────────────────
+    # Sum all remit columns; TakeBack: if negative make positive, then subtract
+    remit_sum = (
+        df["RemitInsShare"] +
+        df["Resub1RemitInsShare"] +
+        df["Resub2RemitInsShare"] +
+        df["Resub3RemitInsShare"] +
+        df["Resub4RemitInsShare"]
+    )
+    takeback_adj = df["TakeBack"].abs()  # always positive
+    df["Paid"] = (remit_sum - takeback_adj).clip(lower=0)
+    # Cap Paid at Net Amount
+    df["Paid"] = df[["Paid", "Net Amount"]].min(axis=1)
 
-    df["Paid"] = df[["Paid","Net Amount"]].min(axis=1)
+    # ── UNDER PROCESS (initial) = Net - Paid ─────────────────────────────────
     df["Residual"] = (df["Net Amount"] - df["Paid"]).clip(lower=0)
 
+    # ── STATUS CLASSIFICATION ─────────────────────────────────────────────────
+    # Normalize status for matching
+    _s = df["Status"].str.strip().str.lower().str.replace(r"\s+", " ", regex=True)
+
+    # Final Rejection: Status matches "rejected" or "rejected (resub-N)"
+    mask_rej = _s.str.match(r"^rejected(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+
+    # Rejection Accepted: Status matches "rejection accepted" or "rejection accepted (resub-N)"
+    mask_acc = _s.str.match(r"^rejection accepted(\s*\(\s*resub\s*-\s*\d+\s*\))?$", na=False)
+
+    # Balance: everything else (Submitted, Approved, Not Submitted, etc.)
+    mask_bal = ~mask_rej & ~mask_acc
+
+    # ── ASSIGN BUCKETS ────────────────────────────────────────────────────────
     df["Rejected"] = 0.0
     df["Accepted"] = 0.0
     df["Balance"]  = 0.0
 
-    df["Final Bucket"] = df["Status"].apply(_classify_final_bucket)
-    mask_rej = df["Final Bucket"] == "Rejected"
-    mask_acc = df["Final Bucket"] == "Accepted"
-    mask_bal = df["Final Bucket"] == "Balance"
-
     df.loc[mask_rej, "Rejected"] = df.loc[mask_rej, "Residual"]
     df.loc[mask_acc, "Accepted"] = df.loc[mask_acc, "Residual"]
     df.loc[mask_bal, "Balance"]  = df.loc[mask_bal, "Residual"]
+
+    # Final Bucket label (used downstream for aging/summary tables)
+    df["Final Bucket"] = "Balance"
+    df.loc[mask_rej, "Final Bucket"] = "Rejected"
+    df.loc[mask_acc, "Final Bucket"] = "Accepted"
 
     df["Recon Total"] = df[["Paid","Balance","Rejected","Accepted"]].sum(axis=1)
     df["Recon Diff"]  = (df["Net Amount"] - df["Recon Total"]).round(2)
