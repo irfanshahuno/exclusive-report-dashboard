@@ -981,7 +981,7 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series, df_source: pd.
 
 
 
-def build_insurance_aging_excel(df_detail: pd.DataFrame, df_source: pd.DataFrame) -> bytes:
+def build_insurance_aging_excel(df_detail: pd.DataFrame, df_source: pd.DataFrame, date_range: str = "") -> bytes:
     """
     Per-claim Insurance Aging Detail — simple flat layout.
     ID cols | Total Outstanding | Aging Days | Sub Nt Rmtd | Rsub Nt Rmtd
@@ -1073,16 +1073,26 @@ def build_insurance_aging_excel(df_detail: pd.DataFrame, df_source: pd.DataFrame
         return Border(left=s, right=s, top=s, bottom=s)
 
     final_cols = out.columns.tolist()
+    # ── Title row ─────────────────────────────────────────────────────────────
+    title = f"EMC - RCM INSURANCE AGING - {date_range}" if date_range else "EMC - RCM INSURANCE AGING"
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(final_cols))
+    tc = ws.cell(row=1, column=1, value=title)
+    tc.fill      = _fill("0A2647")
+    tc.font      = _font(bold=True, color="FFFFFF", size=13)
+    tc.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 30
+
+    # ── Header row ────────────────────────────────────────────────────────────
     for ci, col in enumerate(final_cols, 1):
-        cell = ws.cell(row=1, column=ci, value=col)
+        cell = ws.cell(row=2, column=ci, value=col)
         cell.fill      = _fill("0A2647")
         cell.font      = _font(bold=True, color="FFFFFF", size=10)
         cell.border    = _border()
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws.row_dimensions[1].height = 22
+    ws.row_dimensions[2].height = 22
 
-    gt_row = len(out) + 1
-    for ri, row_data in enumerate(out.values.tolist(), 2):
+    gt_row = len(out) + 2
+    for ri, row_data in enumerate(out.values.tolist(), 3):
         is_gt = ri == gt_row
         bg    = "FCE4D6" if is_gt else ("FFFFFF" if ri % 2 == 0 else "F2F2F2")
         for ci, (col, val) in enumerate(zip(final_cols, row_data), 1):
@@ -1106,7 +1116,7 @@ def build_insurance_aging_excel(df_detail: pd.DataFrame, df_source: pd.DataFrame
     return buf.getvalue()
 
 
-def build_claim_detail_excel(df_detail: pd.DataFrame) -> bytes:
+def build_claim_detail_excel(df_detail: pd.DataFrame, date_range: str = "") -> bytes:
     """Build styled Excel for claim detail report — fast bulk pandas write."""
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -1127,18 +1137,27 @@ def build_claim_detail_excel(df_detail: pd.DataFrame) -> bytes:
     num_cols = set(df_detail.select_dtypes(include="number").columns.tolist())
     text_cols = {"UniqueID","Insurance","DocName","Status"}
 
+    # ── Title row ─────────────────────────────────────────────────────────────
+    title = f"EMC - RCM CLAIM DETAIL - {date_range}" if date_range else "EMC - RCM CLAIM DETAIL"
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(cols))
+    tc = ws.cell(row=1, column=1, value=title)
+    tc.fill      = _fill("0A2647")
+    tc.font      = _font(bold=True, color="FFFFFF", size=13)
+    tc.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 30
+
     # ── Header row ────────────────────────────────────────────────────────────
     for ci, col in enumerate(cols, 1):
-        cell = ws.cell(row=1, column=ci, value=col)
+        cell = ws.cell(row=2, column=ci, value=col)
         cell.fill      = _fill("0A2647")
         cell.font      = _font(bold=True, color="FFFFFF", size=10)
         cell.border    = _border()
         cell.alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[1].height = 22
+    ws.row_dimensions[2].height = 22
 
     # ── Bulk write data using pandas values ───────────────────────────────────
     data = df_detail.values.tolist()
-    for ri, row_data in enumerate(data, 2):
+    for ri, row_data in enumerate(data, 3):
         bg = "FFFFFF" if ri % 2 == 0 else "F2F2F2"
         fill = _fill(bg)
         for ci, (col, val) in enumerate(zip(cols, row_data), 1):
@@ -1160,7 +1179,7 @@ def build_claim_detail_excel(df_detail: pd.DataFrame) -> bytes:
                 cell.number_format = "#,##0.00"
 
     # ── Grand Total row ───────────────────────────────────────────────────────
-    gt_row = len(data) + 2
+    gt_row = len(data) + 3
     for ci, col in enumerate(cols, 1):
         cell = ws.cell(row=gt_row, column=ci)
         cell.fill   = _fill("D9D9D9")
@@ -2073,6 +2092,8 @@ if result:
             pass
         return f"EMC - RCM SUMMARY - {datetime.now().strftime('%b %Y').upper()}.xlsx"
     dl_name = _build_excel_filename()
+    # Extract date range label from filename e.g. "JAN 2025 - JUN 2025"
+    _date_range_label = dl_name.replace("EMC - RCM SUMMARY - ", "").replace(".xlsx", "").strip()
 
     report_s3_key = build_report_s3_key(center_cfg["key"])
     ok_rep, err_rep = upload_bytes_to_s3(
@@ -2127,7 +2148,7 @@ if result:
             key=f"sum_prepare_detail_{ck}",
         ):
             with st.spinner("Building claim detail Excel..."):
-                st.session_state[DETAIL_KEY] = build_claim_detail_excel(df_detail)
+                st.session_state[DETAIL_KEY] = build_claim_detail_excel(df_detail, date_range=_date_range_label)
 
         if DETAIL_KEY in st.session_state:
             st.download_button(
@@ -2152,7 +2173,7 @@ if result:
             key=f"sum_prepare_aging_{ck}",
         ):
             with st.spinner("Building insurance aging Excel..."):
-                st.session_state[AGING_KEY] = build_insurance_aging_excel(df_detail2, df_source2)
+                st.session_state[AGING_KEY] = build_insurance_aging_excel(df_detail2, df_source2, date_range=_date_range_label)
 
         if AGING_KEY in st.session_state:
             st.download_button(
