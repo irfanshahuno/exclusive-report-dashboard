@@ -1374,6 +1374,7 @@ try:
 
     has_insgroup = SHEET_INGROUP in sheet_names
     has_plan = SHEET_IPLAN in sheet_names
+    plan_df = None  # initialized here; loaded lazily in the Balance_Aging_Plan tab
 
     totals_no_gt = drop_gt(totals)
 
