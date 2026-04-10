@@ -352,6 +352,19 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     mask_not_sub_plain = d["_status_norm"] == "not submitted"
     mask_not_sub_resub = d["_status_norm"].str.match(r"^not submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
 
+    # ── Elig Reconciliation masks: Rejected(Resub-2+) and Rejection Accepted(Resub-2+) ──
+    def _resub_num(s):
+        m = _re.search(r"resub\s*-\s*(\d+)", s)
+        return int(m.group(1)) if m else 0
+    _rej_resub_nums    = d["_status_norm"].apply(lambda s: _resub_num(s) if _re.match(r"^rejected\s*\(", s) else 0)
+    _rejac_resub_nums  = d["_status_norm"].apply(lambda s: _resub_num(s) if _re.match(r"^rejection accepted\s*\(", s) else 0)
+    mask_elig_rej      = mask_rejected  & (_rej_resub_nums   >= 2)
+    mask_elig_rej_acc  = mask_rej_acc   & (_rejac_resub_nums >= 2)
+    mask_elig_recon    = mask_elig_rej  | mask_elig_rej_acc
+    # Override: remove Resub-2+ from rejected/rej_acc masks
+    mask_rejected      = mask_rejected  & ~mask_elig_rej
+    mask_rej_acc       = mask_rej_acc   & ~mask_elig_rej_acc
+
     # ── Ensure Resub4RemitInsShare and TakeBack exist ─────────────────────────
     for _c in ["Resub4RemitInsShare", "TakeBack"]:
         if _c not in d.columns:
@@ -385,12 +398,17 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
 
     # ── SLICE Under Process by Status, remove each slice ─────────────────────
 
-    # 1. Final Rejn ← Rejected / Rejected(Resub-N)
+    # 0. Elig Reconciliation ← Rejected(Resub-2+) and Rejection Accepted(Resub-2+)
+    d["_elig_recon"] = 0.0
+    d.loc[mask_elig_recon, "_elig_recon"] = d.loc[mask_elig_recon, "_up"]
+    d.loc[mask_elig_recon, "_up"]         = 0.0
+
+    # 1. Final Rejn ← Rejected(plain) / Rejected(Resub-1) only
     d["_final_rejn"] = 0.0
     d.loc[mask_rejected,       "_final_rejn"] = d.loc[mask_rejected,       "_up"]
     d.loc[mask_rejected,       "_up"]         = 0.0
 
-    # 2. Rejection Accepted ← Rejection Accepted / Rejection Accepted(Resub-N)
+    # 2. Rejection Accepted ← Rejection Accepted(plain) / Rejection Accepted(Resub-1) only
     d["_rej_accepted"] = 0.0
     d.loc[mask_rej_acc,        "_rej_accepted"] = d.loc[mask_rej_acc,       "_up"]
     d.loc[mask_rej_acc,        "_up"]           = 0.0
@@ -432,6 +450,7 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
         rsub_nt_rmtd = ("_rsub_nt_rmtd",    "sum"),
         rej_accepted = ("_rej_accepted",     "sum"),
         final_rejn   = ("_final_rejn",       "sum"),
+        elig_recon   = ("_elig_recon",       "sum"),
     ).reset_index()
 
     agg["final_rejn"] = agg["final_rejn"].clip(lower=0)
@@ -450,6 +469,7 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     out["Rsub Nt Rmtd (outstanding amount)"] = agg["rsub_nt_rmtd"]
     out["Rejection Accepted"]                = agg["rej_accepted"]
     out["Final Rejn"]                        = agg["final_rejn"]
+    out["Elig Reconciliation"]               = agg["elig_recon"]
     out["Rej. %"]                            = agg["rej_pct"]
 
     # Grand Total row
@@ -462,7 +482,9 @@ def build_rcm_summary(df: pd.DataFrame, group_col: str, visit_days_series: pd.Se
     gt_rsub       = out["Rsub Nt Rmtd (outstanding amount)"].sum()
     gt_rej_acc    = out["Rejection Accepted"].sum()
     gt_final_rejn = out["Final Rejn"].sum()
-    gt["Final Rejn"] = gt_final_rejn
+    gt_elig_recon = out["Elig Reconciliation"].sum()
+    gt["Final Rejn"]          = gt_final_rejn
+    gt["Elig Reconciliation"] = gt_elig_recon
     gt["Rej. %"]     = (gt_final_rejn / gt_claimed * 100) if gt_claimed else 0.0
 
     out = pd.concat([out, pd.DataFrame([gt])], ignore_index=True)
@@ -907,6 +929,18 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series, df_source: pd.
     mask_not_sub_plain  = d["_sn"] == "not submitted"
     mask_not_sub_resub  = d["_sn"].str.match(r"^not submitted\s*\(\s*resub\s*-\s*\d+\s*\)$", na=False)
 
+    # ── Elig Reconciliation masks: Rejected(Resub-2+) and Rejection Accepted(Resub-2+) ──
+    def _rsn(s):
+        m = re.search(r"resub\s*-\s*(\d+)", s)
+        return int(m.group(1)) if m else 0
+    _rej_rn   = d["_sn"].apply(lambda s: _rsn(s) if re.match(r"^rejected\s*\(", s) else 0)
+    _rejac_rn = d["_sn"].apply(lambda s: _rsn(s) if re.match(r"^rejection accepted\s*\(", s) else 0)
+    mask_elig_rej     = mask_rejected & (_rej_rn   >= 2)
+    mask_elig_rej_acc = mask_rej_acc  & (_rejac_rn >= 2)
+    mask_elig_recon   = mask_elig_rej | mask_elig_rej_acc
+    mask_rejected     = mask_rejected & ~mask_elig_rej
+    mask_rej_acc      = mask_rej_acc  & ~mask_elig_rej_acc
+
     # ── Visit days ────────────────────────────────────────────────────────────
     if days_series is not None:
         _vd = days_series.reindex(d.index).fillna(0)
@@ -934,12 +968,17 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series, df_source: pd.
 
     # ── SLICE Under Process by Status, remove each slice ─────────────────────
 
-    # 1. Final Rejn ← Rejected / Rejected(Resub-N)
+    # 0. Elig Reconciliation ← Rejected(Resub-2+) and Rejection Accepted(Resub-2+)
+    d["Elig Reconciliation"] = 0.0
+    d.loc[mask_elig_recon, "Elig Reconciliation"] = d.loc[mask_elig_recon, "_up"]
+    d.loc[mask_elig_recon, "_up"]                 = 0.0
+
+    # 1. Final Rejn ← Rejected(plain) / Rejected(Resub-1) only
     d["Final Rejn"] = 0.0
     d.loc[mask_rejected,       "Final Rejn"] = d.loc[mask_rejected,       "_up"]
     d.loc[mask_rejected,       "_up"]        = 0.0
 
-    # 2. Rejection Accepted ← Rejection Accepted / Rejection Accepted(Resub-N)
+    # 2. Rejection Accepted ← Rejection Accepted(plain) / Rejection Accepted(Resub-1) only
     d["Rejection Accepted"] = 0.0
     d.loc[mask_rej_acc,        "Rejection Accepted"] = d.loc[mask_rej_acc, "_up"]
     d.loc[mask_rej_acc,        "_up"]                = 0.0
@@ -977,7 +1016,8 @@ def _build_claim_detail(df: pd.DataFrame, days_series: pd.Series, df_source: pd.
                            "DepName", "DocName", "Insurance", "ReceiverID", "Status",
                            "VisitDate", "Month", "SubInsShare"] if c in d.columns]
     return d[id_cols + ["Initial pay", "Resb1 pay", "Resb2 pay", "Resb3 pay", "Total pay",
-                        "Sub Nt Rmtd", "Rsub Nt Rmtd", "Rejection Accepted", "Final Rejn"]].reset_index(drop=True)
+                        "Sub Nt Rmtd", "Rsub Nt Rmtd", "Rejection Accepted", "Final Rejn",
+                        "Elig Reconciliation"]].reset_index(drop=True)
 
 
 
@@ -1260,7 +1300,7 @@ def build_excel_output(result: dict) -> bytes:
     ws.title = "RCM SUMMARY"
 
     # ── Column widths ─────────────────────────────────────────────────────────
-    col_widths = [42, 12, 16, 14, 13, 11, 11, 11, 13, 18, 18, 14, 9]
+    col_widths = [42, 12, 16, 14, 13, 11, 11, 11, 13, 18, 18, 14, 18, 9]
     for i, w in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
