@@ -761,19 +761,9 @@ def save_uploaded_source(folder: Path, upload) -> Path:
     return dst
 
 
-@st.cache_data(show_spinner=False)
-def load_sheet_names(path: str, _token: float):
-    ext = Path(path).suffix.lower()
-    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
-    return pd.ExcelFile(path, engine=engine).sheet_names
-
-
-@st.cache_data(show_spinner=False)
-def load_optional_sheet(path: str, _token: float, sheet_name: str):
-    ext = Path(path).suffix.lower()
-    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
-    df = pd.read_excel(path, sheet_name=sheet_name, engine=engine)
-    return trim_empty_rows(df)
+@st.cache_data(max_entries=6, show_spinner=False)
+def get_report_bytes(path: str) -> bytes:
+    return Path(path).read_bytes()
 
 
 @st.cache_data(show_spinner=True)
@@ -788,13 +778,12 @@ def load_core_sheets(path: str, _token: float):
     engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
     try:
         xls = pd.ExcelFile(path, engine=engine)
-        names = list(xls.sheet_names)
         df_ins = pd.read_excel(xls, sheet_name=SHEET_INS_TOT)
         df_sum = pd.read_excel(xls, sheet_name=SHEET_SUMMARY)
-        return df_ins, df_sum, names
+        return df_ins, df_sum, [SHEET_INS_TOT, SHEET_SUMMARY]
     except Exception as e:
         try:
-            names = load_sheet_names(path, _token)
+            names = pd.ExcelFile(path, engine=engine).sheet_names
         except Exception:
             names = []
         raise RuntimeError(
@@ -994,8 +983,7 @@ if st.session_state.get("year") is None and st.session_state.get("rcm_year") in 
 if (st.session_state.get("center_key") != st.session_state.get("last_center_key")) or \
    (st.session_state.get("year") != st.session_state.get("last_year")):
     load_core_sheets.clear()
-    load_sheet_names.clear()
-    load_optional_sheet.clear()
+    get_report_bytes.clear()
     st.session_state.last_center_key = st.session_state.get("center_key")
     st.session_state.last_year = st.session_state.get("year")
 
@@ -1028,21 +1016,14 @@ if ck not in CENTERS:
 
     sel_year = st.session_state.get("rcm_year")
 
-    # MEMORY FIX: do not load all center reports on first home render.
-    # KPIs are loaded only if the user explicitly asks for the overview.
-    show_home_overview = st.toggle("Load KPI overview", value=False, key=f"home_overview_{sel_year}")
-
-    y_exc = y_ph = y_eh = sel_year
-    net_exc = paid_exc = bal_exc = rej_exc = acc_exc = 0.0
-    net_ph = paid_ph = bal_ph = rej_ph = acc_ph = 0.0
-    net_eh = paid_eh = bal_eh = rej_eh = acc_eh = 0.0
-
-    if show_home_overview:
-        with st.spinner("Loading KPI overview..."):
-            y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent", sel_year)
-            y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy",  sel_year)
-            if sel_year != 2024:
-                y_eh, net_eh, paid_eh, bal_eh, rej_eh, acc_eh = load_center_kpis("easyhealth", sel_year)
+    # Load KPIs for all centers upfront (needed for donuts under buttons)
+    y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent", sel_year)
+    y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy",  sel_year)
+    if sel_year != 2024:
+        y_eh, net_eh, paid_eh, bal_eh, rej_eh, acc_eh = load_center_kpis("easyhealth", sel_year)
+    else:
+        y_eh = sel_year
+        net_eh = paid_eh = bal_eh = rej_eh = acc_eh = 0.0
 
     # ── small donut helper ──────────────────────────────────────────
     def render_mini_donut(net, paid, bal, rej, acc):
@@ -1139,16 +1120,14 @@ if ck not in CENTERS:
             st.session_state.center_key = "excellent"
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
-        if show_home_overview:
-            render_mini_donut(net_exc, paid_exc, bal_exc, rej_exc, acc_exc)
+        render_mini_donut(net_exc, paid_exc, bal_exc, rej_exc, acc_exc)
 
     with c2:
         if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
             st.session_state.center_key = "pharmacy"
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
-        if show_home_overview:
-            render_mini_donut(net_ph, paid_ph, bal_ph, rej_ph, acc_ph)
+        render_mini_donut(net_ph, paid_ph, bal_ph, rej_ph, acc_ph)
 
     with c3:
         # ✅ EasyHealth hidden in 2024 only
@@ -1157,31 +1136,29 @@ if ck not in CENTERS:
                 st.session_state.center_key = "easyhealth"
                 st.session_state.year = st.session_state.get("rcm_year")
                 st.rerun()
-            if show_home_overview:
-                render_mini_donut(net_eh, paid_eh, bal_eh, rej_eh, acc_eh)
+            render_mini_donut(net_eh, paid_eh, bal_eh, rej_eh, acc_eh)
 
-    if show_home_overview:
-        st.markdown("---")
-        st.subheader("Key metrics (All centers)")
+    st.markdown("---")
+    st.subheader("Key metrics (All centers)")
 
-        st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
-        st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
-        render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, build_balance_url("excellent", sel_year),
-                     rejection_url=build_rejection_url("excellent", sel_year))
-        st.markdown("---")
+    st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
+    st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
+    render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, build_balance_url("excellent", sel_year),
+                 rejection_url=build_rejection_url("excellent", sel_year))
+    st.markdown("---")
 
-        st.markdown('<h3 class="center-title">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
-        st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
-        render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, build_balance_url("pharmacy", sel_year),
-                     rejection_url=build_rejection_url("pharmacy", sel_year))
-        st.markdown("---")
+    st.markdown('<h3 class="center-title">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
+    st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
+    render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, build_balance_url("pharmacy", sel_year),
+                 rejection_url=build_rejection_url("pharmacy", sel_year))
+    st.markdown("---")
 
-        # ✅ EasyHealth KPI section hidden in 2024 only
-        if st.session_state.get("rcm_year") != 2024:
-            st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
-            st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
-            render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, build_balance_url("easyhealth", sel_year),
-                     rejection_url=build_rejection_url("easyhealth", sel_year))
+    # ✅ EasyHealth KPI section hidden in 2024 only
+    if st.session_state.get("rcm_year") != 2024:
+        st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
+        st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
+        render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, build_balance_url("easyhealth", sel_year),
+                 rejection_url=build_rejection_url("easyhealth", sel_year))
 
     st.stop()
 
@@ -1315,8 +1292,7 @@ if st.session_state.get("is_admin"):
                 if msg.strip():
                     st.code(msg, language="bash")
                 load_core_sheets.clear()
-                load_sheet_names.clear()
-                load_optional_sheet.clear()
+                get_report_bytes.clear()
 
                 # ✅ NEEDFUL: upload rebuilt report to S3
                 try:
@@ -1341,8 +1317,7 @@ if token == 0.0:
     )
     if downloaded:
         load_core_sheets.clear()
-        load_sheet_names.clear()
-        load_optional_sheet.clear()
+        get_report_bytes.clear()
         token = mtime_token(out_path)
 
 if token == 0.0:
@@ -1354,7 +1329,7 @@ if token == 0.0:
     st.stop()
 
 try:
-    totals, summary, sheet_names = load_core_sheets(str(out_path), token)
+    totals, summary, _ = load_core_sheets(str(out_path), token)
     totals = totals.copy()
 
     if "Insurance" not in totals.columns and len(totals.columns) > 0:
@@ -1372,9 +1347,20 @@ try:
     if not summary.empty:
         summary = ensure_grand_total(summary, summary.columns[0])
 
-    has_insgroup = SHEET_INGROUP in sheet_names
-    has_plan = SHEET_IPLAN in sheet_names
-    plan_df = None  # initialized here; loaded lazily in the Balance_Aging_Plan tab
+    ext = Path(str(out_path)).suffix.lower()
+    engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
+
+    try:
+        insgroup_df = pd.read_excel(str(out_path), sheet_name=SHEET_INGROUP, engine=engine)
+        insgroup_df = trim_empty_rows(insgroup_df)
+    except Exception:
+        insgroup_df = None
+
+    try:
+        plan_df = pd.read_excel(str(out_path), sheet_name=SHEET_IPLAN, engine=engine)
+        plan_df = trim_empty_rows(plan_df)
+    except Exception:
+        plan_df = None
 
     totals_no_gt = drop_gt(totals)
 
@@ -1391,13 +1377,13 @@ try:
     st.markdown("---")
 
     tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
-    if has_insgroup:
+    if insgroup_df is not None:
         tab_labels.append(SHEET_INGROUP)
-    if has_plan:
+    if plan_df is not None:
         tab_labels.append(SHEET_IPLAN)
     tab_labels.append("Downloads")
 
-    if has_insgroup and st.session_state.pop("_stay_on_ig", False):
+    if insgroup_df is not None and st.session_state.pop("_stay_on_ig", False):
         tab_labels = [SHEET_INGROUP] + [x for x in tab_labels if x != SHEET_INGROUP]
 
     t_tabs = st.tabs(tab_labels)
@@ -1538,77 +1524,16 @@ try:
                 key=f"dl_csv_plan_view_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
             )
 
-    if tIG is not None:
-        with tIG:
-            if st.button("Load Insurance Group", key=f"load_insgroup_{st.session_state.get('center_key')}_{st.session_state.get('year')}", use_container_width=True):
-                st.session_state[f"load_insgroup_{st.session_state.get('center_key')}_{st.session_state.get('year')}"] = True
-            if st.session_state.get(f"load_insgroup_{st.session_state.get('center_key')}_{st.session_state.get('year')}", False):
-                try:
-                    insgroup_df = load_optional_sheet(str(out_path), token, SHEET_INGROUP)
-                    st.dataframe(
-                        _display_df(move_grand_total_last(insgroup_df)),
-                        use_container_width=True,
-                        height=full_height(insgroup_df),
-                    )
-                    st.download_button(
-                        "⬇️ Export Insurance Group (CSV)",
-                        insgroup_df.to_csv(index=False).encode("utf-8"),
-                        file_name=f"{cfg['key']}_{st.session_state.get('year')}_insurance_group.csv",
-                        use_container_width=True,
-                        key=f"dl_csv_insgroup_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-                    )
-                except Exception as e:
-                    st.error(f"Failed to load {SHEET_INGROUP}: {e}")
-            else:
-                st.info("Click Load Insurance Group only when needed.")
-
-    if tPL is not None:
-        with tPL:
-            if st.button("Load Plan Aging", key=f"load_plan_{st.session_state.get('center_key')}_{st.session_state.get('year')}", use_container_width=True):
-                st.session_state[f"load_plan_{st.session_state.get('center_key')}_{st.session_state.get('year')}"] = True
-            if st.session_state.get(f"load_plan_{st.session_state.get('center_key')}_{st.session_state.get('year')}", False):
-                try:
-                    plan_df = load_optional_sheet(str(out_path), token, SHEET_IPLAN)
-                    pl_key = f"plan_choice_{st.session_state.get('center_key')}_{st.session_state.get('year')}"
-                    if "Insurance" in plan_df.columns:
-                        pl_list = ["All"] + sorted([x for x in plan_df["Insurance"].dropna().astype(str).unique().tolist() if str(x).strip()])
-                        choice_pl = st.selectbox("Insurance", pl_list, key=f"plan_select_{st.session_state.get('center_key')}_{st.session_state.get('year')}")
-                        if choice_pl != "All":
-                            view_pl = plan_df.loc[plan_df["Insurance"].astype(str) == choice_pl].drop(columns=["Insurance"], errors="ignore")
-                        else:
-                            view_pl = plan_df.copy()
-                    else:
-                        choice_pl = "All"
-                        view_pl = plan_df.copy()
-                    st.caption(f"Showing Plan aging for **{choice_pl}**")
-                    st.dataframe(
-                        _display_df(move_grand_total_last(view_pl)),
-                        use_container_width=True,
-                        height=full_height(view_pl),
-                    )
-                    st.download_button(
-                        "⬇️ Export Plan (CSV) — current view",
-                        view_pl.to_csv(index=False).encode("utf-8"),
-                        file_name=f"{cfg['key']}_{st.session_state.get('year')}_plan{'_' + choice_pl if choice_pl != 'All' else ''}.csv",
-                        use_container_width=True,
-                        key=f"dl_csv_plan_view_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-                    )
-                except Exception as e:
-                    st.error(f"Failed to load {SHEET_IPLAN}: {e}")
-            else:
-                st.info("Click Load Plan Aging only when needed.")
-
     with t3:
         st.markdown("### Report Download")
         st.write("Open the XLSX locally to inspect **Balance_Aging_Detail** if needed.")
-        with open(out_path, "rb") as fh:
-            st.download_button(
-                "⬇️ Download full report (.xlsx)",
-                fh,
-                file_name=out_path.name,
-                use_container_width=True,
-                key=f"dl_xlsx_full_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
-            )
+        st.download_button(
+            "⬇️ Download full report (.xlsx)",
+            get_report_bytes(str(out_path)),
+            file_name=out_path.name,
+            use_container_width=True,
+            key=f"dl_xlsx_full_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+        )
 
         # ====================== MONTHLY BREAKDOWN (DOWNLOAD ONLY) ======================
         st.markdown("---")
