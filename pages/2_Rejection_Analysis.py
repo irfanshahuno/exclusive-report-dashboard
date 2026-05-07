@@ -16,78 +16,26 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # =========================================
 st.set_page_config(page_title="Rejection Analysis", layout="wide")
 
-# ✅ Light-Red + Smaller Buttons (CSS only)
 st.markdown(
     """
     <style>
-      .block-container {max-width: 100% !important; padding-top: 1.0rem; padding-left: 1.2rem; padding-right: 1.2rem;}
-
-      .card{
-        background:#ffffff;
-        border:1px solid #fde2e2;
-        border-left:3px solid #fb7185;
-        border-radius:14px;
-        padding:12px 14px 10px 14px;
-        box-shadow:0 2px 14px rgba(0,0,0,0.04);
+      .block-container {max-width: 100% !important; padding-top: 1.5rem; padding-left: 2rem; padding-right: 2rem;}
+      .card {
+        background: #ffffff;
+        border: 1px solid #e8eef7;
+        border-radius: 16px;
+        padding: 18px 18px 14px 18px;
+        box-shadow: 0 2px 14px rgba(16,24,40,0.04);
       }
-
-      .card-title{
-        color:#b42318;
-        font-size:13px;
-        font-weight:800;
-        letter-spacing:0.2px;
-        margin-bottom:6px;
+      .card-title {color:#6b7a99; font-size: 14px; font-weight: 600; margin-bottom: 6px;}
+      .card-value {color:#0f172a; font-size: 34px; font-weight: 800; line-height: 1.05;}
+      .card-sub {color:#94a3b8; font-size: 13px; margin-top: 8px;}
+      .pill {
+        display:inline-block; margin-top: 10px;
+        padding: 6px 10px; border-radius: 999px;
+        background:#f1f5f9; color:#334155; font-weight:700; font-size: 13px;
       }
-
-      .card-value{
-        color:#0f172a;
-        font-size:24px;
-        font-weight:900;
-        line-height:1.15;
-      }
-
-      .card-sub{
-        color:#64748b;
-        font-size:12px;
-        margin-top:6px;
-      }
-
-      h3{
-        font-size:26px!important;
-        font-weight:800!important;
-        margin-top:22px!important;
-        margin-bottom:10px!important;
-        color:#0f172a;
-      }
-
       div[data-testid="stDataFrame"] {border: 1px solid #edf2fa; border-radius: 14px; overflow:hidden;}
-
-      div.stButton > button,
-      div.stDownloadButton > button{
-        background: #f87171 !important;
-        color: #ffffff !important;
-        border: 1px solid #fecaca !important;
-        border-radius: 12px !important;
-
-        padding: 0.35rem 0.80rem !important;
-        font-size: 0.88rem !important;
-        font-weight: 700 !important;
-        min-height: 2.25rem !important;
-
-        box-shadow: 0 6px 18px rgba(239,68,68,0.18) !important;
-      }
-
-      div.stButton > button:hover,
-      div.stDownloadButton > button:hover{
-        background: #ef4444 !important;
-        border-color: #fca5a5 !important;
-        transform: translateY(-1px);
-      }
-
-      div.stButton > button:active,
-      div.stDownloadButton > button:active{
-        transform: translateY(0px);
-      }
     </style>
     """,
     unsafe_allow_html=True
@@ -100,54 +48,22 @@ S3_BUCKET = "emc-rcm-storage-2026"
 SOURCE_FILENAME = "source.xlsx"
 DEFAULT_YEAR_OPTIONS = ["2024", "2025", "2026"]
 
-# ✅ Persistent cache (so results stay even after refresh / clicking again)
-REJ_CACHE_PREFIX = "rejection_cache"
-REJ_CACHE_FILENAME = "rejection.xlsx"
-
-# =========================================
-# CENTER NORMALIZATION (MUST be BEFORE use)
-# =========================================
-CENTER_ALIASES = {
-    "excellent medical center": "excellent",
-    "excellent pharmacy": "pharmacy",
-    "easyhealth clinic": "easyhealth",
-    "easy health medical clinic": "easyhealth",
-    "easy health clinic": "easyhealth",
-    "easyhealth": "easyhealth",
-    "excellent": "excellent",
-    "pharmacy": "pharmacy",
-}
-
-def normalize_center_for_s3(center_value: str) -> str:
-    c = str(center_value).strip().lower()
-    c = " ".join(c.split())
-    return CENTER_ALIASES.get(c, c)
-
 # =========================================
 # S3 HELPERS
 # =========================================
 def s3_client():
     return boto3.client("s3")
 
-def s3_exists(bucket: str, key: str) -> bool:
+def s3_exists(bucket, key):
     try:
         s3_client().head_object(Bucket=bucket, Key=key)
         return True
     except ClientError:
         return False
 
-def load_file_from_s3(bucket: str, key: str) -> bytes:
+def load_file_from_s3(bucket, key):
     obj = s3_client().get_object(Bucket=bucket, Key=key)
     return obj["Body"].read()
-
-def save_file_to_s3(bucket: str, key: str, data: bytes) -> None:
-    s3_client().put_object(Bucket=bucket, Key=key, Body=data)
-
-def delete_file_from_s3(bucket: str, key: str) -> None:
-    try:
-        s3_client().delete_object(Bucket=bucket, Key=key)
-    except Exception:
-        pass
 
 # =========================================
 # REJECTION ANALYSIS ENGINE
@@ -352,11 +268,9 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         [{"Insurance": "Grand Total", "Grand Total": 0.0}]
     )
 
-    stats = {"rejected_rows": int(len(rejected_df)), "sha1": sha1_short_bytes(input_bytes)}
-
     meta = pd.DataFrame([{
         "InputFile": input_name,
-        "InputSHA1": stats["sha1"],
+        "InputSHA1": sha1_short_bytes(input_bytes),
         "GeneratedAt": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
         "RejectedRule": "Paid==0 AND lower(ActivityStatus)=='rejected' AND DenialCode not empty",
         "RejectedRows": int(len(rejected_df)),
@@ -372,6 +286,7 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         meta.to_excel(writer, sheet_name="Meta", index=False)
 
     styled = apply_styling_to_bytes(out_buf.getvalue())
+    stats = {"rejected_rows": int(len(rejected_df)), "sha1": sha1_short_bytes(input_bytes)}
     return styled, stats
 
 # =========================================
@@ -395,44 +310,6 @@ def _fmt_aed(x):
     except Exception:
         return f"AED {x}"
 
-def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s3_key: str) -> dict:
-    xls = pd.ExcelFile(io.BytesIO(xlsx_bytes), engine="openpyxl")
-
-    df_by_ins = pd.read_excel(xls, sheet_name="Rejected_By_Insurance")
-    df_by_code = pd.read_excel(xls, sheet_name="Rejected_By_DenialCode")
-    df_ins_x_code = pd.read_excel(xls, sheet_name="Rejected_Ins_x_DenialCode")
-    df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
-
-    PREVIEW_ROWS = 2000
-    detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
-    wanted_cols = ["Insurance", "DenialCode", "ActivityStatus", "ActivityIns", "Paid", "AgingBucket", "DaysDiff", "RefDate"]
-    usecols = [c for c in wanted_cols if c in detail_header]
-    df_preview = pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=PREVIEW_ROWS)
-
-    rejected_rows = 0
-    try:
-        df_meta = pd.read_excel(xls, sheet_name="Meta")
-        if "RejectedRows" in df_meta.columns and len(df_meta):
-            rejected_rows = int(pd.to_numeric(df_meta.loc[0, "RejectedRows"], errors="coerce") or 0)
-    except Exception:
-        rejected_rows = 0
-
-    stats = {"sha1": sha1_short_bytes(xlsx_bytes), "rejected_rows": rejected_rows}
-
-    return {
-        "center": center,
-        "year": year,
-        "s3_key": s3_key,
-        "out_bytes": xlsx_bytes,
-        "stats": stats,
-        "df_by_ins": df_by_ins,
-        "df_by_code": df_by_code,
-        "df_ins_x_code": df_ins_x_code,
-        "df_aging": df_aging,
-        "df_preview": df_preview,
-        "preview_rows": PREVIEW_ROWS,
-    }
-
 # =========================================
 # APP
 # =========================================
@@ -440,76 +317,37 @@ def run_rejection_app():
     st.markdown("## Rejection Analysis")
     st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
 
-    # --- session init ---
     if "rej_result" not in st.session_state:
         st.session_state.rej_result = None
-    if "rej_prev_sel" not in st.session_state:
-        st.session_state.rej_prev_sel = None
-
-    # ✅ detect from URL (when clicking Rejected card)
-    qp = st.query_params
-    if qp.get("center"):
-        st.session_state["selected_center"] = qp.get("center")
-    if qp.get("year"):
-        st.session_state["selected_year"] = qp.get("year")
 
     detected_center = st.session_state.get("selected_center")
     detected_year = st.session_state.get("selected_year")
 
-    # ---- Sidebar controls ----
+    # ---- Sidebar controls (TRUE LEFT) ----
     with st.sidebar:
         st.subheader("Controls")
 
         if detected_center is None or detected_year is None:
             st.warning("Center/Year not detected. Select manually.")
-            center = st.selectbox(
-                "Center",
-                ["Excellent Medical Center", "Excellent Pharmacy", "Easyhealth Clinic"],
-                key="rej_center_manual",
-            )
+            center = st.selectbox("Center", ["excellent", "pharmacy", "easyhealth"], key="rej_center_manual")
             year = st.selectbox("Year", DEFAULT_YEAR_OPTIONS, key="rej_year_manual")
         else:
-            center = str(detected_center).lower().strip()
-            year = str(detected_year).strip()
-
+            center = str(detected_center).lower()
+            year = str(detected_year)
             st.success("Detected from dashboard ✅")
-            st.selectbox(
-                "Center",
-                ["excellent", "pharmacy", "easyhealth"],
-                index=["excellent", "pharmacy", "easyhealth"].index(center),
-                disabled=True,
-            )
-            st.selectbox(
-                "Year",
-                DEFAULT_YEAR_OPTIONS,
-                index=DEFAULT_YEAR_OPTIONS.index(year),
-                disabled=True,
-            )
+            st.selectbox("Center", ["excellent", "pharmacy", "easyhealth"],
+                         index=["excellent", "pharmacy", "easyhealth"].index(center),
+                         disabled=True)
+            st.selectbox("Year", DEFAULT_YEAR_OPTIONS,
+                         index=DEFAULT_YEAR_OPTIONS.index(year),
+                         disabled=True)
 
-        center_raw = center
-        center = normalize_center_for_s3(center_raw)
+        center = str(center).lower()
         year = str(year)
-
         s3_key = f"streamlit/{center}/{year}/{SOURCE_FILENAME}"
-        rej_cache_key = f"{REJ_CACHE_PREFIX}/{center}/{year}/{REJ_CACHE_FILENAME}"
-
-        # ✅ When year/center changes: drop current in-memory result (then auto-load saved if exists)
-        current_sel = f"{center}|{year}"
-        if st.session_state.rej_prev_sel != current_sel:
-            st.session_state.rej_prev_sel = current_sel
-            st.session_state.rej_result = None
 
         st.write("**Source**")
         st.code(f"s3://{S3_BUCKET}/{s3_key}", language="text")
-
-        # ✅ Auto-load saved result from S3 (so it stays until you upload new file or click Generate)
-        if st.session_state.rej_result is None and s3_exists(S3_BUCKET, rej_cache_key):
-            try:
-                cached_bytes = load_file_from_s3(S3_BUCKET, rej_cache_key)
-                st.session_state.rej_result = load_result_from_workbook_bytes(cached_bytes, center, year, s3_key)
-                st.success("Loaded saved result ✅")
-            except Exception:
-                st.warning("Saved result found but could not be loaded. Click Generate once.")
 
         cA, cB = st.columns(2)
         with cA:
@@ -518,31 +356,50 @@ def run_rejection_app():
             clear = st.button("Clear", use_container_width=True)
 
         if clear:
-            # ✅ Clear BOTH session + saved cache (so it won't reappear on refresh)
             st.session_state.rej_result = None
-            delete_file_from_s3(S3_BUCKET, rej_cache_key)
             st.rerun()
 
-        if generate:
-            if not s3_exists(S3_BUCKET, s3_key):
-                st.error("Source file not found in S3. Upload from dashboard first.")
-                st.stop()
+    # ---- Generate only on click ----
+    if generate:
+        if not s3_exists(S3_BUCKET, s3_key):
+            st.error("Source file not found in S3. Upload from dashboard first.")
+            st.stop()
 
-            with st.spinner("Building rejection analysis..."):
-                input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
-                out_xlsx_bytes, _stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
+        with st.spinner("Building rejection analysis..."):
+            input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
+            out_xlsx_bytes, stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
 
-                # ✅ Save to S3 cache (PERSISTENT) so it doesn't ask to process again
-                save_file_to_s3(S3_BUCKET, rej_cache_key, out_xlsx_bytes)
+            xls = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
+            df_by_ins = pd.read_excel(xls, sheet_name="Rejected_By_Insurance")
+            df_by_code = pd.read_excel(xls, sheet_name="Rejected_By_DenialCode")
+            df_ins_x_code = pd.read_excel(xls, sheet_name="Rejected_Ins_x_DenialCode")
+            df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
 
-                # ✅ Load into session
-                st.session_state.rej_result = load_result_from_workbook_bytes(out_xlsx_bytes, center, year, s3_key)
+            # light preview for filters (prevents crash)
+            PREVIEW_ROWS = 2000
+            detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
+            wanted_cols = ["Insurance", "DenialCode", "ActivityStatus", "ActivityIns", "Paid", "AgingBucket", "DaysDiff", "RefDate"]
+            usecols = [c for c in wanted_cols if c in detail_header]
+            df_preview = pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=PREVIEW_ROWS)
 
-            st.success("Done ✅")
+            st.session_state.rej_result = {
+                "center": center,
+                "year": year,
+                "s3_key": s3_key,
+                "out_bytes": out_xlsx_bytes,
+                "stats": stats,
+                "df_by_ins": df_by_ins,
+                "df_by_code": df_by_code,
+                "df_ins_x_code": df_ins_x_code,
+                "df_aging": df_aging,
+                "df_preview": df_preview,
+                "preview_rows": PREVIEW_ROWS,
+            }
 
-    # ---- Main UI ----
+        st.success("Done ✅")
+
     if st.session_state.rej_result is None:
-        st.info("No saved result for this year yet. Click Generate once.")
+        st.info("Generate to view KPIs + tables.")
         return
 
     R = st.session_state.rej_result
@@ -556,6 +413,7 @@ def run_rejection_app():
     df_preview = R["df_preview"]
     PREVIEW_ROWS = R["preview_rows"]
 
+    # download
     st.download_button(
         "Download Rejection Analysis Excel",
         data=out_xlsx_bytes,
@@ -570,7 +428,7 @@ def run_rejection_app():
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        _card("Rejected Rows", f"{int(stats.get('rejected_rows', 0)):,}", "Paid=0 + Status=rejected + DenialCode not empty")
+        _card("Rejected Rows", f"{int(stats['rejected_rows']):,}", "Paid=0 + Status=rejected + DenialCode not empty")
     with c2:
         _card("Total Rejected Amount", _fmt_aed(total_amount), "All insurers (excluding Grand Total row)")
     with c3:
@@ -583,11 +441,11 @@ def run_rejection_app():
     for i in range(3):
         with cols[i]:
             if i < len(top_ins):
-                _card(f"#{i+1} {top_ins.iloc[i]['Insurance']}", _fmt_aed(top_ins.iloc[i]["RejectedAmount"]), "")
+                _card(f"#{i+1} {top_ins.iloc[i]['Insurance']}", _fmt_aed(top_ins.iloc[i]['RejectedAmount']), "")
             else:
                 _card(f"#{i+1}", "AED 0.00", "")
 
-    # ===== Top 3 Denial (Insurance + Code) =====
+    # ===== Top 3 Denial (FULL accurate) from pivot =====
     st.markdown("### Top 3 Denial (Insurance + Code) by Amount")
     top_den = pd.DataFrame(columns=["Insurance", "DenialCode", "Amount"])
     try:
@@ -608,15 +466,11 @@ def run_rejection_app():
     for i in range(3):
         with cols[i]:
             if i < len(top_den):
-                _card(
-                    str(top_den.iloc[i]["Insurance"]),
-                    str(top_den.iloc[i]["DenialCode"]),
-                    _fmt_aed(float(top_den.iloc[i]["Amount"])),
-                )
+                _card(str(top_den.iloc[i]["Insurance"]), str(top_den.iloc[i]["DenialCode"]), _fmt_aed(float(top_den.iloc[i]["Amount"])))
             else:
                 _card("-", "-", "AED 0.00")
 
-    # ===== Denial code drilldown =====
+    # ===== Denial code drilldown (top insurances for selected code) =====
     st.markdown("### Denial Code Drilldown (Top Insurances by Amount)")
     code_options = df_by_code[df_by_code["DenialCode"] != "Grand Total"]["DenialCode"].astype(str).tolist()
     sel_focus_code = st.selectbox("Select Denial Code", [""] + code_options, key="focus_denial_code")
@@ -701,9 +555,9 @@ def run_rejection_app():
 
                 safe_name = f"Rejected_Detail_{R['center']}_{R['year']}_{sel_ins}_{sel_code}_{stats['sha1']}.xlsx"
                 safe_name = (safe_name.replace(" ", "_")
-                                     .replace("/", "_")
-                                     .replace("\\", "_")
-                                     .replace(":", "_"))
+                                       .replace("/", "_")
+                                       .replace("\\", "_")
+                                       .replace(":", "_"))
 
                 st.download_button(
                     "Download Filtered Detail Excel",
