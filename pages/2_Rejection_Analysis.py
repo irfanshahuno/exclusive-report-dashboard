@@ -16,128 +16,78 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # =========================================
 st.set_page_config(page_title="Rejection Analysis", layout="wide")
 
-# ✅ Premium Deep Crimson + Warm Cream (CSS only)
+# ✅ Light-Red + Smaller Buttons (CSS only)
 st.markdown(
     """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+      .block-container {max-width: 100% !important; padding-top: 1.0rem; padding-left: 1.2rem; padding-right: 1.2rem;}
 
-    /* ---- Page Background ---- */
-    .stApp{
-      background: linear-gradient(145deg, #FDF6F6 0%, #FFF9F9 50%, #FFFBFB 100%) !important;
-      font-family: 'Inter', sans-serif !important;
-    }
+      .card{
+        background:#ffffff;
+        border:1px solid #fde2e2;
+        border-left:3px solid #fb7185;
+        border-radius:14px;
+        padding:12px 14px 10px 14px;
+        box-shadow:0 2px 14px rgba(0,0,0,0.04);
+      }
 
-    .block-container {
-      max-width: 100% !important;
-      padding-top: 1.0rem;
-      padding-left: 1.2rem;
-      padding-right: 1.2rem;
-    }
+      .card-title{
+        color:#b42318;
+        font-size:13px;
+        font-weight:800;
+        letter-spacing:0.2px;
+        margin-bottom:6px;
+      }
 
-    /* ---- Cards ---- */
-    .card{
-      background: rgba(255, 255, 255, 0.90);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      border: 1.5px solid rgba(220, 170, 170, 0.35);
-      border-left: 4px solid #9B1C1C;
-      border-radius: 16px;
-      padding: 14px 16px 12px 16px;
-      box-shadow: 0 4px 18px rgba(155, 28, 28, 0.07), 0 1px 3px rgba(0,0,0,0.04), inset 0 1px 0 rgba(255,255,255,0.95);
-      transition: box-shadow 0.2s ease, transform 0.2s ease;
-    }
-    .card:hover{
-      box-shadow: 0 8px 28px rgba(155, 28, 28, 0.12), 0 2px 6px rgba(0,0,0,0.05);
-      transform: translateY(-1px);
-    }
+      .card-value{
+        color:#0f172a;
+        font-size:24px;
+        font-weight:900;
+        line-height:1.15;
+      }
 
-    /* ---- Card Title ---- */
-    .card-title{
-      color: #9B1C1C;
-      font-size: 11px;
-      font-weight: 700;
-      font-family: 'Inter', sans-serif;
-      letter-spacing: 0.8px;
-      text-transform: uppercase;
-      margin-bottom: 8px;
-    }
+      .card-sub{
+        color:#64748b;
+        font-size:12px;
+        margin-top:6px;
+      }
 
-    /* ---- Card Value ---- */
-    .card-value{
-      color: #1A0A0A;
-      font-size: 24px;
-      font-weight: 900;
-      font-family: 'Inter', sans-serif;
-      line-height: 1.15;
-      letter-spacing: -0.5px;
-    }
+      h3{
+        font-size:26px!important;
+        font-weight:800!important;
+        margin-top:22px!important;
+        margin-bottom:10px!important;
+        color:#0f172a;
+      }
 
-    /* ---- Card Sub ---- */
-    .card-sub{
-      color: #9CA3AF;
-      font-size: 11.5px;
-      font-family: 'Inter', sans-serif;
-      margin-top: 7px;
-      font-weight: 500;
-    }
+      div[data-testid="stDataFrame"] {border: 1px solid #edf2fa; border-radius: 14px; overflow:hidden;}
 
-    /* ---- Section Headings ---- */
-    h3{
-      font-size: 22px !important;
-      font-weight: 800 !important;
-      font-family: 'Inter', sans-serif !important;
-      margin-top: 24px !important;
-      margin-bottom: 10px !important;
-      color: #1A0A0A !important;
-      letter-spacing: -0.3px !important;
-    }
+      div.stButton > button,
+      div.stDownloadButton > button{
+        background: #f87171 !important;
+        color: #ffffff !important;
+        border: 1px solid #fecaca !important;
+        border-radius: 12px !important;
 
-    /* ---- HR Dividers ---- */
-    hr{
-      border: none !important;
-      height: 1px !important;
-      background: linear-gradient(90deg, transparent, #E8C5C5, transparent) !important;
-    }
+        padding: 0.35rem 0.80rem !important;
+        font-size: 0.88rem !important;
+        font-weight: 700 !important;
+        min-height: 2.25rem !important;
 
-    /* ---- DataFrames ---- */
-    div[data-testid="stDataFrame"] {
-      border: 1px solid rgba(220,170,170,0.3);
-      border-radius: 14px;
-      overflow: hidden;
-      box-shadow: 0 2px 10px rgba(155,28,28,0.05);
-    }
+        box-shadow: 0 6px 18px rgba(239,68,68,0.18) !important;
+      }
 
-    /* ---- Buttons ---- */
-    div.stButton > button,
-    div.stDownloadButton > button{
-      background: linear-gradient(160deg, #9B1C1C 0%, #7F1D1D 100%) !important;
-      color: #ffffff !important;
-      border: 1px solid rgba(255,255,255,0.15) !important;
-      border-radius: 12px !important;
-      padding: 0.38rem 0.90rem !important;
-      font-size: 0.875rem !important;
-      font-weight: 700 !important;
-      font-family: 'Inter', sans-serif !important;
-      min-height: 2.25rem !important;
-      box-shadow: 0 4px 14px rgba(127, 29, 29, 0.30), inset 0 1px 0 rgba(255,255,255,0.12) !important;
-      letter-spacing: 0.1px !important;
-      transition: all 0.2s ease !important;
-    }
+      div.stButton > button:hover,
+      div.stDownloadButton > button:hover{
+        background: #ef4444 !important;
+        border-color: #fca5a5 !important;
+        transform: translateY(-1px);
+      }
 
-    div.stButton > button:hover,
-    div.stDownloadButton > button:hover{
-      background: linear-gradient(160deg, #B91C1C 0%, #9B1C1C 100%) !important;
-      box-shadow: 0 6px 20px rgba(127, 29, 29, 0.38) !important;
-      transform: translateY(-1px) !important;
-    }
-
-    div.stButton > button:active,
-    div.stDownloadButton > button:active{
-      background: linear-gradient(160deg, #7F1D1D 0%, #6B1919 100%) !important;
-      transform: translateY(0px) !important;
-      box-shadow: 0 2px 8px rgba(127, 29, 29, 0.25) !important;
-    }
+      div.stButton > button:active,
+      div.stDownloadButton > button:active{
+        transform: translateY(0px);
+      }
     </style>
     """,
     unsafe_allow_html=True
