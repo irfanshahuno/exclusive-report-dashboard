@@ -25,7 +25,14 @@ from datetime import datetime, date
 
 import pandas as pd
 import streamlit as st
+
 import streamlit.components.v1 as components  # used only for the home-card link
+
+import base64
+import time
+import json
+import hmac
+import hashlib
 
 # ====================== ✅ NEEDFUL S3 IMPORTS (NEW) ======================
 import boto3
@@ -35,6 +42,100 @@ from botocore.exceptions import ClientError
 # ====================== VIEW PASSWORD (NEW) ======================
 # Keep default, but allow Streamlit Secrets to override (needful)
 VIEW_PASSWORD = st.secrets.get("VIEW_PASSWORD", "Emc@2026")
+
+
+# ====================== ✅ URL TOKEN (NEW) ======================
+# Opening the dashboard in a NEW TAB creates a NEW Streamlit session, so it will ask password again.
+# To avoid that, we generate a short-lived signed token in the URL and auto-auth the new session.
+TOKEN_SECRET = st.secrets.get("TOKEN_SECRET", None)  # set in Streamlit Secrets for security
+TOKEN_TTL_SECONDS = int(st.secrets.get("TOKEN_TTL_SECONDS", 600))  # 10 minutes default
+
+def _b64url_encode(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode("utf-8").rstrip("=")
+
+def _b64url_decode(s: str) -> bytes:
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+def make_url_token(payload: dict) -> str:
+    if not TOKEN_SECRET:
+        return ""  # token disabled if no secret configured
+    data = dict(payload)
+    data["iat"] = int(time.time())
+    body = json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    sig = hmac.new(TOKEN_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
+    return _b64url_encode(body) + "." + _b64url_encode(sig)
+
+def verify_url_token(token: str) -> dict | None:
+    if not TOKEN_SECRET:
+        return None
+    try:
+        body_b64, sig_b64 = token.split(".", 1)
+        body = _b64url_decode(body_b64)
+        sig = _b64url_decode(sig_b64)
+        expected = hmac.new(TOKEN_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        data = json.loads(body.decode("utf-8"))
+        iat = int(data.get("iat", 0))
+        if int(time.time()) - iat > TOKEN_TTL_SECONDS:
+            return None
+        return data
+    except Exception:
+        return None
+
+def auto_auth_from_token():
+    # If token is valid, auto-enable view access for this new session
+    tok = st.query_params.get("token")
+    if not tok:
+        return
+    data = verify_url_token(tok)
+    if not data:
+        return
+    st.session_state.is_view_auth = True
+    # optional defaults
+    if data.get("year") and not st.session_state.get("year"):
+        try:
+            st.session_state.year = int(data["year"])
+        except Exception:
+            pass
+    if data.get("center") and not st.session_state.get("center_key"):
+        st.session_state.center_key = data["center"]
+
+# ✅ attempt auto-auth BEFORE showing password screen
+auto_auth_from_token()
+
+# ====================== ✅ FIX: Restore session from query params (nav=balance) ======================
+# When the Balance card link is clicked in the same session (same tab), query params carry
+# center/year.  We need to restore rcm_year/center_key BEFORE require_year_selection() runs,
+# otherwise that gate fires again and looks like a fresh session.
+def _restore_session_from_query_params():
+    y_param = st.query_params.get("year")
+    c_param = st.query_params.get("center")
+    # ✅ FIX: carry auth across navigation (Balance link opens in same tab but new rerun loses session)
+    # We include a simple HMAC of the password in the URL so the new session can re-auth silently.
+    auth_param = st.query_params.get("auth")
+
+    if auth_param:
+        # Verify: auth = HMAC-SHA256(secret, "view_auth")
+        _secret = st.secrets.get("TOKEN_SECRET", VIEW_PASSWORD)
+        expected = hmac.new(_secret.encode("utf-8"), b"view_auth", hashlib.sha256).hexdigest()[:16]
+        if auth_param == expected:
+            st.session_state.is_view_auth = True
+
+    if y_param and not st.session_state.get("rcm_year"):
+        try:
+            y_int = int(y_param)
+            st.session_state.rcm_year = y_int
+            st.session_state.year = y_int
+        except Exception:
+            pass
+
+    if c_param and not st.session_state.get("center_key"):
+        st.session_state.center_key = c_param
+
+_restore_session_from_query_params()
+# ======================================================================================================
 
 
 def require_view_access() -> None:
@@ -74,8 +175,26 @@ st.set_option("client.showErrorDetails", False)
 # NEW: enforce view login first
 require_view_access()
 
-# ✅ Balance Attempt Aging app URL (opens on Balance click)
-BALANCE_ATTEMPT_URL = "https://balance-attempt-aging-dashboard-eigtoins4ai9hd9r7jsmen.streamlit.app/"
+# ====================== ✅ NEEDFUL: BALANCE PAGE INSIDE SAME APP ======================
+BALANCE_PAGE_PATH = "pages/3_Balance_Attempt_Aging.py"
+
+
+DAILY_REPORT_PAGE_PATH = "pages/4_Registration_Summary.py"
+# External Daily Report (separate Streamlit app)
+DAILY_REPORT_EXTERNAL_BASE = "https://exclusive-report-dashboard-ctan8jpussjzffxz2arkgh.streamlit.app"
+DAILY_REPORT_EXTERNAL_PAGE = "/Registration_View"
+# ✅ Daily Report button target (requested)
+DAILY_REPORT_BUTTON_BASE = "https://exclusive-report-dashboard-ad74eqssyakelmpbeztqob.streamlit.app/"
+def _make_auth_param() -> str:
+    """Generate a short HMAC token to carry view-auth across URL navigation."""
+    _secret = st.secrets.get("TOKEN_SECRET", VIEW_PASSWORD)
+    return hmac.new(_secret.encode("utf-8"), b"view_auth", hashlib.sha256).hexdigest()[:16]
+
+def build_balance_url(center: str, year: int) -> str:
+    auth = _make_auth_param()
+    return f"?nav=balance&center={center}&year={year}&auth={auth}"
+# ================================================================================
+
 
 # =========================================================
 # ✅ PREMIUM + SOOTHING UI (ONLY STYLES) + ✅ AUTO-FIT KPI
@@ -83,56 +202,93 @@ BALANCE_ATTEMPT_URL = "https://balance-attempt-aging-dashboard-eigtoins4ai9hd9r7
 st.markdown(
     """
 <style>
-/* ---------- Page background (soothing) ---------- */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+
+/* ---------- Page background (premium deep gradient) ---------- */
 .stApp{
-  background: linear-gradient(180deg, #F7FAFF 0%, #FFFFFF 45%) !important;
+  background: linear-gradient(145deg, #EDF2FB 0%, #F8FAFF 40%, #FAFCFF 100%) !important;
+  font-family: 'Inter', sans-serif !important;
 }
 
 /* Reduce harsh separators */
-hr{ border: none !important; height:1px !important; background:#E6EEF8 !important; }
+hr{ border: none !important; height:1px !important; background: linear-gradient(90deg, transparent, #C8D9F0, transparent) !important; }
 
-/* ---------- Premium Buttons (Light-blue) ---------- */
+/* ---------- Premium Buttons ---------- */
+a.navlink{
+  display: inline-block;
+  width: 100%;
+  text-align: center;
+  min-height: 58px;
+  padding: 14px 22px;
+  font-size: 17px;
+  font-weight: 700;
+  font-family: 'Inter', sans-serif;
+  background: linear-gradient(160deg, #FFFFFF 0%, #EEF4FF 100%);
+  color: #0A2647;
+  border: 1.5px solid #C5D8F5;
+  border-radius: 14px;
+  box-shadow: 0 2px 8px rgba(10, 38, 71, 0.08), inset 0 1px 0 rgba(255,255,255,0.9);
+  text-decoration: none !important;
+  line-height: 28px;
+  transition: all 0.2s ease;
+}
+a.navlink:hover{
+  background: linear-gradient(160deg, #E8F1FF 0%, #D6E8FF 100%);
+  border-color: #7DAAEE;
+  box-shadow: 0 6px 20px rgba(10, 38, 71, 0.15), inset 0 1px 0 rgba(255,255,255,0.9);
+  transform: translateY(-1px);
+  color: #0A2647;
+}
+a.navlink:active, a.navlink:focus, a.navlink:focus-visible{
+  background: linear-gradient(160deg, #0A2647 0%, #154B8A 100%);
+  color: #ffffff;
+  border-color: #0A2647;
+  outline: none;
+  box-shadow: 0 4px 12px rgba(10, 38, 71, 0.3);
+  transform: translateY(0px);
+}
+
 div.stButton > button{
   width: 100% !important;
   min-height: 58px !important;
   padding: 14px 22px !important;
-  font-size: 18px !important;
-  font-weight: 800 !important;
-
-  background: #EEF6FF !important;              /* premium light blue */
-  color: #0B2D5C !important;                   /* navy text */
-  border: 1.8px solid #B6D4FF !important;      /* soft border */
+  font-size: 17px !important;
+  font-weight: 700 !important;
+  font-family: 'Inter', sans-serif !important;
+  background: linear-gradient(160deg, #FFFFFF 0%, #EEF4FF 100%) !important;
+  color: #0A2647 !important;
+  border: 1.5px solid #C5D8F5 !important;
   border-radius: 14px !important;
-
-  box-shadow: 0 3px 10px rgba(11, 45, 92, 0.10) !important;
+  box-shadow: 0 2px 8px rgba(10, 38, 71, 0.08), inset 0 1px 0 rgba(255,255,255,0.9) !important;
+  transition: all 0.2s ease !important;
+  letter-spacing: 0.1px !important;
 }
-
-/* Hover */
 div.stButton > button:hover{
-  background: #DCEBFF !important;
-  border-color: #6FA4FF !important;
-  box-shadow: 0 6px 16px rgba(11, 45, 92, 0.14) !important;
+  background: linear-gradient(160deg, #E8F1FF 0%, #D6E8FF 100%) !important;
+  border-color: #7DAAEE !important;
+  box-shadow: 0 6px 20px rgba(10, 38, 71, 0.15) !important;
+  transform: translateY(-1px) !important;
 }
-
-/* Active/Selected feel */
 div.stButton > button:active,
 div.stButton > button:focus,
 div.stButton > button:focus-visible{
-  background: #0B2D5C !important;              /* navy active */
+  background: linear-gradient(160deg, #0A2647 0%, #154B8A 100%) !important;
   color: #ffffff !important;
-  border-color: #0B2D5C !important;
+  border-color: #0A2647 !important;
   outline: none !important;
-  box-shadow: none !important;
+  box-shadow: 0 4px 12px rgba(10, 38, 71, 0.3) !important;
 }
 
 /* Center titles */
 .center-title{
-  color: #0B2D5C !important;
+  color: #0A2647 !important;
   font-weight: 900 !important;
+  font-family: 'Inter', sans-serif !important;
+  letter-spacing: -0.5px !important;
   margin-bottom: 0 !important;
 }
 
-/* ---------- KPI Cards (premium + soothing) ---------- */
+/* ---------- KPI Cards (glassmorphism premium) ---------- */
 .kpi-grid{
   display:grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -141,39 +297,49 @@ div.stButton > button:focus-visible{
   margin-bottom: 10px;
 }
 .kpi-card{
-  background: rgba(255,255,255,0.92);
-  border: 1.4px solid #E3ECFA;
-  border-radius: 16px;
-  padding: 14px 16px;
-  box-shadow: 0 8px 18px rgba(11,45,92,0.06);
-  min-width: 0; /* important for overflow handling inside grid */
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1.5px solid rgba(197, 216, 245, 0.7);
+  border-radius: 18px;
+  padding: 16px 18px;
+  box-shadow: 0 4px 16px rgba(10, 38, 71, 0.07), 0 1px 3px rgba(10, 38, 71, 0.05), inset 0 1px 0 rgba(255,255,255,0.95);
+  min-width: 0;
+  transition: all 0.2s ease;
 }
 .kpi-label{
-  font-size: 13px;
-  color: #64748B;
-  font-weight: 750;
-  margin-bottom: 6px;
+  font-size: 12px;
+  color: #8A9BB5;
+  font-weight: 600;
+  font-family: 'Inter', sans-serif;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  margin-bottom: 8px;
 }
 
 /* ✅ AUTO-FIT number inside card */
 .kpi-value{
-  font-size: clamp(18px, 2.2vw, 30px);  /* auto fit based on screen */
-  font-weight: 900;
-  color: #111827;
-  letter-spacing: 0.2px;
-
-  white-space: nowrap;                  /* keep number in one line */
-  overflow: hidden;                     /* hide overflow */
-  text-overflow: ellipsis;              /* show ... if too long */
+  font-size: clamp(17px, 2.1vw, 28px);
+  font-weight: 800;
+  color: #0D1B2E;
+  letter-spacing: -0.5px;
+  font-family: 'Inter', sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* Balance featured: same bold, slight different color */
+/* Balance card — gold accent premium */
 .kpi-card.balance{
-  background: linear-gradient(180deg, #F1F7FF 0%, #FFFFFF 100%);
-  border-color: #CFE3FF;
+  background: linear-gradient(145deg, rgba(10,38,71,0.96) 0%, rgba(15,56,110,0.96) 100%);
+  border-color: rgba(180, 210, 255, 0.25);
+  box-shadow: 0 6px 24px rgba(10, 38, 71, 0.25), 0 1px 3px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.08);
+}
+.kpi-card.balance .kpi-label{
+  color: rgba(180, 205, 255, 0.75);
 }
 .kpi-card.balance .kpi-value{
-  color:#0B2D5C; /* slight different premium navy */
+  color: #FFFFFF;
 }
 
 /* Links inside cards look clean */
@@ -183,8 +349,13 @@ div.stButton > button:focus-visible{
   display:block !important;
 }
 .kpi-link:hover .kpi-card{
-  border-color:#6FA4FF;
-  box-shadow: 0 10px 22px rgba(11,45,92,0.10);
+  border-color: #7DAAEE;
+  box-shadow: 0 8px 28px rgba(10, 38, 71, 0.14), inset 0 1px 0 rgba(255,255,255,0.95);
+  transform: translateY(-2px);
+}
+.kpi-link:hover .kpi-card.balance{
+  box-shadow: 0 10px 32px rgba(10, 38, 71, 0.35), inset 0 1px 0 rgba(255,255,255,0.08);
+  transform: translateY(-2px);
 }
 
 /* Mobile */
@@ -196,14 +367,30 @@ div.stButton > button:focus-visible{
     unsafe_allow_html=True,
 )
 
-
-def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str):
-    """Premium KPI cards (Balance card clickable)."""
+def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str, rejection_url: str = ""):
+    """Premium KPI cards (Balance clickable, Rejected clickable)."""
     def fmt(x):
         try:
             return f"{float(x):,.2f}"
         except Exception:
             return "—"
+
+    rejected_block = f"""
+      <div class="kpi-card" title="{fmt(rej)}">
+        <div class="kpi-label">Rejected</div>
+        <div class="kpi-value">{fmt(rej)}</div>
+      </div>
+    """
+
+    if rejection_url:
+        rejected_block = f"""
+      <a class="kpi-link" href="{rejection_url}" title="{fmt(rej)}">
+        <div class="kpi-card" title="{fmt(rej)}">
+          <div class="kpi-label">Rejected</div>
+          <div class="kpi-value">{fmt(rej)}</div>
+        </div>
+      </a>
+        """
 
     html = f"""
     <div class="kpi-grid">
@@ -217,17 +404,15 @@ def render_kpi_cards(net, paid, bal, rej, acc, balance_url: str):
         <div class="kpi-value">{fmt(paid)}</div>
       </div>
 
-      <a class="kpi-link" href="{balance_url}" target="_blank" title="{fmt(bal)}">
+      <!-- ✅ NEEDFUL: remove target=_blank so it opens in same app -->
+      <a class="kpi-link" href="{balance_url}" title="{fmt(bal)}">
         <div class="kpi-card balance">
           <div class="kpi-label">Balance</div>
           <div class="kpi-value">{fmt(bal)}</div>
         </div>
       </a>
 
-      <div class="kpi-card" title="{fmt(rej)}">
-        <div class="kpi-label">Rejected</div>
-        <div class="kpi-value">{fmt(rej)}</div>
-      </div>
+      {rejected_block}
 
       <div class="kpi-card" title="{fmt(acc)}">
         <div class="kpi-label">Accepted</div>
@@ -342,6 +527,43 @@ CENTERS = {
     },
 }
 
+# ====================== ✅ NEEDFUL: NAV HANDLER for Balance ======================
+nav = st.query_params.get("nav")
+if nav == "daily":
+    # ✅ Direct-open the Daily Report page (skip center selection on home)
+    # New tab => new session, so token is used to auto-auth above.
+    y = st.query_params.get("year")
+    if y:
+        try:
+            st.session_state.year = int(y)
+            st.session_state.rcm_year = int(y)
+        except Exception:
+            pass
+    st.switch_page(DAILY_REPORT_PAGE_PATH)
+
+if nav == "balance":
+    c = st.query_params.get("center")
+    y = st.query_params.get("year")
+
+    if c in CENTERS:
+        st.session_state.center_key = c
+    try:
+        if y:
+            y_int = int(y)
+            st.session_state.year = y_int
+            st.session_state.rcm_year = y_int
+    except Exception:
+        pass
+
+    try:
+        del st.query_params["nav"]
+    except Exception:
+        pass
+
+    st.switch_page(BALANCE_PAGE_PATH)
+# ================================================================================
+
+
 
 # ====================== ✅ NEEDFUL S3 HELPERS (NEW) ======================
 def _get_s3_cfg():
@@ -374,19 +596,36 @@ def _get_s3_cfg():
     }
 
 
-def _s3_client(cfg):
+@st.cache_resource(show_spinner=False)
+def _s3_client_cached(access_key: str, secret_key: str, region: str):
+    # Cache the boto3 client per-credential set to avoid recreating it on every rerun
     return boto3.client(
         "s3",
-        aws_access_key_id=cfg["access_key"],
-        aws_secret_access_key=cfg["secret_key"],
-        region_name=cfg["region"],
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name=region,
     )
+
+def _s3_client(cfg):
+    return _s3_client_cached(cfg["access_key"], cfg["secret_key"], cfg["region"])
 
 
 def s3_key_for(center_key: str, year: int, filename: str) -> str:
+    """Build the S3 object key.
+
+    We keep ONE consistent structure in S3:
+      s3://<bucket>/streamlit/<center>/<year>/<filename>
+
+    If you set secrets S3_PREFIX="streamlit", it will become:
+      <prefix>/<center>/<year>/<filename>
+    """
     cfg = _get_s3_cfg()
-    pre = (cfg["prefix"] + "/") if (cfg and cfg.get("prefix")) else ""
-    return f"{pre}{center_key}/{year}/{filename}"
+    if not cfg:
+        return ""
+
+    # If prefix is empty, default to "streamlit" to match your existing uploads
+    prefix = (cfg.get("prefix") or "streamlit").strip().strip("/")
+    return f"{prefix}/{center_key}/{year}/{filename}"
 
 
 def upload_to_s3(local_path: Path, center_key: str, year: int) -> str:
@@ -407,6 +646,69 @@ def upload_to_s3(local_path: Path, center_key: str, year: int) -> str:
         raise RuntimeError(f"S3 upload failed: {e}")
 
 
+def download_from_s3(dest_path: Path, center_key: str, year: int, filename: str) -> bool:
+    """Download a file from S3 to local disk (returns True if downloaded)."""
+    cfg = _get_s3_cfg()
+    if cfg is None:
+        return False
+
+    key = s3_key_for(center_key, year, filename)
+    if not key:
+        return False
+
+    client = _s3_client(cfg)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        client.download_file(cfg["bucket"], key, str(dest_path))
+        return dest_path.exists() and dest_path.stat().st_size > 0
+    except ClientError:
+        return False
+
+
+
+def resolve_existing_report(folder: Path, preferred_name: str) -> Path:
+    """Return the best local report path (preferred -> report.xlsx -> newest excel)."""
+    candidates = [preferred_name]
+    if preferred_name.lower() != "report.xlsx":
+        candidates.append("report.xlsx")
+    # common variants
+    candidates += ["Report.xlsx", "report.xlsb", "report.xlsm"]
+    for name in candidates:
+        p = folder / name
+        if p.exists():
+            return p
+    # fallback: newest excel-like file
+    for pattern in ("*.xlsx", "*.xlsb", "*.xlsm"):
+        files = sorted(folder.glob(pattern), key=lambda x: x.stat().st_mtime, reverse=True)
+        if files:
+            return files[0]
+    return folder / preferred_name
+
+
+def ensure_report_available(folder: Path, center_key: str, year: int, preferred_name: str) -> Path:
+    """Ensure report exists locally; if missing, try to download from S3."""
+    folder.mkdir(parents=True, exist_ok=True)
+
+    # 1) local
+    local_best = resolve_existing_report(folder, preferred_name)
+    if local_best.exists():
+        return local_best
+
+    # 2) try S3 download (preferred, then report.xlsx)
+    candidates = [preferred_name]
+    if preferred_name.lower() != "report.xlsx":
+        candidates.append("report.xlsx")
+
+    for fn in candidates:
+        dest = folder / fn
+        if download_from_s3(dest, center_key, year, fn):
+            return dest
+
+    # nothing found
+    return folder / preferred_name
+
+
 # ====================== Small helpers ======================
 def mtime_token(p: Path) -> float:
     try:
@@ -414,6 +716,7 @@ def mtime_token(p: Path) -> float:
     except FileNotFoundError:
         return 0.0
 
+# --------- (rest of your script unchanged below) ---------
 
 def _run(cmd):
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -465,11 +768,18 @@ def get_report_bytes(path: str) -> bytes:
 
 @st.cache_data(show_spinner=True)
 def load_core_sheets(path: str, _token: float):
+    """Load the two core sheets efficiently.
+
+    Notes:
+    - Uses ExcelFile once to avoid reopening the workbook multiple times.
+    - _token (mtime) is included to invalidate cache when the file changes.
+    """
     ext = Path(path).suffix.lower()
     engine = "pyxlsb" if ext == ".xlsb" else "openpyxl"
     try:
-        df_ins = pd.read_excel(path, sheet_name=SHEET_INS_TOT, engine=engine)
-        df_sum = pd.read_excel(path, sheet_name=SHEET_SUMMARY, engine=engine)
+        xls = pd.ExcelFile(path, engine=engine)
+        df_ins = pd.read_excel(xls, sheet_name=SHEET_INS_TOT)
+        df_sum = pd.read_excel(xls, sheet_name=SHEET_SUMMARY)
         return df_ins, df_sum, [SHEET_INS_TOT, SHEET_SUMMARY]
     except Exception as e:
         try:
@@ -480,6 +790,7 @@ def load_core_sheets(path: str, _token: float):
             f"Required sheets not found or failed to load. "
             f"Available: {', '.join(names) if names else '(none)'}\nOriginal error: {e}"
         )
+
 
 
 def trim_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -546,8 +857,15 @@ def ksum(df: pd.DataFrame, *cands):
         if col in df.columns:
             return float(pd.to_numeric(df[col], errors="coerce").sum())
     return 0.0
+    
+def build_rejection_url(center, year):
+    return f"/Rejection_Analysis?center={center}&year={year}"
 
-
+# IMPORTANT: keep build_balance_url (nav=balance) defined earlier.
+# This helper is only for display/debug if you need a plain page URL.
+def build_balance_page_url(center, year):
+    return f"/Balance_Attempt_Aging?center={center}&year={year}"
+   
 def is_admin_mode() -> bool:
     secret_pwd = st.secrets.get("ADMIN_PASSWORD", "")
     if secret_pwd:
@@ -578,7 +896,8 @@ def load_center_kpis(center_key: str, year: int):
     if year not in YEARS:
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
-    outp = cfg0["folder_root"] / str(year) / cfg0["out_name"]
+    folder_y = cfg0["folder_root"] / str(year)
+    outp = ensure_report_available(folder_y, center_key, year, cfg0["out_name"])
     if not outp.exists():
         return year, 0.0, 0.0, 0.0, 0.0, 0.0
 
@@ -615,10 +934,32 @@ def load_center_kpis(center_key: str, year: int):
 
 
 # ====================== Header & routing ======================
-t1, t2 = st.columns([6, 2])
+t1, t2, t3, t4 = st.columns([5, 2, 2, 2])
 with t1:
     st.title("📊 Excellent Medical Group")
 with t2:
+    # ✅ Open External Daily Report (view page) in a NEW browser tab
+    yr = int(st.session_state.get("rcm_year") or st.session_state.get("year") or 2026)
+    ck = st.session_state.get("center_key") or st.query_params.get("center")
+    # Build URL with auto-passed center/year when available
+    params = []
+    if ck:
+        params.append(f"center={ck}")
+    params.append(f"year={yr}")
+    qp = ("?" + "&".join(params)) if params else ""
+    # ✅ Daily Report button opens this app link (with center/year)
+    base = DAILY_REPORT_BUTTON_BASE.rstrip("/")
+    # keep same params for deep-linking
+    daily_url = DAILY_REPORT_BUTTON_BASE
+
+    st.markdown(f'<a class="navlink" href="{daily_url}" target="_blank">📅 Daily Report</a>', unsafe_allow_html=True)
+with t3:
+    _auth = _make_auth_param()
+    _host = st.context.headers.get("host", "")
+    _proto = st.context.headers.get("x-forwarded-proto", "http")
+    summary_url = f"{_proto}://{_host}/Summary_Report?auth={_auth}" + (f"&center={ck}&year={yr}" if ck else f"&year={yr}")
+    st.markdown(f'<a class="navlink" href="{summary_url}" target="_blank">📋 Summary</a>', unsafe_allow_html=True)
+with t4:
     if st.button("⬅ Change Year", use_container_width=True, key="btn_change_year"):
         reset_year_selection()
 
@@ -651,7 +992,6 @@ st.caption(
     f"Center: **{st.session_state.get('center_key') or 'none'}** · "
     f"Year: **{st.session_state.get('year') or 'none'}**"
 )
-
 # ====================== ✅ HIDE EASYHEALTH IN 2024 (ONLY) ======================
 # Block direct access via URL or session state when year selection is 2024
 if st.session_state.get("rcm_year") == 2024:
@@ -674,6 +1014,105 @@ ck = st.session_state.get("center_key")
 if ck not in CENTERS:
     st.subheader("Choose a center")
 
+    sel_year = st.session_state.get("rcm_year")
+
+    # Load KPIs for all centers upfront (needed for donuts under buttons)
+    y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent", sel_year)
+    y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy",  sel_year)
+    if sel_year != 2024:
+        y_eh, net_eh, paid_eh, bal_eh, rej_eh, acc_eh = load_center_kpis("easyhealth", sel_year)
+    else:
+        y_eh = sel_year
+        net_eh = paid_eh = bal_eh = rej_eh = acc_eh = 0.0
+
+    # ── small donut helper ──────────────────────────────────────────
+    def render_mini_donut(net, paid, bal, rej, acc):
+        """Renders a small donut circle using components.html, matching KPI card colors."""
+        import math
+        total = paid + max(bal, 0) + max(rej, 0) + max(acc, 0)
+        if total <= 0:
+            total = 1
+
+        R = 54; SW = 14; CX = CY = 74
+        circ = 2 * math.pi * R
+
+        segments = [
+            (paid,       "#3DD9A0", "rgba(61,217,160,.55)"),
+            (max(bal,0), "#4F9EFF", "rgba(79,158,255,.55)"),
+            (max(rej,0), "#FF6B8A", "rgba(255,107,138,.55)"),
+            (max(acc,0), "#FFD166", "rgba(255,209,102,.55)"),
+        ]
+
+        def fmt_short(v):
+            av = abs(v)
+            if av >= 1_000_000: return f"{v/1_000_000:.2f}M"
+            if av >= 1_000:     return f"{v/1_000:.1f}K"
+            return f"{v:,.0f}"
+
+        arcs = ""
+        offset = 0.0
+        for val, color, glow in segments:
+            p = max(val, 0) / total
+            dash = p * circ
+            gap  = circ - dash
+            neg_off = -(offset * circ)
+            arcs += (
+                f'<circle cx="{CX}" cy="{CY}" r="{R}" fill="none" '
+                f'stroke="{color}" stroke-width="{SW}" '
+                f'stroke-dasharray="{dash:.4f} {gap:.4f}" '
+                f'stroke-dashoffset="{neg_off:.4f}" '
+                f'style="filter:drop-shadow(0 0 5px {glow});"/>'
+            )
+            offset += p
+
+        legend_items = list(zip(
+            ["Paid", "Balance", "Rejected", "Accepted"],
+            [paid, bal, rej, acc],
+            ["#3DD9A0", "#4F9EFF", "#FF6B8A", "#FFD166"],
+        ))
+        legend_html = "".join(
+            f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">'
+            f'<div style="width:10px;height:10px;border-radius:3px;background:{c};'
+            f'box-shadow:0 0 5px {c}88;flex-shrink:0;"></div>'
+            f'<span style="font-size:12px;color:#8A9BB5;flex:1;">{lbl}</span>'
+            f'<span style="font-size:13px;font-weight:700;color:#0D1B2E;">{fmt_short(v)}</span>'
+            f'</div>'
+            for lbl, v, c in legend_items
+        )
+
+        html = f"""
+        <div style="
+            display:flex;align-items:center;gap:22px;
+            background:rgba(255,255,255,0.65);
+            backdrop-filter:blur(10px);
+            border:1.5px solid rgba(197,216,245,0.6);
+            border-radius:18px;
+            padding:14px 18px;
+            box-shadow:0 4px 14px rgba(10,38,71,0.07);
+            margin-top:8px;
+            font-family:'Inter',sans-serif;
+        ">
+          <div style="position:relative;width:130px;height:130px;flex-shrink:0;">
+            <svg width="130" height="130" viewBox="0 0 148 148"
+                 style="transform:rotate(-90deg);display:block;">
+              <circle cx="{CX}" cy="{CY}" r="{R}" fill="none"
+                      stroke="rgba(10,38,71,0.07)" stroke-width="{SW}"/>
+              {arcs}
+            </svg>
+            <div style="position:absolute;inset:0;display:flex;flex-direction:column;
+                align-items:center;justify-content:center;text-align:center;pointer-events:none;">
+              <span style="font-size:9px;color:#8A9BB5;letter-spacing:.08em;text-transform:uppercase;margin-bottom:2px;">NET</span>
+              <span style="font-size:15px;font-weight:800;color:#0A2647;letter-spacing:-.5px;">{fmt_short(net)}</span>
+              <span style="font-size:9px;color:#8A9BB5;margin-top:1px;">AED</span>
+            </div>
+          </div>
+          <div style="flex:1;">{legend_html}</div>
+        </div>
+        """
+        components.html(html, height=165, scrolling=False)
+    # ── end helper ──────────────────────────────────────────────────
+
+    # Center buttons + donut under each
     c1, c2, c3 = st.columns(3)
 
     with c1:
@@ -681,12 +1120,14 @@ if ck not in CENTERS:
             st.session_state.center_key = "excellent"
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
+        render_mini_donut(net_exc, paid_exc, bal_exc, rej_exc, acc_exc)
 
     with c2:
         if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
             st.session_state.center_key = "pharmacy"
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
+        render_mini_donut(net_ph, paid_ph, bal_ph, rej_ph, acc_ph)
 
     with c3:
         # ✅ EasyHealth hidden in 2024 only
@@ -695,32 +1136,29 @@ if ck not in CENTERS:
                 st.session_state.center_key = "easyhealth"
                 st.session_state.year = st.session_state.get("rcm_year")
                 st.rerun()
+            render_mini_donut(net_eh, paid_eh, bal_eh, rej_eh, acc_eh)
 
     st.markdown("---")
     st.subheader("Key metrics (All centers)")
 
-    sel_year = st.session_state.get("rcm_year")
-
-    y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent", sel_year)
-    y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy", sel_year)
-
     st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
-    render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, BALANCE_ATTEMPT_URL)
+    render_kpi_cards(net_exc, paid_exc, bal_exc, rej_exc, acc_exc, build_balance_url("excellent", sel_year),
+                 rejection_url=build_rejection_url("excellent", sel_year))
     st.markdown("---")
 
     st.markdown('<h3 class="center-title">Excellent Pharmacy (PF3205)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_ph if y_ph is not None else '—'}**")
-    render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, BALANCE_ATTEMPT_URL)
+    render_kpi_cards(net_ph, paid_ph, bal_ph, rej_ph, acc_ph, build_balance_url("pharmacy", sel_year),
+                 rejection_url=build_rejection_url("pharmacy", sel_year))
     st.markdown("---")
 
     # ✅ EasyHealth KPI section hidden in 2024 only
     if st.session_state.get("rcm_year") != 2024:
-        y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth", sel_year)
-
         st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
         st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
-        render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, BALANCE_ATTEMPT_URL)
+        render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, build_balance_url("easyhealth", sel_year),
+                 rejection_url=build_rejection_url("easyhealth", sel_year))
 
     st.stop()
 
@@ -769,7 +1207,7 @@ folder = cfg["folder_root"] / str(st.session_state.get("year"))
 folder.mkdir(parents=True, exist_ok=True)
 
 src_path = resolve_source_path(folder, preferred=cfg["src_name"])
-out_path = folder / cfg["out_name"]
+out_path = ensure_report_available(folder, st.session_state.get("center_key"), st.session_state.get("year"), cfg["out_name"])
 gen_path = cfg["generator"]
 
 if (st.query_params.get("center") != st.session_state.get("center_key")) or \
@@ -869,9 +1307,24 @@ if st.session_state.get("is_admin"):
 
 token = mtime_token(out_path)
 if token == 0.0:
+    # ✅ NEEDFUL: If local report is missing (Streamlit Cloud redeploy/restart),
+    # try to pull it back from S3 (because you already uploaded it).
+    downloaded = download_from_s3(
+        out_path,
+        st.session_state.get("center_key"),
+        st.session_state.get("year"),
+        out_path.name,
+    )
+    if downloaded:
+        load_core_sheets.clear()
+        get_report_bytes.clear()
+        token = mtime_token(out_path)
+
+if token == 0.0:
     msg = f"Report not found for {cfg['name']} ({st.session_state.get('year')})."
     if st.session_state.get("is_admin"):
         msg += " (Upload source and click Rebuild.)"
+    msg += " (If you uploaded to S3, check your S3 secrets: bucket/prefix/region.)"
     st.warning(msg)
     st.stop()
 
@@ -918,7 +1371,9 @@ try:
     acc = ksum(totals_no_gt, "Accepted")
 
     st.markdown(f"### Key metrics — {st.session_state.get('year')}")
-    render_kpi_cards(net, paid, bal, rej, acc, BALANCE_ATTEMPT_URL)
+    render_kpi_cards(net, paid, bal, rej, acc,
+                 build_balance_url(st.session_state.get("center_key"), st.session_state.get("year")),
+                 rejection_url=build_rejection_url(st.session_state.get("center_key"), st.session_state.get("year")))
     st.markdown("---")
 
     tab_labels = [SHEET_INS_TOT, SHEET_SUMMARY]
@@ -1080,6 +1535,199 @@ try:
             key=f"dl_xlsx_full_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
         )
 
+        # ====================== MONTHLY BREAKDOWN (DOWNLOAD ONLY) ======================
+        st.markdown("---")
+        st.markdown("### 📅 Monthly Breakdown")
+
+        try:
+            _ext2 = Path(str(out_path)).suffix.lower()
+            _eng2 = "pyxlsb" if _ext2 == ".xlsb" else "openpyxl"
+
+            try:
+                _monthly = pd.read_excel(str(out_path), sheet_name="Monthly_Totals", engine=_eng2)
+                _monthly = trim_empty_rows(_monthly)
+            except Exception:
+                _monthly = None
+
+            try:
+                _mid = pd.read_excel(str(out_path), sheet_name="Monthly_Insurance_Detail", engine=_eng2)
+                _mid = trim_empty_rows(_mid)
+            except Exception:
+                _mid = None
+
+            if _monthly is None or _monthly.empty:
+                st.info("Monthly_Totals sheet not found. Please rebuild the report.")
+            else:
+                import io
+                from openpyxl import Workbook
+                from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+                from openpyxl.utils import get_column_letter
+
+                # Month color palette (one per month, soft colors)
+                _MONTH_COLORS = [
+                    "DDEEFF", "D5F5E3", "FFF3CD", "F9EBEA", "E8DAEF",
+                    "D6EAF8", "FDEBD0", "D0ECE7", "FDEDEC", "EBF5FB",
+                    "F4ECF7", "E8F8F5",
+                ]
+                _HEADER_COLOR  = "2E4057"   # dark navy
+                _GT_COLOR      = "FCE4D6"   # soft orange for Grand Total
+                _MONTH_HDR_CLR = "1A5276"   # deep blue for month header row
+
+                def _thin_border():
+                    s = Side(style="thin", color="BBBBBB")
+                    return Border(left=s, right=s, top=s, bottom=s)
+
+                def _col_widths(ws):
+                    for col in ws.columns:
+                        max_len = 0
+                        col_letter = get_column_letter(col[0].column)
+                        for cell in col:
+                            try:
+                                max_len = max(max_len, len(str(cell.value or "")))
+                            except Exception:
+                                pass
+                        ws.column_dimensions[col_letter].width = min(max_len + 4, 40)
+
+                wb = Workbook()
+
+                # ── Sheet 1: Monthly_Totals ──────────────────────────────
+                ws1 = wb.active
+                ws1.title = "Monthly_Totals"
+
+                # Sort months chronologically
+                _month_order = ["January","February","March","April","May","June",
+                                "July","August","September","October","November","December"]
+                def _month_sort_key(val):
+                    for i, m in enumerate(_month_order):
+                        if str(val).startswith(m):
+                            # extract year
+                            parts = str(val).split()
+                            yr = int(parts[1]) if len(parts) > 1 else 0
+                            return (yr, i)
+                    return (9999, 99)
+
+                _monthly_sorted = _monthly[_monthly.iloc[:,0] != "Grand Total"].copy()
+                _monthly_sorted = _monthly_sorted.sort_values(
+                    by=_monthly_sorted.columns[0],
+                    key=lambda s: s.map(_month_sort_key)
+                ).reset_index(drop=True)
+                _gt_row = _monthly[_monthly.iloc[:,0] == "Grand Total"]
+                _monthly_sorted = pd.concat([_monthly_sorted, _gt_row], ignore_index=True)
+
+                # Write header
+                headers1 = list(_monthly_sorted.columns)
+                for ci, h in enumerate(headers1, 1):
+                    cell = ws1.cell(row=1, column=ci, value=h)
+                    cell.fill = PatternFill("solid", fgColor=_HEADER_COLOR)
+                    cell.font = Font(bold=True, color="FFFFFF", size=11)
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                    cell.border = _thin_border()
+                ws1.row_dimensions[1].height = 22
+
+                # Write data rows
+                for ri, row in _monthly_sorted.iterrows():
+                    is_gt = str(row.iloc[0]) == "Grand Total"
+                    color = _GT_COLOR if is_gt else _MONTH_COLORS[ri % len(_MONTH_COLORS)]
+                    for ci, val in enumerate(row, 1):
+                        cell = ws1.cell(row=ri+2, column=ci, value=val)
+                        cell.fill = PatternFill("solid", fgColor=color)
+                        cell.font = Font(bold=is_gt, size=10)
+                        cell.alignment = Alignment(horizontal="right" if ci > 1 else "left", vertical="center")
+                        cell.border = _thin_border()
+                        if ci > 1 and not is_gt:
+                            try:
+                                cell.number_format = "#,##0.00"
+                            except Exception:
+                                pass
+                        if is_gt:
+                            cell.font = Font(bold=True, size=11, color="8B0000")
+
+                ws1.freeze_panes = "A2"
+                _col_widths(ws1)
+
+                # ── Sheet 2: Monthly_Insurance_Detail ───────────────────
+                if _mid is not None and not _mid.empty:
+                    ws2 = wb.create_sheet("Monthly_Insurance_Detail")
+
+                    # Sort months
+                    _all_months = sorted(
+                        _mid["Month"].dropna().unique().tolist(),
+                        key=_month_sort_key
+                    )
+
+                    # Write header row
+                    _detail_cols = list(_mid.columns)  # Month, Insurance, Net Amount, ...
+                    for ci, h in enumerate(_detail_cols, 1):
+                        cell = ws2.cell(row=1, column=ci, value=h)
+                        cell.fill = PatternFill("solid", fgColor=_HEADER_COLOR)
+                        cell.font = Font(bold=True, color="FFFFFF", size=11)
+                        cell.alignment = Alignment(horizontal="center", vertical="center")
+                        cell.border = _thin_border()
+                    ws2.row_dimensions[1].height = 22
+                    ws2.freeze_panes = "A2"
+
+                    cur_row = 2
+                    for m_idx, _mon in enumerate(_all_months):
+                        _df_mon = _mid[_mid["Month"] == _mon].drop(columns=["Month"]).copy()
+                        _color = _MONTH_COLORS[m_idx % len(_MONTH_COLORS)]
+                        _num_c = [c for c in _df_mon.columns if c != "Insurance"]
+
+                        # Grand total row
+                        _gt = {"Insurance": "Grand Total"}
+                        for _nc in _num_c:
+                            _gt[_nc] = pd.to_numeric(_df_mon[_nc], errors="coerce").sum()
+                        _df_mon = pd.concat([_df_mon, pd.DataFrame([_gt])], ignore_index=True)
+
+                        first_row_of_month = cur_row
+
+                        for r_idx, row in _df_mon.iterrows():
+                            is_gt = str(row.get("Insurance","")) == "Grand Total"
+                            row_color = _GT_COLOR if is_gt else _color
+
+                            # Col A: Month — only write on first data row, blank for rest
+                            month_val = _mon if r_idx == 0 else ""
+                            cell_a = ws2.cell(row=cur_row, column=1, value=month_val)
+                            cell_a.fill = PatternFill("solid", fgColor=row_color)
+                            cell_a.font = Font(bold=(r_idx == 0 or is_gt), size=10,
+                                               color=("1A5276" if r_idx == 0 else ("8B0000" if is_gt else "000000")))
+                            cell_a.alignment = Alignment(horizontal="left", vertical="center")
+                            cell_a.border = _thin_border()
+
+                            # Remaining cols
+                            row_vals = [row.get(c, "") for c in _df_mon.columns]
+                            for ci, val in enumerate(row_vals, 2):
+                                cell = ws2.cell(row=cur_row, column=ci, value=val)
+                                cell.fill = PatternFill("solid", fgColor=row_color)
+                                cell.font = Font(bold=is_gt, size=10,
+                                                 color=("8B0000" if is_gt else "000000"))
+                                cell.alignment = Alignment(horizontal="right" if ci > 2 else "left",
+                                                           vertical="center")
+                                cell.border = _thin_border()
+                                try:
+                                    cell.number_format = "#,##0.00"
+                                except Exception:
+                                    pass
+
+                            cur_row += 1
+
+                    _col_widths(ws2)
+
+                _buf = io.BytesIO()
+                wb.save(_buf)
+                _buf.seek(0)
+
+                st.download_button(
+                    "⬇️ Download Monthly Breakdown (Excel)",
+                    _buf.read(),
+                    file_name=f"{cfg['key']}_{st.session_state.get('year')}_monthly_breakdown.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key=f"dl_monthly_{st.session_state.get('center_key')}_{st.session_state.get('year')}",
+                )
+
+        except Exception as _me:
+            st.warning(f"Monthly breakdown could not be generated: {_me}")
+
 except Exception as e:
     try:
         ext = Path(str(out_path)).suffix.lower()
@@ -1088,4 +1736,12 @@ except Exception as e:
     except Exception:
         names = []
     st.error(f"{e}\n\nAvailable sheets: {', '.join(names) if names else '(none)'}")
+
+
+
+
+
+
+
+
 
