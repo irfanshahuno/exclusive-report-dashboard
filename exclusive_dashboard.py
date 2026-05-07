@@ -934,7 +934,7 @@ def load_center_kpis(center_key: str, year: int):
 
 
 # ====================== Header & routing ======================
-t1, t2, t3, t4 = st.columns([5, 2, 2, 2])
+t1, t2, t3 = st.columns([6, 2, 2])
 with t1:
     st.title("📊 Excellent Medical Group")
 with t2:
@@ -954,9 +954,6 @@ with t2:
 
     st.markdown(f'<a class="navlink" href="{daily_url}" target="_blank">📅 Daily Report</a>', unsafe_allow_html=True)
 with t3:
-    if st.button("📋 Summary", use_container_width=True, key="btn_summary_report"):
-        st.switch_page("pages/5_Summary_Report.py")
-with t4:
     if st.button("⬅ Change Year", use_container_width=True, key="btn_change_year"):
         reset_year_selection()
 
@@ -1011,105 +1008,6 @@ ck = st.session_state.get("center_key")
 if ck not in CENTERS:
     st.subheader("Choose a center")
 
-    sel_year = st.session_state.get("rcm_year")
-
-    # Load KPIs for all centers upfront (needed for donuts under buttons)
-    y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent", sel_year)
-    y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy",  sel_year)
-    if sel_year != 2024:
-        y_eh, net_eh, paid_eh, bal_eh, rej_eh, acc_eh = load_center_kpis("easyhealth", sel_year)
-    else:
-        y_eh = sel_year
-        net_eh = paid_eh = bal_eh = rej_eh = acc_eh = 0.0
-
-    # ── small donut helper ──────────────────────────────────────────
-    def render_mini_donut(net, paid, bal, rej, acc):
-        """Renders a small donut circle using components.html, matching KPI card colors."""
-        import math
-        total = paid + max(bal, 0) + max(rej, 0) + max(acc, 0)
-        if total <= 0:
-            total = 1
-
-        R = 54; SW = 14; CX = CY = 74
-        circ = 2 * math.pi * R
-
-        segments = [
-            (paid,       "#3DD9A0", "rgba(61,217,160,.55)"),
-            (max(bal,0), "#4F9EFF", "rgba(79,158,255,.55)"),
-            (max(rej,0), "#FF6B8A", "rgba(255,107,138,.55)"),
-            (max(acc,0), "#FFD166", "rgba(255,209,102,.55)"),
-        ]
-
-        def fmt_short(v):
-            av = abs(v)
-            if av >= 1_000_000: return f"{v/1_000_000:.2f}M"
-            if av >= 1_000:     return f"{v/1_000:.1f}K"
-            return f"{v:,.0f}"
-
-        arcs = ""
-        offset = 0.0
-        for val, color, glow in segments:
-            p = max(val, 0) / total
-            dash = p * circ
-            gap  = circ - dash
-            neg_off = -(offset * circ)
-            arcs += (
-                f'<circle cx="{CX}" cy="{CY}" r="{R}" fill="none" '
-                f'stroke="{color}" stroke-width="{SW}" '
-                f'stroke-dasharray="{dash:.4f} {gap:.4f}" '
-                f'stroke-dashoffset="{neg_off:.4f}" '
-                f'style="filter:drop-shadow(0 0 5px {glow});"/>'
-            )
-            offset += p
-
-        legend_items = list(zip(
-            ["Paid", "Balance", "Rejected", "Accepted"],
-            [paid, bal, rej, acc],
-            ["#3DD9A0", "#4F9EFF", "#FF6B8A", "#FFD166"],
-        ))
-        legend_html = "".join(
-            f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">'
-            f'<div style="width:10px;height:10px;border-radius:3px;background:{c};'
-            f'box-shadow:0 0 5px {c}88;flex-shrink:0;"></div>'
-            f'<span style="font-size:12px;color:#8A9BB5;flex:1;">{lbl}</span>'
-            f'<span style="font-size:13px;font-weight:700;color:#0D1B2E;">{fmt_short(v)}</span>'
-            f'</div>'
-            for lbl, v, c in legend_items
-        )
-
-        html = f"""
-        <div style="
-            display:flex;align-items:center;gap:22px;
-            background:rgba(255,255,255,0.65);
-            backdrop-filter:blur(10px);
-            border:1.5px solid rgba(197,216,245,0.6);
-            border-radius:18px;
-            padding:14px 18px;
-            box-shadow:0 4px 14px rgba(10,38,71,0.07);
-            margin-top:8px;
-            font-family:'Inter',sans-serif;
-        ">
-          <div style="position:relative;width:130px;height:130px;flex-shrink:0;">
-            <svg width="130" height="130" viewBox="0 0 148 148"
-                 style="transform:rotate(-90deg);display:block;">
-              <circle cx="{CX}" cy="{CY}" r="{R}" fill="none"
-                      stroke="rgba(10,38,71,0.07)" stroke-width="{SW}"/>
-              {arcs}
-            </svg>
-            <div style="position:absolute;inset:0;display:flex;flex-direction:column;
-                align-items:center;justify-content:center;text-align:center;pointer-events:none;">
-              <span style="font-size:9px;color:#8A9BB5;letter-spacing:.08em;text-transform:uppercase;margin-bottom:2px;">NET</span>
-              <span style="font-size:15px;font-weight:800;color:#0A2647;letter-spacing:-.5px;">{fmt_short(net)}</span>
-              <span style="font-size:9px;color:#8A9BB5;margin-top:1px;">AED</span>
-            </div>
-          </div>
-          <div style="flex:1;">{legend_html}</div>
-        </div>
-        """
-        components.html(html, height=165, scrolling=False)
-    # ── end helper ──────────────────────────────────────────────────
-
-    # Center buttons + donut under each
     c1, c2, c3 = st.columns(3)
 
     with c1:
@@ -1117,14 +1015,12 @@ if ck not in CENTERS:
             st.session_state.center_key = "excellent"
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
-        render_mini_donut(net_exc, paid_exc, bal_exc, rej_exc, acc_exc)
 
     with c2:
         if st.container(border=True).button(CENTERS["pharmacy"]["name"], use_container_width=True, key="home_pharm"):
             st.session_state.center_key = "pharmacy"
             st.session_state.year = st.session_state.get("rcm_year")
             st.rerun()
-        render_mini_donut(net_ph, paid_ph, bal_ph, rej_ph, acc_ph)
 
     with c3:
         # ✅ EasyHealth hidden in 2024 only
@@ -1133,10 +1029,14 @@ if ck not in CENTERS:
                 st.session_state.center_key = "easyhealth"
                 st.session_state.year = st.session_state.get("rcm_year")
                 st.rerun()
-            render_mini_donut(net_eh, paid_eh, bal_eh, rej_eh, acc_eh)
 
     st.markdown("---")
     st.subheader("Key metrics (All centers)")
+
+    sel_year = st.session_state.get("rcm_year")
+
+    y_exc, net_exc, paid_exc, bal_exc, rej_exc, acc_exc = load_center_kpis("excellent", sel_year)
+    y_ph,  net_ph,  paid_ph,  bal_ph,  rej_ph,  acc_ph  = load_center_kpis("pharmacy", sel_year)
 
     st.markdown('<h3 class="center-title">Excellent Medical Center (MF4777)</h3>', unsafe_allow_html=True)
     st.caption(f"Year: **{y_exc if y_exc is not None else '—'}**")
@@ -1152,6 +1052,8 @@ if ck not in CENTERS:
 
     # ✅ EasyHealth KPI section hidden in 2024 only
     if st.session_state.get("rcm_year") != 2024:
+        y_eh,  net_eh,  paid_eh,  bal_eh,  rej_eh,  acc_eh  = load_center_kpis("easyhealth", sel_year)
+
         st.markdown('<h3 class="center-title">Easy Health Medical Clinic (MF8031)</h3>', unsafe_allow_html=True)
         st.caption(f"Year: **{y_eh if y_eh is not None else '—'}**")
         render_kpi_cards(net_eh, paid_eh, bal_eh, rej_eh, acc_eh, build_balance_url("easyhealth", sel_year),
