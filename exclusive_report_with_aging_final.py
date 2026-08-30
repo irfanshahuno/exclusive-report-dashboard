@@ -9,7 +9,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # =========================================
 # Toggle: write the raw "Exclusive_Report" sheet?
 # =========================================
-WRITE_EXCLUSIVE_SHEET = False
+WRITE_EXCLUSIVE_SHEET = True
 
 # -------------------- helpers --------------------
 def sha1_short(path: str) -> str:
@@ -39,14 +39,15 @@ def parse_args():
 # -------------------- ETL parts --------------------
 def load_data(input_file: str) -> pd.DataFrame:
     df = pd.read_excel(input_file, engine="openpyxl")
-    df.columns = df.columns.str.strip()
+    # Source exports contain leading/trailing and sometimes non-breaking spaces.
+    df.columns = [str(c).replace("\xa0", " ").strip() for c in df.columns]
     return df
 
 def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
     num_cols = [
         "ActivityIns",
         "actRemitInsShare", "actResub1RemitInsShare",
-        "actResub2RemitInsShare", "actResub3RemitInsShare",
+        "actResub2RemitInsShare", "actResub3RemitInsShare", "actResub4RemitInsShare",
         "TKBKAmountAct",
     ]
     for c in num_cols:
@@ -56,51 +57,58 @@ def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def compute_measures(df: pd.DataFrame) -> pd.DataFrame:
-    # STEP 1 — Paid = sum of all remit columns + TakeBack
-    df["Paid"] = df[[
-        "actRemitInsShare", "actResub1RemitInsShare",
-        "actResub2RemitInsShare", "actResub3RemitInsShare",
-        "TKBKAmountAct"
-    ]].sum(axis=1)
+    # Status is normalized only for matching; the original Status column is unchanged.
+    status = df.get("Status", pd.Series("", index=df.index)).fillna("").astype(str)
+    status = status.str.replace(r"\s+", "", regex=True).str.lower()
 
-    # STEP 2 — Initialise columns
-    df["Rejection"]    = 0.0
-    df["Accepted"]     = 0.0
-    df["UnderProcess"] = 0.0   # renamed from Balance
+    # Approved resubmission amounts are moved to their own columns.
+    # They remain included in Paid exactly once.
+    for n in range(1, 5):
+        source = f"actResub{n}RemitInsShare"
+        target = f"Resub{n} Approved"
+        df[target] = 0.0
+        approved_mask = status.eq(f"approved(resub-{n})")
+        df.loc[approved_mask, target] = df.loc[approved_mask, source]
+        df.loc[approved_mask, source] = 0.0
 
-    # STEP 3 — UnderProcess = Net Amount - Paid  (change #3)
-    df["UnderProcess"] = df["ActivityIns"] - df["Paid"]
+    # Paid = all available remit columns + TKBKAmountAct.
+    # This includes Resub1–Resub4 Approved once through their dedicated columns.
+    paid_sources = ["actRemitInsShare", "TKBKAmountAct"] + [f"actResub{n}RemitInsShare" for n in range(1, 5)]
+    paid_approved = [f"Resub{n} Approved" for n in range(1, 5)]
+    df["Paid"] = df[paid_sources + paid_approved].sum(axis=1)
 
-    # STEP 4 — Rows with any DenialCode → shift UnderProcess to Rejection  (change #4)
-    if "DenialCode" in df.columns:
-        has_denial = df["DenialCode"].notna() & (df["DenialCode"].astype(str).str.strip() != "")
-        df.loc[has_denial, "Rejection"]    = df.loc[has_denial, "UnderProcess"]
-        df.loc[has_denial, "UnderProcess"] = 0.0
+    # ActivityIns is the agreed Net Amount. ABS keeps Under Process positive.
+    df["UnderProcess"] = (df["ActivityIns"] - df["Paid"]).abs()
 
-    # STEP 5 — Specific denial codes COPY-001 / PRCE-001 → shift Rejection to Accepted  (change #5)
-    if "DenialCode" in df.columns:
-        accepted_codes = ["COPY-001", "PRCE-001"]
-        is_accepted_code = df["DenialCode"].astype(str).str.strip().isin(accepted_codes)
-        df.loc[is_accepted_code, "Accepted"]  = df.loc[is_accepted_code, "Rejection"]
-        df.loc[is_accepted_code, "Rejection"] = 0.0
+    for c in ["Rejection", "Resub1 Rejection", "Resub2 Rejection", "Resub3 Rejection",
+              "Accepted", "Resub1 Accepted", "Resub2 Accepted"]:
+        df[c] = 0.0
 
-    # STEP 6 — ActivityStatus = "Submitted" → move Rejection to UnderProcess  (change #6)
-    # If UnderProcess is 0 → shift Rejection value to UnderProcess
-    # If UnderProcess already has a value → just clear Rejection
-    if "ActivityStatus" in df.columns:
-        is_submitted = df["ActivityStatus"].astype(str).str.strip().str.lower() == "submitted"
-        has_rejection = df["Rejection"] != 0
+    # Initial rejection: Status must be Rejected AND DenialCode must contain a value.
+    denial = df.get("DenialCode", pd.Series("", index=df.index)).fillna("").astype(str).str.strip()
+    initial_rejected = status.eq("rejected") & denial.ne("")
+    df.loc[initial_rejected, "Rejection"] = df.loc[initial_rejected, "UnderProcess"]
+    df.loc[initial_rejected, "UnderProcess"] = 0.0
 
-        submitted_with_rejection = is_submitted & has_rejection
+    # Resubmission rejections: move the value out of Under Process into the matching stage.
+    for n in range(1, 4):
+        rejected_mask = status.eq(f"rejected(resub-{n})")
+        target = f"Resub{n} Rejection"
+        df.loc[rejected_mask, target] = df.loc[rejected_mask, "UnderProcess"]
+        df.loc[rejected_mask, "UnderProcess"] = 0.0
 
-        # Sub-case A: UnderProcess is 0 → move Rejection value into UnderProcess
-        move_mask = submitted_with_rejection & (df["UnderProcess"] == 0)
-        df.loc[move_mask, "UnderProcess"] = df.loc[move_mask, "Rejection"]
-        df.loc[move_mask, "Rejection"]    = 0.0
+    # Rejection Accepted statuses are reported separately and removed from Under Process.
+    for status_value, target in {
+        "rejectionaccepted": "Accepted",
+        "rejectionaccepted(resub-1)": "Resub1 Accepted",
+        "rejectionaccepted(resub-2)": "Resub2 Accepted",
+    }.items():
+        accepted_mask = status.eq(status_value)
+        df.loc[accepted_mask, target] = df.loc[accepted_mask, "UnderProcess"]
+        df.loc[accepted_mask, "UnderProcess"] = 0.0
 
-        # Sub-case B: UnderProcess already has value → just clear Rejection
-        clear_mask = submitted_with_rejection & (df["UnderProcess"] != 0)
-        df.loc[clear_mask, "Rejection"] = 0.0
+    df["Rejection"] = df[["Rejection", "Resub1 Rejection", "Resub2 Rejection", "Resub3 Rejection"]].sum(axis=1)
+    df["Accepted"] = df[["Accepted", "Resub1 Accepted", "Resub2 Accepted"]].sum(axis=1)
 
     return df
 
@@ -168,6 +176,25 @@ def build_insurance_totals(df: pd.DataFrame) -> pd.DataFrame:
     insurance_totals = pd.concat([insurance_totals, pd.DataFrame([total_row])], ignore_index=True)
     return insurance_totals
 
+def build_denial_code_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """Rejection count and amount by the applicable denial-code stage."""
+    rows = []
+    mapping = [("DenialCode", "Rejection")] + [(f"DenialCode{n}", f"Resub{n} Rejection") for n in range(1, 4)]
+    for code_col, amount_col in mapping:
+        if code_col not in df.columns:
+            continue
+        part = df.loc[df[amount_col] > 0, [code_col, amount_col]].copy()
+        part[code_col] = part[code_col].fillna("").astype(str).str.strip()
+        part = part.loc[part[code_col].ne("")]
+        part = part.rename(columns={code_col: "Denial Code", amount_col: "Rejected Amount"})
+        rows.append(part)
+    if not rows:
+        return pd.DataFrame(columns=["Denial Code", "Rejection Count", "Rejected Amount"])
+    detail = pd.concat(rows, ignore_index=True)
+    return (detail.groupby("Denial Code", as_index=False)
+            .agg(**{"Rejection Count": ("Rejected Amount", "size"), "Rejected Amount": ("Rejected Amount", "sum")})
+            .sort_values(["Rejected Amount", "Rejection Count"], ascending=False))
+
 # -------------------- styling --------------------
 HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
 TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
@@ -218,11 +245,13 @@ def main():
     balance_df    = df.loc[df["UnderProcess"] > 0].copy()
     pivot_summary = build_balance_aging_summary(balance_df)
     insurance_totals = build_insurance_totals(df)
+    denial_summary = build_denial_code_summary(df)
 
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
         if WRITE_EXCLUSIVE_SHEET:
             df.to_excel(writer, sheet_name="Exclusive_Report", index=False)
         insurance_totals.to_excel(writer, sheet_name="Insurance_Totals", index=False)
+        denial_summary.to_excel(writer, sheet_name="Denial_Code_Summary", index=False)
         pivot_summary.to_excel(writer, sheet_name="Balance_Aging_Summary", index=False)
         balance_df.to_excel(writer, sheet_name="Balance_Aging_Detail", index=False)
         meta = pd.DataFrame([{
