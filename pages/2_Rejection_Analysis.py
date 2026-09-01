@@ -205,28 +205,94 @@ def delete_file_from_s3(bucket: str, key: str) -> None:
 def sha1_short_bytes(b: bytes) -> str:
     return hashlib.sha1(b).hexdigest()[:12]
 
+def normalize_source_schema(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Normalize old and new billing-software exports into one internal schema.
+
+    Old export:
+      ActivityStatus + DenialCode + calculated remit paid fields
+
+    New export:
+      CurrentActivityStatus / InitialActivityStatus / Resub status columns
+      + FinalDenialCode + FinalPaidAmount + FinalBalance
+    """
+    info = {
+        "format": "old",
+        "status_source": "ActivityStatus",
+        "denial_source": "DenialCode",
+        "paid_source": "legacy remit fields",
+        "amount_source": "ActivityIns",
+    }
+
+    # Status: the new software renamed ActivityStatus to CurrentActivityStatus
+    # and added historical stage-specific status columns.
+    if "ActivityStatus" not in df.columns and "CurrentActivityStatus" in df.columns:
+        df["ActivityStatus"] = df["CurrentActivityStatus"]
+        info["format"] = "new"
+        info["status_source"] = "CurrentActivityStatus"
+    elif "ActivityStatus" not in df.columns:
+        df["ActivityStatus"] = ""
+        info["status_source"] = "missing"
+
+    # Denial code: for the new export prefer the final/current denial code,
+    # but fall back to the original DenialCode when FinalDenialCode is blank.
+    if "FinalDenialCode" in df.columns:
+        info["format"] = "new"
+        base = df["DenialCode"] if "DenialCode" in df.columns else ""
+        final_code = df["FinalDenialCode"].astype(str).fillna("").str.strip()
+        final_code = final_code.mask(final_code.str.lower().isin(["nan", "none", "null"]), "")
+        if isinstance(base, pd.Series):
+            base = base.astype(str).fillna("").str.strip()
+            base = base.mask(base.str.lower().isin(["nan", "none", "null"]), "")
+            df["DenialCode"] = final_code.where(final_code.ne(""), base)
+        else:
+            df["DenialCode"] = final_code
+        info["denial_source"] = "FinalDenialCode (fallback DenialCode)"
+
+    if "FinalPaidAmount" in df.columns:
+        info["format"] = "new"
+        info["paid_source"] = "FinalPaidAmount"
+    if "FinalBalance" in df.columns:
+        info["format"] = "new"
+        info["amount_source"] = "FinalBalance (fallback ActivityIns)"
+
+    return df, info
+
+
 def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
-    num_cols = [
+    required_num_cols = [
         "ActivityIns",
         "actRemitInsShare", "actResub1RemitInsShare",
         "actResub2RemitInsShare", "actResub3RemitInsShare",
         "TKBKAmountAct",
     ]
-    for c in num_cols:
+    for c in required_num_cols:
         if c not in df.columns:
             df[c] = 0
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    # New-export numeric fields are optional; do not create them for old files,
+    # because their presence is used to detect which calculation method to use.
+    for c in ["FinalPaidAmount", "FinalBalance"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
     return df
 
+
 def compute_paid(df: pd.DataFrame) -> pd.DataFrame:
-    df["Paid"] = df[
-        [
-            "actRemitInsShare", "actResub1RemitInsShare",
-            "actResub2RemitInsShare", "actResub3RemitInsShare",
-            "TKBKAmountAct",
-        ]
-    ].sum(axis=1)
+    # New billing-software export already provides the final paid amount.
+    if "FinalPaidAmount" in df.columns:
+        df["Paid"] = pd.to_numeric(df["FinalPaidAmount"], errors="coerce").fillna(0)
+    else:
+        # Backward-compatible calculation for the old export.
+        df["Paid"] = df[
+            [
+                "actRemitInsShare", "actResub1RemitInsShare",
+                "actResub2RemitInsShare", "actResub3RemitInsShare",
+                "TKBKAmountAct",
+            ]
+        ].sum(axis=1)
     return df
+
 
 def ensure_insurance_column(df: pd.DataFrame) -> pd.DataFrame:
     insurance_col = next(
@@ -241,8 +307,13 @@ def ensure_insurance_column(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[df["Insurance"].eq(""), "Insurance"] = "Not Available"
     return df
 
+
 def add_refdate_and_aging(df: pd.DataFrame) -> pd.DataFrame:
-    date_candidates = [c for c in ["SubmissionDate", "ClaimDate", "VisitDate"] if c in df.columns]
+    # Both supplied exports use SubDate. Keep legacy alternatives as fallbacks.
+    date_candidates = [
+        c for c in ["SubDate", "SubmissionDate", "ClaimDate", "VisitDate"]
+        if c in df.columns
+    ]
     if date_candidates:
         for c in date_candidates:
             df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
@@ -258,6 +329,7 @@ def add_refdate_and_aging(df: pd.DataFrame) -> pd.DataFrame:
     df["AgingBucket"] = pd.cut(df["DaysDiff"], bins=bins, labels=labels)
     return df
 
+
 def normalize_denial_code(df: pd.DataFrame) -> pd.DataFrame:
     if "DenialCode" not in df.columns:
         df["DenialCode"] = ""
@@ -265,13 +337,21 @@ def normalize_denial_code(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[df["DenialCode"].str.lower().isin(["nan", "none", "null"]), "DenialCode"] = ""
     return df
 
+
 def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
-    if "ActivityStatus" not in df.columns:
-        return df.iloc[0:0].copy()
     status = df["ActivityStatus"].astype(str).fillna("").str.strip().str.lower()
     mask = (df["Paid"] == 0) & (status == "rejected") & (df["DenialCode"] != "")
     rej = df.loc[mask].copy()
-    rej["RejectedAmount"] = rej["ActivityIns"]
+
+    # New export: FinalBalance represents what remains unpaid after all stages.
+    # Old export: preserve the original ActivityIns logic.
+    if "FinalBalance" in rej.columns:
+        final_balance = pd.to_numeric(rej["FinalBalance"], errors="coerce").fillna(0)
+        activity_ins = pd.to_numeric(rej["ActivityIns"], errors="coerce").fillna(0)
+        rej["RejectedAmount"] = final_balance.where(final_balance > 0, activity_ins)
+    else:
+        rej["RejectedAmount"] = rej["ActivityIns"]
+
     rej["RejectedCount"] = 1
     return rej
 
@@ -381,6 +461,8 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
     df = pd.read_excel(io.BytesIO(input_bytes), engine="openpyxl")
     df.columns = df.columns.str.strip()
 
+    # Normalize old/new billing-software column layouts before analysis.
+    df, source_info = normalize_source_schema(df)
     df = ensure_numeric(df)
     df = compute_paid(df)
     df = normalize_denial_code(df)
@@ -402,13 +484,22 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         [{"Insurance": "Grand Total", "Grand Total": 0.0}]
     )
 
-    stats = {"rejected_rows": int(len(rejected_df)), "sha1": sha1_short_bytes(input_bytes)}
+    stats = {
+        "rejected_rows": int(len(rejected_df)),
+        "sha1": sha1_short_bytes(input_bytes),
+        "source_format": source_info["format"],
+    }
 
     meta = pd.DataFrame([{
         "InputFile": input_name,
         "InputSHA1": stats["sha1"],
         "GeneratedAt": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "RejectedRule": "Paid==0 AND lower(ActivityStatus)=='rejected' AND DenialCode not empty",
+        "SourceFormat": source_info["format"],
+        "StatusSource": source_info["status_source"],
+        "DenialSource": source_info["denial_source"],
+        "PaidSource": source_info["paid_source"],
+        "RejectedAmountSource": source_info["amount_source"],
+        "RejectedRule": "Paid==0 AND current ActivityStatus=='rejected' AND final/current DenialCode not empty",
         "RejectedRows": int(len(rejected_df)),
     }])
 
@@ -455,19 +546,31 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
 
     PREVIEW_ROWS = 2000
     detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
-    wanted_cols = ["Insurance", "DenialCode", "ActivityStatus", "ActivityIns", "Paid", "AgingBucket", "DaysDiff", "RefDate"]
+    wanted_cols = [
+        "Insurance", "DenialCode", "FinalDenialCode",
+        "ActivityStatus", "CurrentActivityStatus", "InitialActivityStatus",
+        "ActivityIns", "FinalPaidAmount", "FinalBalance", "Paid",
+        "AgingBucket", "DaysDiff", "RefDate"
+    ]
     usecols = [c for c in wanted_cols if c in detail_header]
     df_preview = pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=PREVIEW_ROWS)
 
     rejected_rows = 0
+    source_format = "unknown"
     try:
         df_meta = pd.read_excel(xls, sheet_name="Meta")
         if "RejectedRows" in df_meta.columns and len(df_meta):
             rejected_rows = int(pd.to_numeric(df_meta.loc[0, "RejectedRows"], errors="coerce") or 0)
+        if "SourceFormat" in df_meta.columns and len(df_meta):
+            source_format = str(df_meta.loc[0, "SourceFormat"])
     except Exception:
         rejected_rows = 0
 
-    stats = {"sha1": sha1_short_bytes(xlsx_bytes), "rejected_rows": rejected_rows}
+    stats = {
+        "sha1": sha1_short_bytes(xlsx_bytes),
+        "rejected_rows": rejected_rows,
+        "source_format": source_format,
+    }
 
     return {
         "center": center,
@@ -488,7 +591,7 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
 # =========================================
 def run_rejection_app():
     st.markdown("## Rejection Analysis")
-    st.caption("Rule: Paid==0 AND ActivityStatus=='rejected' AND DenialCode not empty")
+    st.caption("Supports old + new billing exports automatically. Rule: final paid = 0 + current status = rejected + denial code present")
 
     # --- session init ---
     if "rej_result" not in st.session_state:
@@ -552,6 +655,44 @@ def run_rejection_app():
         st.write("**Source**")
         st.code(f"s3://{S3_BUCKET}/{s3_key}", language="text")
 
+        # ✅ Direct upload from Rejection Analysis page
+        st.write("**Upload / Replace Source File**")
+        uploaded_source = st.file_uploader(
+            "Upload Excel file",
+            type=["xlsx"],
+            key=f"rej_source_upload_{center}_{year}",
+            help="Uploads this workbook directly as the source file for the selected center/year.",
+        )
+
+        if uploaded_source is not None:
+            uploaded_bytes = uploaded_source.getvalue()
+            upload_hash = sha1_short_bytes(uploaded_bytes)
+            upload_state_key = f"rej_last_upload_hash_{center}_{year}"
+
+            # Process only once per newly selected file, even after Streamlit reruns.
+            if st.session_state.get(upload_state_key) != upload_hash:
+                try:
+                    with st.spinner("Uploading source and rebuilding rejection analysis..."):
+                        # Save/replace source workbook in the same S3 location used by Generate.
+                        save_file_to_s3(S3_BUCKET, s3_key, uploaded_bytes)
+
+                        # A new source invalidates the previous cached rejection workbook.
+                        delete_file_from_s3(S3_BUCKET, rej_cache_key)
+
+                        # Build immediately so the user does not need a separate Generate click.
+                        out_xlsx_bytes, _stats = build_rejection_workbook_bytes(
+                            uploaded_bytes, uploaded_source.name
+                        )
+                        save_file_to_s3(S3_BUCKET, rej_cache_key, out_xlsx_bytes)
+                        st.session_state.rej_result = load_result_from_workbook_bytes(
+                            out_xlsx_bytes, center, year, s3_key
+                        )
+                        st.session_state[upload_state_key] = upload_hash
+
+                    st.success(f"Uploaded and analyzed: {uploaded_source.name} ✅")
+                except Exception as e:
+                    st.error(f"Could not process uploaded file: {e}")
+
         # ✅ Auto-load saved result from S3 (so it stays until you upload new file or click Generate)
         if st.session_state.rej_result is None and s3_exists(S3_BUCKET, rej_cache_key):
             try:
@@ -575,7 +716,7 @@ def run_rejection_app():
 
         if generate:
             if not s3_exists(S3_BUCKET, s3_key):
-                st.error("Source file not found in S3. Upload from dashboard first.")
+                st.error("Source file not found in S3. Upload an Excel file above first.")
                 st.stop()
 
             with st.spinner("Building rejection analysis..."):
@@ -620,7 +761,11 @@ def run_rejection_app():
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        _card("Rejected Rows", f"{int(stats.get('rejected_rows', 0)):,}", "Paid=0 + Status=rejected + DenialCode not empty")
+        _card(
+            "Rejected Rows",
+            f"{int(stats.get('rejected_rows', 0)):,}",
+            f"Paid=0 + current status=rejected • format: {stats.get('source_format', 'unknown')}"
+        )
     with c2:
         _card("Total Rejected Amount", _fmt_aed(total_amount), "All insurers (excluding Grand Total row)")
     with c3:
