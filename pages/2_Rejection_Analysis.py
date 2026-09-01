@@ -352,34 +352,84 @@ def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
     else:
         rej["RejectedAmount"] = rej["ActivityIns"]
 
-    rej["RejectedCount"] = 1
+    # Keep every rejected activity row for amount/detail analysis.
+    # Claim counting is handled separately using UniqueID, so multiple
+    # activities belonging to the same claim are counted only once.
     return rej
 
+def _unique_claim_count(series: pd.Series) -> int:
+    """Count unique claim IDs without changing any amount calculation.
+
+    Blank/missing UniqueID values are counted row-by-row instead of being
+    collapsed into one claim, so we never undercount because of missing IDs.
+    """
+    s = series.astype("string").str.strip()
+    valid = s.notna() & (~s.str.lower().isin(["", "nan", "none", "null", "<na>"]))
+    return int(s[valid].nunique(dropna=True) + (~valid).sum())
+
 def pivot_by_insurance(rej: pd.DataFrame) -> pd.DataFrame:
-    out = (
-        rej.groupby("Insurance", dropna=False)[["RejectedAmount", "RejectedCount"]]
-          .sum()
-          .reset_index()
-          .sort_values("RejectedAmount", ascending=False)
-    )
+    # IMPORTANT: RejectedAmount remains the SUM of all rejected activities.
+    # Only RejectedCount is deduplicated by claim UniqueID.
+    if "UniqueID" in rej.columns:
+        out = (
+            rej.groupby("Insurance", dropna=False)
+               .agg(
+                   RejectedAmount=("RejectedAmount", "sum"),
+                   RejectedCount=("UniqueID", _unique_claim_count),
+               )
+               .reset_index()
+               .sort_values("RejectedAmount", ascending=False)
+        )
+        grand_count = _unique_claim_count(rej["UniqueID"])
+    else:
+        # Fallback for an unexpected export without UniqueID.
+        out = (
+            rej.groupby("Insurance", dropna=False)
+               .agg(
+                   RejectedAmount=("RejectedAmount", "sum"),
+                   RejectedCount=("RejectedAmount", "size"),
+               )
+               .reset_index()
+               .sort_values("RejectedAmount", ascending=False)
+        )
+        grand_count = int(len(rej))
+
     total_row = {
         "Insurance": "Grand Total",
         "RejectedAmount": out["RejectedAmount"].sum(),
-        "RejectedCount": int(out["RejectedCount"].sum()),
+        "RejectedCount": grand_count,
     }
     return pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
 
 def pivot_by_denialcode(rej: pd.DataFrame) -> pd.DataFrame:
-    out = (
-        rej.groupby("DenialCode", dropna=False)[["RejectedAmount", "RejectedCount"]]
-          .sum()
-          .reset_index()
-          .sort_values("RejectedAmount", ascending=False)
-    )
+    # Same principle here: amounts are untouched; claim count is UniqueID-based.
+    if "UniqueID" in rej.columns:
+        out = (
+            rej.groupby("DenialCode", dropna=False)
+               .agg(
+                   RejectedAmount=("RejectedAmount", "sum"),
+                   RejectedCount=("UniqueID", _unique_claim_count),
+               )
+               .reset_index()
+               .sort_values("RejectedAmount", ascending=False)
+        )
+        grand_count = _unique_claim_count(rej["UniqueID"])
+    else:
+        out = (
+            rej.groupby("DenialCode", dropna=False)
+               .agg(
+                   RejectedAmount=("RejectedAmount", "sum"),
+                   RejectedCount=("RejectedAmount", "size"),
+               )
+               .reset_index()
+               .sort_values("RejectedAmount", ascending=False)
+        )
+        grand_count = int(len(rej))
+
     total_row = {
         "DenialCode": "Grand Total",
         "RejectedAmount": out["RejectedAmount"].sum(),
-        "RejectedCount": int(out["RejectedCount"].sum()),
+        "RejectedCount": grand_count,
     }
     return pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
 
@@ -757,7 +807,7 @@ def run_rejection_app():
     # ===== KPIs =====
     df_by_ins_nogt = df_by_ins[df_by_ins["Insurance"] != "Grand Total"].copy()
     total_amount = float(pd.to_numeric(df_by_ins_nogt["RejectedAmount"], errors="coerce").fillna(0).sum())
-    total_claims = int(pd.to_numeric(df_by_ins_nogt["RejectedCount"], errors="coerce").fillna(0).sum())
+    total_claims = int(pd.to_numeric(df_by_ins.loc[df_by_ins["Insurance"] == "Grand Total", "RejectedCount"], errors="coerce").fillna(0).iloc[0]) if (df_by_ins["Insurance"] == "Grand Total").any() else int(pd.to_numeric(df_by_ins_nogt["RejectedCount"], errors="coerce").fillna(0).sum())
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -769,7 +819,7 @@ def run_rejection_app():
     with c2:
         _card("Total Rejected Amount", _fmt_aed(total_amount), "All insurers (excluding Grand Total row)")
     with c3:
-        _card("Total Rejected Claims", f"{total_claims:,}", "Count of rejected activities")
+        _card("Total Rejected Claims", f"{total_claims:,}", "Unique rejected claims by UniqueID")
 
     # ===== Top 3 Insurance =====
     st.markdown("### Top 3 Insurances by Rejected Amount")
