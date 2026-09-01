@@ -464,6 +464,147 @@ def pivot_rejection_aging(rej: pd.DataFrame) -> pd.DataFrame:
     pv.reset_index(inplace=True)
     return pv
 
+
+# =========================================
+# REJECTION RECOVERY / RESUBMISSION TRACKER
+# =========================================
+def build_recovery_detail(df: pd.DataFrame) -> pd.DataFrame:
+    """Track activities that were rejected earlier and show where they are now.
+
+    The new billing export provides InitialActivityStatus and CurrentActivityStatus,
+    which lets us trace an activity from its original rejection to its current state.
+    Amounts stay at activity level; claim counts are deduplicated by UniqueID.
+    """
+    if "InitialActivityStatus" not in df.columns:
+        return pd.DataFrame()
+
+    initial_status = df["InitialActivityStatus"].astype(str).fillna("").str.strip().str.lower()
+    hist = df.loc[initial_status.eq("rejected")].copy()
+    if hist.empty:
+        return hist
+
+    current_col = "CurrentActivityStatus" if "CurrentActivityStatus" in hist.columns else "ActivityStatus"
+    hist["CurrentStatus"] = hist[current_col].astype(str).fillna("").str.strip()
+
+    activity_amount = pd.to_numeric(hist.get("ActivityIns", 0), errors="coerce").fillna(0)
+    if "FinalPaidAmount" in hist.columns:
+        final_paid = pd.to_numeric(hist["FinalPaidAmount"], errors="coerce").fillna(0)
+    else:
+        final_paid = pd.to_numeric(hist.get("Paid", 0), errors="coerce").fillna(0)
+
+    if "FinalBalance" in hist.columns:
+        final_balance = pd.to_numeric(hist["FinalBalance"], errors="coerce").fillna(0)
+    else:
+        final_balance = (activity_amount - final_paid).clip(lower=0)
+
+    hist["OriginalRejectedAmount"] = activity_amount
+    hist["RecoveredAmount"] = final_paid.clip(lower=0)
+    hist["OutstandingAmount"] = final_balance.clip(lower=0)
+
+    # We keep the current operational status visible, while RecoveryBucket gives
+    # management-friendly categories for tracing rejected -> resubmitted/recovered.
+    cur = hist["CurrentStatus"].astype(str).str.strip().str.lower()
+    paid = hist["RecoveredAmount"]
+    bal = hist["OutstandingAmount"]
+
+    def classify(row):
+        c = str(row["CurrentStatus"]).strip().lower()
+        p = float(row["RecoveredAmount"] or 0)
+        b = float(row["OutstandingAmount"] or 0)
+        if p > 0 and b <= 0:
+            return "Recovered"
+        if p > 0 and b > 0:
+            return "Partially Recovered"
+        if c == "submitted":
+            return "Resubmitted / Pending"
+        if c == "rejected":
+            return "Still Rejected"
+        if c in ["not submitted", ""]:
+            return "Not Resubmitted"
+        return "Other"
+
+    hist["RecoveryBucket"] = hist.apply(classify, axis=1)
+
+    # Show the latest/final denial code when available.
+    if "FinalDenialCode" in hist.columns:
+        final_code = hist["FinalDenialCode"].astype(str).fillna("").str.strip()
+        base_code = hist["DenialCode"].astype(str).fillna("").str.strip() if "DenialCode" in hist.columns else ""
+        if isinstance(base_code, pd.Series):
+            hist["RecoveryDenialCode"] = final_code.where(~final_code.str.lower().isin(["", "nan", "none", "null"]), base_code)
+        else:
+            hist["RecoveryDenialCode"] = final_code
+    elif "DenialCode" in hist.columns:
+        hist["RecoveryDenialCode"] = hist["DenialCode"]
+    else:
+        hist["RecoveryDenialCode"] = ""
+
+    return hist
+
+
+def build_recovery_summary(recovery: pd.DataFrame) -> pd.DataFrame:
+    cols = [
+        "RecoveryBucket", "OriginalRejectedAmount", "RecoveredAmount",
+        "OutstandingAmount", "ActivityRows", "UniqueClaims"
+    ]
+    if recovery.empty:
+        return pd.DataFrame(columns=cols)
+
+    rows = []
+    for bucket, g in recovery.groupby("RecoveryBucket", dropna=False):
+        rows.append({
+            "RecoveryBucket": bucket,
+            "OriginalRejectedAmount": pd.to_numeric(g["OriginalRejectedAmount"], errors="coerce").fillna(0).sum(),
+            "RecoveredAmount": pd.to_numeric(g["RecoveredAmount"], errors="coerce").fillna(0).sum(),
+            "OutstandingAmount": pd.to_numeric(g["OutstandingAmount"], errors="coerce").fillna(0).sum(),
+            "ActivityRows": int(len(g)),
+            "UniqueClaims": _unique_claim_count(g["UniqueID"]) if "UniqueID" in g.columns else int(len(g)),
+        })
+    out = pd.DataFrame(rows).sort_values("OriginalRejectedAmount", ascending=False)
+    total = {
+        "RecoveryBucket": "Grand Total",
+        "OriginalRejectedAmount": out["OriginalRejectedAmount"].sum(),
+        "RecoveredAmount": out["RecoveredAmount"].sum(),
+        "OutstandingAmount": out["OutstandingAmount"].sum(),
+        "ActivityRows": int(out["ActivityRows"].sum()),
+        "UniqueClaims": _unique_claim_count(recovery["UniqueID"]) if "UniqueID" in recovery.columns else int(len(recovery)),
+    }
+    return pd.concat([out, pd.DataFrame([total])], ignore_index=True)
+
+
+def build_recovery_by_insurance(recovery: pd.DataFrame) -> pd.DataFrame:
+    cols = [
+        "Insurance", "OriginalRejectedAmount", "RecoveredAmount",
+        "OutstandingAmount", "UniqueClaims", "RecoveryRatePct"
+    ]
+    if recovery.empty:
+        return pd.DataFrame(columns=cols)
+
+    rows = []
+    for insurance, g in recovery.groupby("Insurance", dropna=False):
+        orig = pd.to_numeric(g["OriginalRejectedAmount"], errors="coerce").fillna(0).sum()
+        rec = pd.to_numeric(g["RecoveredAmount"], errors="coerce").fillna(0).sum()
+        outst = pd.to_numeric(g["OutstandingAmount"], errors="coerce").fillna(0).sum()
+        rows.append({
+            "Insurance": insurance,
+            "OriginalRejectedAmount": orig,
+            "RecoveredAmount": rec,
+            "OutstandingAmount": outst,
+            "UniqueClaims": _unique_claim_count(g["UniqueID"]) if "UniqueID" in g.columns else int(len(g)),
+            "RecoveryRatePct": (rec / orig * 100) if orig > 0 else 0,
+        })
+    out = pd.DataFrame(rows).sort_values("OriginalRejectedAmount", ascending=False)
+    orig = out["OriginalRejectedAmount"].sum()
+    rec = out["RecoveredAmount"].sum()
+    total = {
+        "Insurance": "Grand Total",
+        "OriginalRejectedAmount": orig,
+        "RecoveredAmount": rec,
+        "OutstandingAmount": out["OutstandingAmount"].sum(),
+        "UniqueClaims": _unique_claim_count(recovery["UniqueID"]) if "UniqueID" in recovery.columns else int(len(recovery)),
+        "RecoveryRatePct": (rec / orig * 100) if orig > 0 else 0,
+    }
+    return pd.concat([out, pd.DataFrame([total])], ignore_index=True)
+
 # -------------------- excel styling --------------------
 HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
 TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
@@ -499,6 +640,8 @@ def apply_styling_to_bytes(xlsx_bytes: bytes) -> bytes:
             "Rejected_By_DenialCode",
             "Rejected_Ins_x_DenialCode",
             "Rejected_Aging_Summary",
+            "Recovery_Summary",
+            "Recovery_By_Insurance",
         ]:
             highlight_grand_total_rows(ws, label_col=1, label_value="Grand Total")
             if ws.title in ["Rejected_Ins_x_DenialCode", "Rejected_Aging_Summary"]:
@@ -534,10 +677,18 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         [{"Insurance": "Grand Total", "Grand Total": 0.0}]
     )
 
+    # Historical recovery analysis is available in the new export where
+    # InitialActivityStatus / CurrentActivityStatus are present.
+    recovery_detail = build_recovery_detail(df)
+    recovery_summary = build_recovery_summary(recovery_detail)
+    recovery_by_insurance = build_recovery_by_insurance(recovery_detail)
+
     stats = {
         "rejected_rows": int(len(rejected_df)),
         "sha1": sha1_short_bytes(input_bytes),
         "source_format": source_info["format"],
+        "recovery_rows": int(len(recovery_detail)),
+        "recovery_available": bool(not recovery_detail.empty),
     }
 
     meta = pd.DataFrame([{
@@ -551,6 +702,9 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         "RejectedAmountSource": source_info["amount_source"],
         "RejectedRule": "Paid==0 AND current ActivityStatus=='rejected' AND final/current DenialCode not empty",
         "RejectedRows": int(len(rejected_df)),
+        "RecoveryTrackingAvailable": bool(not recovery_detail.empty),
+        "HistoricalRejectedRows": int(len(recovery_detail)),
+        "RecoveryRule": "InitialActivityStatus='Rejected'; amounts at activity level; claim counts by UniqueID",
     }])
 
     out_buf = io.BytesIO()
@@ -560,6 +714,9 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         ins_x_code.to_excel(writer, sheet_name="Rejected_Ins_x_DenialCode", index=False)
         aging_sum.to_excel(writer, sheet_name="Rejected_Aging_Summary", index=False)
         rejected_df.to_excel(writer, sheet_name="Rejected_Detail", index=False)
+        recovery_summary.to_excel(writer, sheet_name="Recovery_Summary", index=False)
+        recovery_by_insurance.to_excel(writer, sheet_name="Recovery_By_Insurance", index=False)
+        recovery_detail.to_excel(writer, sheet_name="Recovery_Detail", index=False)
         meta.to_excel(writer, sheet_name="Meta", index=False)
 
     styled = apply_styling_to_bytes(out_buf.getvalue())
@@ -594,10 +751,29 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
     df_ins_x_code = pd.read_excel(xls, sheet_name="Rejected_Ins_x_DenialCode")
     df_aging = pd.read_excel(xls, sheet_name="Rejected_Aging_Summary")
 
+    try:
+        df_recovery_summary = pd.read_excel(xls, sheet_name="Recovery_Summary")
+        df_recovery_by_insurance = pd.read_excel(xls, sheet_name="Recovery_By_Insurance")
+        recovery_header = pd.read_excel(xls, sheet_name="Recovery_Detail", nrows=0).columns.tolist()
+        recovery_preview_cols = [c for c in [
+            "UniqueID", "Insurance", "VisitNo", "VisitDate", "Code", "Description",
+            "InitialActivityStatus", "CurrentStatus", "RecoveryBucket", "RecoveryDenialCode",
+            "OriginalRejectedAmount", "RecoveredAmount", "OutstandingAmount",
+            "Resub1ActivityStatus", "Resub2ActivityStatus", "Resub3ActivityStatus",
+            "Resub1Date", "Resub2Date", "Resub3Date"
+        ] if c in recovery_header]
+        df_recovery_preview = pd.read_excel(
+            xls, sheet_name="Recovery_Detail", usecols=recovery_preview_cols, nrows=2000
+        )
+    except Exception:
+        df_recovery_summary = pd.DataFrame()
+        df_recovery_by_insurance = pd.DataFrame()
+        df_recovery_preview = pd.DataFrame()
+
     PREVIEW_ROWS = 2000
     detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
     wanted_cols = [
-        "Insurance", "DenialCode", "FinalDenialCode",
+        "UniqueID", "Insurance", "DenialCode", "FinalDenialCode",
         "ActivityStatus", "CurrentActivityStatus", "InitialActivityStatus",
         "ActivityIns", "FinalPaidAmount", "FinalBalance", "Paid",
         "AgingBucket", "DaysDiff", "RefDate"
@@ -632,6 +808,9 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
         "df_by_code": df_by_code,
         "df_ins_x_code": df_ins_x_code,
         "df_aging": df_aging,
+        "df_recovery_summary": df_recovery_summary,
+        "df_recovery_by_insurance": df_recovery_by_insurance,
+        "df_recovery_preview": df_recovery_preview,
         "df_preview": df_preview,
         "preview_rows": PREVIEW_ROWS,
     }
@@ -794,6 +973,9 @@ def run_rejection_app():
     df_by_code = R["df_by_code"]
     df_ins_x_code = R["df_ins_x_code"]
     df_aging = R["df_aging"]
+    df_recovery_summary = R.get("df_recovery_summary", pd.DataFrame())
+    df_recovery_by_insurance = R.get("df_recovery_by_insurance", pd.DataFrame())
+    df_recovery_preview = R.get("df_recovery_preview", pd.DataFrame())
     df_preview = R["df_preview"]
     PREVIEW_ROWS = R["preview_rows"]
 
@@ -877,6 +1059,90 @@ def run_rejection_app():
             st.dataframe(tmp, use_container_width=True)
         else:
             st.info("No amounts found for this denial code.")
+
+    st.divider()
+
+    # ===== Recovery & Resubmission Analysis =====
+    st.markdown("## Recovery & Resubmission Analysis")
+    st.caption(
+        "Tracks activities that were initially rejected and shows their current position. "
+        "Amounts remain activity-level; claim counts use distinct UniqueID."
+    )
+
+    if df_recovery_summary.empty:
+        st.info(
+            "Historical rejection tracking is not available in this export. "
+            "Upload the new billing export containing InitialActivityStatus and CurrentActivityStatus."
+        )
+    else:
+        rs = df_recovery_summary[df_recovery_summary["RecoveryBucket"] != "Grand Total"].copy()
+        gt = df_recovery_summary[df_recovery_summary["RecoveryBucket"] == "Grand Total"].copy()
+
+        original_rejected = float(pd.to_numeric(gt["OriginalRejectedAmount"], errors="coerce").fillna(0).iloc[0]) if len(gt) else 0.0
+        recovered_amount = float(pd.to_numeric(gt["RecoveredAmount"], errors="coerce").fillna(0).iloc[0]) if len(gt) else 0.0
+        outstanding_amount = float(pd.to_numeric(gt["OutstandingAmount"], errors="coerce").fillna(0).iloc[0]) if len(gt) else 0.0
+        historical_claims = int(pd.to_numeric(gt["UniqueClaims"], errors="coerce").fillna(0).iloc[0]) if len(gt) else 0
+        recovery_rate = (recovered_amount / original_rejected * 100) if original_rejected > 0 else 0.0
+
+        pending_amount = float(pd.to_numeric(
+            rs.loc[rs["RecoveryBucket"] == "Resubmitted / Pending", "OutstandingAmount"],
+            errors="coerce"
+        ).fillna(0).sum())
+        still_rejected_amount = float(pd.to_numeric(
+            rs.loc[rs["RecoveryBucket"] == "Still Rejected", "OutstandingAmount"],
+            errors="coerce"
+        ).fillna(0).sum())
+
+        rc1, rc2, rc3, rc4 = st.columns(4)
+        with rc1:
+            _card("Historical Rejected", _fmt_aed(original_rejected), f"{historical_claims:,} unique claims")
+        with rc2:
+            _card("Recovered / Paid", _fmt_aed(recovered_amount), f"Recovery rate {recovery_rate:.1f}%")
+        with rc3:
+            _card("Resubmitted / Pending", _fmt_aed(pending_amount), "Outstanding amount currently submitted")
+        with rc4:
+            _card("Still Rejected", _fmt_aed(still_rejected_amount), "Outstanding amount still rejected")
+
+        st.markdown("### Recovery Status Summary")
+        st.dataframe(df_recovery_summary, use_container_width=True)
+
+        st.markdown("### Recovery by Insurance")
+        st.dataframe(df_recovery_by_insurance, use_container_width=True)
+
+        st.markdown("### Trace Rejected → Current Status")
+        if not df_recovery_preview.empty:
+            ins_options = sorted([
+                str(x) for x in df_recovery_preview.get("Insurance", pd.Series(dtype=str)).dropna().unique()
+                if str(x).strip()
+            ])
+            bucket_options = sorted([
+                str(x) for x in df_recovery_preview.get("RecoveryBucket", pd.Series(dtype=str)).dropna().unique()
+                if str(x).strip()
+            ])
+
+            rf1, rf2, rf3 = st.columns([1, 1, 1])
+            with rf1:
+                rec_ins = st.selectbox("Recovery Insurance", ["All"] + ins_options, key="recovery_insurance_filter")
+            with rf2:
+                rec_bucket = st.selectbox("Recovery Status", ["All"] + bucket_options, key="recovery_bucket_filter")
+            with rf3:
+                rec_claim = st.text_input("UniqueID contains", key="recovery_uniqueid_filter")
+
+            rec_filt = df_recovery_preview.copy()
+            if rec_ins != "All" and "Insurance" in rec_filt.columns:
+                rec_filt = rec_filt[rec_filt["Insurance"].astype(str) == rec_ins]
+            if rec_bucket != "All" and "RecoveryBucket" in rec_filt.columns:
+                rec_filt = rec_filt[rec_filt["RecoveryBucket"].astype(str) == rec_bucket]
+            if rec_claim.strip() and "UniqueID" in rec_filt.columns:
+                rec_filt = rec_filt[
+                    rec_filt["UniqueID"].astype(str).str.contains(rec_claim.strip(), case=False, na=False)
+                ]
+
+            st.dataframe(rec_filt, use_container_width=True)
+            st.caption(
+                "Tip: choose 'Resubmitted / Pending' to see claims that were rejected before but are now submitted. "
+                "Use UniqueID to trace the exact claim."
+            )
 
     st.divider()
 
