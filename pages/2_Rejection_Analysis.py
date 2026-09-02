@@ -4,6 +4,7 @@ import boto3
 from botocore.exceptions import ClientError
 import io
 import hashlib
+import re
 from datetime import datetime as dt
 
 import pandas as pd
@@ -206,57 +207,53 @@ def sha1_short_bytes(b: bytes) -> str:
     return hashlib.sha1(b).hexdigest()[:12]
 
 def normalize_source_schema(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """Normalize old and new billing-software exports into one internal schema.
+    """Normalize old/new billing-software exports into one internal schema.
 
-    Old export:
-      ActivityStatus + DenialCode + calculated remit paid fields
-
-    New export:
-      CurrentActivityStatus / InitialActivityStatus / Resub status columns
-      + FinalDenialCode + FinalPaidAmount + FinalBalance
+    IMPORTANT analytical rules used by this dashboard:
+      - FinalPaidAmount is NOT used.
+      - FinalBalance is NOT used to calculate rejection.
+      - Initial rejection amount is calculated from ActivityIns - actRemitInsShare.
+      - Original DenialCode is preferred for rejection analysis; FinalDenialCode is only a fallback.
     """
     info = {
         "format": "old",
         "status_source": "ActivityStatus",
         "denial_source": "DenialCode",
-        "paid_source": "legacy remit fields",
-        "amount_source": "ActivityIns",
+        "paid_source": "remit/resub fields + TKBK override",
+        "amount_source": "ActivityIns - actRemitInsShare",
     }
 
-    # Status: the new software renamed ActivityStatus to CurrentActivityStatus
-    # and added historical stage-specific status columns.
+    # New software renamed ActivityStatus to CurrentActivityStatus.
     if "ActivityStatus" not in df.columns and "CurrentActivityStatus" in df.columns:
         df["ActivityStatus"] = df["CurrentActivityStatus"]
         info["format"] = "new"
         info["status_source"] = "CurrentActivityStatus"
+    elif "ActivityStatus" not in df.columns and "Status" in df.columns:
+        df["ActivityStatus"] = df["Status"]
+        info["status_source"] = "Status"
     elif "ActivityStatus" not in df.columns:
         df["ActivityStatus"] = ""
         info["status_source"] = "missing"
 
-    # Denial code: for the new export prefer the final/current denial code,
-    # but fall back to the original DenialCode when FinalDenialCode is blank.
+    # Keep the ORIGINAL denial code for initial rejection analysis.
+    # Use FinalDenialCode only when the original DenialCode is blank.
     if "FinalDenialCode" in df.columns:
         info["format"] = "new"
-        base = df["DenialCode"] if "DenialCode" in df.columns else ""
         final_code = df["FinalDenialCode"].astype(str).fillna("").str.strip()
         final_code = final_code.mask(final_code.str.lower().isin(["nan", "none", "null"]), "")
-        if isinstance(base, pd.Series):
-            base = base.astype(str).fillna("").str.strip()
+        if "DenialCode" in df.columns:
+            base = df["DenialCode"].astype(str).fillna("").str.strip()
             base = base.mask(base.str.lower().isin(["nan", "none", "null"]), "")
-            df["DenialCode"] = final_code.where(final_code.ne(""), base)
+            df["DenialCode"] = base.where(base.ne(""), final_code)
+            info["denial_source"] = "DenialCode (fallback FinalDenialCode)"
         else:
             df["DenialCode"] = final_code
-        info["denial_source"] = "FinalDenialCode (fallback DenialCode)"
+            info["denial_source"] = "FinalDenialCode fallback"
 
-    if "FinalPaidAmount" in df.columns:
+    if "FinalPaidAmount" in df.columns or "FinalBalance" in df.columns:
         info["format"] = "new"
-        info["paid_source"] = "FinalPaidAmount"
-    if "FinalBalance" in df.columns:
-        info["format"] = "new"
-        info["amount_source"] = "FinalBalance (fallback ActivityIns)"
 
     return df, info
-
 
 def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
     required_num_cols = [
@@ -278,21 +275,96 @@ def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _distinct_positive_sum(values) -> float:
+    """Sum positive amounts once; exact duplicate amounts are counted only once."""
+    seen = set()
+    total = 0.0
+    for value in values:
+        try:
+            v = float(value)
+        except Exception:
+            v = 0.0
+        if v <= 0:
+            continue
+        # Currency-safe key so 21.4 and 21.40 are treated as the same amount.
+        key = round(v, 2)
+        if key not in seen:
+            seen.add(key)
+            total += v
+    return total
+
+
 def compute_paid(df: pd.DataFrame) -> pd.DataFrame:
-    # New billing-software export already provides the final paid amount.
-    if "FinalPaidAmount" in df.columns:
-        df["Paid"] = pd.to_numeric(df["FinalPaidAmount"], errors="coerce").fillna(0)
-    else:
-        # Backward-compatible calculation for the old export.
-        df["Paid"] = df[
-            [
-                "actRemitInsShare", "actResub1RemitInsShare",
-                "actResub2RemitInsShare", "actResub3RemitInsShare",
-                "TKBKAmountAct",
-            ]
-        ].sum(axis=1)
+    """Calculate Paid without using FinalPaidAmount.
+
+    Normal calculation:
+      initial remit + distinct positive resub remit amounts.
+
+    Special TKBK rule supplied by the user:
+      when TKBKAmountAct contains a non-zero amount, it OVERRIDES the calculated
+      paid amount and Paid becomes ABS(TKBKAmountAct) exactly.
+    """
+    initial = pd.to_numeric(df["actRemitInsShare"], errors="coerce").fillna(0)
+
+    def calc_row(row):
+        takeback = float(row.get("TKBKAmountAct", 0) or 0)
+        if takeback != 0:
+            return abs(takeback)
+        resub_total = _distinct_positive_sum([
+            row.get("actResub1RemitInsShare", 0),
+            row.get("actResub2RemitInsShare", 0),
+            row.get("actResub3RemitInsShare", 0),
+        ])
+        return max(float(row.get("actRemitInsShare", 0) or 0), 0) + resub_total
+
+    df["Paid"] = df.apply(calc_row, axis=1)
+    df["InitialPaid"] = initial.clip(lower=0)
     return df
 
+
+def _status_parts(value) -> tuple[str, int]:
+    """Return (base_status, resub_stage). Stage 0 means no Resub suffix."""
+    s = str(value or "").strip().lower()
+    s = " ".join(s.split())
+    m = re.match(r"^(approved|rejected|rejection accepted|submitted|not submitted)\s*\(\s*resub\s*-\s*([123])\s*\)\s*$", s)
+    if m:
+        return m.group(1), int(m.group(2))
+    if s in {"rejected", "rejection accepted"}:
+        return s, 0
+    return s, 0
+
+
+def _is_initial_rejection_status(value) -> bool:
+    """Exact analytical status logic agreed with the user."""
+    base, stage = _status_parts(value)
+    if base in {"rejected", "rejection accepted"}:
+        return True
+    if stage >= 1 and base in {"approved", "submitted", "not submitted"}:
+        return True
+    return False
+
+
+def _recovery_from_resub_fields(row, stage: int) -> float:
+    """Recovery after rejection from resub remit fields.
+
+    Resub-1 -> actResub1RemitInsShare
+    Resub-2 -> Resub1 + Resub2, but duplicate equal amounts count once
+    Resub-3 -> Resub1 + Resub2 + Resub3, duplicate equal amounts count once
+    TKBKAmountAct rule -> if present/non-zero, use its absolute exact value instead.
+    """
+    takeback = float(row.get("TKBKAmountAct", 0) or 0)
+    if takeback != 0:
+        return abs(takeback)
+    if stage <= 0:
+        return 0.0
+    vals = []
+    if stage >= 1:
+        vals.append(row.get("actResub1RemitInsShare", 0))
+    if stage >= 2:
+        vals.append(row.get("actResub2RemitInsShare", 0))
+    if stage >= 3:
+        vals.append(row.get("actResub3RemitInsShare", 0))
+    return _distinct_positive_sum(vals)
 
 def ensure_insurance_column(df: pd.DataFrame) -> pd.DataFrame:
     insurance_col = next(
@@ -339,22 +411,30 @@ def normalize_denial_code(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
-    status = df["ActivityStatus"].astype(str).fillna("").str.strip().str.lower()
-    mask = (df["Paid"] == 0) & (status == "rejected") & (df["DenialCode"] != "")
-    rej = df.loc[mask].copy()
+    """Build the INITIAL rejection population from the agreed Status values.
 
-    # New export: FinalBalance represents what remains unpaid after all stages.
-    # Old export: preserve the original ActivityIns logic.
-    if "FinalBalance" in rej.columns:
-        final_balance = pd.to_numeric(rej["FinalBalance"], errors="coerce").fillna(0)
-        activity_ins = pd.to_numeric(rej["ActivityIns"], errors="coerce").fillna(0)
-        rej["RejectedAmount"] = final_balance.where(final_balance > 0, activity_ins)
-    else:
-        rej["RejectedAmount"] = rej["ActivityIns"]
+    RejectedAmount is analytical and always:
+        ActivityIns - actRemitInsShare
+
+    It does NOT depend on final/current payment status, FinalPaidAmount or FinalBalance.
+    """
+    status_mask = df["ActivityStatus"].apply(_is_initial_rejection_status)
+    rej = df.loc[status_mask].copy()
+
+    activity_ins = pd.to_numeric(rej["ActivityIns"], errors="coerce").fillna(0)
+    initial_paid = pd.to_numeric(rej["actRemitInsShare"], errors="coerce").fillna(0)
+    rej["RejectedAmount"] = (activity_ins - initial_paid).clip(lower=0).round(2)
+
+    # Status journey fields used throughout the dashboard.
+    parts = rej["ActivityStatus"].apply(_status_parts)
+    rej["StatusBase"] = parts.apply(lambda x: x[0].title())
+    rej["ResubStage"] = parts.apply(lambda x: x[1])
+
+    # Remove rows where the analytical rejection amount is zero.
+    rej = rej.loc[rej["RejectedAmount"] > 0].copy()
 
     # Keep every rejected activity row for amount/detail analysis.
-    # Claim counting is handled separately using UniqueID, so multiple
-    # activities belonging to the same claim are counted only once.
+    # Claim counting remains deduplicated separately by UniqueID.
     return rej
 
 def _unique_claim_count(series: pd.Series) -> int:
@@ -469,74 +549,57 @@ def pivot_rejection_aging(rej: pd.DataFrame) -> pd.DataFrame:
 # REJECTION RECOVERY / RESUBMISSION TRACKER
 # =========================================
 def build_recovery_detail(df: pd.DataFrame) -> pd.DataFrame:
-    """Track activities that were rejected earlier and show where they are now.
-
-    The new billing export provides InitialActivityStatus and CurrentActivityStatus,
-    which lets us trace an activity from its original rejection to its current state.
-    Amounts stay at activity level; claim counts are deduplicated by UniqueID.
-    """
-    if "InitialActivityStatus" not in df.columns:
-        return pd.DataFrame()
-
-    initial_status = df["InitialActivityStatus"].astype(str).fillna("").str.strip().str.lower()
-    hist = df.loc[initial_status.eq("rejected")].copy()
+    """Trace the full rejection -> resubmission -> outcome journey from ActivityStatus."""
+    hist = build_rejected_df(df)
     if hist.empty:
         return hist
 
-    current_col = "CurrentActivityStatus" if "CurrentActivityStatus" in hist.columns else "ActivityStatus"
-    hist["CurrentStatus"] = hist[current_col].astype(str).fillna("").str.strip()
+    hist["CurrentStatus"] = hist["ActivityStatus"].astype(str).fillna("").str.strip()
 
-    activity_amount = pd.to_numeric(hist.get("ActivityIns", 0), errors="coerce").fillna(0)
-    if "FinalPaidAmount" in hist.columns:
-        final_paid = pd.to_numeric(hist["FinalPaidAmount"], errors="coerce").fillna(0)
-    else:
-        final_paid = pd.to_numeric(hist.get("Paid", 0), errors="coerce").fillna(0)
+    # Initial rejection is always ActivityIns - original remit.
+    hist["OriginalRejectedAmount"] = pd.to_numeric(hist["RejectedAmount"], errors="coerce").fillna(0)
 
-    if "FinalBalance" in hist.columns:
-        final_balance = pd.to_numeric(hist["FinalBalance"], errors="coerce").fillna(0)
-    else:
-        final_balance = (activity_amount - final_paid).clip(lower=0)
+    # Recovery means additional amount recovered AFTER the initial rejection.
+    hist["RecoveredAmount"] = hist.apply(
+        lambda r: _recovery_from_resub_fields(r, int(r.get("ResubStage", 0) or 0)), axis=1
+    )
 
-    hist["OriginalRejectedAmount"] = activity_amount
-    hist["RecoveredAmount"] = final_paid.clip(lower=0)
-    hist["OutstandingAmount"] = final_balance.clip(lower=0)
+    # Never show recovery above the originally rejected amount for analytical KPIs.
+    hist["RecoveredAmount"] = hist[["RecoveredAmount", "OriginalRejectedAmount"]].min(axis=1).clip(lower=0).round(2)
+    hist["OutstandingAmount"] = (
+        hist["OriginalRejectedAmount"] - hist["RecoveredAmount"]
+    ).clip(lower=0).round(2)
 
-    # We keep the current operational status visible, while RecoveryBucket gives
-    # management-friendly categories for tracing rejected -> resubmitted/recovered.
-    cur = hist["CurrentStatus"].astype(str).str.strip().str.lower()
-    paid = hist["RecoveredAmount"]
-    bal = hist["OutstandingAmount"]
+    # Cumulative resubmission exposure: a Resub-2 row has passed through Resub-1 and Resub-2.
+    hist["Resub1Amount"] = hist.apply(
+        lambda r: r["OriginalRejectedAmount"] if int(r.get("ResubStage", 0) or 0) >= 1 else 0.0, axis=1
+    )
+    hist["Resub2Amount"] = hist.apply(
+        lambda r: r["OriginalRejectedAmount"] if int(r.get("ResubStage", 0) or 0) >= 2 else 0.0, axis=1
+    )
+    hist["Resub3Amount"] = hist.apply(
+        lambda r: r["OriginalRejectedAmount"] if int(r.get("ResubStage", 0) or 0) >= 3 else 0.0, axis=1
+    )
 
     def classify(row):
-        c = str(row["CurrentStatus"]).strip().lower()
-        p = float(row["RecoveredAmount"] or 0)
-        b = float(row["OutstandingAmount"] or 0)
-        if p > 0 and b <= 0:
-            return "Recovered"
-        if p > 0 and b > 0:
-            return "Partially Recovered"
-        if c == "submitted":
-            return "Resubmitted / Pending"
-        if c == "rejected":
-            return "Still Rejected"
-        if c in ["not submitted", ""]:
-            return "Not Resubmitted"
+        base = str(row.get("StatusBase", "")).strip().lower()
+        stage = int(row.get("ResubStage", 0) or 0)
+        if base == "approved" and stage >= 1:
+            return f"Approved (Resub-{stage})"
+        if base == "submitted" and stage >= 1:
+            return f"Submitted / Pending (Resub-{stage})"
+        if base == "rejected":
+            return "Initially Rejected" if stage == 0 else f"Still Rejected (Resub-{stage})"
+        if base == "rejection accepted":
+            return "Rejection Accepted" if stage == 0 else f"Rejection Accepted (Resub-{stage})"
+        if base == "not submitted" and stage >= 1:
+            return f"Not Submitted (Resub-{stage})"
         return "Other"
 
     hist["RecoveryBucket"] = hist.apply(classify, axis=1)
 
-    # Show the latest/final denial code when available.
-    if "FinalDenialCode" in hist.columns:
-        final_code = hist["FinalDenialCode"].astype(str).fillna("").str.strip()
-        base_code = hist["DenialCode"].astype(str).fillna("").str.strip() if "DenialCode" in hist.columns else ""
-        if isinstance(base_code, pd.Series):
-            hist["RecoveryDenialCode"] = final_code.where(~final_code.str.lower().isin(["", "nan", "none", "null"]), base_code)
-        else:
-            hist["RecoveryDenialCode"] = final_code
-    elif "DenialCode" in hist.columns:
-        hist["RecoveryDenialCode"] = hist["DenialCode"]
-    else:
-        hist["RecoveryDenialCode"] = ""
+    # Keep all denial codes. Original DenialCode is preferred; FinalDenialCode is visible separately.
+    hist["RecoveryDenialCode"] = hist.get("DenialCode", "")
 
     return hist
 
@@ -605,6 +668,26 @@ def build_recovery_by_insurance(recovery: pd.DataFrame) -> pd.DataFrame:
     }
     return pd.concat([out, pd.DataFrame([total])], ignore_index=True)
 
+
+def build_resub_stage_summary(recovery: pd.DataFrame) -> pd.DataFrame:
+    """Management view of how much initial rejection reached each resubmission stage."""
+    rows = []
+    if recovery.empty:
+        return pd.DataFrame(columns=["Stage", "RejectedAmount", "RecoveredAmount", "OutstandingAmount", "UniqueClaims"])
+    for stage in [1, 2, 3]:
+        g = recovery[pd.to_numeric(recovery["ResubStage"], errors="coerce").fillna(0) >= stage].copy()
+        rejected = pd.to_numeric(g["OriginalRejectedAmount"], errors="coerce").fillna(0).sum()
+        recovered = pd.to_numeric(g["RecoveredAmount"], errors="coerce").fillna(0).sum()
+        rows.append({
+            "Stage": f"Resub-{stage}",
+            "RejectedAmount": rejected,
+            "RecoveredAmount": recovered,
+            "OutstandingAmount": max(rejected - recovered, 0),
+            "UniqueClaims": _unique_claim_count(g["UniqueID"]) if "UniqueID" in g.columns else int(len(g)),
+        })
+    return pd.DataFrame(rows)
+
+
 # -------------------- excel styling --------------------
 HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
 TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
@@ -642,6 +725,7 @@ def apply_styling_to_bytes(xlsx_bytes: bytes) -> bytes:
             "Rejected_Aging_Summary",
             "Recovery_Summary",
             "Recovery_By_Insurance",
+            "Resub_Stage_Summary",
         ]:
             highlight_grand_total_rows(ws, label_col=1, label_value="Grand Total")
             if ws.title in ["Rejected_Ins_x_DenialCode", "Rejected_Aging_Summary"]:
@@ -677,11 +761,11 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         [{"Insurance": "Grand Total", "Grand Total": 0.0}]
     )
 
-    # Historical recovery analysis is available in the new export where
-    # InitialActivityStatus / CurrentActivityStatus are present.
+    # Full analytical rejection lifecycle from the exact ActivityStatus values.
     recovery_detail = build_recovery_detail(df)
     recovery_summary = build_recovery_summary(recovery_detail)
     recovery_by_insurance = build_recovery_by_insurance(recovery_detail)
+    resub_stage_summary = build_resub_stage_summary(recovery_detail)
 
     stats = {
         "rejected_rows": int(len(rejected_df)),
@@ -700,11 +784,11 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         "DenialSource": source_info["denial_source"],
         "PaidSource": source_info["paid_source"],
         "RejectedAmountSource": source_info["amount_source"],
-        "RejectedRule": "Paid==0 AND current ActivityStatus=='rejected' AND final/current DenialCode not empty",
+        "RejectedRule": "Agreed rejection/resub statuses; RejectedAmount = ActivityIns - actRemitInsShare",
         "RejectedRows": int(len(rejected_df)),
         "RecoveryTrackingAvailable": bool(not recovery_detail.empty),
         "HistoricalRejectedRows": int(len(recovery_detail)),
-        "RecoveryRule": "InitialActivityStatus='Rejected'; amounts at activity level; claim counts by UniqueID",
+        "RecoveryRule": "Status-driven lifecycle; resub recovery from actResub remit fields with duplicate-equal amounts counted once",
     }])
 
     out_buf = io.BytesIO()
@@ -716,6 +800,7 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         rejected_df.to_excel(writer, sheet_name="Rejected_Detail", index=False)
         recovery_summary.to_excel(writer, sheet_name="Recovery_Summary", index=False)
         recovery_by_insurance.to_excel(writer, sheet_name="Recovery_By_Insurance", index=False)
+        resub_stage_summary.to_excel(writer, sheet_name="Resub_Stage_Summary", index=False)
         recovery_detail.to_excel(writer, sheet_name="Recovery_Detail", index=False)
         meta.to_excel(writer, sheet_name="Meta", index=False)
 
@@ -754,11 +839,16 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
     try:
         df_recovery_summary = pd.read_excel(xls, sheet_name="Recovery_Summary")
         df_recovery_by_insurance = pd.read_excel(xls, sheet_name="Recovery_By_Insurance")
+        df_resub_stage_summary = pd.read_excel(xls, sheet_name="Resub_Stage_Summary")
         recovery_header = pd.read_excel(xls, sheet_name="Recovery_Detail", nrows=0).columns.tolist()
         recovery_preview_cols = [c for c in [
             "UniqueID", "Insurance", "VisitNo", "VisitDate", "Code", "Description",
-            "InitialActivityStatus", "CurrentStatus", "RecoveryBucket", "RecoveryDenialCode",
-            "OriginalRejectedAmount", "RecoveredAmount", "OutstandingAmount",
+            "ActivityStatus", "CurrentActivityStatus", "InitialActivityStatus", "CurrentStatus",
+            "RecoveryBucket", "RecoveryDenialCode", "OriginalRejectedAmount",
+            "RecoveredAmount", "OutstandingAmount", "ResubStage",
+            "actRemitInsShare", "actResub1RemitInsShare", "actResub2RemitInsShare",
+            "actResub3RemitInsShare", "TKBKAmountAct", "Paid",
+            "Resub1Comments/Accpt Comments",
             "Resub1ActivityStatus", "Resub2ActivityStatus", "Resub3ActivityStatus",
             "Resub1Date", "Resub2Date", "Resub3Date"
         ] if c in recovery_header]
@@ -768,6 +858,7 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
     except Exception:
         df_recovery_summary = pd.DataFrame()
         df_recovery_by_insurance = pd.DataFrame()
+        df_resub_stage_summary = pd.DataFrame()
         df_recovery_preview = pd.DataFrame()
 
     PREVIEW_ROWS = 2000
@@ -775,8 +866,10 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
     wanted_cols = [
         "UniqueID", "Insurance", "DenialCode", "FinalDenialCode",
         "ActivityStatus", "CurrentActivityStatus", "InitialActivityStatus",
-        "ActivityIns", "FinalPaidAmount", "FinalBalance", "Paid",
-        "AgingBucket", "DaysDiff", "RefDate"
+        "ActivityIns", "actRemitInsShare", "actResub1RemitInsShare",
+        "actResub2RemitInsShare", "actResub3RemitInsShare", "TKBKAmountAct",
+        "Paid", "RejectedAmount", "StatusBase", "ResubStage",
+        "AgingBucket", "DaysDiff", "RefDate", "Resub1Comments/Accpt Comments"
     ]
     usecols = [c for c in wanted_cols if c in detail_header]
     df_preview = pd.read_excel(xls, sheet_name="Rejected_Detail", usecols=usecols, nrows=PREVIEW_ROWS)
@@ -810,6 +903,7 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
         "df_aging": df_aging,
         "df_recovery_summary": df_recovery_summary,
         "df_recovery_by_insurance": df_recovery_by_insurance,
+        "df_resub_stage_summary": df_resub_stage_summary,
         "df_recovery_preview": df_recovery_preview,
         "df_preview": df_preview,
         "preview_rows": PREVIEW_ROWS,
@@ -820,7 +914,7 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
 # =========================================
 def run_rejection_app():
     st.markdown("## Rejection Analysis")
-    st.caption("Supports old + new billing exports automatically. Rule: final paid = 0 + current status = rejected + denial code present")
+    st.caption("Initial rejection analysis: ActivityIns - actRemitInsShare, traced through Resub-1/2/3. FinalPaidAmount and FinalBalance are not used.")
 
     # --- session init ---
     if "rej_result" not in st.session_state:
@@ -975,6 +1069,7 @@ def run_rejection_app():
     df_aging = R["df_aging"]
     df_recovery_summary = R.get("df_recovery_summary", pd.DataFrame())
     df_recovery_by_insurance = R.get("df_recovery_by_insurance", pd.DataFrame())
+    df_resub_stage_summary = R.get("df_resub_stage_summary", pd.DataFrame())
     df_recovery_preview = R.get("df_recovery_preview", pd.DataFrame())
     df_preview = R["df_preview"]
     PREVIEW_ROWS = R["preview_rows"]
@@ -1071,8 +1166,7 @@ def run_rejection_app():
 
     if df_recovery_summary.empty:
         st.info(
-            "Historical rejection tracking is not available in this export. "
-            "Upload the new billing export containing InitialActivityStatus and CurrentActivityStatus."
+            "No activities matched the agreed rejection/resubmission Status values in this export."
         )
     else:
         rs = df_recovery_summary[df_recovery_summary["RecoveryBucket"] != "Grand Total"].copy()
@@ -1085,11 +1179,11 @@ def run_rejection_app():
         recovery_rate = (recovered_amount / original_rejected * 100) if original_rejected > 0 else 0.0
 
         pending_amount = float(pd.to_numeric(
-            rs.loc[rs["RecoveryBucket"] == "Resubmitted / Pending", "OutstandingAmount"],
+            rs.loc[rs["RecoveryBucket"].astype(str).str.startswith("Submitted / Pending"), "OutstandingAmount"],
             errors="coerce"
         ).fillna(0).sum())
         still_rejected_amount = float(pd.to_numeric(
-            rs.loc[rs["RecoveryBucket"] == "Still Rejected", "OutstandingAmount"],
+            rs.loc[rs["RecoveryBucket"].astype(str).str.contains("Rejected", case=False, na=False), "OutstandingAmount"],
             errors="coerce"
         ).fillna(0).sum())
 
@@ -1109,7 +1203,11 @@ def run_rejection_app():
         st.markdown("### Recovery by Insurance")
         st.dataframe(df_recovery_by_insurance, use_container_width=True)
 
-        st.markdown("### Trace Rejected → Current Status")
+        if not df_resub_stage_summary.empty:
+            st.markdown("### Resubmission Stage Summary")
+            st.dataframe(df_resub_stage_summary, use_container_width=True)
+
+        st.markdown("### Trace Initial Rejection → Current Status")
         if not df_recovery_preview.empty:
             ins_options = sorted([
                 str(x) for x in df_recovery_preview.get("Insurance", pd.Series(dtype=str)).dropna().unique()
@@ -1140,7 +1238,7 @@ def run_rejection_app():
 
             st.dataframe(rec_filt, use_container_width=True)
             st.caption(
-                "Tip: choose 'Resubmitted / Pending' to see claims that were rejected before but are now submitted. "
+                "Tip: filter Submitted / Pending, Approved, Still Rejected, Rejection Accepted, or Not Submitted buckets. "
                 "Use UniqueID to trace the exact claim."
             )
 
