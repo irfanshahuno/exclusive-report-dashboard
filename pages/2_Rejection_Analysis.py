@@ -965,37 +965,29 @@ def run_rejection_app():
             help="Uploads this workbook directly as the source file for the selected center/year.",
         )
 
+        # Manual workflow: selecting a file must NOT start analysis.
+        pending_key = f"rej_pending_upload_{center}_{year}"
+        pending_name_key = f"rej_pending_upload_name_{center}_{year}"
+        pending_hash_key = f"rej_pending_upload_hash_{center}_{year}"
+
         if uploaded_source is not None:
             uploaded_bytes = uploaded_source.getvalue()
             upload_hash = sha1_short_bytes(uploaded_bytes)
-            upload_state_key = f"rej_last_upload_hash_{center}_{year}"
 
-            # Process only once per newly selected file, even after Streamlit reruns.
-            if st.session_state.get(upload_state_key) != upload_hash:
-                try:
-                    with st.spinner("Uploading source and rebuilding rejection analysis..."):
-                        # Save/replace source workbook in the same S3 location used by Generate.
-                        save_file_to_s3(S3_BUCKET, s3_key, uploaded_bytes)
+            # Keep the selected workbook in the current Streamlit session only.
+            # No S3 upload and no rejection analysis happens until Generate is clicked.
+            if st.session_state.get(pending_hash_key) != upload_hash:
+                st.session_state[pending_key] = uploaded_bytes
+                st.session_state[pending_name_key] = uploaded_source.name
+                st.session_state[pending_hash_key] = upload_hash
+                st.session_state.rej_result = None
 
-                        # A new source invalidates the previous cached rejection workbook.
-                        delete_file_from_s3(S3_BUCKET, rej_cache_key)
+            st.success(f"File ready: {uploaded_source.name}. Click Generate to process it.")
 
-                        # Build immediately so the user does not need a separate Generate click.
-                        out_xlsx_bytes, _stats = build_rejection_workbook_bytes(
-                            uploaded_bytes, uploaded_source.name
-                        )
-                        save_file_to_s3(S3_BUCKET, rej_cache_key, out_xlsx_bytes)
-                        st.session_state.rej_result = load_result_from_workbook_bytes(
-                            out_xlsx_bytes, center, year, s3_key
-                        )
-                        st.session_state[upload_state_key] = upload_hash
+        has_pending_upload = bool(st.session_state.get(pending_key))
 
-                    st.success(f"Uploaded and analyzed: {uploaded_source.name} ✅")
-                except Exception as e:
-                    st.error(f"Could not process uploaded file: {e}")
-
-        # ✅ Auto-load saved result from S3 (so it stays until you upload new file or click Generate)
-        if st.session_state.rej_result is None and s3_exists(S3_BUCKET, rej_cache_key):
+        # Load a previously generated cache only when there is NO newly selected file waiting.
+        if (not has_pending_upload) and st.session_state.rej_result is None and s3_exists(S3_BUCKET, rej_cache_key):
             try:
                 cached_bytes = load_file_from_s3(S3_BUCKET, rej_cache_key)
                 st.session_state.rej_result = load_result_from_workbook_bytes(cached_bytes, center, year, s3_key)
@@ -1016,21 +1008,38 @@ def run_rejection_app():
             st.rerun()
 
         if generate:
-            if not s3_exists(S3_BUCKET, s3_key):
-                st.error("Source file not found in S3. Upload an Excel file above first.")
-                st.stop()
+            try:
+                # Prefer the workbook just selected in the uploader.
+                if st.session_state.get(pending_key):
+                    input_bytes = st.session_state[pending_key]
+                    input_name = st.session_state.get(pending_name_key, SOURCE_FILENAME)
 
-            with st.spinner("Building rejection analysis..."):
-                input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
-                out_xlsx_bytes, _stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
+                    with st.spinner("Uploading source file..."):
+                        save_file_to_s3(S3_BUCKET, s3_key, input_bytes)
 
-                # ✅ Save to S3 cache (PERSISTENT) so it doesn't ask to process again
-                save_file_to_s3(S3_BUCKET, rej_cache_key, out_xlsx_bytes)
+                    # New source means the previous generated workbook is no longer valid.
+                    delete_file_from_s3(S3_BUCKET, rej_cache_key)
+                else:
+                    if not s3_exists(S3_BUCKET, s3_key):
+                        st.error("Source file not found. Upload an Excel file above first.")
+                        st.stop()
+                    input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
+                    input_name = SOURCE_FILENAME
 
-                # ✅ Load into session
-                st.session_state.rej_result = load_result_from_workbook_bytes(out_xlsx_bytes, center, year, s3_key)
+                with st.spinner("Building rejection analysis..."):
+                    out_xlsx_bytes, _stats = build_rejection_workbook_bytes(input_bytes, input_name)
+                    save_file_to_s3(S3_BUCKET, rej_cache_key, out_xlsx_bytes)
+                    st.session_state.rej_result = load_result_from_workbook_bytes(
+                        out_xlsx_bytes, center, year, s3_key
+                    )
 
-            st.success("Done ✅")
+                # Clear pending bytes only after a successful Generate.
+                st.session_state.pop(pending_key, None)
+                st.session_state.pop(pending_name_key, None)
+                st.session_state.pop(pending_hash_key, None)
+                st.success("Done ✅")
+            except Exception as e:
+                st.error(f"Could not generate rejection analysis: {e}")
 
     # ---- Main UI ----
     if st.session_state.rej_result is None:
