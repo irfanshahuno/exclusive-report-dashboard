@@ -153,7 +153,9 @@ DEFAULT_YEAR_OPTIONS = ["2024", "2025", "2026"]
 
 # ✅ Persistent cache (so results stay even after refresh / clicking again)
 REJ_CACHE_PREFIX = "rejection_cache"
-REJ_CACHE_FILENAME = "rejection.xlsx"
+# Bump this whenever analytical rules change so an old cached workbook is NEVER reused.
+ANALYSIS_VERSION = "2026-09-02-v5-status-column"
+REJ_CACHE_FILENAME = f"rejection_{ANALYSIS_VERSION}.xlsx"
 
 # =========================================
 # CENTER NORMALIZATION (MUST be BEFORE use)
@@ -207,36 +209,46 @@ def sha1_short_bytes(b: bytes) -> str:
     return hashlib.sha1(b).hexdigest()[:12]
 
 def normalize_source_schema(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """Normalize old/new billing-software exports into one internal schema.
+    """Normalize exports and select the business Status column used for analysis.
 
-    IMPORTANT analytical rules used by this dashboard:
-      - FinalPaidAmount is NOT used.
-      - FinalBalance is NOT used to calculate rejection.
-      - Initial rejection amount is calculated from ActivityIns - actRemitInsShare.
-      - Original DenialCode is preferred for rejection analysis; FinalDenialCode is only a fallback.
+    IMPORTANT:
+      - The user's rejection journey is defined by the column named `Status`.
+      - If `Status` is unavailable, fall back to ActivityStatus, then CurrentActivityStatus.
+      - FinalPaidAmount and FinalBalance are retained only as raw source columns; they are
+        NOT used in rejection/recovery calculations.
+      - Initial rejection = ActivityIns - actRemitInsShare.
     """
     info = {
         "format": "old",
-        "status_source": "ActivityStatus",
+        "status_source": "missing",
         "denial_source": "DenialCode",
         "paid_source": "remit/resub fields + TKBK override",
         "amount_source": "ActivityIns - actRemitInsShare",
+        "analysis_version": ANALYSIS_VERSION,
     }
 
-    # New software renamed ActivityStatus to CurrentActivityStatus.
-    if "ActivityStatus" not in df.columns and "CurrentActivityStatus" in df.columns:
-        df["ActivityStatus"] = df["CurrentActivityStatus"]
-        info["format"] = "new"
-        info["status_source"] = "CurrentActivityStatus"
-    elif "ActivityStatus" not in df.columns and "Status" in df.columns:
-        df["ActivityStatus"] = df["Status"]
+    # CRITICAL: use the actual business Status column first.
+    if "Status" in df.columns:
+        df["AnalysisStatus"] = df["Status"]
         info["status_source"] = "Status"
-    elif "ActivityStatus" not in df.columns:
-        df["ActivityStatus"] = ""
-        info["status_source"] = "missing"
+        info["format"] = "new"
+    elif "ActivityStatus" in df.columns:
+        df["AnalysisStatus"] = df["ActivityStatus"]
+        info["status_source"] = "ActivityStatus"
+    elif "CurrentActivityStatus" in df.columns:
+        df["AnalysisStatus"] = df["CurrentActivityStatus"]
+        info["status_source"] = "CurrentActivityStatus"
+        info["format"] = "new"
+    else:
+        df["AnalysisStatus"] = ""
 
-    # Keep the ORIGINAL denial code for initial rejection analysis.
-    # Use FinalDenialCode only when the original DenialCode is blank.
+    # Keep ActivityStatus for backward-compatible display/export, but do not let it
+    # override AnalysisStatus when a real Status column exists.
+    if "ActivityStatus" not in df.columns:
+        df["ActivityStatus"] = df["AnalysisStatus"]
+
+    # Prefer the original denial code for initial rejection analysis.
+    # FinalDenialCode is only a fallback when original DenialCode is blank.
     if "FinalDenialCode" in df.columns:
         info["format"] = "new"
         final_code = df["FinalDenialCode"].astype(str).fillna("").str.strip()
@@ -254,6 +266,7 @@ def normalize_source_schema(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         info["format"] = "new"
 
     return df, info
+
 
 def ensure_numeric(df: pd.DataFrame) -> pd.DataFrame:
     required_num_cols = [
@@ -455,7 +468,7 @@ def build_status_audit(df: pd.DataFrame) -> pd.DataFrame:
     formatting variation can never silently disappear from the rejection total.
     """
     tmp = df.copy()
-    tmp["RawStatus"] = tmp["ActivityStatus"].astype(str).fillna("").str.strip()
+    tmp["RawStatus"] = tmp["AnalysisStatus"].astype(str).fillna("").str.strip()
     parts = tmp["RawStatus"].apply(_status_parts)
     tmp["ParsedBase"] = parts.apply(lambda x: x[0])
     tmp["ParsedResubStage"] = parts.apply(lambda x: x[1])
@@ -499,7 +512,7 @@ def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
 
     It does NOT depend on final/current payment status, FinalPaidAmount or FinalBalance.
     """
-    status_mask = df["ActivityStatus"].apply(_is_initial_rejection_status)
+    status_mask = df["AnalysisStatus"].apply(_is_initial_rejection_status)
     rej = df.loc[status_mask].copy()
 
     activity_ins = pd.to_numeric(rej["ActivityIns"], errors="coerce").fillna(0)
@@ -507,7 +520,7 @@ def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
     rej["RejectedAmount"] = (activity_ins - initial_paid).clip(lower=0).round(2)
 
     # Status journey fields used throughout the dashboard.
-    parts = rej["ActivityStatus"].apply(_status_parts)
+    parts = rej["AnalysisStatus"].apply(_status_parts)
     rej["StatusBase"] = parts.apply(lambda x: x[0].title())
     rej["ResubStage"] = parts.apply(lambda x: x[1])
 
@@ -630,28 +643,29 @@ def pivot_rejection_aging(rej: pd.DataFrame) -> pd.DataFrame:
 # REJECTION RECOVERY / RESUBMISSION TRACKER
 # =========================================
 def build_recovery_detail(df: pd.DataFrame) -> pd.DataFrame:
-    """Trace the full rejection -> resubmission -> outcome journey from ActivityStatus."""
+    """Trace the rejection journey using AnalysisStatus (Status column first).
+
+    OriginalRejectedAmount = ActivityIns - actRemitInsShare.
+    RecoveredAmount = actual additional resubmission payment only.
+    The current journey bucket is determined by Status, not by payment amount.
+    """
     hist = build_rejected_df(df)
     if hist.empty:
         return hist
 
-    hist["CurrentStatus"] = hist["ActivityStatus"].astype(str).fillna("").str.strip()
-
-    # Initial rejection is always ActivityIns - original remit.
+    hist["CurrentStatus"] = hist["AnalysisStatus"].astype(str).fillna("").str.strip()
     hist["OriginalRejectedAmount"] = pd.to_numeric(hist["RejectedAmount"], errors="coerce").fillna(0)
 
-    # Recovery means additional amount recovered AFTER the initial rejection.
+    # Actual additional payment received after initial rejection.
     hist["RecoveredAmount"] = hist.apply(
         lambda r: _recovery_from_resub_fields(r, int(r.get("ResubStage", 0) or 0)), axis=1
     )
-
-    # Never show recovery above the originally rejected amount for analytical KPIs.
     hist["RecoveredAmount"] = hist[["RecoveredAmount", "OriginalRejectedAmount"]].min(axis=1).clip(lower=0).round(2)
     hist["OutstandingAmount"] = (
         hist["OriginalRejectedAmount"] - hist["RecoveredAmount"]
     ).clip(lower=0).round(2)
 
-    # Cumulative resubmission exposure: a Resub-2 row has passed through Resub-1 and Resub-2.
+    # Amount that reached each resubmission stage. These are journey amounts, not payments.
     hist["Resub1Amount"] = hist.apply(
         lambda r: r["OriginalRejectedAmount"] if int(r.get("ResubStage", 0) or 0) >= 1 else 0.0, axis=1
     )
@@ -670,17 +684,27 @@ def build_recovery_detail(df: pd.DataFrame) -> pd.DataFrame:
         if base == "submitted" and stage >= 1:
             return f"Submitted / Pending (Resub-{stage})"
         if base == "rejected":
-            return "Initially Rejected" if stage == 0 else f"Still Rejected (Resub-{stage})"
+            return f"Still Rejected (Resub-{stage})" if stage >= 1 else "Still Rejected (Initial)"
         if base == "rejection accepted":
-            return "Rejection Accepted" if stage == 0 else f"Rejection Accepted (Resub-{stage})"
+            return f"Rejection Accepted (Resub-{stage})" if stage >= 1 else "Rejection Accepted"
         if base == "not submitted" and stage >= 1:
             return f"Not Submitted (Resub-{stage})"
-        return "Other"
+        return "Other Initial Rejection"
 
     hist["RecoveryBucket"] = hist.apply(classify, axis=1)
 
-    # Keep all denial codes. Original DenialCode is preferred; FinalDenialCode is visible separately.
-    hist["RecoveryDenialCode"] = hist.get("DenialCode", "")
+    # Keep all useful denial/comment fields for later management justification work.
+    if "FinalDenialCode" in hist.columns:
+        final_code = hist["FinalDenialCode"].astype(str).fillna("").str.strip()
+        base_code = hist["DenialCode"].astype(str).fillna("").str.strip() if "DenialCode" in hist.columns else ""
+        if isinstance(base_code, pd.Series):
+            hist["RecoveryDenialCode"] = base_code.where(~base_code.str.lower().isin(["", "nan", "none", "null"]), final_code)
+        else:
+            hist["RecoveryDenialCode"] = final_code
+    elif "DenialCode" in hist.columns:
+        hist["RecoveryDenialCode"] = hist["DenialCode"]
+    else:
+        hist["RecoveryDenialCode"] = ""
 
     return hist
 
@@ -862,6 +886,7 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         "InputFile": input_name,
         "InputSHA1": stats["sha1"],
         "GeneratedAt": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "AnalysisVersion": ANALYSIS_VERSION,
         "SourceFormat": source_info["format"],
         "StatusSource": source_info["status_source"],
         "DenialSource": source_info["denial_source"],
@@ -1074,7 +1099,7 @@ def run_rejection_app():
         if uploaded_source is not None:
             uploaded_bytes = uploaded_source.getvalue()
             upload_hash = sha1_short_bytes(uploaded_bytes)
-            upload_state_key = f"rej_last_upload_hash_{center}_{year}"
+            upload_state_key = f"rej_last_upload_hash_{ANALYSIS_VERSION}_{center}_{year}"
 
             # Process only once per newly selected file, even after Streamlit reruns.
             if st.session_state.get(upload_state_key) != upload_hash:
@@ -1175,7 +1200,7 @@ def run_rejection_app():
         _card(
             "Rejected Rows",
             f"{int(stats.get('rejected_rows', 0)):,}",
-            f"Paid=0 + current status=rejected • format: {stats.get('source_format', 'unknown')}"
+            f"Initial rejection journey • format: {stats.get('source_format', 'unknown')}"
         )
     with c2:
         _card("Total Rejected Amount", _fmt_aed(total_amount), "All insurers (excluding Grand Total row)")
