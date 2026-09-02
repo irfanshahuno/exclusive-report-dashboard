@@ -323,15 +323,53 @@ def compute_paid(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _status_parts(value) -> tuple[str, int]:
-    """Return (base_status, resub_stage). Stage 0 means no Resub suffix."""
-    s = str(value or "").strip().lower()
-    s = " ".join(s.split())
-    m = re.match(r"^(approved|rejected|rejection accepted|submitted|not submitted)\s*\(\s*resub\s*-\s*([123])\s*\)\s*$", s)
-    if m:
-        return m.group(1), int(m.group(2))
-    if s in {"rejected", "rejection accepted"}:
-        return s, 0
-    return s, 0
+    """Return (canonical_base_status, resub_stage) using tolerant matching.
+
+    Billing exports can vary only in formatting, for example:
+      Approved(Resub- 1)
+      Approved (Resub -1)
+      Approved(Resub 1)
+      Approved ( RESUB-01 )
+
+    We normalize those formatting differences WITHOUT broadening the business
+    rule to unrelated statuses.
+    """
+    raw = str(value or "").strip().lower()
+    if raw in {"", "nan", "none", "null", "<na>"}:
+        return "", 0
+
+    # Normalize common punctuation/spacing variants but retain the words.
+    s = raw.replace("–", "-").replace("—", "-")
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # Stage is taken from any explicit Resub marker; accepts resub-1, resub 1,
+    # resub - 01, etc. Only stages 1-3 are valid for this analysis.
+    stage = 0
+    m_stage = re.search(r"\bresub\b\s*[-:]?\s*0*([123])\b", s, flags=re.IGNORECASE)
+    if m_stage:
+        stage = int(m_stage.group(1))
+
+    # Remove the resub suffix/parenthetical only for identifying the base status.
+    base_text = re.sub(r"\(\s*resub\b[^)]*\)", "", s, flags=re.IGNORECASE).strip()
+    base_text = re.sub(r"\bresub\b\s*[-:]?\s*0*[123]\b", "", base_text, flags=re.IGNORECASE).strip(" -:()")
+    base_text = re.sub(r"\s+", " ", base_text).strip()
+
+    # Order matters: 'not submitted' before 'submitted'; 'rejection accepted'
+    # before 'rejected'. These are the exact business-status families agreed.
+    if re.fullmatch(r"rejection\s+accepted", base_text):
+        base = "rejection accepted"
+    elif re.fullmatch(r"not\s+submitted", base_text):
+        base = "not submitted"
+    elif re.fullmatch(r"approved", base_text):
+        base = "approved"
+    elif re.fullmatch(r"rejected", base_text):
+        base = "rejected"
+    elif re.fullmatch(r"submitted", base_text):
+        base = "submitted"
+    else:
+        return base_text, stage
+
+    return base, stage
 
 
 def _is_initial_rejection_status(value) -> bool:
@@ -408,6 +446,49 @@ def normalize_denial_code(df: pd.DataFrame) -> pd.DataFrame:
     df["DenialCode"] = df["DenialCode"].astype(str).fillna("").str.strip()
     df.loc[df["DenialCode"].str.lower().isin(["nan", "none", "null"]), "DenialCode"] = ""
     return df
+
+
+def build_status_audit(df: pd.DataFrame) -> pd.DataFrame:
+    """Transparent audit of every raw ActivityStatus and how the parser treats it.
+
+    This sheet is intentionally included in the output workbook so a status
+    formatting variation can never silently disappear from the rejection total.
+    """
+    tmp = df.copy()
+    tmp["RawStatus"] = tmp["ActivityStatus"].astype(str).fillna("").str.strip()
+    parts = tmp["RawStatus"].apply(_status_parts)
+    tmp["ParsedBase"] = parts.apply(lambda x: x[0])
+    tmp["ParsedResubStage"] = parts.apply(lambda x: x[1])
+    tmp["IncludedAsInitialRejection"] = tmp["RawStatus"].apply(_is_initial_rejection_status)
+
+    activity = pd.to_numeric(tmp.get("ActivityIns", 0), errors="coerce").fillna(0)
+    initial_paid = pd.to_numeric(tmp.get("actRemitInsShare", 0), errors="coerce").fillna(0)
+    tmp["AnalyticalInitialRejection"] = (activity - initial_paid).clip(lower=0).round(2)
+
+    rows = []
+    for keys, g in tmp.groupby(
+        ["RawStatus", "ParsedBase", "ParsedResubStage", "IncludedAsInitialRejection"],
+        dropna=False,
+    ):
+        raw, base, stage, included = keys
+        rows.append({
+            "RawStatus": raw,
+            "ParsedBase": base,
+            "ParsedResubStage": int(stage or 0),
+            "IncludedAsInitialRejection": bool(included),
+            "ActivityRows": int(len(g)),
+            "ActivityIns": pd.to_numeric(g.get("ActivityIns", 0), errors="coerce").fillna(0).sum(),
+            "InitialPaid": pd.to_numeric(g.get("actRemitInsShare", 0), errors="coerce").fillna(0).sum(),
+            "AnalyticalInitialRejection": pd.to_numeric(g["AnalyticalInitialRejection"], errors="coerce").fillna(0).sum(),
+        })
+    if not rows:
+        return pd.DataFrame(columns=[
+            "RawStatus", "ParsedBase", "ParsedResubStage", "IncludedAsInitialRejection",
+            "ActivityRows", "ActivityIns", "InitialPaid", "AnalyticalInitialRejection"
+        ])
+    return pd.DataFrame(rows).sort_values(
+        ["IncludedAsInitialRejection", "AnalyticalInitialRejection"], ascending=[False, False]
+    ).reset_index(drop=True)
 
 
 def build_rejected_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -746,6 +827,8 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
     df = ensure_insurance_column(df)
     df = add_refdate_and_aging(df)
 
+    # Status audit makes parser inclusion/exclusion fully visible.
+    status_audit = build_status_audit(df)
     rejected_df = build_rejected_df(df)
 
     by_ins = pivot_by_insurance(rejected_df) if len(rejected_df) else pd.DataFrame(
@@ -802,6 +885,7 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         recovery_by_insurance.to_excel(writer, sheet_name="Recovery_By_Insurance", index=False)
         resub_stage_summary.to_excel(writer, sheet_name="Resub_Stage_Summary", index=False)
         recovery_detail.to_excel(writer, sheet_name="Recovery_Detail", index=False)
+        status_audit.to_excel(writer, sheet_name="Status_Audit", index=False)
         meta.to_excel(writer, sheet_name="Meta", index=False)
 
     styled = apply_styling_to_bytes(out_buf.getvalue())
