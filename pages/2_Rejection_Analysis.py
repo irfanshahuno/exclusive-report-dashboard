@@ -154,7 +154,7 @@ DEFAULT_YEAR_OPTIONS = ["2024", "2025", "2026"]
 # ✅ Persistent cache (so results stay even after refresh / clicking again)
 REJ_CACHE_PREFIX = "rejection_cache"
 # Bump this whenever analytical rules change so an old cached workbook is NEVER reused.
-ANALYSIS_VERSION = "2026-09-02-v5-status-column"
+ANALYSIS_VERSION = "2026-09-04-v6-management-view"
 REJ_CACHE_FILENAME = f"rejection_{ANALYSIS_VERSION}.xlsx"
 
 # =========================================
@@ -503,6 +503,23 @@ def normalize_denial_code(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def split_denial_code_levels(df: pd.DataFrame) -> pd.DataFrame:
+    """Split the denial code into a level-2 category and the full level-3 code.
+
+    Payer denial codes are typically written as CATEGORY-NUMBER, e.g. MNEC-006.
+    Management reporting should show the granular level-3 code (MNEC-006), not
+    just the level-2 category (MNEC) — this preserves both:
+        DenialCodeLevel2 -> "MNEC"       (category, for grouping)
+        DenialCodeLevel3 -> "MNEC-006"   (full/granular code, for detail)
+    If a code has no "-" in it, both levels are set to the same value.
+    """
+    code = df["DenialCode"].astype(str).fillna("").str.strip()
+    df["DenialCodeLevel3"] = code
+    level2 = code.str.split("-").str[0].str.strip()
+    df["DenialCodeLevel2"] = level2.where(level2.ne(""), code)
+    return df
+
+
 def build_status_audit(df: pd.DataFrame) -> pd.DataFrame:
     """Transparent audit of every raw ActivityStatus and how the parser treats it.
 
@@ -718,6 +735,17 @@ def build_recovery_detail(df: pd.DataFrame) -> pd.DataFrame:
         hist["OriginalRejectedAmount"] - hist["RecoveredAmount"]
     ).clip(lower=0).round(2)
 
+    # Payment status for management reporting: distinguishes a claim that
+    # received SOME money back (Partially Paid) from one that recovered
+    # nothing at all (Fully Rejected), rather than lumping both under one
+    # denial reason. A 1-fils/cent tolerance avoids float rounding noise.
+    orig_amt = hist["OriginalRejectedAmount"]
+    rec_amt = hist["RecoveredAmount"]
+    payment_status = pd.Series("Fully Rejected", index=hist.index)
+    payment_status = payment_status.mask(rec_amt > 0.01, "Partially Paid")
+    payment_status = payment_status.mask(rec_amt >= (orig_amt - 0.01), "Fully Recovered")
+    hist["PaymentStatus"] = payment_status
+
     # Amount that reached each resubmission stage. These are journey amounts, not payments.
     hist["Resub1Amount"] = hist["OriginalRejectedAmount"].where(stage >= 1, 0.0)
     hist["Resub2Amount"] = hist["OriginalRejectedAmount"].where(stage >= 2, 0.0)
@@ -735,6 +763,14 @@ def build_recovery_detail(df: pd.DataFrame) -> pd.DataFrame:
     bucket = bucket.mask((base_lower == "rejection accepted") & (stage < 1), "Rejection Accepted")
     bucket = bucket.mask((base_lower == "not submitted") & (stage >= 1), "Not Submitted (Resub-" + stage_str + ")")
     hist["RecoveryBucket"] = bucket
+
+    # Reconciliation flag: still fully rejected (zero recovered) after being
+    # resubmitted TWICE or more. Two resubmissions with no money back is a
+    # signal the claim likely needs reconciliation/write-off review rather
+    # than a third resubmission attempt.
+    hist["ReconciliationEligible"] = (
+        (base_lower == "rejected") & (stage >= 2) & (hist["RecoveredAmount"] <= 0.01)
+    )
 
     # Keep all useful denial/comment fields for later management justification work.
     if "FinalDenialCode" in hist.columns:
@@ -836,9 +872,101 @@ def build_resub_stage_summary(recovery: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def build_resub_stage_summary_exclusive(recovery: pd.DataFrame) -> pd.DataFrame:
+    """Non-cumulative version of the stage funnel: each claim is counted in
+    EXACTLY ONE row (the highest stage it currently sits at), so the rows
+    add up to the Total Rejected Amount instead of overlapping.
+
+    Use this table when you need the numbers to sum correctly; use
+    Resub_Stage_Summary (cumulative funnel) when you want "how much reached
+    at least this stage."
+    """
+    cols = ["Stage", "RejectedAmount", "RecoveredAmount", "OutstandingAmount", "UniqueClaims"]
+    if recovery.empty:
+        return pd.DataFrame(columns=cols)
+
+    stage = pd.to_numeric(recovery["ResubStage"], errors="coerce").fillna(0).astype(int)
+    labels = {0: "Initial (Never Resubmitted)", 1: "Resub-1", 2: "Resub-2", 3: "Resub-3"}
+
+    rows = []
+    for s in [0, 1, 2, 3]:
+        g = recovery.loc[stage == s]
+        rows.append({
+            "Stage": labels[s],
+            "RejectedAmount": pd.to_numeric(g["OriginalRejectedAmount"], errors="coerce").fillna(0).sum(),
+            "RecoveredAmount": pd.to_numeric(g["RecoveredAmount"], errors="coerce").fillna(0).sum(),
+            "OutstandingAmount": pd.to_numeric(g["OutstandingAmount"], errors="coerce").fillna(0).sum(),
+            "UniqueClaims": _unique_claim_count(g["UniqueID"]) if "UniqueID" in g.columns else int(len(g)),
+        })
+    out = pd.DataFrame(rows)
+    total = {
+        "Stage": "Grand Total",
+        "RejectedAmount": out["RejectedAmount"].sum(),
+        "RecoveredAmount": out["RecoveredAmount"].sum(),
+        "OutstandingAmount": out["OutstandingAmount"].sum(),
+        "UniqueClaims": _unique_claim_count(recovery["UniqueID"]) if "UniqueID" in recovery.columns else int(len(recovery)),
+    }
+    return pd.concat([out, pd.DataFrame([total])], ignore_index=True)
+
+
+def build_denial_management_summary(recovery: pd.DataFrame) -> pd.DataFrame:
+    """Insurance + granular denial code + payment status, for management.
+
+    Shows the level-3 (granular) denial code alongside the level-2 category,
+    and splits amounts by PaymentStatus so management can see, for example,
+    how much of MNEC-006 for a payer was fully rejected vs partially paid —
+    instead of one blended number under the level-2 category.
+    """
+    cols = [
+        "Insurance", "DenialCodeLevel2", "DenialCodeLevel3", "PaymentStatus",
+        "OriginalRejectedAmount", "RecoveredAmount", "OutstandingAmount", "UniqueClaims"
+    ]
+    if recovery.empty or "DenialCodeLevel3" not in recovery.columns:
+        return pd.DataFrame(columns=cols)
+
+    group_cols = ["Insurance", "DenialCodeLevel2", "DenialCodeLevel3", "PaymentStatus"]
+    rows = []
+    for keys, g in recovery.groupby(group_cols, dropna=False):
+        ins, l2, l3, pstatus = keys
+        rows.append({
+            "Insurance": ins,
+            "DenialCodeLevel2": l2,
+            "DenialCodeLevel3": l3,
+            "PaymentStatus": pstatus,
+            "OriginalRejectedAmount": pd.to_numeric(g["OriginalRejectedAmount"], errors="coerce").fillna(0).sum(),
+            "RecoveredAmount": pd.to_numeric(g["RecoveredAmount"], errors="coerce").fillna(0).sum(),
+            "OutstandingAmount": pd.to_numeric(g["OutstandingAmount"], errors="coerce").fillna(0).sum(),
+            "UniqueClaims": _unique_claim_count(g["UniqueID"]) if "UniqueID" in g.columns else int(len(g)),
+        })
+    return pd.DataFrame(rows).sort_values("OriginalRejectedAmount", ascending=False).reset_index(drop=True)
+
+
+def build_reconciliation_candidates(recovery: pd.DataFrame) -> pd.DataFrame:
+    """Claim-level list of activities flagged ReconciliationEligible:
+    resubmitted 2+ times with zero money recovered. This is the working
+    list for the reconciliation team, not a summary."""
+    if recovery.empty or "ReconciliationEligible" not in recovery.columns:
+        return pd.DataFrame()
+
+    cand = recovery.loc[recovery["ReconciliationEligible"]].copy()
+    wanted = [
+        "UniqueID", "Insurance", "VisitNo", "VisitDate", "Code", "Description",
+        "DenialCodeLevel2", "DenialCodeLevel3", "RecoveryDenialCode",
+        "CurrentStatus", "RecoveryBucket", "PaymentStatus",
+        "OriginalRejectedAmount", "RecoveredAmount", "OutstandingAmount",
+        "ResubStage", "RefDate", "DaysDiff",
+        "Resub1Comments/Accpt Comments",
+    ]
+    cols = [c for c in wanted if c in cand.columns]
+    return cand[cols].sort_values("OriginalRejectedAmount", ascending=False).reset_index(drop=True)
+
+
 # -------------------- excel styling --------------------
 HEADER_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
 TOTAL_FILL  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+# Highlight color for claims flagged eligible for reconciliation (resubmitted
+# 2+ times, zero recovered) — distinct amber so it stands out from totals.
+RECON_FILL  = PatternFill(start_color="FFE699", end_color="FFE699", fill_type="solid")
 
 def style_headers(ws):
     for c in range(1, ws.max_column + 1):
@@ -854,6 +982,11 @@ def highlight_grand_total_rows(ws, label_col=1, label_value="Grand Total"):
                 cell = ws.cell(row=r, column=c)
                 cell.fill = TOTAL_FILL
                 cell.font = Font(bold=True)
+
+def highlight_all_data_rows(ws, fill):
+    for r in range(2, ws.max_row + 1):
+        for c in range(1, ws.max_column + 1):
+            ws.cell(row=r, column=c).fill = fill
 
 def highlight_last_col(ws):
     last_col = ws.max_column
@@ -891,6 +1024,7 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
     df = ensure_numeric(df)
     df = compute_paid(df)
     df = normalize_denial_code(df)
+    df = split_denial_code_levels(df)
     df = ensure_insurance_column(df)
     df = add_refdate_and_aging(df)
 
@@ -920,6 +1054,9 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
     recovery_summary = build_recovery_summary(recovery_detail)
     recovery_by_insurance = build_recovery_by_insurance(recovery_detail)
     resub_stage_summary = build_resub_stage_summary(recovery_detail)
+    resub_stage_summary_exclusive = build_resub_stage_summary_exclusive(recovery_detail)
+    denial_management_summary = build_denial_management_summary(recovery_detail)
+    reconciliation_candidates = build_reconciliation_candidates(recovery_detail)
 
     stats = {
         "rejected_rows": int(len(rejected_df)),
@@ -956,6 +1093,9 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         recovery_summary.to_excel(writer, sheet_name="Recovery_Summary", index=False)
         recovery_by_insurance.to_excel(writer, sheet_name="Recovery_By_Insurance", index=False)
         resub_stage_summary.to_excel(writer, sheet_name="Resub_Stage_Summary", index=False)
+        resub_stage_summary_exclusive.to_excel(writer, sheet_name="Resub_Stage_Summary_Exclusive", index=False)
+        denial_management_summary.to_excel(writer, sheet_name="Denial_Reason_Management", index=False)
+        reconciliation_candidates.to_excel(writer, sheet_name="Reconciliation_Candidates", index=False)
         recovery_detail.to_excel(writer, sheet_name="Recovery_Detail", index=False)
         status_audit.to_excel(writer, sheet_name="Status_Audit", index=False)
         meta.to_excel(writer, sheet_name="Meta", index=False)
@@ -976,6 +1116,7 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
             "Recovery_Summary",
             "Recovery_By_Insurance",
             "Resub_Stage_Summary",
+            "Resub_Stage_Summary_Exclusive",
         }
         for name, ws in writer.sheets.items():
             style_headers(ws)
@@ -983,6 +1124,8 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
                 highlight_grand_total_rows(ws, label_col=1, label_value="Grand Total")
                 if name in ("Rejected_Ins_x_DenialCode", "Rejected_Aging_Summary"):
                     highlight_last_col(ws)
+            if name == "Reconciliation_Candidates":
+                highlight_all_data_rows(ws, fill=RECON_FILL)
 
     return out_buf.getvalue(), stats
 
@@ -1023,7 +1166,8 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
         recovery_preview_cols = [c for c in [
             "UniqueID", "Insurance", "VisitNo", "VisitDate", "Code", "Description",
             "ActivityStatus", "CurrentActivityStatus", "InitialActivityStatus", "CurrentStatus",
-            "RecoveryBucket", "RecoveryDenialCode", "OriginalRejectedAmount",
+            "RecoveryBucket", "RecoveryDenialCode", "DenialCodeLevel2", "DenialCodeLevel3",
+            "PaymentStatus", "ReconciliationEligible", "OriginalRejectedAmount",
             "RecoveredAmount", "OutstandingAmount", "ResubStage",
             "actRemitInsShare", "actResub1RemitInsShare", "actResub2RemitInsShare",
             "actResub3RemitInsShare", "TKBKAmountAct", "Paid",
@@ -1040,10 +1184,26 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
         df_resub_stage_summary = pd.DataFrame()
         df_recovery_preview = pd.DataFrame()
 
+    try:
+        df_resub_stage_summary_excl = pd.read_excel(xls, sheet_name="Resub_Stage_Summary_Exclusive")
+    except Exception:
+        df_resub_stage_summary_excl = pd.DataFrame()
+
+    try:
+        df_denial_management = pd.read_excel(xls, sheet_name="Denial_Reason_Management")
+    except Exception:
+        df_denial_management = pd.DataFrame()
+
+    try:
+        df_reconciliation = pd.read_excel(xls, sheet_name="Reconciliation_Candidates")
+    except Exception:
+        df_reconciliation = pd.DataFrame()
+
     PREVIEW_ROWS = 2000
     detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
     wanted_cols = [
         "UniqueID", "Insurance", "DenialCode", "FinalDenialCode",
+        "DenialCodeLevel2", "DenialCodeLevel3",
         "ActivityStatus", "CurrentActivityStatus", "InitialActivityStatus",
         "ActivityIns", "actRemitInsShare", "actResub1RemitInsShare",
         "actResub2RemitInsShare", "actResub3RemitInsShare", "TKBKAmountAct",
@@ -1083,6 +1243,9 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
         "df_recovery_summary": df_recovery_summary,
         "df_recovery_by_insurance": df_recovery_by_insurance,
         "df_resub_stage_summary": df_resub_stage_summary,
+        "df_resub_stage_summary_excl": df_resub_stage_summary_excl,
+        "df_denial_management": df_denial_management,
+        "df_reconciliation": df_reconciliation,
         "df_recovery_preview": df_recovery_preview,
         "df_preview": df_preview,
         "preview_rows": PREVIEW_ROWS,
@@ -1165,6 +1328,7 @@ def run_rejection_app():
             key=f"rej_source_upload_{center}_{year}",
             help="Uploads this workbook directly as the source file for the selected center/year.",
         )
+        st.caption("Processing starts automatically once a file is selected — no need to click Generate after uploading.")
 
         if uploaded_source is not None:
             uploaded_bytes = uploaded_source.getvalue()
@@ -1249,6 +1413,9 @@ def run_rejection_app():
     df_recovery_summary = R.get("df_recovery_summary", pd.DataFrame())
     df_recovery_by_insurance = R.get("df_recovery_by_insurance", pd.DataFrame())
     df_resub_stage_summary = R.get("df_resub_stage_summary", pd.DataFrame())
+    df_resub_stage_summary_excl = R.get("df_resub_stage_summary_excl", pd.DataFrame())
+    df_denial_management = R.get("df_denial_management", pd.DataFrame())
+    df_reconciliation = R.get("df_reconciliation", pd.DataFrame())
     df_recovery_preview = R.get("df_recovery_preview", pd.DataFrame())
     df_preview = R["df_preview"]
     PREVIEW_ROWS = R["preview_rows"]
@@ -1265,16 +1432,10 @@ def run_rejection_app():
     total_amount = float(pd.to_numeric(df_by_ins_nogt["RejectedAmount"], errors="coerce").fillna(0).sum())
     total_claims = int(pd.to_numeric(df_by_ins.loc[df_by_ins["Insurance"] == "Grand Total", "RejectedCount"], errors="coerce").fillna(0).iloc[0]) if (df_by_ins["Insurance"] == "Grand Total").any() else int(pd.to_numeric(df_by_ins_nogt["RejectedCount"], errors="coerce").fillna(0).sum())
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
-        _card(
-            "Rejected Rows",
-            f"{int(stats.get('rejected_rows', 0)):,}",
-            f"Initial rejection journey • format: {stats.get('source_format', 'unknown')}"
-        )
-    with c2:
         _card("Total Rejected Amount", _fmt_aed(total_amount), "All insurers (excluding Grand Total row)")
-    with c3:
+    with c2:
         _card("Total Rejected Claims", f"{total_claims:,}", "Unique rejected claims by UniqueID")
 
     # ===== Top 3 Insurance =====
@@ -1383,8 +1544,20 @@ def run_rejection_app():
         st.dataframe(df_recovery_by_insurance, use_container_width=True)
 
         if not df_resub_stage_summary.empty:
-            st.markdown("### Resubmission Stage Summary")
+            st.markdown("### Resubmission Stage Summary (Cumulative Funnel)")
+            st.caption(
+                "Each stage includes everything that reached AT LEAST that stage — so Resub-2 amounts "
+                "are already included inside Resub-1. Do not add these rows together; they overlap by design."
+            )
             st.dataframe(df_resub_stage_summary, use_container_width=True)
+
+        if not df_resub_stage_summary_excl.empty:
+            st.markdown("### Resubmission Stage Summary (Exclusive — adds up to Total)")
+            st.caption(
+                "Each claim counted in exactly ONE row — the stage it currently sits at. "
+                "These rows add up correctly to the Total Rejected Amount."
+            )
+            st.dataframe(df_resub_stage_summary_excl, use_container_width=True)
 
         st.markdown("### Trace Initial Rejection → Current Status")
         if not df_recovery_preview.empty:
@@ -1420,6 +1593,71 @@ def run_rejection_app():
                 "Tip: filter Submitted / Pending, Approved, Still Rejected, Rejection Accepted, or Not Submitted buckets. "
                 "Use UniqueID to trace the exact claim."
             )
+
+    st.divider()
+
+    # ===== Denial Reason Management (granular code + payment status) =====
+    st.markdown("## Denial Reason — Management View")
+    st.caption(
+        "Granular (level-3) denial code, e.g. MNEC-006, instead of only the category (MNEC), "
+        "split by whether the claim was Fully Rejected, Partially Paid, or Fully Recovered."
+    )
+    if df_denial_management.empty:
+        st.info("No denial reason breakdown available for this export.")
+    else:
+        dm1, dm2, dm3 = st.columns([1, 1, 1])
+        with dm1:
+            dm_ins_options = sorted([
+                str(x) for x in df_denial_management["Insurance"].dropna().unique() if str(x).strip()
+            ])
+            dm_ins = st.selectbox("Insurance", ["All"] + dm_ins_options, key="dm_insurance_filter")
+        with dm2:
+            dm_code_options = sorted([
+                str(x) for x in df_denial_management["DenialCodeLevel3"].dropna().unique() if str(x).strip()
+            ])
+            dm_code = st.selectbox("Denial Code (Level 3)", ["All"] + dm_code_options, key="dm_code_filter")
+        with dm3:
+            dm_status_options = sorted([
+                str(x) for x in df_denial_management["PaymentStatus"].dropna().unique() if str(x).strip()
+            ])
+            dm_status = st.selectbox("Payment Status", ["All"] + dm_status_options, key="dm_status_filter")
+
+        dm_filt = df_denial_management.copy()
+        if dm_ins != "All":
+            dm_filt = dm_filt[dm_filt["Insurance"].astype(str) == dm_ins]
+        if dm_code != "All":
+            dm_filt = dm_filt[dm_filt["DenialCodeLevel3"].astype(str) == dm_code]
+        if dm_status != "All":
+            dm_filt = dm_filt[dm_filt["PaymentStatus"].astype(str) == dm_status]
+
+        st.dataframe(
+            dm_filt.sort_values("OriginalRejectedAmount", ascending=False),
+            use_container_width=True
+        )
+
+    st.divider()
+
+    # ===== Reconciliation Candidates =====
+    st.markdown("## Eligible for Reconciliation")
+    st.caption(
+        "Claims resubmitted 2+ times (Resub-2 or Resub-3) that are still fully rejected with zero amount "
+        "recovered — flagged for the reconciliation team instead of another resubmission attempt."
+    )
+    if df_reconciliation.empty:
+        st.info("No claims currently meet the reconciliation-eligible criteria.")
+    else:
+        recon_amount = float(pd.to_numeric(
+            df_reconciliation.get("OutstandingAmount", pd.Series(dtype=float)), errors="coerce"
+        ).fillna(0).sum())
+        recon_claims = _unique_claim_count(df_reconciliation["UniqueID"]) if "UniqueID" in df_reconciliation.columns else len(df_reconciliation)
+
+        rec1, rec2 = st.columns(2)
+        with rec1:
+            _card("Reconciliation-Eligible Amount", _fmt_aed(recon_amount), "Outstanding, zero recovered after 2+ resubmissions")
+        with rec2:
+            _card("Reconciliation-Eligible Claims", f"{recon_claims:,}", "Unique claims by UniqueID")
+
+        st.dataframe(df_reconciliation, use_container_width=True)
 
     st.divider()
 
