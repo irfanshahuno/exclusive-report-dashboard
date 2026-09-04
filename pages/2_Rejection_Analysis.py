@@ -173,7 +173,7 @@ DEFAULT_MANAGEMENT_RECIPIENTS = _get_secret("MANAGEMENT_EMAIL_RECIPIENTS")
 # ✅ Persistent cache (so results stay even after refresh / clicking again)
 REJ_CACHE_PREFIX = "rejection_cache"
 # Bump this whenever analytical rules change so an old cached workbook is NEVER reused.
-ANALYSIS_VERSION = "2026-09-05-v7-leadership-view"
+ANALYSIS_VERSION = "2026-09-05-v8-likely-nonrecoverable"
 REJ_CACHE_FILENAME = f"rejection_{ANALYSIS_VERSION}.xlsx"
 
 # =========================================
@@ -571,6 +571,45 @@ def classify_denial_category(level2_code: str) -> str:
     return DENIAL_CATEGORY_MAP.get(key, DEFAULT_DENIAL_CATEGORY)
 
 
+# ---- CPT + payer override: "Likely Non-Recoverable" ----
+# Denial codes don't follow a fixed book for TPAs (MNEC-3, MNEC-6, CLAI-16 all
+# show up unpredictably for the same real reason), so for these specific CPT
+# codes at any TPA OTHER than Daman, the denial is treated as experience-based
+# non-recoverable regardless of what denial code got attached. This OVERRIDES
+# the DENIAL_CATEGORY_MAP result above when it matches.
+#
+# Add more CPT codes here as you confirm the pattern for them.
+NON_RECOVERABLE_CPT_CODES = {"99203", "99213"}
+
+# Payer name(s) EXCLUDED from this rule (i.e. NOT treated as a TPA for this
+# purpose). Matched case-insensitively as a substring of the Insurance name.
+NON_TPA_INSURERS = ["DAMAN"]
+
+LIKELY_NON_RECOVERABLE = "Likely Non-Recoverable"
+
+
+def apply_cpt_tpa_override(hist: pd.DataFrame) -> pd.Series:
+    """Returns the DenialCategory series after applying the CPT+TPA override
+    on top of the denial-code-based category. A row is flipped to
+    'Likely Non-Recoverable' when: Insurance is NOT one of NON_TPA_INSURERS,
+    the CPT Code is in NON_RECOVERABLE_CPT_CODES, and the claim still has an
+    outstanding (unrecovered) balance."""
+    category = hist["DenialCategory"].copy()
+
+    if "Code" not in hist.columns or "Insurance" not in hist.columns:
+        return category
+
+    code = hist["Code"].astype(str).str.strip()
+    insurance = hist["Insurance"].astype(str).str.upper()
+    is_tpa = ~insurance.str.contains("|".join(NON_TPA_INSURERS), case=False, na=False)
+    is_target_code = code.isin(NON_RECOVERABLE_CPT_CODES)
+    has_outstanding = pd.to_numeric(hist.get("OutstandingAmount", 0), errors="coerce").fillna(0) > 0.01
+
+    override_mask = is_tpa & is_target_code & has_outstanding
+    category = category.mask(override_mask, LIKELY_NON_RECOVERABLE)
+    return category
+
+
 def build_status_audit(df: pd.DataFrame) -> pd.DataFrame:
     """Transparent audit of every raw ActivityStatus and how the parser treats it.
 
@@ -842,6 +881,11 @@ def build_recovery_detail(df: pd.DataFrame) -> pd.DataFrame:
     else:
         hist["DenialCategory"] = DEFAULT_DENIAL_CATEGORY
 
+    # Overlay: specific CPT codes at any TPA (except Daman) are treated as
+    # "Likely Non-Recoverable" regardless of the denial code text — see
+    # apply_cpt_tpa_override() for the exact rule.
+    hist["DenialCategory"] = apply_cpt_tpa_override(hist)
+
     return hist
 
 
@@ -1019,14 +1063,15 @@ def build_reconciliation_candidates(recovery: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_writeoff_split(recovery: pd.DataFrame) -> pd.DataFrame:
-    """Amounts grouped by DenialCategory (Recoverable / Write-off / Review).
-    This is the table the Leadership bar chart and email summary are built from."""
+    """Amounts grouped by DenialCategory (Recoverable / Write-off / Likely
+    Non-Recoverable / Review). This is the table the Leadership bar chart
+    and email summary are built from."""
     cols = ["DenialCategory", "OriginalRejectedAmount", "RecoveredAmount", "OutstandingAmount", "UniqueClaims"]
     if recovery.empty or "DenialCategory" not in recovery.columns:
         return pd.DataFrame(columns=cols)
 
     rows = []
-    for cat in ["Recoverable", "Write-off", "Review"]:
+    for cat in ["Recoverable", "Write-off", LIKELY_NON_RECOVERABLE, "Review"]:
         g = recovery.loc[recovery["DenialCategory"] == cat]
         rows.append({
             "DenialCategory": cat,
@@ -1039,13 +1084,15 @@ def build_writeoff_split(recovery: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_leadership_summary(recovery: pd.DataFrame) -> pd.DataFrame:
-    """One-row KPI summary for the Leadership view: the 5 numbers a director
-    or higher-leadership reader needs, nothing else. Write-off is split out
-    of 'outstanding' so the headline recoverable number isn't inflated by
-    money that was never collectible in the first place."""
+    """One-row KPI summary for the Leadership view. Write-off AND Likely
+    Non-Recoverable are both split out of 'outstanding' so the headline
+    recoverable number isn't inflated by money that's already known to be
+    a lost cause — but they're kept as two separate numbers since one is a
+    confirmed adjustment and the other is an experience-based judgment call."""
     cols = [
         "TotalDenied", "RecoveredAmount", "WriteOffAmount",
-        "RecoverableOutstanding", "ReviewOutstanding", "RecoveryRatePct",
+        "LikelyNonRecoverableAmount", "RecoverableOutstanding",
+        "ReviewOutstanding", "RecoveryRatePct",
     ]
     if recovery.empty:
         return pd.DataFrame([{c: 0 for c in cols}])
@@ -1054,6 +1101,7 @@ def build_leadership_summary(recovery: pd.DataFrame) -> pd.DataFrame:
     total_denied = float(pd.to_numeric(recovery.get("OriginalRejectedAmount", 0), errors="coerce").fillna(0).sum())
     recovered = float(pd.to_numeric(recovery.get("RecoveredAmount", 0), errors="coerce").fillna(0).sum())
     writeoff_amt = float(split.loc[split["DenialCategory"] == "Write-off", "OutstandingAmount"].sum())
+    likely_nonrec_amt = float(split.loc[split["DenialCategory"] == LIKELY_NON_RECOVERABLE, "OutstandingAmount"].sum())
     recoverable_amt = float(split.loc[split["DenialCategory"] == "Recoverable", "OutstandingAmount"].sum())
     review_amt = float(split.loc[split["DenialCategory"] == "Review", "OutstandingAmount"].sum())
     recovery_rate = (recovered / total_denied * 100) if total_denied > 0 else 0.0
@@ -1062,6 +1110,7 @@ def build_leadership_summary(recovery: pd.DataFrame) -> pd.DataFrame:
         "TotalDenied": total_denied,
         "RecoveredAmount": recovered,
         "WriteOffAmount": writeoff_amt,
+        "LikelyNonRecoverableAmount": likely_nonrec_amt,
         "RecoverableOutstanding": recoverable_amt,
         "ReviewOutstanding": review_amt,
         "RecoveryRatePct": recovery_rate,
@@ -1669,8 +1718,8 @@ def run_rejection_app():
 
     with tab_lead:
         st.caption(
-            "The numbers leadership needs in 10 seconds. Write-off is split out from "
-            "outstanding so this number is never inflated by money that was never collectible."
+            "The numbers leadership needs in 10 seconds. Write-off and Likely Non-Recoverable are both "
+            "split out from outstanding so this number is never inflated by money that's already a lost cause."
         )
 
         if df_leadership_summary.empty:
@@ -1680,31 +1729,35 @@ def run_rejection_app():
             total_denied_l = float(pd.to_numeric(ld.get("TotalDenied", 0), errors="coerce") or 0)
             recovered_l = float(pd.to_numeric(ld.get("RecoveredAmount", 0), errors="coerce") or 0)
             writeoff_l = float(pd.to_numeric(ld.get("WriteOffAmount", 0), errors="coerce") or 0)
+            likely_nonrec_l = float(pd.to_numeric(ld.get("LikelyNonRecoverableAmount", 0), errors="coerce") or 0)
             recoverable_l = float(pd.to_numeric(ld.get("RecoverableOutstanding", 0), errors="coerce") or 0)
             review_l = float(pd.to_numeric(ld.get("ReviewOutstanding", 0), errors="coerce") or 0)
             rate_l = float(pd.to_numeric(ld.get("RecoveryRatePct", 0), errors="coerce") or 0)
 
-            lc1, lc2, lc3, lc4 = st.columns(4)
+            lc1, lc2, lc3, lc4, lc5 = st.columns(5)
             with lc1:
                 _card("Total Denied", _fmt_aed(total_denied_l), f"{R['center'].title()} \u2014 {R['year']}")
             with lc2:
-                _card("Write-off", _fmt_aed(writeoff_l), "Not appealable \u2014 excluded from outstanding")
-            with lc3:
                 _card("Recovered", _fmt_aed(recovered_l), f"Recovery rate {rate_l:.1f}%")
+            with lc3:
+                _card("Write-off", _fmt_aed(writeoff_l), "Confirmed adjustment \u2014 not appealable")
             with lc4:
+                _card("Likely Non-Recoverable", _fmt_aed(likely_nonrec_l), "TPA denials on 99203/99213 \u2014 experience-based")
+            with lc5:
                 _card("Net Recoverable Outstanding", _fmt_aed(recoverable_l), "The number that actually needs action")
 
             st.markdown(
                 f"**{_fmt_aed(recoverable_l)}** is still outstanding and recoverable at "
                 f"**{R['center'].title()}** ({R['year']}). **{_fmt_aed(writeoff_l)}** has already been "
-                f"written off and is not being chased further."
+                f"written off, and **{_fmt_aed(likely_nonrec_l)}** is flagged likely non-recoverable "
+                f"(TPA denials on 99203/99213) and not being chased further."
                 + (f" **{_fmt_aed(review_l)}** is pending category review." if review_l > 0 else "")
             )
 
-            st.markdown("#### Denied Amount \u2014 Recovered vs Recoverable vs Write-off")
+            st.markdown("#### Denied Amount \u2014 Recovered vs Recoverable vs Write-off vs Likely Non-Recoverable")
             chart_df = pd.DataFrame({
-                "Category": ["Recovered", "Recoverable Outstanding", "Write-off", "Under Review"],
-                "Amount": [recovered_l, recoverable_l, writeoff_l, review_l],
+                "Category": ["Recovered", "Recoverable Outstanding", "Write-off", "Likely Non-Recoverable", "Under Review"],
+                "Amount": [recovered_l, recoverable_l, writeoff_l, likely_nonrec_l, review_l],
             }).set_index("Category")
             st.bar_chart(chart_df)
 
