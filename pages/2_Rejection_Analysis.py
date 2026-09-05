@@ -173,7 +173,7 @@ DEFAULT_MANAGEMENT_RECIPIENTS = _get_secret("MANAGEMENT_EMAIL_RECIPIENTS")
 # ✅ Persistent cache (so results stay even after refresh / clicking again)
 REJ_CACHE_PREFIX = "rejection_cache"
 # Bump this whenever analytical rules change so an old cached workbook is NEVER reused.
-ANALYSIS_VERSION = "2026-09-06-v8-rule-engine-month-drilldown"
+ANALYSIS_VERSION = "2026-09-06-v8.2-flexible-date-insurance-kpi"
 REJ_CACHE_FILENAME = f"rejection_{ANALYSIS_VERSION}.xlsx"
 
 # =========================================
@@ -1899,39 +1899,17 @@ def run_rejection_app():
             key=f"rej_source_upload_{center}_{year}",
             help="Uploads this workbook directly as the source file for the selected center/year.",
         )
-        st.caption("Processing starts automatically once a file is selected — no need to click Generate after uploading.")
+        st.caption("Select the Excel file first. Processing will start only after you click Generate.")
 
-        if uploaded_source is not None:
-            uploaded_bytes = uploaded_source.getvalue()
-            upload_hash = sha1_short_bytes(uploaded_bytes)
-            upload_state_key = f"rej_last_upload_hash_{ANALYSIS_VERSION}_{center}_{year}"
+        # IMPORTANT: selecting a file must NOT trigger any upload, parsing, or analysis.
+        # The file remains pending in the Streamlit uploader until Generate is clicked.
+        pending_upload = uploaded_source is not None
+        if pending_upload:
+            st.info(f"Ready to generate: {uploaded_source.name}")
 
-            # Process only once per newly selected file, even after Streamlit reruns.
-            if st.session_state.get(upload_state_key) != upload_hash:
-                try:
-                    with st.spinner("Uploading source and rebuilding rejection analysis..."):
-                        # Save/replace source workbook in the same S3 location used by Generate.
-                        save_file_to_s3(S3_BUCKET, s3_key, uploaded_bytes)
-
-                        # A new source invalidates the previous cached rejection workbook.
-                        delete_file_from_s3(S3_BUCKET, rej_cache_key)
-
-                        # Build immediately so the user does not need a separate Generate click.
-                        out_xlsx_bytes, _stats = build_rejection_workbook_bytes(
-                            uploaded_bytes, uploaded_source.name
-                        )
-                        save_file_to_s3(S3_BUCKET, rej_cache_key, out_xlsx_bytes)
-                        st.session_state.rej_result = load_result_from_workbook_bytes(
-                            out_xlsx_bytes, center, year, s3_key
-                        )
-                        st.session_state[upload_state_key] = upload_hash
-
-                    st.success(f"Uploaded and analyzed: {uploaded_source.name} ✅")
-                except Exception as e:
-                    st.error(f"Could not process uploaded file: {e}")
-
-        # ✅ Auto-load saved result from S3 (so it stays until you upload new file or click Generate)
-        if st.session_state.rej_result is None and s3_exists(S3_BUCKET, rej_cache_key):
+        # Auto-load a previously saved result only when there is NO new file waiting to be generated.
+        # This avoids showing an old dashboard underneath a newly selected (but not yet processed) file.
+        if (not pending_upload) and st.session_state.rej_result is None and s3_exists(S3_BUCKET, rej_cache_key):
             try:
                 cached_bytes = load_file_from_s3(S3_BUCKET, rej_cache_key)
                 st.session_state.rej_result = load_result_from_workbook_bytes(cached_bytes, center, year, s3_key)
@@ -1952,21 +1930,41 @@ def run_rejection_app():
             st.rerun()
 
         if generate:
-            if not s3_exists(S3_BUCKET, s3_key):
-                st.error("Source file not found in S3. Upload an Excel file above first.")
-                st.stop()
+            # If the user selected a new file, use that file ONLY now, when Generate is clicked.
+            if uploaded_source is not None:
+                input_bytes = uploaded_source.getvalue()
+                input_name = uploaded_source.name
 
-            with st.spinner("Building rejection analysis..."):
-                input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
-                out_xlsx_bytes, _stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
+                with st.spinner("Uploading source and building rejection analysis..."):
+                    # Replace the source workbook in S3 only after explicit Generate click.
+                    save_file_to_s3(S3_BUCKET, s3_key, input_bytes)
 
-                # ✅ Save to S3 cache (PERSISTENT) so it doesn't ask to process again
-                save_file_to_s3(S3_BUCKET, rej_cache_key, out_xlsx_bytes)
+                    # The source changed, so remove the previous cached analysis before rebuilding.
+                    delete_file_from_s3(S3_BUCKET, rej_cache_key)
 
-                # ✅ Load into session
-                st.session_state.rej_result = load_result_from_workbook_bytes(out_xlsx_bytes, center, year, s3_key)
+                    out_xlsx_bytes, _stats = build_rejection_workbook_bytes(input_bytes, input_name)
+                    save_file_to_s3(S3_BUCKET, rej_cache_key, out_xlsx_bytes)
+                    st.session_state.rej_result = load_result_from_workbook_bytes(
+                        out_xlsx_bytes, center, year, s3_key
+                    )
 
-            st.success("Done ✅")
+                st.success(f"Generated from: {input_name} ✅")
+
+            else:
+                # No new upload selected: regenerate from the source already saved in S3.
+                if not s3_exists(S3_BUCKET, s3_key):
+                    st.error("Source file not found in S3. Upload an Excel file above first.")
+                    st.stop()
+
+                with st.spinner("Building rejection analysis..."):
+                    input_bytes = load_file_from_s3(S3_BUCKET, s3_key)
+                    out_xlsx_bytes, _stats = build_rejection_workbook_bytes(input_bytes, SOURCE_FILENAME)
+                    save_file_to_s3(S3_BUCKET, rej_cache_key, out_xlsx_bytes)
+                    st.session_state.rej_result = load_result_from_workbook_bytes(
+                        out_xlsx_bytes, center, year, s3_key
+                    )
+
+                st.success("Done ✅")
 
     # ---- Main UI ----
     if st.session_state.rej_result is None:
@@ -1998,33 +1996,89 @@ def run_rejection_app():
     df_rule_detail = R.get("df_rule_detail", pd.DataFrame())
     df_rule_master = R.get("df_rule_master", pd.DataFrame())
 
-    # ===== PERIOD / MONTH FILTER =====
-    # One Jan-Sep (or full-year) upload can be viewed as All Months or one month.
+    # ===== FLEXIBLE PERIOD / DATE FILTER =====
+    # Supports all data, one month, multiple months (e.g. Jul + Aug), or an exact date/date range.
     filtered_rule_detail = df_rule_detail.copy()
     date_candidates = [c for c in ["VisitDate", "ServiceDate", "EncounterDate", "ClaimDate", "RefDate"] if c in filtered_rule_detail.columns]
 
-    pcol1, pcol2, pcol3 = st.columns([1.2, 1.2, 2.6])
     if date_candidates:
+        f1, f2, f3 = st.columns([1.1, 1.2, 2.7])
         default_date_idx = date_candidates.index("VisitDate") if "VisitDate" in date_candidates else 0
-        with pcol1:
+        with f1:
             period_date_col = st.selectbox("Performance date", date_candidates, index=default_date_idx, key="period_date_source")
         parsed_dates = pd.to_datetime(filtered_rule_detail[period_date_col], errors="coerce")
         period_values = sorted(parsed_dates.dropna().dt.to_period("M").unique().tolist())
         period_labels = [p.strftime("%B %Y") for p in period_values]
-        with pcol2:
-            selected_period_label = st.selectbox("Period", ["All Months"] + period_labels, key="management_period_filter")
-        if selected_period_label != "All Months":
-            selected_period = period_values[period_labels.index(selected_period_label)]
-            filtered_rule_detail = filtered_rule_detail.loc[parsed_dates.dt.to_period("M") == selected_period].copy()
-        with pcol3:
-            st.caption(f"Month filter uses **{period_date_col}**. Select All Months for the complete uploaded report.")
+
+        with f2:
+            filter_mode = st.selectbox(
+                "Period filter",
+                ["All Data", "Single Month", "Multiple Months", "Specific Date / Range"],
+                key="management_filter_mode",
+            )
+
+        selected_period_label = "All Data"
+        if filter_mode == "Single Month":
+            with f3:
+                chosen_month = st.selectbox("Select month", period_labels, key="management_single_month") if period_labels else None
+            if chosen_month:
+                chosen_period = period_values[period_labels.index(chosen_month)]
+                filtered_rule_detail = filtered_rule_detail.loc[parsed_dates.dt.to_period("M") == chosen_period].copy()
+                selected_period_label = chosen_month
+
+        elif filter_mode == "Multiple Months":
+            with f3:
+                chosen_months = st.multiselect(
+                    "Select two or more months",
+                    period_labels,
+                    default=period_labels[-2:] if len(period_labels) >= 2 else period_labels,
+                    key="management_multi_months",
+                )
+            if chosen_months:
+                chosen_periods = {period_values[period_labels.index(m)] for m in chosen_months}
+                filtered_rule_detail = filtered_rule_detail.loc[parsed_dates.dt.to_period("M").isin(chosen_periods)].copy()
+                selected_period_label = " + ".join(chosen_months)
+            else:
+                filtered_rule_detail = filtered_rule_detail.iloc[0:0].copy()
+                selected_period_label = "No months selected"
+
+        elif filter_mode == "Specific Date / Range":
+            valid_dates = parsed_dates.dropna()
+            if not valid_dates.empty:
+                min_d = valid_dates.min().date()
+                max_d = valid_dates.max().date()
+                with f3:
+                    chosen_dates = st.date_input(
+                        "Select one date or a date range",
+                        value=(min_d, max_d),
+                        min_value=min_d,
+                        max_value=max_d,
+                        key="management_date_range",
+                    )
+                if isinstance(chosen_dates, (list, tuple)):
+                    if len(chosen_dates) == 2:
+                        start_d, end_d = chosen_dates
+                    elif len(chosen_dates) == 1:
+                        start_d = end_d = chosen_dates[0]
+                    else:
+                        start_d, end_d = min_d, max_d
+                else:
+                    start_d = end_d = chosen_dates
+                normalized = parsed_dates.dt.date
+                filtered_rule_detail = filtered_rule_detail.loc[(normalized >= start_d) & (normalized <= end_d)].copy()
+                selected_period_label = start_d.strftime("%d %b %Y") if start_d == end_d else f"{start_d.strftime('%d %b %Y')} – {end_d.strftime('%d %b %Y')}"
+            else:
+                with f3:
+                    st.caption("No valid dates found in the selected date column.")
+                filtered_rule_detail = filtered_rule_detail.iloc[0:0].copy()
+                selected_period_label = "No valid dates"
+        else:
+            with f3:
+                st.caption(f"Showing the complete uploaded report using **{period_date_col}**.")
     else:
         period_date_col = None
-        selected_period_label = "All Months"
-        with pcol1:
-            st.selectbox("Period", ["All Months"], disabled=True, key="management_period_filter_no_date")
-        with pcol3:
-            st.caption("No usable service/visit date column was found, so only All Months is available.")
+        selected_period_label = "All Data"
+        st.info("No usable service/visit date column was found, so date filtering is unavailable.")
 
     # Rebuild every management summary from the period-filtered activity-level detail.
     df_management_outcome = build_management_outcome_summary(filtered_rule_detail)
@@ -2130,8 +2184,34 @@ def run_rejection_app():
                 st.info("No rule-confirmed non-recoverable outstanding amount for the selected period.")
             else:
                 reason_summary = build_management_by_reason(nonrec)
-                st.markdown("##### Why is it non-recoverable?")
-                st.dataframe(reason_summary, use_container_width=True, hide_index=True)
+                st.markdown("##### Why is it non-recoverable? — reason, denial code and service")
+
+                denial_col = "DenialCodeLevel3" if "DenialCodeLevel3" in nonrec.columns else ("DenialCode" if "DenialCode" in nonrec.columns else None)
+                service_col_all = "Code" if "Code" in nonrec.columns else ("RuleCPT" if "RuleCPT" in nonrec.columns else None)
+                desc_col_all = "Description" if "Description" in nonrec.columns else None
+                summary_group_cols = ["ManagementReason"]
+                if denial_col:
+                    summary_group_cols.append(denial_col)
+                if service_col_all:
+                    summary_group_cols.append(service_col_all)
+                if desc_col_all:
+                    summary_group_cols.append(desc_col_all)
+
+                detailed_reason_summary = nonrec.groupby(summary_group_cols, dropna=False).agg(
+                    InitialRejected=("OriginalRejectedAmount", "sum"),
+                    Recovered=("RecoveredAmount", "sum"),
+                    Outstanding=("OutstandingAmount", "sum"),
+                    Activities=("OutstandingAmount", "size"),
+                    UniqueClaims=("UniqueID", _unique_claim_count) if "UniqueID" in nonrec.columns else ("OutstandingAmount", "size"),
+                ).reset_index().sort_values("Outstanding", ascending=False)
+                rename_map = {}
+                if denial_col:
+                    rename_map[denial_col] = "Denial Code"
+                if service_col_all:
+                    rename_map[service_col_all] = "Service / CPT"
+                if desc_col_all:
+                    rename_map[desc_col_all] = "Service Description"
+                st.dataframe(detailed_reason_summary.rename(columns=rename_map), use_container_width=True, hide_index=True)
 
                 reasons = reason_summary["ManagementReason"].dropna().astype(str).tolist()
                 selected_reason = st.selectbox("Select reason to see services/CPT", reasons, key="nonrec_reason_drill") if reasons else None
@@ -2163,40 +2243,17 @@ def run_rejection_app():
                     st.markdown("##### Claim / Activity Detail")
                     st.dataframe(claim_rows[detail_cols].sort_values("OutstandingAmount", ascending=False), use_container_width=True, hide_index=True)
 
-        st.markdown("### Management Snapshot")
-        if not df_management_outcome.empty:
-            show = df_management_outcome[df_management_outcome["Outcome"] != "Grand Total"].copy()
-            show["Amount"] = pd.to_numeric(show["Amount"], errors="coerce").fillna(0)
-            show["SharePct"] = (show["Amount"] / total_amount * 100).round(1) if total_amount > 0 else 0
-            st.dataframe(
-                show.rename(columns={
-                    "Outcome": "Current Position",
-                    "Amount": "Amount (AED)",
-                    "UniqueClaims": "Claims",
-                    "SharePct": "% of Initial Rejection",
-                }),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        st.markdown("### Top 5 Insurances — What Management Needs to See")
+        st.markdown("### Top 5 Insurances")
         if not df_management_by_insurance.empty:
             top5 = df_management_by_insurance.head(5).copy()
-            st.dataframe(
-                top5.rename(columns={
-                    "InitialRejected": "Initial Rejected",
-                    "Recovered": "Recovered",
-                    "Pending": "Pending",
-                    "ActionRequired": "Action Required",
-                    "Reconciliation": "Escalation",
-                    "AdjustmentClosed": "Non-Recoverable / Adjustment",
-                    "NeedsReview": "Needs Review",
-                    "UniqueClaims": "Claims",
-                    "RecoveredPct": "Recovered %",
-                }),
-                use_container_width=True,
-                hide_index=True,
-            )
+            cols = st.columns(5)
+            for i, (_, row) in enumerate(top5.iterrows()):
+                ins_name = str(row.get("Insurance", "Unknown"))
+                rejected = float(pd.to_numeric(pd.Series([row.get("InitialRejected", 0)]), errors="coerce").fillna(0).iloc[0])
+                open_amt = sum(float(pd.to_numeric(pd.Series([row.get(c, 0)]), errors="coerce").fillna(0).iloc[0]) for c in ["Pending", "ActionRequired", "Reconciliation", "AdjustmentClosed", "NeedsReview"])
+                claims = int(pd.to_numeric(pd.Series([row.get("UniqueClaims", 0)]), errors="coerce").fillna(0).iloc[0])
+                with cols[i]:
+                    _card(ins_name, _fmt_aed(rejected), f"{claims:,} claims • Open/adjusted {_fmt_aed(open_amt)}")
 
         st.markdown("### Top 5 Denial Reasons")
         if not df_management_by_denial.empty:
