@@ -174,7 +174,7 @@ DEFAULT_MANAGEMENT_CC = _get_secret("EMAIL_CC")
 # ✅ Persistent cache (so results stay even after refresh / clicking again)
 REJ_CACHE_PREFIX = "rejection_cache"
 # Bump this whenever analytical rules change so an old cached workbook is NEVER reused.
-ANALYSIS_VERSION = "2026-09-06-v8.4-owner-email-preview"
+ANALYSIS_VERSION = "2026-09-06-v8.8-owner-email-recipient-fallback"
 REJ_CACHE_FILENAME = f"rejection_{ANALYSIS_VERSION}.xlsx"
 
 # =========================================
@@ -2406,16 +2406,25 @@ def run_rejection_app():
                 top_denials=owner_top_den,
             )
 
+            # Seed email fields from Streamlit secrets. Streamlit keeps widget values in
+            # session_state across reruns/deploys, so a previously blank field can otherwise
+            # override a newly configured EMAIL_TO/EMAIL_CC secret.
+            default_to = DEFAULT_MANAGEMENT_RECIPIENTS.strip().strip(",")
+            default_cc = DEFAULT_MANAGEMENT_CC.strip().strip(",")
+            if not str(st.session_state.get("owner_email_recipients", "")).strip() and default_to:
+                st.session_state["owner_email_recipients"] = default_to
+            if "owner_email_cc" not in st.session_state and default_cc:
+                st.session_state["owner_email_cc"] = default_cc
+
             em1, em2 = st.columns([2, 1])
             with em1:
                 owner_recipients_raw = st.text_input(
                     "To (comma-separated)",
-                    value=DEFAULT_MANAGEMENT_RECIPIENTS.strip().strip(","),
                     key="owner_email_recipients",
+                    placeholder="owner@example.com",
                 )
                 owner_cc_raw = st.text_input(
                     "CC (optional, comma-separated)",
-                    value=DEFAULT_MANAGEMENT_CC.strip().strip(","),
                     key="owner_email_cc",
                 )
             with em2:
@@ -2457,8 +2466,11 @@ def run_rejection_app():
                 )
 
             if send_clicked:
-                recipients = [r.strip() for r in owner_recipients_raw.split(",") if r.strip()]
-                cc_recipients = [r.strip() for r in owner_cc_raw.split(",") if r.strip()]
+                # Final fallback to secrets in case the visible widget is unexpectedly blank.
+                raw_to = owner_recipients_raw.strip() or DEFAULT_MANAGEMENT_RECIPIENTS.strip().strip(",")
+                raw_cc = owner_cc_raw.strip() or DEFAULT_MANAGEMENT_CC.strip().strip(",")
+                recipients = [r.strip() for r in raw_to.split(",") if r.strip()]
+                cc_recipients = [r.strip() for r in raw_cc.split(",") if r.strip()]
                 try:
                     with st.spinner("Sending owner email..."):
                         send_email_with_attachment(
