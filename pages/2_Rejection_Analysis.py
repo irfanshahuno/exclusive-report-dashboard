@@ -2190,6 +2190,10 @@ def run_rejection_app():
                 service_col_all = "Code" if "Code" in nonrec.columns else ("RuleCPT" if "RuleCPT" in nonrec.columns else None)
                 desc_col_all = "Description" if "Description" in nonrec.columns else None
                 summary_group_cols = ["ManagementReason"]
+                # Always keep payer visible in the management drill-down so the same
+                # denial/service can be traced back to the responsible insurance.
+                if "Insurance" in nonrec.columns:
+                    summary_group_cols.append("Insurance")
                 if denial_col:
                     summary_group_cols.append(denial_col)
                 if service_col_all:
@@ -2255,24 +2259,37 @@ def run_rejection_app():
                 with cols[i]:
                     _card(ins_name, _fmt_aed(rejected), f"{claims:,} claims • Open/adjusted {_fmt_aed(open_amt)}")
 
-        st.markdown("### Top 5 Denial Reasons")
+        st.markdown("### Top 5 Denial Codes")
         if not df_management_by_denial.empty:
             topd = df_management_by_denial.head(5).copy()
-            st.dataframe(
-                topd.rename(columns={
-                    "DenialCode": "Denial Code",
-                    "InitialRejected": "Initial Rejected",
-                    "Recovered": "Recovered",
-                    "Pending": "Pending",
-                    "ActionRequired": "Action Required",
-                    "Reconciliation": "Escalation",
-                    "AdjustmentClosed": "Non-Recoverable / Adjustment",
-                    "NeedsReview": "Needs Review",
-                    "UniqueClaims": "Claims",
-                }),
-                use_container_width=True,
-                hide_index=True,
-            )
+            dcols = st.columns(5)
+            denial_detail_col = "DenialCodeLevel3" if "DenialCodeLevel3" in filtered_rule_detail.columns else ("DenialCode" if "DenialCode" in filtered_rule_detail.columns else None)
+            for i, (_, row) in enumerate(topd.iterrows()):
+                code = str(row.get("DenialCode", "Unknown"))
+                rejected = float(pd.to_numeric(pd.Series([row.get("InitialRejected", 0)]), errors="coerce").fillna(0).iloc[0])
+                claims = int(pd.to_numeric(pd.Series([row.get("UniqueClaims", 0)]), errors="coerce").fillna(0).iloc[0])
+
+                top_payer = ""
+                payer_amount = 0.0
+                if denial_detail_col and not filtered_rule_detail.empty and "Insurance" in filtered_rule_detail.columns:
+                    code_rows = filtered_rule_detail.loc[
+                        filtered_rule_detail[denial_detail_col].astype(str).str.strip().str.upper().eq(code.strip().upper())
+                    ].copy()
+                    if not code_rows.empty:
+                        payer_summary = (
+                            code_rows.groupby("Insurance", dropna=False)["OriginalRejectedAmount"]
+                            .sum()
+                            .sort_values(ascending=False)
+                        )
+                        if not payer_summary.empty:
+                            top_payer = str(payer_summary.index[0])
+                            payer_amount = float(payer_summary.iloc[0])
+
+                subtitle = f"{claims:,} claims"
+                if top_payer:
+                    subtitle += f" • Top payer: {top_payer} ({_fmt_aed(payer_amount)})"
+                with dcols[i]:
+                    _card(code, _fmt_aed(rejected), subtitle)
 
         st.info(
             "Management reading: Initial Rejected is the historical picture. The operational focus is Action Required + "
