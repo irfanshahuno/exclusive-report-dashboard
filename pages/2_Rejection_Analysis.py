@@ -2322,12 +2322,12 @@ def run_rejection_app():
     matured_recovery_rate = (recovered_amount / matured_base * 100) if matured_base > 0 else 0.0
 
     # ===== Top toolbar =====
-    top_left, top_right = st.columns([4, 1])
+    top_left, top_download, top_email = st.columns([3.4, 1, 1])
     with top_left:
         st.caption(
             f"Executive view first • {selected_period_label} • Rule engine {ANALYSIS_VERSION}. Detailed tracing stays under RCM Detail."
         )
-    with top_right:
+    with top_download:
         st.download_button(
             "Download Full Excel",
             data=out_xlsx_bytes,
@@ -2335,6 +2335,9 @@ def run_rejection_app():
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
+    with top_email:
+        if st.button("📧 Email Owner", use_container_width=True, key="toggle_owner_email_top"):
+            st.session_state["show_owner_email"] = not st.session_state.get("show_owner_email", False)
 
     # ===== Main navigation =====
     tab_exec, tab_ins, tab_denial, tab_work, tab_detail = st.tabs([
@@ -2349,6 +2352,106 @@ def run_rejection_app():
     # TAB 1 — EXECUTIVE SUMMARY
     # ------------------------------------------------------------------
     with tab_exec:
+        # Owner email workflow on Executive Summary first page.
+        if st.session_state.get("show_owner_email", False):
+            st.markdown("### 📧 Owner Email — Preview & Send")
+            st.caption(
+                f"The email and attachment use the CURRENT dashboard filter: **{selected_period_label}**. "
+                "Nothing is sent until you click Send Email."
+            )
+
+            owner_xlsx_bytes = build_owner_workbook_bytes(
+                period_label=selected_period_label,
+                filtered_detail=filtered_rule_detail,
+                management_by_insurance=df_management_by_insurance,
+                management_by_denial=df_management_by_denial,
+                total_amount=total_amount,
+                total_claims=total_claims,
+                recovered_amount=recovered_amount,
+                pending_amount=pending_amount,
+                action_amount=action_amount,
+                recon_amount=recon_amount,
+                adjustment_amount=adjustment_amount,
+                needs_review_amount=needs_review_amount,
+            )
+
+            owner_top_ins = df_management_by_insurance.sort_values("InitialRejected", ascending=False).head(5).copy() if not df_management_by_insurance.empty else pd.DataFrame()
+            owner_top_den = df_management_by_denial.sort_values("InitialRejected", ascending=False).head(5).copy() if not df_management_by_denial.empty else pd.DataFrame()
+            owner_html = build_owner_email_html(
+                center=R["center"],
+                period_label=selected_period_label,
+                total_amount=total_amount,
+                total_claims=total_claims,
+                recovered_amount=recovered_amount,
+                pending_amount=pending_amount,
+                action_amount=action_amount,
+                recon_amount=recon_amount,
+                adjustment_amount=adjustment_amount,
+                needs_review_amount=needs_review_amount,
+                top_insurance=owner_top_ins,
+                top_denials=owner_top_den,
+            )
+
+            em1, em2 = st.columns([2, 1])
+            with em1:
+                owner_recipients_raw = st.text_input(
+                    "To (comma-separated)",
+                    value=DEFAULT_MANAGEMENT_RECIPIENTS,
+                    key="owner_email_recipients",
+                )
+            with em2:
+                owner_subject = st.text_input(
+                    "Subject",
+                    value=f"RCM Denial & Recovery Summary — {selected_period_label}",
+                    key="owner_email_subject",
+                )
+
+            st.markdown("##### Email Preview")
+            st.components.v1.html(owner_html, height=980, scrolling=True)
+
+            safe_period = re.sub(r"[^A-Za-z0-9_-]+", "_", selected_period_label).strip("_") or "Selected_Period"
+            owner_attach_name = f"RCM_Denial_Recovery_{safe_period}.xlsx"
+            dl_col, send_col = st.columns([1, 1])
+            with dl_col:
+                st.download_button(
+                    "📎 Download Owner Excel",
+                    data=owner_xlsx_bytes,
+                    file_name=owner_attach_name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="owner_email_attachment_download",
+                )
+            with send_col:
+                send_clicked = st.button(
+                    "📧 Send Email",
+                    type="primary",
+                    use_container_width=True,
+                    key="owner_send_email_btn",
+                    disabled=not bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD and SMTP_SENDER),
+                )
+
+            if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD and SMTP_SENDER):
+                st.info(
+                    "Email preview and Owner Excel are ready. To enable Send Email, configure "
+                    "SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD and SMTP_SENDER in Streamlit secrets."
+                )
+
+            if send_clicked:
+                recipients = [r.strip() for r in owner_recipients_raw.split(",") if r.strip()]
+                try:
+                    with st.spinner("Sending owner email..."):
+                        send_email_with_attachment(
+                            recipients=recipients,
+                            subject=owner_subject,
+                            html_body=owner_html,
+                            attachment_bytes=owner_xlsx_bytes,
+                            attachment_filename=owner_attach_name,
+                        )
+                    st.success(f"Owner email sent to {len(recipients)} recipient(s) ✅")
+                except Exception as e:
+                    st.error(f"Could not send email: {e}")
+
+
         st.markdown("### Financial Position of Denials")
 
         k1, k2, k3 = st.columns(3)
@@ -2765,102 +2868,5 @@ def run_rejection_app():
                 st.write("**Resubmission Stages — Exclusive**")
                 st.dataframe(df_resub_stage_summary_excl, use_container_width=True)
 
-        # Owner email workflow: prepare -> preview -> download attachment -> send.
-        with st.expander("📧 Owner Email — Preview & Send", expanded=False):
-            st.caption(
-                f"The email and attachment use the CURRENT dashboard filter: **{selected_period_label}**. "
-                "Nothing is sent until you click Send Email."
-            )
-
-            owner_xlsx_bytes = build_owner_workbook_bytes(
-                period_label=selected_period_label,
-                filtered_detail=filtered_rule_detail,
-                management_by_insurance=df_management_by_insurance,
-                management_by_denial=df_management_by_denial,
-                total_amount=total_amount,
-                total_claims=total_claims,
-                recovered_amount=recovered_amount,
-                pending_amount=pending_amount,
-                action_amount=action_amount,
-                recon_amount=recon_amount,
-                adjustment_amount=adjustment_amount,
-                needs_review_amount=needs_review_amount,
-            )
-
-            owner_top_ins = df_management_by_insurance.sort_values("InitialRejected", ascending=False).head(5).copy() if not df_management_by_insurance.empty else pd.DataFrame()
-            owner_top_den = df_management_by_denial.sort_values("InitialRejected", ascending=False).head(5).copy() if not df_management_by_denial.empty else pd.DataFrame()
-            owner_html = build_owner_email_html(
-                center=R["center"],
-                period_label=selected_period_label,
-                total_amount=total_amount,
-                total_claims=total_claims,
-                recovered_amount=recovered_amount,
-                pending_amount=pending_amount,
-                action_amount=action_amount,
-                recon_amount=recon_amount,
-                adjustment_amount=adjustment_amount,
-                needs_review_amount=needs_review_amount,
-                top_insurance=owner_top_ins,
-                top_denials=owner_top_den,
-            )
-
-            em1, em2 = st.columns([2, 1])
-            with em1:
-                owner_recipients_raw = st.text_input(
-                    "To (comma-separated)",
-                    value=DEFAULT_MANAGEMENT_RECIPIENTS,
-                    key="owner_email_recipients",
-                )
-            with em2:
-                owner_subject = st.text_input(
-                    "Subject",
-                    value=f"RCM Denial & Recovery Summary — {selected_period_label}",
-                    key="owner_email_subject",
-                )
-
-            st.markdown("##### Email Preview")
-            st.components.v1.html(owner_html, height=980, scrolling=True)
-
-            safe_period = re.sub(r"[^A-Za-z0-9_-]+", "_", selected_period_label).strip("_") or "Selected_Period"
-            owner_attach_name = f"RCM_Denial_Recovery_{safe_period}.xlsx"
-            dl_col, send_col = st.columns([1, 1])
-            with dl_col:
-                st.download_button(
-                    "📎 Download Owner Excel",
-                    data=owner_xlsx_bytes,
-                    file_name=owner_attach_name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key="owner_email_attachment_download",
-                )
-            with send_col:
-                send_clicked = st.button(
-                    "📧 Send Email",
-                    type="primary",
-                    use_container_width=True,
-                    key="owner_send_email_btn",
-                    disabled=not bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD and SMTP_SENDER),
-                )
-
-            if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD and SMTP_SENDER):
-                st.info(
-                    "Email preview and Owner Excel are ready. To enable Send Email, configure "
-                    "SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD and SMTP_SENDER in Streamlit secrets."
-                )
-
-            if send_clicked:
-                recipients = [r.strip() for r in owner_recipients_raw.split(",") if r.strip()]
-                try:
-                    with st.spinner("Sending owner email..."):
-                        send_email_with_attachment(
-                            recipients=recipients,
-                            subject=owner_subject,
-                            html_body=owner_html,
-                            attachment_bytes=owner_xlsx_bytes,
-                            attachment_filename=owner_attach_name,
-                        )
-                    st.success(f"Owner email sent to {len(recipients)} recipient(s) ✅")
-                except Exception as e:
-                    st.error(f"Could not send email: {e}")
 
 run_rejection_app()
