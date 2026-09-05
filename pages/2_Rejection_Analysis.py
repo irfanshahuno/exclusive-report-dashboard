@@ -173,7 +173,7 @@ DEFAULT_MANAGEMENT_RECIPIENTS = _get_secret("MANAGEMENT_EMAIL_RECIPIENTS")
 # ✅ Persistent cache (so results stay even after refresh / clicking again)
 REJ_CACHE_PREFIX = "rejection_cache"
 # Bump this whenever analytical rules change so an old cached workbook is NEVER reused.
-ANALYSIS_VERSION = "2026-09-06-v8.2-flexible-date-insurance-kpi"
+ANALYSIS_VERSION = "2026-09-06-v8.4-owner-email-preview"
 REJ_CACHE_FILENAME = f"rejection_{ANALYSIS_VERSION}.xlsx"
 
 # =========================================
@@ -1651,6 +1651,205 @@ def build_email_summary_html(
     return html
 
 
+
+def build_owner_email_html(
+    center: str,
+    period_label: str,
+    total_amount: float,
+    total_claims: int,
+    recovered_amount: float,
+    pending_amount: float,
+    action_amount: float,
+    recon_amount: float,
+    adjustment_amount: float,
+    needs_review_amount: float,
+    top_insurance: pd.DataFrame,
+    top_denials: pd.DataFrame,
+) -> str:
+    """Outlook-friendly executive HTML email using inline styles only."""
+
+    def card(title, value, note, accent):
+        return f"""<td style='width:33.33%;padding:7px;vertical-align:top;'>
+          <div style='border:1px solid #E7D8D8;border-left:5px solid {accent};border-radius:12px;padding:14px 16px;background:#FFFFFF;min-height:96px;'>
+            <div style='font-size:11px;letter-spacing:.6px;font-weight:700;color:{accent};text-transform:uppercase;'>{title}</div>
+            <div style='font-size:24px;line-height:1.25;font-weight:800;color:#201010;margin-top:7px;'>{_fmt_aed(value)}</div>
+            <div style='font-size:11px;color:#8A8A98;margin-top:6px;'>{note}</div>
+          </div>
+        </td>"""
+
+    def mini_cards(df, label_col, amount_col, extra_fn=None):
+        if df is None or df.empty:
+            return "<p style='color:#888;'>No data for the selected period.</p>"
+        cells = []
+        for _, r in df.head(5).iterrows():
+            label = str(r.get(label_col, '')).strip()
+            amt = float(pd.to_numeric(pd.Series([r.get(amount_col, 0)]), errors='coerce').fillna(0).iloc[0])
+            extra = extra_fn(r) if extra_fn else ''
+            cells.append(f"""<td style='width:20%;padding:6px;vertical-align:top;'>
+              <div style='border:1px solid #E7D8D8;border-left:4px solid #A62020;border-radius:10px;padding:12px;background:#fff;min-height:90px;'>
+                <div style='font-size:11px;font-weight:700;color:#A62020;text-transform:uppercase;'>{label}</div>
+                <div style='font-size:19px;font-weight:800;color:#201010;margin-top:6px;'>{_fmt_aed(amt)}</div>
+                <div style='font-size:10.5px;color:#8A8A98;margin-top:5px;'>{extra}</div>
+              </div>
+            </td>""")
+        return "<table role='presentation' width='100%' cellspacing='0' cellpadding='0'><tr>" + ''.join(cells) + "</tr></table>"
+
+    top_ins_html = mini_cards(
+        top_insurance, 'Insurance', 'InitialRejected',
+        lambda r: f"{int(r.get('UniqueClaims', 0)):,} claims"
+    )
+    top_den_html = mini_cards(
+        top_denials, 'DenialCode', 'InitialRejected',
+        lambda r: f"{int(r.get('UniqueClaims', 0)):,} claims"
+    )
+
+    nonrec_note = (
+        "Confirmed business-rule adjustments such as contractual/price adjustments, "
+        "E&amp;M level adjustments, non-covered services, follow-up adjustments and patient responsibility."
+    )
+
+    return f"""<!doctype html>
+<html><body style='margin:0;padding:0;background:#FAF4F4;font-family:Arial,Helvetica,sans-serif;color:#201010;'>
+  <table role='presentation' width='100%' cellspacing='0' cellpadding='0' style='background:#FAF4F4;'>
+    <tr><td align='center' style='padding:22px 10px;'>
+      <table role='presentation' width='920' cellspacing='0' cellpadding='0' style='width:920px;max-width:100%;background:#FAF4F4;'>
+        <tr><td style='padding:4px 8px 18px 8px;'>
+          <div style='font-size:28px;font-weight:800;color:#261414;'>RCM Denial &amp; Recovery Summary</div>
+          <div style='font-size:13px;color:#7F7A83;margin-top:6px;'>{center.title()} • {period_label}</div>
+        </td></tr>
+        <tr><td>
+          <table role='presentation' width='100%' cellspacing='0' cellpadding='0'><tr>
+            {card('Initial Rejected', total_amount, f'{total_claims:,} unique claims', '#A62020')}
+            {card('Recovered / Paid', recovered_amount, 'Cash recovered after initial rejection', '#2F7D4A')}
+            {card('Pending with Payer', pending_amount, 'Already submitted; awaiting payer', '#B7791F')}
+          </tr></table>
+          <table role='presentation' width='100%' cellspacing='0' cellpadding='0'><tr>
+            {card('Recoverable / Action Required', action_amount, 'Correct / resubmit / investigate', '#C2410C')}
+            {card('Reconciliation / Escalation', recon_amount, 'Payer dispute / repeated rejection', '#2563A6')}
+            {card('Non-Recoverable / Adjustment', adjustment_amount, 'Confirmed business-rule adjustment', '#6B1F1F')}
+          </tr></table>
+          <table role='presentation' width='100%' cellspacing='0' cellpadding='0'><tr>
+            {card('Needs Review', needs_review_amount, 'Not automatically written off', '#7C3A8C')}
+            <td style='width:66.66%;padding:7px;vertical-align:top;'>
+              <div style='border:1px solid #E7D8D8;border-radius:12px;padding:14px 16px;background:#FFF9F9;min-height:96px;'>
+                <div style='font-size:12px;font-weight:700;color:#6B1F1F;'>Management note</div>
+                <div style='font-size:12px;line-height:1.55;color:#5D555B;margin-top:6px;'>{nonrec_note}</div>
+              </div>
+            </td>
+          </tr></table>
+        </td></tr>
+        <tr><td style='padding:22px 8px 5px 8px;font-size:19px;font-weight:800;'>Top 5 Insurances</td></tr>
+        <tr><td>{top_ins_html}</td></tr>
+        <tr><td style='padding:22px 8px 5px 8px;font-size:19px;font-weight:800;'>Top 5 Denial Codes</td></tr>
+        <tr><td>{top_den_html}</td></tr>
+        <tr><td style='padding:20px 8px 4px 8px;'>
+          <div style='background:#EEF5FF;border:1px solid #D5E4F8;border-radius:10px;padding:13px 15px;font-size:12px;line-height:1.55;color:#2C4E75;'>
+            RCM focus: active recovery opportunities, payer-pending cases and reconciliation/escalation. The attached Excel provides insurance, denial-code, CPT/service and claim-level support for the selected period.
+          </div>
+        </td></tr>
+        <tr><td style='padding:20px 8px 6px 8px;font-size:12px;color:#5F5960;'>
+          Best Regards,<br/><b>Irfan Shah</b><br/>RCM / Insurance Department
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>"""
+
+
+def build_owner_workbook_bytes(
+    period_label: str,
+    filtered_detail: pd.DataFrame,
+    management_by_insurance: pd.DataFrame,
+    management_by_denial: pd.DataFrame,
+    total_amount: float,
+    total_claims: int,
+    recovered_amount: float,
+    pending_amount: float,
+    action_amount: float,
+    recon_amount: float,
+    adjustment_amount: float,
+    needs_review_amount: float,
+) -> bytes:
+    """Create a management-ready workbook for the currently selected period."""
+    detail = filtered_detail.copy()
+    bucket_col = "ManagementOutstandingBucket"
+
+    def subset(bucket):
+        if detail.empty or bucket_col not in detail.columns:
+            return pd.DataFrame()
+        return detail.loc[detail[bucket_col].astype(str).eq(bucket)].copy()
+
+    executive = pd.DataFrame([
+        ["Selected Period", period_label, ""],
+        ["Initial Rejected", total_amount, total_claims],
+        ["Recovered / Paid", recovered_amount, ""],
+        ["Pending with Payer", pending_amount, ""],
+        ["Recoverable / Action Required", action_amount, ""],
+        ["Reconciliation / Escalation", recon_amount, ""],
+        ["Non-Recoverable / Adjustment", adjustment_amount, ""],
+        ["Needs Review", needs_review_amount, ""],
+    ], columns=["KPI", "Amount / Value", "Unique Claims"])
+
+    preferred_cols = [
+        "UniqueID", "Insurance", "VisitNo", "VisitDate", "DenialCodeLevel3", "RecoveryDenialCode",
+        "Code", "Description", "OriginalRejectedAmount", "RecoveredAmount", "OutstandingAmount",
+        "ManagementOutstandingBucket", "ManagementReason", "RuleApplied", "RuleSource", "RecommendedAction"
+    ]
+    cols = [c for c in preferred_cols if c in detail.columns]
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        executive.to_excel(writer, sheet_name="Executive Summary", index=False)
+        management_by_insurance.to_excel(writer, sheet_name="Insurance Summary", index=False)
+        management_by_denial.to_excel(writer, sheet_name="Denial Codes", index=False)
+        subset("Non-Recoverable / Adjustment")[cols].to_excel(writer, sheet_name="Non-Recoverable", index=False)
+        subset("Action Required")[cols].to_excel(writer, sheet_name="Action Required", index=False)
+        subset("Reconciliation / Escalation")[cols].to_excel(writer, sheet_name="Reconciliation", index=False)
+        subset("Needs Review")[cols].to_excel(writer, sheet_name="Needs Review", index=False)
+        detail[cols].to_excel(writer, sheet_name="Claim Detail", index=False)
+
+    wb = load_workbook(io.BytesIO(buf.getvalue()))
+    header_fill = PatternFill("solid", fgColor="A62020")
+    header_font = Font(color="FFFFFF", bold=True)
+    sub_fill = PatternFill("solid", fgColor="F8EAEA")
+
+    for ws in wb.worksheets:
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        for col_cells in ws.columns:
+            letter = col_cells[0].column_letter
+            max_len = 0
+            for cell in col_cells[:250]:
+                v = "" if cell.value is None else str(cell.value)
+                max_len = max(max_len, len(v))
+            ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 42)
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                header = str(ws.cell(1, cell.column).value or '').lower()
+                if isinstance(cell.value, (int, float)) and any(k in header for k in ['amount','rejected','recovered','pending','action','reconciliation','adjustment','review']):
+                    cell.number_format = '#,##0.00'
+
+    ws = wb["Executive Summary"]
+    ws.freeze_panes = None
+    ws.auto_filter.ref = None
+    ws.column_dimensions["A"].width = 34
+    ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["C"].width = 18
+    for r in range(2, ws.max_row + 1):
+        ws.cell(r, 1).fill = sub_fill
+        ws.cell(r, 1).font = Font(bold=True, color="6B1F1F")
+        if r >= 3 and isinstance(ws.cell(r, 2).value, (int, float)):
+            ws.cell(r, 2).number_format = 'AED #,##0.00'
+            ws.cell(r, 2).font = Font(bold=True, size=12)
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
 def send_email_with_attachment(
     recipients: list[str], subject: str, html_body: str,
     attachment_bytes: bytes, attachment_filename: str,
@@ -2566,53 +2765,102 @@ def run_rejection_app():
                 st.write("**Resubmission Stages — Exclusive**")
                 st.dataframe(df_resub_stage_summary_excl, use_container_width=True)
 
-        # Email remains available to RCM but no longer dominates the executive view.
-        with st.expander("Email management summary"):
-            if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD):
-                st.warning("Email is not configured in Streamlit secrets.")
-            else:
-                em1, em2 = st.columns([2, 1])
-                with em1:
-                    email_recipients_raw = st.text_input(
-                        "Recipients (comma-separated)",
-                        value=DEFAULT_MANAGEMENT_RECIPIENTS,
-                        key="rej_email_recipients",
-                    )
-                with em2:
-                    email_subject = st.text_input(
-                        "Subject",
-                        value=f"RCM Denial & Recovery Summary — {R['center'].title()} ({R['year']})",
-                        key="rej_email_subject",
-                    )
+        # Owner email workflow: prepare -> preview -> download attachment -> send.
+        with st.expander("📧 Owner Email — Preview & Send", expanded=False):
+            st.caption(
+                f"The email and attachment use the CURRENT dashboard filter: **{selected_period_label}**. "
+                "Nothing is sent until you click Send Email."
+            )
 
-                if st.button("Send Email to Management", type="primary", key="rej_send_email_btn"):
-                    recipients = [r.strip() for r in email_recipients_raw.split(",") if r.strip()]
-                    try:
-                        with st.spinner("Sending email..."):
-                            top_ins = df_by_ins_nogt.sort_values("RejectedAmount", ascending=False).head(5)
-                            html_body = build_email_summary_html(
-                                center=R["center"], year=R["year"],
-                                total_amount=total_amount, total_claims=total_claims,
-                                top_ins=top_ins,
-                                df_recovery_summary=df_recovery_summary,
-                                df_resub_stage_summary_excl=df_resub_stage_summary_excl,
-                                recon_amount=recon_amount,
-                                recon_claims=(
-                                    _unique_claim_count(df_reconciliation["UniqueID"])
-                                    if (not df_reconciliation.empty and "UniqueID" in df_reconciliation.columns)
-                                    else len(df_reconciliation)
-                                ),
-                            )
-                            attach_name = f"Rejection_Analysis_{R['center']}_{R['year']}_{stats['sha1']}.xlsx"
-                            send_email_with_attachment(
-                                recipients=recipients,
-                                subject=email_subject,
-                                html_body=html_body,
-                                attachment_bytes=out_xlsx_bytes,
-                                attachment_filename=attach_name,
-                            )
-                        st.success(f"Email sent to {len(recipients)} recipient(s) ✅")
-                    except Exception as e:
-                        st.error(f"Could not send email: {e}")
+            owner_xlsx_bytes = build_owner_workbook_bytes(
+                period_label=selected_period_label,
+                filtered_detail=filtered_rule_detail,
+                management_by_insurance=df_management_by_insurance,
+                management_by_denial=df_management_by_denial,
+                total_amount=total_amount,
+                total_claims=total_claims,
+                recovered_amount=recovered_amount,
+                pending_amount=pending_amount,
+                action_amount=action_amount,
+                recon_amount=recon_amount,
+                adjustment_amount=adjustment_amount,
+                needs_review_amount=needs_review_amount,
+            )
+
+            owner_top_ins = df_management_by_insurance.sort_values("InitialRejected", ascending=False).head(5).copy() if not df_management_by_insurance.empty else pd.DataFrame()
+            owner_top_den = df_management_by_denial.sort_values("InitialRejected", ascending=False).head(5).copy() if not df_management_by_denial.empty else pd.DataFrame()
+            owner_html = build_owner_email_html(
+                center=R["center"],
+                period_label=selected_period_label,
+                total_amount=total_amount,
+                total_claims=total_claims,
+                recovered_amount=recovered_amount,
+                pending_amount=pending_amount,
+                action_amount=action_amount,
+                recon_amount=recon_amount,
+                adjustment_amount=adjustment_amount,
+                needs_review_amount=needs_review_amount,
+                top_insurance=owner_top_ins,
+                top_denials=owner_top_den,
+            )
+
+            em1, em2 = st.columns([2, 1])
+            with em1:
+                owner_recipients_raw = st.text_input(
+                    "To (comma-separated)",
+                    value=DEFAULT_MANAGEMENT_RECIPIENTS,
+                    key="owner_email_recipients",
+                )
+            with em2:
+                owner_subject = st.text_input(
+                    "Subject",
+                    value=f"RCM Denial & Recovery Summary — {selected_period_label}",
+                    key="owner_email_subject",
+                )
+
+            st.markdown("##### Email Preview")
+            st.components.v1.html(owner_html, height=980, scrolling=True)
+
+            safe_period = re.sub(r"[^A-Za-z0-9_-]+", "_", selected_period_label).strip("_") or "Selected_Period"
+            owner_attach_name = f"RCM_Denial_Recovery_{safe_period}.xlsx"
+            dl_col, send_col = st.columns([1, 1])
+            with dl_col:
+                st.download_button(
+                    "📎 Download Owner Excel",
+                    data=owner_xlsx_bytes,
+                    file_name=owner_attach_name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="owner_email_attachment_download",
+                )
+            with send_col:
+                send_clicked = st.button(
+                    "📧 Send Email",
+                    type="primary",
+                    use_container_width=True,
+                    key="owner_send_email_btn",
+                    disabled=not bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD and SMTP_SENDER),
+                )
+
+            if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD and SMTP_SENDER):
+                st.info(
+                    "Email preview and Owner Excel are ready. To enable Send Email, configure "
+                    "SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD and SMTP_SENDER in Streamlit secrets."
+                )
+
+            if send_clicked:
+                recipients = [r.strip() for r in owner_recipients_raw.split(",") if r.strip()]
+                try:
+                    with st.spinner("Sending owner email..."):
+                        send_email_with_attachment(
+                            recipients=recipients,
+                            subject=owner_subject,
+                            html_body=owner_html,
+                            attachment_bytes=owner_xlsx_bytes,
+                            attachment_filename=owner_attach_name,
+                        )
+                    st.success(f"Owner email sent to {len(recipients)} recipient(s) ✅")
+                except Exception as e:
+                    st.error(f"Could not send email: {e}")
 
 run_rejection_app()
