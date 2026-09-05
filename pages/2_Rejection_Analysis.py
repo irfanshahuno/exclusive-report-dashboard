@@ -174,7 +174,7 @@ DEFAULT_MANAGEMENT_CC = _get_secret("EMAIL_CC")
 # ✅ Persistent cache (so results stay even after refresh / clicking again)
 REJ_CACHE_PREFIX = "rejection_cache"
 # Bump this whenever analytical rules change so an old cached workbook is NEVER reused.
-ANALYSIS_VERSION = "2026-09-06-v8.8-owner-email-recipient-fallback"
+ANALYSIS_VERSION = "2026-09-06-v8.9-persistent-results"
 REJ_CACHE_FILENAME = f"rejection_{ANALYSIS_VERSION}.xlsx"
 
 # =========================================
@@ -2120,15 +2120,22 @@ def run_rejection_app():
         if pending_upload:
             st.info(f"Ready to generate: {uploaded_source.name}")
 
-        # Auto-load a previously saved result only when there is NO new file waiting to be generated.
-        # This avoids showing an old dashboard underneath a newly selected (but not yet processed) file.
-        if (not pending_upload) and st.session_state.rej_result is None and s3_exists(S3_BUCKET, rej_cache_key):
+        # Persistent dashboard behavior:
+        # Always restore the last generated result from S3 when the app/session is reopened.
+        # A newly selected upload does NOT replace or hide the saved dashboard until Generate is clicked.
+        if st.session_state.rej_result is None and s3_exists(S3_BUCKET, rej_cache_key):
             try:
                 cached_bytes = load_file_from_s3(S3_BUCKET, rej_cache_key)
                 st.session_state.rej_result = load_result_from_workbook_bytes(cached_bytes, center, year, s3_key)
-                st.success("Loaded saved result ✅")
+                st.success("Loaded last saved result ✅")
             except Exception:
-                st.warning("Saved result found but could not be loaded. Click Generate once.")
+                st.warning("A saved result exists but could not be loaded. Click Generate to rebuild it.")
+
+        if pending_upload and st.session_state.rej_result is not None:
+            st.info(
+                "A new Excel file is selected. The current saved dashboard will remain visible "
+                "until you click Generate. Nothing is replaced automatically."
+            )
 
         cA, cB = st.columns(2)
         with cA:
@@ -2181,7 +2188,7 @@ def run_rejection_app():
 
     # ---- Main UI ----
     if st.session_state.rej_result is None:
-        st.info("No saved result for this year yet. Click Generate once.")
+        st.info("No saved result for this center/year yet. Upload a file and click Generate once. After that, the result will reopen automatically.")
         return
 
     R = st.session_state.rej_result
