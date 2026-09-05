@@ -18,7 +18,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # =========================================
 # PAGE CONFIG (wide + clean)
 # =========================================
-st.set_page_config(page_title="Rejection Analysis", layout="wide")
+st.set_page_config(page_title="RCM Denial & Recovery Intelligence Dashboard", layout="wide")
 
 # ✅ Premium Deep Crimson + Warm Cream (CSS only)
 st.markdown(
@@ -173,7 +173,7 @@ DEFAULT_MANAGEMENT_RECIPIENTS = _get_secret("MANAGEMENT_EMAIL_RECIPIENTS")
 # ✅ Persistent cache (so results stay even after refresh / clicking again)
 REJ_CACHE_PREFIX = "rejection_cache"
 # Bump this whenever analytical rules change so an old cached workbook is NEVER reused.
-ANALYSIS_VERSION = "2026-09-05-v8-likely-nonrecoverable"
+ANALYSIS_VERSION = "2026-09-06-v8-rule-engine-month-drilldown"
 REJ_CACHE_FILENAME = f"rejection_{ANALYSIS_VERSION}.xlsx"
 
 # =========================================
@@ -539,77 +539,6 @@ def split_denial_code_levels(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# =========================================
-# DENIAL CATEGORY CLASSIFICATION (Recoverable vs Write-off vs Review)
-# =========================================
-# EDIT THIS MAP to match how your team actually works each denial family.
-#   "Recoverable" -> fixable and resubmittable (team should keep working it)
-#   "Write-off"   -> not appealable / not worth chasing (contractual, benefit
-#                     exclusion, duplicate, timely-filing expired, billed-in-error
-#                     adjustment) -> should be EXCLUDED from "outstanding" on the
-#                     Leadership view, not counted as a live problem
-#   "Review"      -> ambiguous / needs a human call before it's bucketed
-# Keys are the LEVEL-2 prefix of the denial code (the part before the "-"),
-# e.g. "MNEC-006" -> level-2 is "MNEC".
-DENIAL_CATEGORY_MAP = {
-    "AUTH": "Recoverable",   # missing/expired prior authorization -> get retro-auth & resubmit
-    "ELIG": "Recoverable",   # eligibility mismatch -> verify & resubmit
-    "CODE": "Recoverable",   # coding error -> correct code & resubmit
-    "CLAI": "Recoverable",   # claim form / data error -> correct & resubmit
-    "PRCE": "Recoverable",   # pricing discrepancy -> dispute with payer
-    "COB":  "Recoverable",   # coordination of benefits -> resubmit to correct payer
-    "MNEC": "Review",        # medical necessity -> appealable, but outcome varies; needs clinical review
-    "BENX": "Write-off",     # benefit exclusion -> not covered under the plan, non-appealable
-    "DUPL": "Write-off",     # duplicate claim/billing
-    "TIME": "Write-off",     # timely filing expired
-    "TFL":  "Write-off",     # timely filing expired (alt code)
-}
-DEFAULT_DENIAL_CATEGORY = "Review"
-
-def classify_denial_category(level2_code: str) -> str:
-    key = str(level2_code or "").strip().upper()
-    return DENIAL_CATEGORY_MAP.get(key, DEFAULT_DENIAL_CATEGORY)
-
-
-# ---- CPT + payer override: "Likely Non-Recoverable" ----
-# Denial codes don't follow a fixed book for TPAs (MNEC-3, MNEC-6, CLAI-16 all
-# show up unpredictably for the same real reason), so for these specific CPT
-# codes at any TPA OTHER than Daman, the denial is treated as experience-based
-# non-recoverable regardless of what denial code got attached. This OVERRIDES
-# the DENIAL_CATEGORY_MAP result above when it matches.
-#
-# Add more CPT codes here as you confirm the pattern for them.
-NON_RECOVERABLE_CPT_CODES = {"99203", "99213"}
-
-# Payer name(s) EXCLUDED from this rule (i.e. NOT treated as a TPA for this
-# purpose). Matched case-insensitively as a substring of the Insurance name.
-NON_TPA_INSURERS = ["DAMAN"]
-
-LIKELY_NON_RECOVERABLE = "Likely Non-Recoverable"
-
-
-def apply_cpt_tpa_override(hist: pd.DataFrame) -> pd.Series:
-    """Returns the DenialCategory series after applying the CPT+TPA override
-    on top of the denial-code-based category. A row is flipped to
-    'Likely Non-Recoverable' when: Insurance is NOT one of NON_TPA_INSURERS,
-    the CPT Code is in NON_RECOVERABLE_CPT_CODES, and the claim still has an
-    outstanding (unrecovered) balance."""
-    category = hist["DenialCategory"].copy()
-
-    if "Code" not in hist.columns or "Insurance" not in hist.columns:
-        return category
-
-    code = hist["Code"].astype(str).str.strip()
-    insurance = hist["Insurance"].astype(str).str.upper()
-    is_tpa = ~insurance.str.contains("|".join(NON_TPA_INSURERS), case=False, na=False)
-    is_target_code = code.isin(NON_RECOVERABLE_CPT_CODES)
-    has_outstanding = pd.to_numeric(hist.get("OutstandingAmount", 0), errors="coerce").fillna(0) > 0.01
-
-    override_mask = is_tpa & is_target_code & has_outstanding
-    category = category.mask(override_mask, LIKELY_NON_RECOVERABLE)
-    return category
-
-
 def build_status_audit(df: pd.DataFrame) -> pd.DataFrame:
     """Transparent audit of every raw ActivityStatus and how the parser treats it.
 
@@ -875,17 +804,6 @@ def build_recovery_detail(df: pd.DataFrame) -> pd.DataFrame:
     else:
         hist["RecoveryDenialCode"] = ""
 
-    # Recoverable / Write-off / Review split, driven by DENIAL_CATEGORY_MAP above.
-    if "DenialCodeLevel2" in hist.columns:
-        hist["DenialCategory"] = hist["DenialCodeLevel2"].apply(classify_denial_category)
-    else:
-        hist["DenialCategory"] = DEFAULT_DENIAL_CATEGORY
-
-    # Overlay: specific CPT codes at any TPA (except Daman) are treated as
-    # "Likely Non-Recoverable" regardless of the denial code text — see
-    # apply_cpt_tpa_override() for the exact rule.
-    hist["DenialCategory"] = apply_cpt_tpa_override(hist)
-
     return hist
 
 
@@ -1062,59 +980,402 @@ def build_reconciliation_candidates(recovery: pd.DataFrame) -> pd.DataFrame:
     return cand[cols].sort_values("OriginalRejectedAmount", ascending=False).reset_index(drop=True)
 
 
-def build_writeoff_split(recovery: pd.DataFrame) -> pd.DataFrame:
-    """Amounts grouped by DenialCategory (Recoverable / Write-off / Likely
-    Non-Recoverable / Review). This is the table the Leadership bar chart
-    and email summary are built from."""
-    cols = ["DenialCategory", "OriginalRejectedAmount", "RecoveredAmount", "OutstandingAmount", "UniqueClaims"]
-    if recovery.empty or "DenialCategory" not in recovery.columns:
+
+
+# =========================================
+# BUSINESS DISPOSITION / RECOVERABILITY RULE ENGINE
+# =========================================
+# Rule priority:
+#   1) insurance-specific rule
+#   2) global denial rule
+#   3) current status / generic reconciliation logic
+#   4) Needs Review fallback
+#
+# IMPORTANT: rules classify ONLY the remaining outstanding balance. Money already
+# recovered remains Recovered / Paid even if the original denial reason is normally
+# non-recoverable.
+
+def _norm_rule_text(value) -> str:
+    s = str(value or "").strip().upper()
+    if s in {"NAN", "NONE", "NULL", "<NA>"}:
+        return ""
+    return re.sub(r"\s+", " ", s)
+
+
+def _insurance_family(value) -> str:
+    """Return a stable payer family keyword using tolerant substring matching."""
+    s = _norm_rule_text(value)
+    if "AAFIYA" in s:
+        return "AAF IYA".replace(" ", "")
+    if "DAMAN" in s:
+        return "DAMAN"
+    if "INAYAH" in s:
+        return "INAYAH"
+    # NAS can appear as NAS ADMINISTRATION / NAS TPA etc. Avoid matching random words.
+    if re.search(r"(^|[^A-Z])NAS([^A-Z]|$)", s) or s.startswith("NAS "):
+        return "NAS"
+    if "OMAN" in s:
+        return "OMAN"
+    if re.search(r"(^|[^A-Z])FMC([^A-Z]|$)", s) or s.startswith("FMC "):
+        return "FMC"
+    return s
+
+
+def apply_disposition_rules(recovery: pd.DataFrame) -> pd.DataFrame:
+    """Attach auditable business-rule classification to every rejected activity.
+
+    Added columns:
+      RuleDisposition     - Non-Recoverable / Recoverable / Reconciliation Eligible /
+                            Needs Review / Unclassified
+      ManagementReason    - plain-language reason for management
+      RecommendedAction   - operational next step
+      RuleApplied         - exact rule identifier for auditability
+      RuleSource          - Insurance Specific / Global / Fallback
+      RulePriority        - numeric priority (1 = insurance-specific, 2 = global, 9 = fallback)
+      RuleConflict        - reserved flag; True only if future overlapping rules are detected
+      ManagementOutstandingBucket - current financial position of remaining balance
+    """
+    if recovery.empty:
+        return recovery.copy()
+
+    d = recovery.copy()
+    idx = d.index
+
+    denial_col = "DenialCodeLevel3" if "DenialCodeLevel3" in d.columns else (
+        "RecoveryDenialCode" if "RecoveryDenialCode" in d.columns else "DenialCode"
+    )
+    denial = d.get(denial_col, pd.Series("", index=idx)).map(_norm_rule_text)
+    insurance = d.get("Insurance", pd.Series("", index=idx)).map(_insurance_family)
+    cpt = d.get("Code", pd.Series("", index=idx)).map(_norm_rule_text)
+    base = d.get("StatusBase", pd.Series("", index=idx)).astype(str).str.strip().str.lower()
+    stage = pd.to_numeric(d.get("ResubStage", 0), errors="coerce").fillna(0).astype(int)
+    generic_recon = d.get("ReconciliationEligible", pd.Series(False, index=idx)).fillna(False).astype(bool)
+
+    d["RuleDisposition"] = "Unclassified"
+    d["ManagementReason"] = "Unclassified Denial"
+    d["RecommendedAction"] = "Review and classify"
+    d["RuleApplied"] = "FALLBACK-UNCLASSIFIED"
+    d["RuleSource"] = "Fallback"
+    d["RulePriority"] = 9
+    d["RuleConflict"] = False
+
+    def set_rule(mask, disposition, reason, action, rule_name, source="Insurance Specific", priority=1):
+        # A higher-priority rule wins. This keeps future exceptions auditable.
+        eligible = mask & (pd.to_numeric(d["RulePriority"], errors="coerce").fillna(99) >= priority)
+        d.loc[eligible, "RuleDisposition"] = disposition
+        d.loc[eligible, "ManagementReason"] = reason
+        d.loc[eligible, "RecommendedAction"] = action
+        d.loc[eligible, "RuleApplied"] = rule_name
+        d.loc[eligible, "RuleSource"] = source
+        d.loc[eligible, "RulePriority"] = priority
+
+    # ---------------- INSURANCE-SPECIFIC RULES (priority 1) ----------------
+    # Aafiya
+    is_aafiya = insurance.eq("AAFIYA")
+    set_rule(is_aafiya & denial.eq("MNEC-003") & cpt.isin(["99213", "99203"]),
+             "Non-Recoverable", "E&M Level 3 Adjustment", "Adjust / no further recovery",
+             "AAF IYA:MNEC-003:99213/99203".replace(" ", ""))
+    set_rule(is_aafiya & denial.eq("MNEC-006"),
+             "Non-Recoverable", "E&M Level 3 Adjustment", "Adjust / no further recovery",
+             "AAF IYA:MNEC-006:LEVEL3".replace(" ", ""))
+
+    # Daman
+    is_daman = insurance.eq("DAMAN")
+    for code in ["AUTH-001", "AUTH-003", "ELIG-006"]:
+        set_rule(is_daman & denial.eq(code), "Needs Review", "Daman System Glitch",
+                 "Review payer/system issue", f"DAMAN:{code}:SYSTEM-GLITCH")
+    set_rule(is_daman & denial.eq("AUTH-007"), "Needs Review", "Daman System Glitch",
+             "Review resubmission / payer response", "DAMAN:AUTH-007:SYSTEM-GLITCH")
+    set_rule(is_daman & denial.eq("CLAI-012"), "Recoverable", "New vs Established Patient",
+             "Correct and resubmit", "DAMAN:CLAI-012:NEW-ESTABLISHED")
+    set_rule(is_daman & denial.eq("CLAI-016"), "Recoverable", "Modifier / Malaffi Issue",
+             "Correct supporting issue and resubmit", "DAMAN:CLAI-016:MODIFIER-MALAFI")
+    set_rule(is_daman & denial.eq("ELIG-007"), "Recoverable", "Daman System Glitch",
+             "Resubmit / follow payer", "DAMAN:ELIG-007:SYSTEM-GLITCH")
+    set_rule(is_daman & denial.eq("PRCE-010"), "Non-Recoverable", "Contractual / Bundled Service",
+             "Adjust / no further recovery", "DAMAN:PRCE-010:BUNDLED")
+    set_rule(is_daman & denial.eq("NCOV-003"), "Non-Recoverable", "Non-Covered Service",
+             "Adjust and review billed CPT/service", "DAMAN:NCOV-003:NON-COVERED")
+    for code in ["MNEC-004", "MNEC-005"]:
+        set_rule(is_daman & denial.eq(code), "Needs Review", "Medical Necessity",
+                 "Clinical/coding review for recovery", f"DAMAN:{code}:MEDICAL-NECESSITY")
+
+    # FMC
+    is_fmc = insurance.eq("FMC")
+    set_rule(is_fmc & denial.eq("MNEC-006"), "Non-Recoverable", "E&M Level 3 Adjustment",
+             "Adjust / no further recovery", "FMC:MNEC-006:LEVEL3")
+
+    # Inayah
+    is_inayah = insurance.eq("INAYAH")
+    set_rule(is_inayah & denial.eq("CODE-012"), "Needs Review", "Coding Issue – Potentially Recoverable",
+             "Review for correction / recovery", "INAYAH:CODE-012:REVIEW")
+    for code in ["MNEC-003", "MNEC-004"]:
+        set_rule(is_inayah & denial.eq(code), "Needs Review", "Medical Necessity – Potentially Recoverable",
+                 "Review for recovery", f"INAYAH:{code}:REVIEW")
+
+    # NAS
+    is_nas = insurance.eq("NAS")
+    set_rule(is_nas & denial.eq("CLAI-016"), "Non-Recoverable", "E&M Level 3 Adjustment",
+             "Adjust / no further recovery", "NAS:CLAI-016:LEVEL3")
+    for code in ["MNEC-003", "MNEC-004", "MNEC-006"]:
+        set_rule(is_nas & denial.eq(code), "Reconciliation Eligible", "Service Payment Dispute",
+                 "Payer reconciliation / escalation", f"NAS:{code}:RECONCILIATION")
+
+    # Oman
+    is_oman = insurance.eq("OMAN")
+    set_rule(is_oman & denial.eq("MNEC-006"), "Non-Recoverable", "E&M Level 3 Adjustment",
+             "Adjust / no further recovery", "OMAN:MNEC-006:LEVEL3")
+
+    # ---------------- GLOBAL RULES (priority 2) ----------------
+    # These apply to all insurers unless a payer-specific exception is defined above.
+    set_rule(denial.eq("COPY-001"), "Non-Recoverable", "Copay / Patient Responsibility",
+             "Patient responsibility / adjust insurer receivable", "GLOBAL:COPY-001:COPAY", "Global", 2)
+    for code in ["PRCE-001", "PRCE-002"]:
+        set_rule(denial.eq(code), "Non-Recoverable", "Contractual / Price Adjustment",
+                 "Contractual adjustment", f"GLOBAL:{code}:CONTRACTUAL", "Global", 2)
+    set_rule(denial.eq("PRCE-006"), "Non-Recoverable", "Follow-up Consultation Adjustment",
+             "Contractual follow-up adjustment", "GLOBAL:PRCE-006:FOLLOW-UP", "Global", 2)
+    for code in ["NCOV-001", "NCOV-0026"]:
+        set_rule(denial.eq(code), "Non-Recoverable", "Non-Covered Service",
+                 "Adjust and review billed CPT/service", f"GLOBAL:{code}:NON-COVERED", "Global", 2)
+    set_rule(denial.str.startswith("TIME-", na=False), "Non-Recoverable", "Time / Timely Filing Issue",
+             "No further recovery / adjust", "GLOBAL:TIME-*:TIME-ISSUE", "Global", 2)
+
+    # Current financial position of the OUTSTANDING portion.
+    bucket = pd.Series("Needs Review", index=idx, dtype="object")
+    disposition = d["RuleDisposition"].astype(str)
+
+    # Explicit business disposition wins over generic status.
+    bucket = bucket.mask(disposition.eq("Non-Recoverable"), "Non-Recoverable / Adjustment")
+    bucket = bucket.mask(disposition.eq("Reconciliation Eligible"), "Reconciliation / Escalation")
+
+    # Explicit recoverable items: pending if already with payer, otherwise action required.
+    recoverable = disposition.eq("Recoverable")
+    bucket = bucket.mask(recoverable & (base.eq("submitted")) & (stage >= 1), "Pending with Payer")
+    bucket = bucket.mask(recoverable & ~((base.eq("submitted")) & (stage >= 1)), "Action Required")
+
+    # Explicit Needs Review items can still be currently pending with payer.
+    needs_review = disposition.eq("Needs Review")
+    bucket = bucket.mask(needs_review & base.eq("submitted") & (stage >= 1), "Pending with Payer")
+    bucket = bucket.mask(needs_review & ~(base.eq("submitted") & (stage >= 1)), "Needs Review")
+
+    # Unclassified: preserve submitted claims as pending, generic 2+ resub/zero recovery
+    # as reconciliation, and everything else as Needs Review (safe fallback).
+    unclassified = disposition.eq("Unclassified")
+    bucket = bucket.mask(unclassified & base.eq("submitted") & (stage >= 1), "Pending with Payer")
+    bucket = bucket.mask(unclassified & generic_recon, "Reconciliation / Escalation")
+    bucket = bucket.mask(unclassified & ~(base.eq("submitted") & (stage >= 1)) & ~generic_recon, "Needs Review")
+
+    d["ManagementOutstandingBucket"] = bucket
+    d["RuleDenialCode"] = denial
+    d["RuleInsuranceFamily"] = insurance
+    d["RuleCPT"] = cpt
+    return d
+
+
+def build_rule_master_table() -> pd.DataFrame:
+    """Human-readable rule register exported with every analysis workbook."""
+    rows = [
+        # Global
+        ["Global", "All", "COPY-001", "", "Non-Recoverable", "Copay / Patient Responsibility", "All insurers"],
+        ["Global", "All", "PRCE-001", "", "Non-Recoverable", "Contractual / Price Adjustment", "All insurers"],
+        ["Global", "All", "PRCE-002", "", "Non-Recoverable", "Contractual / Price Adjustment", "All insurers"],
+        ["Global", "All", "PRCE-006", "", "Non-Recoverable", "Follow-up Consultation Adjustment", "All insurers"],
+        ["Global", "All", "NCOV-001", "", "Non-Recoverable", "Non-Covered Service", "Highlight CPT/service"],
+        ["Global", "All", "NCOV-0026", "", "Non-Recoverable", "Non-Covered Service", "Highlight CPT/service"],
+        ["Global", "All", "TIME-*", "", "Non-Recoverable", "Time / Timely Filing Issue", "All TIME codes"],
+        # Aafiya
+        ["Insurance Specific", "Aafiya", "MNEC-003", "99213 / 99203", "Non-Recoverable", "E&M Level 3 Adjustment", "CPT-specific"],
+        ["Insurance Specific", "Aafiya", "MNEC-006", "", "Non-Recoverable", "E&M Level 3 Adjustment", "Level 3 billing"],
+        # Daman
+        ["Insurance Specific", "Daman", "AUTH-001", "", "Needs Review", "Daman System Glitch", ""],
+        ["Insurance Specific", "Daman", "AUTH-003", "", "Needs Review", "Daman System Glitch", ""],
+        ["Insurance Specific", "Daman", "AUTH-007", "", "Needs Review", "Daman System Glitch", "Resubmitted; recovery uncertain"],
+        ["Insurance Specific", "Daman", "CLAI-012", "", "Recoverable", "New vs Established Patient", ""],
+        ["Insurance Specific", "Daman", "CLAI-016", "", "Recoverable", "Modifier / Malaffi Issue", ""],
+        ["Insurance Specific", "Daman", "ELIG-006", "", "Needs Review", "Daman System Glitch", ""],
+        ["Insurance Specific", "Daman", "ELIG-007", "", "Recoverable", "Daman System Glitch", ""],
+        ["Insurance Specific", "Daman", "PRCE-010", "", "Non-Recoverable", "Contractual / Bundled Service", ""],
+        ["Insurance Specific", "Daman", "NCOV-003", "", "Non-Recoverable", "Non-Covered Service", "Highlight CPT/service"],
+        ["Insurance Specific", "Daman", "MNEC-004", "", "Needs Review", "Medical Necessity", "Sometimes recoverable"],
+        ["Insurance Specific", "Daman", "MNEC-005", "", "Needs Review", "Medical Necessity", "Sometimes recoverable"],
+        # FMC
+        ["Insurance Specific", "FMC", "MNEC-006", "", "Non-Recoverable", "E&M Level 3 Adjustment", ""],
+        # Inayah
+        ["Insurance Specific", "Inayah", "CODE-012", "", "Needs Review", "Coding Issue – Potentially Recoverable", ""],
+        ["Insurance Specific", "Inayah", "MNEC-003", "", "Needs Review", "Medical Necessity – Potentially Recoverable", ""],
+        ["Insurance Specific", "Inayah", "MNEC-004", "", "Needs Review", "Medical Necessity – Potentially Recoverable", ""],
+        # NAS
+        ["Insurance Specific", "NAS", "CLAI-016", "", "Non-Recoverable", "E&M Level 3 Adjustment", ""],
+        ["Insurance Specific", "NAS", "MNEC-003", "", "Reconciliation Eligible", "Service Payment Dispute", ""],
+        ["Insurance Specific", "NAS", "MNEC-004", "", "Reconciliation Eligible", "Service Payment Dispute", ""],
+        ["Insurance Specific", "NAS", "MNEC-006", "", "Reconciliation Eligible", "Service Payment Dispute", ""],
+        # Oman
+        ["Insurance Specific", "Oman", "MNEC-006", "", "Non-Recoverable", "E&M Level 3 Adjustment", ""],
+    ]
+    return pd.DataFrame(rows, columns=[
+        "RuleSource", "Insurance", "DenialCode", "CPTCondition", "Disposition", "ManagementReason", "Notes"
+    ])
+
+def _management_outstanding_bucket(recovery: pd.DataFrame) -> pd.Series:
+    """Return the mutually-exclusive current bucket for the remaining balance."""
+    if recovery.empty:
+        return pd.Series(dtype="object")
+    if "ManagementOutstandingBucket" in recovery.columns:
+        return recovery["ManagementOutstandingBucket"].fillna("Needs Review").astype(str)
+    return apply_disposition_rules(recovery)["ManagementOutstandingBucket"]
+
+
+def build_management_outcome_summary(recovery: pd.DataFrame) -> pd.DataFrame:
+    """Executive summary that fully partitions the original rejected amount."""
+    cols = ["Outcome", "Amount", "UniqueClaims"]
+    if recovery.empty:
+        return pd.DataFrame(columns=cols)
+
+    tmp = recovery.copy()
+    if "ManagementOutstandingBucket" not in tmp.columns:
+        tmp = apply_disposition_rules(tmp)
+    tmp["ManagementOutstandingBucket"] = _management_outstanding_bucket(tmp)
+
+    recovered_num = pd.to_numeric(tmp.get("RecoveredAmount", 0), errors="coerce").fillna(0)
+    rows = [{
+        "Outcome": "Recovered / Paid",
+        "Amount": recovered_num.sum(),
+        "UniqueClaims": _unique_claim_count(tmp.loc[recovered_num > 0.01, "UniqueID"])
+            if "UniqueID" in tmp.columns else int((recovered_num > 0.01).sum()),
+    }]
+
+    for label in [
+        "Pending with Payer",
+        "Action Required",
+        "Reconciliation / Escalation",
+        "Non-Recoverable / Adjustment",
+        "Needs Review",
+    ]:
+        g = tmp.loc[tmp["ManagementOutstandingBucket"] == label]
+        rows.append({
+            "Outcome": label,
+            "Amount": pd.to_numeric(g.get("OutstandingAmount", 0), errors="coerce").fillna(0).sum(),
+            "UniqueClaims": _unique_claim_count(g["UniqueID"]) if "UniqueID" in g.columns else int(len(g)),
+        })
+
+    out = pd.DataFrame(rows)
+    total = {
+        "Outcome": "Grand Total",
+        "Amount": out["Amount"].sum(),
+        "UniqueClaims": _unique_claim_count(tmp["UniqueID"]) if "UniqueID" in tmp.columns else int(len(tmp)),
+    }
+    return pd.concat([out, pd.DataFrame([total])], ignore_index=True)
+
+
+def _management_split_for_group(g: pd.DataFrame) -> dict:
+    """Return management financial split for one insurance / denial group."""
+    g = g.copy()
+    if "ManagementOutstandingBucket" not in g.columns:
+        g = apply_disposition_rules(g)
+    bucket = _management_outstanding_bucket(g)
+    recovered = pd.to_numeric(g["RecoveredAmount"], errors="coerce").fillna(0)
+    outstanding = pd.to_numeric(g["OutstandingAmount"], errors="coerce").fillna(0)
+    original = pd.to_numeric(g["OriginalRejectedAmount"], errors="coerce").fillna(0)
+
+    return {
+        "InitialRejected": original.sum(),
+        "Recovered": recovered.sum(),
+        "Pending": outstanding.where(bucket == "Pending with Payer", 0).sum(),
+        "ActionRequired": outstanding.where(bucket == "Action Required", 0).sum(),
+        "Reconciliation": outstanding.where(bucket == "Reconciliation / Escalation", 0).sum(),
+        "AdjustmentClosed": outstanding.where(bucket == "Non-Recoverable / Adjustment", 0).sum(),
+        "NeedsReview": outstanding.where(bucket == "Needs Review", 0).sum(),
+        "UniqueClaims": _unique_claim_count(g["UniqueID"]) if "UniqueID" in g.columns else int(len(g)),
+    }
+
+
+def build_management_by_insurance(recovery: pd.DataFrame) -> pd.DataFrame:
+    cols = [
+        "Insurance", "InitialRejected", "Recovered", "Pending",
+        "ActionRequired", "Reconciliation", "AdjustmentClosed", "NeedsReview",
+        "UniqueClaims", "RecoveredPct"
+    ]
+    if recovery.empty:
         return pd.DataFrame(columns=cols)
 
     rows = []
-    for cat in ["Recoverable", "Write-off", LIKELY_NON_RECOVERABLE, "Review"]:
-        g = recovery.loc[recovery["DenialCategory"] == cat]
-        rows.append({
-            "DenialCategory": cat,
-            "OriginalRejectedAmount": pd.to_numeric(g.get("OriginalRejectedAmount", 0), errors="coerce").fillna(0).sum(),
-            "RecoveredAmount": pd.to_numeric(g.get("RecoveredAmount", 0), errors="coerce").fillna(0).sum(),
-            "OutstandingAmount": pd.to_numeric(g.get("OutstandingAmount", 0), errors="coerce").fillna(0).sum(),
-            "UniqueClaims": _unique_claim_count(g["UniqueID"]) if "UniqueID" in g.columns else int(len(g)),
-        })
-    return pd.DataFrame(rows)
+    for insurance, g in recovery.groupby("Insurance", dropna=False):
+        d = _management_split_for_group(g)
+        d["Insurance"] = insurance
+        d["RecoveredPct"] = (d["Recovered"] / d["InitialRejected"] * 100) if d["InitialRejected"] > 0 else 0
+        rows.append(d)
+
+    return pd.DataFrame(rows)[cols].sort_values("InitialRejected", ascending=False).reset_index(drop=True)
 
 
-def build_leadership_summary(recovery: pd.DataFrame) -> pd.DataFrame:
-    """One-row KPI summary for the Leadership view. Write-off AND Likely
-    Non-Recoverable are both split out of 'outstanding' so the headline
-    recoverable number isn't inflated by money that's already known to be
-    a lost cause — but they're kept as two separate numbers since one is a
-    confirmed adjustment and the other is an experience-based judgment call."""
+def build_management_by_denial(recovery: pd.DataFrame) -> pd.DataFrame:
     cols = [
-        "TotalDenied", "RecoveredAmount", "WriteOffAmount",
-        "LikelyNonRecoverableAmount", "RecoverableOutstanding",
-        "ReviewOutstanding", "RecoveryRatePct",
+        "DenialCode", "InitialRejected", "Recovered", "Pending",
+        "ActionRequired", "Reconciliation", "AdjustmentClosed", "NeedsReview",
+        "UniqueClaims"
     ]
     if recovery.empty:
-        return pd.DataFrame([{c: 0 for c in cols}])
+        return pd.DataFrame(columns=cols)
 
-    split = build_writeoff_split(recovery)
-    total_denied = float(pd.to_numeric(recovery.get("OriginalRejectedAmount", 0), errors="coerce").fillna(0).sum())
-    recovered = float(pd.to_numeric(recovery.get("RecoveredAmount", 0), errors="coerce").fillna(0).sum())
-    writeoff_amt = float(split.loc[split["DenialCategory"] == "Write-off", "OutstandingAmount"].sum())
-    likely_nonrec_amt = float(split.loc[split["DenialCategory"] == LIKELY_NON_RECOVERABLE, "OutstandingAmount"].sum())
-    recoverable_amt = float(split.loc[split["DenialCategory"] == "Recoverable", "OutstandingAmount"].sum())
-    review_amt = float(split.loc[split["DenialCategory"] == "Review", "OutstandingAmount"].sum())
-    recovery_rate = (recovered / total_denied * 100) if total_denied > 0 else 0.0
+    code_col = "DenialCodeLevel3" if "DenialCodeLevel3" in recovery.columns else "RecoveryDenialCode"
+    tmp = recovery.copy()
+    tmp[code_col] = tmp.get(code_col, "").astype(str).fillna("").str.strip()
+    tmp.loc[tmp[code_col].isin(["", "nan", "None", "none"]), code_col] = "No Code"
 
-    return pd.DataFrame([{
-        "TotalDenied": total_denied,
-        "RecoveredAmount": recovered,
-        "WriteOffAmount": writeoff_amt,
-        "LikelyNonRecoverableAmount": likely_nonrec_amt,
-        "RecoverableOutstanding": recoverable_amt,
-        "ReviewOutstanding": review_amt,
-        "RecoveryRatePct": recovery_rate,
-    }])
+    rows = []
+    for code, g in tmp.groupby(code_col, dropna=False):
+        d = _management_split_for_group(g)
+        d["DenialCode"] = code
+        rows.append(d)
+
+    return pd.DataFrame(rows)[cols].sort_values("InitialRejected", ascending=False).reset_index(drop=True)
+
+
+def build_management_by_reason(recovery: pd.DataFrame) -> pd.DataFrame:
+    """Management reason summary used for clickable/expandable drill-down."""
+    if recovery.empty:
+        return pd.DataFrame(columns=["ManagementReason", "InitialRejected", "Recovered", "Outstanding", "Activities", "UniqueClaims"])
+    tmp = recovery if "ManagementReason" in recovery.columns else apply_disposition_rules(recovery)
+    rows = []
+    for reason, g in tmp.groupby("ManagementReason", dropna=False):
+        rows.append({
+            "ManagementReason": str(reason),
+            "InitialRejected": pd.to_numeric(g.get("OriginalRejectedAmount", 0), errors="coerce").fillna(0).sum(),
+            "Recovered": pd.to_numeric(g.get("RecoveredAmount", 0), errors="coerce").fillna(0).sum(),
+            "Outstanding": pd.to_numeric(g.get("OutstandingAmount", 0), errors="coerce").fillna(0).sum(),
+            "Activities": int(len(g)),
+            "UniqueClaims": _unique_claim_count(g["UniqueID"]) if "UniqueID" in g.columns else int(len(g)),
+        })
+    return pd.DataFrame(rows).sort_values("Outstanding", ascending=False).reset_index(drop=True)
+
+
+def _dynamic_detail_summaries(detail: pd.DataFrame):
+    """Build period-aware detail summaries directly from row-level classified data."""
+    if detail.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    d = detail.copy()
+    amount = pd.to_numeric(d.get("OriginalRejectedAmount", 0), errors="coerce").fillna(0)
+    d["_Amt"] = amount
+
+    by_ins = d.groupby("Insurance", dropna=False).agg(
+        RejectedAmount=("_Amt", "sum"),
+        RejectedCount=("UniqueID", _unique_claim_count) if "UniqueID" in d.columns else ("_Amt", "size"),
+    ).reset_index().sort_values("RejectedAmount", ascending=False)
+
+    code_col = "DenialCodeLevel3" if "DenialCodeLevel3" in d.columns else "RuleDenialCode"
+    by_code = d.groupby(code_col, dropna=False).agg(
+        RejectedAmount=("_Amt", "sum"),
+        RejectedCount=("UniqueID", _unique_claim_count) if "UniqueID" in d.columns else ("_Amt", "size"),
+    ).reset_index().rename(columns={code_col: "DenialCode"}).sort_values("RejectedAmount", ascending=False)
+
+    matrix = pd.pivot_table(d, index="Insurance", columns=code_col, values="_Amt", aggfunc="sum", fill_value=0, margins=True, margins_name="Grand Total").reset_index()
+
+    if "AgingBucket" in d.columns:
+        aging = pd.pivot_table(d, index="Insurance", columns="AgingBucket", values="_Amt", aggfunc="sum", fill_value=0, margins=True, margins_name="Grand Total").reset_index()
+    else:
+        aging = pd.DataFrame()
+    return by_ins, by_code, matrix, aging
 
 
 # -------------------- excel styling --------------------
@@ -1207,14 +1468,17 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
 
     # Full analytical rejection lifecycle from the exact ActivityStatus values.
     recovery_detail = build_recovery_detail(df)
+    recovery_detail = apply_disposition_rules(recovery_detail)
+    rule_master = build_rule_master_table()
     recovery_summary = build_recovery_summary(recovery_detail)
     recovery_by_insurance = build_recovery_by_insurance(recovery_detail)
     resub_stage_summary = build_resub_stage_summary(recovery_detail)
     resub_stage_summary_exclusive = build_resub_stage_summary_exclusive(recovery_detail)
     denial_management_summary = build_denial_management_summary(recovery_detail)
     reconciliation_candidates = build_reconciliation_candidates(recovery_detail)
-    writeoff_split = build_writeoff_split(recovery_detail)
-    leadership_summary = build_leadership_summary(recovery_detail)
+    management_outcome = build_management_outcome_summary(recovery_detail)
+    management_by_insurance = build_management_by_insurance(recovery_detail)
+    management_by_denial = build_management_by_denial(recovery_detail)
 
     stats = {
         "rejected_rows": int(len(rejected_df)),
@@ -1239,6 +1503,7 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         "RecoveryTrackingAvailable": bool(not recovery_detail.empty),
         "HistoricalRejectedRows": int(len(recovery_detail)),
         "RecoveryRule": "Status-driven lifecycle; resub recovery from actResub remit fields with duplicate-equal amounts counted once",
+        "DispositionRule": "Insurance-specific rules override global rules; unmatched outstanding defaults safely to Needs Review",
     }])
 
     out_buf = io.BytesIO()
@@ -1254,8 +1519,12 @@ def build_rejection_workbook_bytes(input_bytes: bytes, input_name: str = "source
         resub_stage_summary_exclusive.to_excel(writer, sheet_name="Resub_Stage_Summary_Exclusive", index=False)
         denial_management_summary.to_excel(writer, sheet_name="Denial_Reason_Management", index=False)
         reconciliation_candidates.to_excel(writer, sheet_name="Reconciliation_Candidates", index=False)
-        writeoff_split.to_excel(writer, sheet_name="WriteOff_Split", index=False)
-        leadership_summary.to_excel(writer, sheet_name="Leadership_Summary", index=False)
+        management_outcome.to_excel(writer, sheet_name="Management_Outcome", index=False)
+        management_by_insurance.to_excel(writer, sheet_name="Management_By_Insurance", index=False)
+        management_by_denial.to_excel(writer, sheet_name="Management_By_Denial", index=False)
+        build_management_by_reason(recovery_detail).to_excel(writer, sheet_name="Management_By_Reason", index=False)
+        rule_master.to_excel(writer, sheet_name="Rule_Master", index=False)
+        recovery_detail.to_excel(writer, sheet_name="Rule_Classified_Detail", index=False)
         recovery_detail.to_excel(writer, sheet_name="Recovery_Detail", index=False)
         status_audit.to_excel(writer, sheet_name="Status_Audit", index=False)
         meta.to_excel(writer, sheet_name="Meta", index=False)
@@ -1434,7 +1703,7 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
             "UniqueID", "Insurance", "VisitNo", "VisitDate", "Code", "Description",
             "ActivityStatus", "CurrentActivityStatus", "InitialActivityStatus", "CurrentStatus",
             "RecoveryBucket", "RecoveryDenialCode", "DenialCodeLevel2", "DenialCodeLevel3",
-            "PaymentStatus", "DenialCategory", "ReconciliationEligible", "OriginalRejectedAmount",
+            "PaymentStatus", "ReconciliationEligible", "OriginalRejectedAmount",
             "RecoveredAmount", "OutstandingAmount", "ResubStage",
             "actRemitInsShare", "actResub1RemitInsShare", "actResub2RemitInsShare",
             "actResub3RemitInsShare", "TKBKAmountAct", "Paid",
@@ -1467,14 +1736,34 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
         df_reconciliation = pd.DataFrame()
 
     try:
-        df_writeoff_split = pd.read_excel(xls, sheet_name="WriteOff_Split")
+        df_management_outcome = pd.read_excel(xls, sheet_name="Management_Outcome")
     except Exception:
-        df_writeoff_split = pd.DataFrame()
+        df_management_outcome = pd.DataFrame()
 
     try:
-        df_leadership_summary = pd.read_excel(xls, sheet_name="Leadership_Summary")
+        df_management_by_insurance = pd.read_excel(xls, sheet_name="Management_By_Insurance")
     except Exception:
-        df_leadership_summary = pd.DataFrame()
+        df_management_by_insurance = pd.DataFrame()
+
+    try:
+        df_management_by_denial = pd.read_excel(xls, sheet_name="Management_By_Denial")
+    except Exception:
+        df_management_by_denial = pd.DataFrame()
+
+    try:
+        df_rule_detail = pd.read_excel(xls, sheet_name="Rule_Classified_Detail")
+    except Exception:
+        # Backward compatibility only; v8 cache version normally guarantees the new sheet.
+        try:
+            df_rule_detail = pd.read_excel(xls, sheet_name="Recovery_Detail")
+            df_rule_detail = apply_disposition_rules(df_rule_detail)
+        except Exception:
+            df_rule_detail = pd.DataFrame()
+
+    try:
+        df_rule_master = pd.read_excel(xls, sheet_name="Rule_Master")
+    except Exception:
+        df_rule_master = build_rule_master_table()
 
     PREVIEW_ROWS = 2000
     detail_header = pd.read_excel(xls, sheet_name="Rejected_Detail", nrows=0).columns.tolist()
@@ -1523,8 +1812,11 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
         "df_resub_stage_summary_excl": df_resub_stage_summary_excl,
         "df_denial_management": df_denial_management,
         "df_reconciliation": df_reconciliation,
-        "df_writeoff_split": df_writeoff_split,
-        "df_leadership_summary": df_leadership_summary,
+        "df_management_outcome": df_management_outcome,
+        "df_management_by_insurance": df_management_by_insurance,
+        "df_management_by_denial": df_management_by_denial,
+        "df_rule_detail": df_rule_detail,
+        "df_rule_master": df_rule_master,
         "df_recovery_preview": df_recovery_preview,
         "df_preview": df_preview,
         "preview_rows": PREVIEW_ROWS,
@@ -1534,8 +1826,8 @@ def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s
 # APP
 # =========================================
 def run_rejection_app():
-    st.markdown("## Rejection Analysis")
-    st.caption("Initial rejection analysis: ActivityIns - actRemitInsShare, traced through Resub-1/2/3. FinalPaidAmount and FinalBalance are not used.")
+    st.markdown("## RCM Denial & Recovery Intelligence Dashboard")
+    st.caption("Management-first view with payer-specific recoverability rules, month filtering, reconciliation logic, and CPT/service drill-down.")
 
     # --- session init ---
     if "rej_result" not in st.session_state:
@@ -1695,411 +1987,444 @@ def run_rejection_app():
     df_resub_stage_summary_excl = R.get("df_resub_stage_summary_excl", pd.DataFrame())
     df_denial_management = R.get("df_denial_management", pd.DataFrame())
     df_reconciliation = R.get("df_reconciliation", pd.DataFrame())
-    df_writeoff_split = R.get("df_writeoff_split", pd.DataFrame())
-    df_leadership_summary = R.get("df_leadership_summary", pd.DataFrame())
     df_recovery_preview = R.get("df_recovery_preview", pd.DataFrame())
     df_preview = R["df_preview"]
     PREVIEW_ROWS = R["preview_rows"]
 
-    st.download_button(
-        "Download Rejection Analysis Excel",
-        data=out_xlsx_bytes,
-        file_name=f"Rejection_Analysis_{R['center']}_{R['year']}_{stats['sha1']}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    # New management-first datasets
+    df_management_outcome = R.get("df_management_outcome", pd.DataFrame())
+    df_management_by_insurance = R.get("df_management_by_insurance", pd.DataFrame())
+    df_management_by_denial = R.get("df_management_by_denial", pd.DataFrame())
+    df_rule_detail = R.get("df_rule_detail", pd.DataFrame())
+    df_rule_master = R.get("df_rule_master", pd.DataFrame())
 
+    # ===== PERIOD / MONTH FILTER =====
+    # One Jan-Sep (or full-year) upload can be viewed as All Months or one month.
+    filtered_rule_detail = df_rule_detail.copy()
+    date_candidates = [c for c in ["VisitDate", "ServiceDate", "EncounterDate", "ClaimDate", "RefDate"] if c in filtered_rule_detail.columns]
 
-    # ===== Leadership / Manager / Team views =====
-    tab_lead, tab_mgr, tab_team = st.tabs([
-        "\U0001F4CA Leadership Summary",
-        "\U0001F454 Manager View",
-        "\U0001F50D Team / Operational Detail",
+    pcol1, pcol2, pcol3 = st.columns([1.2, 1.2, 2.6])
+    if date_candidates:
+        default_date_idx = date_candidates.index("VisitDate") if "VisitDate" in date_candidates else 0
+        with pcol1:
+            period_date_col = st.selectbox("Performance date", date_candidates, index=default_date_idx, key="period_date_source")
+        parsed_dates = pd.to_datetime(filtered_rule_detail[period_date_col], errors="coerce")
+        period_values = sorted(parsed_dates.dropna().dt.to_period("M").unique().tolist())
+        period_labels = [p.strftime("%B %Y") for p in period_values]
+        with pcol2:
+            selected_period_label = st.selectbox("Period", ["All Months"] + period_labels, key="management_period_filter")
+        if selected_period_label != "All Months":
+            selected_period = period_values[period_labels.index(selected_period_label)]
+            filtered_rule_detail = filtered_rule_detail.loc[parsed_dates.dt.to_period("M") == selected_period].copy()
+        with pcol3:
+            st.caption(f"Month filter uses **{period_date_col}**. Select All Months for the complete uploaded report.")
+    else:
+        period_date_col = None
+        selected_period_label = "All Months"
+        with pcol1:
+            st.selectbox("Period", ["All Months"], disabled=True, key="management_period_filter_no_date")
+        with pcol3:
+            st.caption("No usable service/visit date column was found, so only All Months is available.")
+
+    # Rebuild every management summary from the period-filtered activity-level detail.
+    df_management_outcome = build_management_outcome_summary(filtered_rule_detail)
+    df_management_by_insurance = build_management_by_insurance(filtered_rule_detail)
+    df_management_by_denial = build_management_by_denial(filtered_rule_detail)
+    df_management_by_reason = build_management_by_reason(filtered_rule_detail)
+    df_by_ins, df_by_code, df_ins_x_code, df_aging = _dynamic_detail_summaries(filtered_rule_detail)
+    df_by_ins_nogt = df_by_ins.copy()
+    df_recovery_summary = build_recovery_summary(filtered_rule_detail)
+    df_recovery_by_insurance = build_recovery_by_insurance(filtered_rule_detail)
+    df_resub_stage_summary = build_resub_stage_summary(filtered_rule_detail)
+    df_resub_stage_summary_excl = build_resub_stage_summary_exclusive(filtered_rule_detail)
+    df_preview = filtered_rule_detail.copy()
+    df_recovery_preview = filtered_rule_detail.copy()
+    df_reconciliation = filtered_rule_detail.loc[
+        filtered_rule_detail.get("ManagementOutstandingBucket", pd.Series("", index=filtered_rule_detail.index)).astype(str).eq("Reconciliation / Escalation")
+    ].copy() if not filtered_rule_detail.empty else pd.DataFrame()
+    df_denial_management = filtered_rule_detail.copy()
+
+    # ===== Headline values =====
+    total_amount = float(pd.to_numeric(filtered_rule_detail.get("OriginalRejectedAmount", 0), errors="coerce").fillna(0).sum()) if not filtered_rule_detail.empty else 0.0
+    total_claims = _unique_claim_count(filtered_rule_detail["UniqueID"]) if (not filtered_rule_detail.empty and "UniqueID" in filtered_rule_detail.columns) else int(len(filtered_rule_detail))
+
+    def _outcome_amount(label: str) -> float:
+        if df_management_outcome.empty or "Outcome" not in df_management_outcome.columns:
+            return 0.0
+        s = df_management_outcome.loc[
+            df_management_outcome["Outcome"].astype(str) == label, "Amount"
+        ]
+        return float(pd.to_numeric(s, errors="coerce").fillna(0).sum())
+
+    recovered_amount = _outcome_amount("Recovered / Paid")
+    pending_amount = _outcome_amount("Pending with Payer")
+    action_amount = _outcome_amount("Action Required")
+    recon_amount = _outcome_amount("Reconciliation / Escalation")
+    adjustment_amount = _outcome_amount("Non-Recoverable / Adjustment")
+    needs_review_amount = _outcome_amount("Needs Review")
+
+    # A more meaningful rate than recovered / all historical denials:
+    # recovery among money that has reached a closed financial outcome.
+    matured_base = recovered_amount + adjustment_amount
+    matured_recovery_rate = (recovered_amount / matured_base * 100) if matured_base > 0 else 0.0
+
+    # ===== Top toolbar =====
+    top_left, top_right = st.columns([4, 1])
+    with top_left:
+        st.caption(
+            f"Executive view first • {selected_period_label} • Rule engine {ANALYSIS_VERSION}. Detailed tracing stays under RCM Detail."
+        )
+    with top_right:
+        st.download_button(
+            "Download Full Excel",
+            data=out_xlsx_bytes,
+            file_name=f"Rejection_Analysis_{R['center']}_{R['year']}_{stats['sha1']}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+    # ===== Main navigation =====
+    tab_exec, tab_ins, tab_denial, tab_work, tab_detail = st.tabs([
+        "Executive Summary",
+        "Insurance Analysis",
+        "Denial Reasons",
+        "Recovery Worklist",
+        "RCM Detail",
     ])
 
-    with tab_lead:
+    # ------------------------------------------------------------------
+    # TAB 1 — EXECUTIVE SUMMARY
+    # ------------------------------------------------------------------
+    with tab_exec:
+        st.markdown("### Financial Position of Denials")
+
+        k1, k2, k3 = st.columns(3)
+        with k1:
+            _card("Initial Rejected", _fmt_aed(total_amount), f"{total_claims:,} unique claims • {selected_period_label}")
+        with k2:
+            _card("Recovered / Paid", _fmt_aed(recovered_amount), "Cash recovered after initial rejection")
+        with k3:
+            _card("Pending with Payer", _fmt_aed(pending_amount), "Already submitted; awaiting payer")
+
+        k4, k5, k6, k7 = st.columns(4)
+        with k4:
+            _card("Recoverable / Action Required", _fmt_aed(action_amount), "Correct / resubmit / investigate")
+        with k5:
+            _card("Reconciliation / Escalation", _fmt_aed(recon_amount), "Payer dispute / repeated rejection")
+        with k6:
+            _card("Non-Recoverable / Adjustment", _fmt_aed(adjustment_amount), "Confirmed business-rule adjustment")
+        with k7:
+            _card("Needs Review", _fmt_aed(needs_review_amount), "Not automatically written off")
+
         st.caption(
-            "The numbers leadership needs in 10 seconds. Write-off and Likely Non-Recoverable are both "
-            "split out from outstanding so this number is never inflated by money that's already a lost cause."
+            "Financial control: Recovered + Pending + Action Required + Reconciliation + Non-Recoverable + Needs Review "
+            "must reconcile to Initial Rejected. Unknown cases default to Needs Review rather than being written off."
         )
 
-        if df_leadership_summary.empty:
-            st.info("No rejection data available for this export yet.")
-        else:
-            ld = df_leadership_summary.iloc[0]
-            total_denied_l = float(pd.to_numeric(ld.get("TotalDenied", 0), errors="coerce") or 0)
-            recovered_l = float(pd.to_numeric(ld.get("RecoveredAmount", 0), errors="coerce") or 0)
-            writeoff_l = float(pd.to_numeric(ld.get("WriteOffAmount", 0), errors="coerce") or 0)
-            likely_nonrec_l = float(pd.to_numeric(ld.get("LikelyNonRecoverableAmount", 0), errors="coerce") or 0)
-            recoverable_l = float(pd.to_numeric(ld.get("RecoverableOutstanding", 0), errors="coerce") or 0)
-            review_l = float(pd.to_numeric(ld.get("ReviewOutstanding", 0), errors="coerce") or 0)
-            rate_l = float(pd.to_numeric(ld.get("RecoveryRatePct", 0), errors="coerce") or 0)
+        with st.expander(f"🔎 Non-Recoverable / Adjustment Drill-Down — {_fmt_aed(adjustment_amount)}", expanded=False):
+            nonrec = filtered_rule_detail.loc[
+                filtered_rule_detail.get("ManagementOutstandingBucket", pd.Series("", index=filtered_rule_detail.index)).astype(str).eq("Non-Recoverable / Adjustment")
+            ].copy() if not filtered_rule_detail.empty else pd.DataFrame()
 
-            lc1, lc2, lc3, lc4, lc5 = st.columns(5)
-            with lc1:
-                _card("Total Denied", _fmt_aed(total_denied_l), f"{R['center'].title()} \u2014 {R['year']}")
-            with lc2:
-                _card("Recovered", _fmt_aed(recovered_l), f"Recovery rate {rate_l:.1f}%")
-            with lc3:
-                _card("Write-off", _fmt_aed(writeoff_l), "Confirmed adjustment \u2014 not appealable")
-            with lc4:
-                _card("Likely Non-Recoverable", _fmt_aed(likely_nonrec_l), "TPA denials on 99203/99213 \u2014 experience-based")
-            with lc5:
-                _card("Net Recoverable Outstanding", _fmt_aed(recoverable_l), "The number that actually needs action")
-
-            st.markdown(
-                f"**{_fmt_aed(recoverable_l)}** is still outstanding and recoverable at "
-                f"**{R['center'].title()}** ({R['year']}). **{_fmt_aed(writeoff_l)}** has already been "
-                f"written off, and **{_fmt_aed(likely_nonrec_l)}** is flagged likely non-recoverable "
-                f"(TPA denials on 99203/99213) and not being chased further."
-                + (f" **{_fmt_aed(review_l)}** is pending category review." if review_l > 0 else "")
-            )
-
-            st.markdown("#### Denied Amount \u2014 Recovered vs Recoverable vs Write-off vs Likely Non-Recoverable")
-            chart_df = pd.DataFrame({
-                "Category": ["Recovered", "Recoverable Outstanding", "Write-off", "Likely Non-Recoverable", "Under Review"],
-                "Amount": [recovered_l, recoverable_l, writeoff_l, likely_nonrec_l, review_l],
-            }).set_index("Category")
-            st.bar_chart(chart_df)
-
-            st.markdown("#### Top 3 Insurers by Denied Amount")
-            df_by_ins_nogt_l = df_by_ins[df_by_ins["Insurance"] != "Grand Total"].copy()
-            top_ins_l = df_by_ins_nogt_l.sort_values("RejectedAmount", ascending=False).head(3)
-            lcols = st.columns(3)
-            for i in range(3):
-                with lcols[i]:
-                    if i < len(top_ins_l):
-                        _card(f"#{i+1} {top_ins_l.iloc[i]['Insurance']}", _fmt_aed(top_ins_l.iloc[i]['RejectedAmount']), "")
-                    else:
-                        _card(f"#{i+1}", "AED 0.00", "")
-
-            st.caption(
-                "Full breakdown, denial reasons, and the resubmission funnel are in the Manager View tab. "
-                "Claim-level working detail is in Team / Operational Detail."
-            )
-
-    with tab_mgr:
-        # ===== KPIs =====
-        df_by_ins_nogt = df_by_ins[df_by_ins["Insurance"] != "Grand Total"].copy()
-        total_amount = float(pd.to_numeric(df_by_ins_nogt["RejectedAmount"], errors="coerce").fillna(0).sum())
-        total_claims = int(pd.to_numeric(df_by_ins.loc[df_by_ins["Insurance"] == "Grand Total", "RejectedCount"], errors="coerce").fillna(0).iloc[0]) if (df_by_ins["Insurance"] == "Grand Total").any() else int(pd.to_numeric(df_by_ins_nogt["RejectedCount"], errors="coerce").fillna(0).sum())
-
-        c1, c2 = st.columns(2)
-        with c1:
-            _card("Total Rejected Amount", _fmt_aed(total_amount), "All insurers (excluding Grand Total row)")
-        with c2:
-            _card("Total Rejected Claims", f"{total_claims:,}", "Unique rejected claims by UniqueID")
-
-        # ===== Top 3 Insurance =====
-        st.markdown("### Top 3 Insurances by Rejected Amount")
-        top_ins = df_by_ins_nogt.sort_values("RejectedAmount", ascending=False).head(3)
-        cols = st.columns(3)
-        for i in range(3):
-            with cols[i]:
-                if i < len(top_ins):
-                    _card(f"#{i+1} {top_ins.iloc[i]['Insurance']}", _fmt_aed(top_ins.iloc[i]["RejectedAmount"]), "")
-                else:
-                    _card(f"#{i+1}", "AED 0.00", "")
-
-        # ===== Top 3 Denial (Insurance + Code) =====
-        st.markdown("### Top 3 Denial (Insurance + Code) by Amount")
-        top_den = pd.DataFrame(columns=["Insurance", "DenialCode", "Amount"])
-        try:
-            pv = df_ins_x_code.copy()
-            if "Insurance" in pv.columns:
-                pv = pv[pv["Insurance"] != "Grand Total"].copy()
-                if "Grand Total" in pv.columns:
-                    pv = pv.drop(columns=["Grand Total"])
-                melted = pv.melt(id_vars=["Insurance"], var_name="DenialCode", value_name="Amount")
-                melted["Amount"] = pd.to_numeric(melted["Amount"], errors="coerce").fillna(0)
-                melted["DenialCode"] = melted["DenialCode"].astype(str).fillna("").str.strip()
-                melted = melted[(melted["DenialCode"] != "") & (melted["Amount"] > 0)]
-                top_den = melted.sort_values("Amount", ascending=False).head(3)
-        except Exception:
-            pass
-
-        cols = st.columns(3)
-        for i in range(3):
-            with cols[i]:
-                if i < len(top_den):
-                    _card(
-                        str(top_den.iloc[i]["Insurance"]),
-                        str(top_den.iloc[i]["DenialCode"]),
-                        _fmt_aed(float(top_den.iloc[i]["Amount"])),
-                    )
-                else:
-                    _card("-", "-", "AED 0.00")
-
-        # ===== Denial code drilldown =====
-        st.markdown("### Denial Code Drilldown (Top Insurances by Amount)")
-        code_options = df_by_code[df_by_code["DenialCode"] != "Grand Total"]["DenialCode"].astype(str).tolist()
-        sel_focus_code = st.selectbox("Select Denial Code", [""] + code_options, key="focus_denial_code")
-
-        if sel_focus_code:
-            pv2 = df_ins_x_code.copy()
-            pv2 = pv2[pv2["Insurance"] != "Grand Total"].copy()
-            if sel_focus_code in pv2.columns:
-                tmp = pv2[["Insurance", sel_focus_code]].copy()
-                tmp[sel_focus_code] = pd.to_numeric(tmp[sel_focus_code], errors="coerce").fillna(0)
-                tmp = tmp[tmp[sel_focus_code] > 0].sort_values(sel_focus_code, ascending=False).head(10)
-                tmp = tmp.rename(columns={sel_focus_code: "Amount"})
-                st.dataframe(tmp, use_container_width=True)
+            if nonrec.empty:
+                st.info("No rule-confirmed non-recoverable outstanding amount for the selected period.")
             else:
-                st.info("No amounts found for this denial code.")
+                reason_summary = build_management_by_reason(nonrec)
+                st.markdown("##### Why is it non-recoverable?")
+                st.dataframe(reason_summary, use_container_width=True, hide_index=True)
 
-        st.divider()
+                reasons = reason_summary["ManagementReason"].dropna().astype(str).tolist()
+                selected_reason = st.selectbox("Select reason to see services/CPT", reasons, key="nonrec_reason_drill") if reasons else None
+                reason_rows = nonrec.loc[nonrec["ManagementReason"].astype(str) == selected_reason].copy() if selected_reason else nonrec.iloc[0:0]
 
-        # ===== Recovery & Resubmission Analysis =====
-        st.markdown("## Recovery & Resubmission Analysis")
-        st.caption(
-            "Tracks activities that were initially rejected and shows their current position. "
-            "Amounts remain activity-level; claim counts use distinct UniqueID."
-        )
+                if not reason_rows.empty:
+                    service_col = "Code" if "Code" in reason_rows.columns else "RuleCPT"
+                    desc_col = "Description" if "Description" in reason_rows.columns else None
+                    group_cols = [service_col] + ([desc_col] if desc_col else [])
+                    service_summary = reason_rows.groupby(group_cols, dropna=False).agg(
+                        NonRecoverableAmount=("OutstandingAmount", "sum"),
+                        Activities=("OutstandingAmount", "size"),
+                        Claims=("UniqueID", _unique_claim_count) if "UniqueID" in reason_rows.columns else ("OutstandingAmount", "size"),
+                    ).reset_index().sort_values("NonRecoverableAmount", ascending=False)
+                    st.markdown(f"##### Services / CPT — {selected_reason}")
+                    st.dataframe(service_summary, use_container_width=True, hide_index=True)
 
-        if df_recovery_summary.empty:
-            st.info(
-                "No activities matched the agreed rejection/resubmission Status values in this export."
-            )
-        else:
-            rs = df_recovery_summary[df_recovery_summary["RecoveryBucket"] != "Grand Total"].copy()
-            gt = df_recovery_summary[df_recovery_summary["RecoveryBucket"] == "Grand Total"].copy()
+                    cpt_options = service_summary[service_col].dropna().astype(str).tolist()
+                    selected_cpt = st.selectbox("Select CPT/service for claim detail", ["All"] + cpt_options, key="nonrec_cpt_drill")
+                    claim_rows = reason_rows.copy()
+                    if selected_cpt != "All":
+                        claim_rows = claim_rows.loc[claim_rows[service_col].astype(str) == selected_cpt]
+                    detail_cols = [c for c in [
+                        "UniqueID", "VisitNo", "VisitDate", "Insurance", "DenialCodeLevel3",
+                        "Code", "Description", "DocName", "OriginalRejectedAmount", "RecoveredAmount",
+                        "OutstandingAmount", "CurrentStatus", "RuleDisposition", "ManagementReason",
+                        "RecommendedAction", "RuleApplied"
+                    ] if c in claim_rows.columns]
+                    st.markdown("##### Claim / Activity Detail")
+                    st.dataframe(claim_rows[detail_cols].sort_values("OutstandingAmount", ascending=False), use_container_width=True, hide_index=True)
 
-            original_rejected = float(pd.to_numeric(gt["OriginalRejectedAmount"], errors="coerce").fillna(0).iloc[0]) if len(gt) else 0.0
-            recovered_amount = float(pd.to_numeric(gt["RecoveredAmount"], errors="coerce").fillna(0).iloc[0]) if len(gt) else 0.0
-            outstanding_amount = float(pd.to_numeric(gt["OutstandingAmount"], errors="coerce").fillna(0).iloc[0]) if len(gt) else 0.0
-            historical_claims = int(pd.to_numeric(gt["UniqueClaims"], errors="coerce").fillna(0).iloc[0]) if len(gt) else 0
-            recovery_rate = (recovered_amount / original_rejected * 100) if original_rejected > 0 else 0.0
-
-            pending_amount = float(pd.to_numeric(
-                rs.loc[rs["RecoveryBucket"].astype(str).str.startswith("Submitted / Pending"), "OutstandingAmount"],
-                errors="coerce"
-            ).fillna(0).sum())
-            still_rejected_amount = float(pd.to_numeric(
-                rs.loc[rs["RecoveryBucket"].astype(str).str.contains("Rejected", case=False, na=False), "OutstandingAmount"],
-                errors="coerce"
-            ).fillna(0).sum())
-
-            rc1, rc2, rc3, rc4 = st.columns(4)
-            with rc1:
-                _card("Historical Rejected", _fmt_aed(original_rejected), f"{historical_claims:,} unique claims")
-            with rc2:
-                _card("Recovered / Paid", _fmt_aed(recovered_amount), f"Recovery rate {recovery_rate:.1f}%")
-            with rc3:
-                _card("Resubmitted / Pending", _fmt_aed(pending_amount), "Outstanding amount currently submitted")
-            with rc4:
-                _card("Still Rejected", _fmt_aed(still_rejected_amount), "Outstanding amount still rejected")
-
-            st.markdown("### Recovery Status Summary")
-            st.dataframe(df_recovery_summary, use_container_width=True)
-
-            st.markdown("### Recovery by Insurance")
-            st.dataframe(df_recovery_by_insurance, use_container_width=True)
-
-            if not df_resub_stage_summary.empty:
-                st.markdown("### Resubmission Stage Summary (Cumulative Funnel)")
-                st.caption(
-                    "Each stage includes everything that reached AT LEAST that stage — so Resub-2 amounts "
-                    "are already included inside Resub-1. Do not add these rows together; they overlap by design."
-                )
-                st.dataframe(df_resub_stage_summary, use_container_width=True)
-
-            if not df_resub_stage_summary_excl.empty:
-                st.markdown("### Resubmission Stage Summary (Exclusive — adds up to Total)")
-                st.caption(
-                    "Each claim counted in exactly ONE row — the stage it currently sits at. "
-                    "These rows add up correctly to the Total Rejected Amount."
-                )
-                st.dataframe(df_resub_stage_summary_excl, use_container_width=True)
-
-            st.markdown("### Trace Initial Rejection → Current Status")
-            if not df_recovery_preview.empty:
-                ins_options = sorted([
-                    str(x) for x in df_recovery_preview.get("Insurance", pd.Series(dtype=str)).dropna().unique()
-                    if str(x).strip()
-                ])
-                bucket_options = sorted([
-                    str(x) for x in df_recovery_preview.get("RecoveryBucket", pd.Series(dtype=str)).dropna().unique()
-                    if str(x).strip()
-                ])
-
-                rf1, rf2, rf3 = st.columns([1, 1, 1])
-                with rf1:
-                    rec_ins = st.selectbox("Recovery Insurance", ["All"] + ins_options, key="recovery_insurance_filter")
-                with rf2:
-                    rec_bucket = st.selectbox("Recovery Status", ["All"] + bucket_options, key="recovery_bucket_filter")
-                with rf3:
-                    rec_claim = st.text_input("UniqueID contains", key="recovery_uniqueid_filter")
-
-                rec_filt = df_recovery_preview.copy()
-                if rec_ins != "All" and "Insurance" in rec_filt.columns:
-                    rec_filt = rec_filt[rec_filt["Insurance"].astype(str) == rec_ins]
-                if rec_bucket != "All" and "RecoveryBucket" in rec_filt.columns:
-                    rec_filt = rec_filt[rec_filt["RecoveryBucket"].astype(str) == rec_bucket]
-                if rec_claim.strip() and "UniqueID" in rec_filt.columns:
-                    rec_filt = rec_filt[
-                        rec_filt["UniqueID"].astype(str).str.contains(rec_claim.strip(), case=False, na=False)
-                    ]
-
-                st.dataframe(rec_filt, use_container_width=True)
-                st.caption(
-                    "Tip: filter Submitted / Pending, Approved, Still Rejected, Rejection Accepted, or Not Submitted buckets. "
-                    "Use UniqueID to trace the exact claim."
-                )
-
-        st.divider()
-
-        # ===== Denial Reason Management (granular code + payment status) =====
-        st.markdown("## Denial Reason — Management View")
-        st.caption(
-            "Granular (level-3) denial code, e.g. MNEC-006, instead of only the category (MNEC), "
-            "split by whether the claim was Fully Rejected, Partially Paid, or Fully Recovered."
-        )
-        if df_denial_management.empty:
-            st.info("No denial reason breakdown available for this export.")
-        else:
-            dm1, dm2, dm3 = st.columns([1, 1, 1])
-            with dm1:
-                dm_ins_options = sorted([
-                    str(x) for x in df_denial_management["Insurance"].dropna().unique() if str(x).strip()
-                ])
-                dm_ins = st.selectbox("Insurance", ["All"] + dm_ins_options, key="dm_insurance_filter")
-            with dm2:
-                dm_code_options = sorted([
-                    str(x) for x in df_denial_management["DenialCodeLevel3"].dropna().unique() if str(x).strip()
-                ])
-                dm_code = st.selectbox("Denial Code (Level 3)", ["All"] + dm_code_options, key="dm_code_filter")
-            with dm3:
-                dm_status_options = sorted([
-                    str(x) for x in df_denial_management["PaymentStatus"].dropna().unique() if str(x).strip()
-                ])
-                dm_status = st.selectbox("Payment Status", ["All"] + dm_status_options, key="dm_status_filter")
-
-            dm_filt = df_denial_management.copy()
-            if dm_ins != "All":
-                dm_filt = dm_filt[dm_filt["Insurance"].astype(str) == dm_ins]
-            if dm_code != "All":
-                dm_filt = dm_filt[dm_filt["DenialCodeLevel3"].astype(str) == dm_code]
-            if dm_status != "All":
-                dm_filt = dm_filt[dm_filt["PaymentStatus"].astype(str) == dm_status]
-
+        st.markdown("### Management Snapshot")
+        if not df_management_outcome.empty:
+            show = df_management_outcome[df_management_outcome["Outcome"] != "Grand Total"].copy()
+            show["Amount"] = pd.to_numeric(show["Amount"], errors="coerce").fillna(0)
+            show["SharePct"] = (show["Amount"] / total_amount * 100).round(1) if total_amount > 0 else 0
             st.dataframe(
-                dm_filt.sort_values("OriginalRejectedAmount", ascending=False),
-                use_container_width=True
+                show.rename(columns={
+                    "Outcome": "Current Position",
+                    "Amount": "Amount (AED)",
+                    "UniqueClaims": "Claims",
+                    "SharePct": "% of Initial Rejection",
+                }),
+                use_container_width=True,
+                hide_index=True,
             )
 
-        st.divider()
+        st.markdown("### Top 5 Insurances — What Management Needs to See")
+        if not df_management_by_insurance.empty:
+            top5 = df_management_by_insurance.head(5).copy()
+            st.dataframe(
+                top5.rename(columns={
+                    "InitialRejected": "Initial Rejected",
+                    "Recovered": "Recovered",
+                    "Pending": "Pending",
+                    "ActionRequired": "Action Required",
+                    "Reconciliation": "Escalation",
+                    "AdjustmentClosed": "Non-Recoverable / Adjustment",
+                    "NeedsReview": "Needs Review",
+                    "UniqueClaims": "Claims",
+                    "RecoveredPct": "Recovered %",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
 
-        # ===== Reconciliation Candidates =====
-        st.markdown("## Eligible for Reconciliation")
-        st.caption(
-            "Claims resubmitted 2+ times (Resub-2 or Resub-3) that are still fully rejected with zero amount "
-            "recovered — flagged for the reconciliation team instead of another resubmission attempt."
+        st.markdown("### Top 5 Denial Reasons")
+        if not df_management_by_denial.empty:
+            topd = df_management_by_denial.head(5).copy()
+            st.dataframe(
+                topd.rename(columns={
+                    "DenialCode": "Denial Code",
+                    "InitialRejected": "Initial Rejected",
+                    "Recovered": "Recovered",
+                    "Pending": "Pending",
+                    "ActionRequired": "Action Required",
+                    "Reconciliation": "Escalation",
+                    "AdjustmentClosed": "Non-Recoverable / Adjustment",
+                    "NeedsReview": "Needs Review",
+                    "UniqueClaims": "Claims",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.info(
+            "Management reading: Initial Rejected is the historical picture. The operational focus is Action Required + "
+            "Reconciliation / Escalation. Pending is already with the payer. Non-Recoverable is rule-confirmed only; Needs Review should not be "
+            "presented as active recoverable denial inventory."
         )
+
+    # ------------------------------------------------------------------
+    # TAB 2 — INSURANCE ANALYSIS
+    # ------------------------------------------------------------------
+    with tab_ins:
+        st.markdown("### Denial & Recovery by Insurance")
+        st.caption("One table answers: which payer denied, how much, what was recovered, and what is still actionable.")
+        if df_management_by_insurance.empty:
+            st.info("No insurance management summary available.")
+        else:
+            ins_view = df_management_by_insurance.copy()
+            st.dataframe(
+                ins_view.rename(columns={
+                    "InitialRejected": "Initial Rejected",
+                    "Recovered": "Recovered",
+                    "Pending": "Pending with Payer",
+                    "ActionRequired": "Action Required",
+                    "Reconciliation": "Reconciliation / Escalation",
+                    "AdjustmentClosed": "Non-Recoverable / Adjustment",
+                    "NeedsReview": "Needs Review",
+                    "UniqueClaims": "Claims",
+                    "RecoveredPct": "Recovered %",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            ins_options = ["All"] + sorted(ins_view["Insurance"].dropna().astype(str).unique().tolist())
+            selected_ins = st.selectbox("Focus on one insurance", ins_options, key="management_insurance_focus")
+
+            if selected_ins != "All" and not df_denial_management.empty:
+                sub = df_denial_management[
+                    df_denial_management["Insurance"].astype(str) == selected_ins
+                ].copy()
+                if not sub.empty:
+                    code_summary = (
+                        sub.groupby("DenialCodeLevel3", dropna=False)
+                        .agg(
+                            InitialRejected=("OriginalRejectedAmount", "sum"),
+                            Recovered=("RecoveredAmount", "sum"),
+                            Outstanding=("OutstandingAmount", "sum"),
+                            Claims=("UniqueID", _unique_claim_count),
+                        )
+                        .reset_index()
+                        .sort_values("InitialRejected", ascending=False)
+                    )
+                    st.markdown(f"#### Main denial codes — {selected_ins}")
+                    st.dataframe(code_summary.head(15), use_container_width=True, hide_index=True)
+
+    # ------------------------------------------------------------------
+    # TAB 3 — DENIAL REASONS
+    # ------------------------------------------------------------------
+    with tab_denial:
+        st.markdown("### Denial Reasons — Financial Impact")
+        st.caption(
+            "Prioritize by amount first, then check whether the amount is pending, actionable, escalated, recovered or closed."
+        )
+        if df_management_by_denial.empty:
+            st.info("No denial reason summary available.")
+        else:
+            st.dataframe(
+                df_management_by_denial.rename(columns={
+                    "DenialCode": "Denial Code",
+                    "InitialRejected": "Initial Rejected",
+                    "Recovered": "Recovered",
+                    "Pending": "Pending with Payer",
+                    "ActionRequired": "Action Required",
+                    "Reconciliation": "Reconciliation / Escalation",
+                    "AdjustmentClosed": "Non-Recoverable / Adjustment",
+                    "NeedsReview": "Needs Review",
+                    "UniqueClaims": "Claims",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            codes = ["All"] + df_management_by_denial["DenialCode"].dropna().astype(str).tolist()
+            focus_code = st.selectbox("Drill into denial code", codes, key="executive_denial_focus")
+            if focus_code != "All" and not df_denial_management.empty:
+                code_rows = df_denial_management[
+                    df_denial_management["DenialCodeLevel3"].astype(str) == focus_code
+                ].copy()
+                if not code_rows.empty:
+                    by_payer = (
+                        code_rows.groupby("Insurance", dropna=False)
+                        .agg(
+                            InitialRejected=("OriginalRejectedAmount", "sum"),
+                            Recovered=("RecoveredAmount", "sum"),
+                            Outstanding=("OutstandingAmount", "sum"),
+                            Claims=("UniqueID", _unique_claim_count),
+                        )
+                        .reset_index()
+                        .sort_values("InitialRejected", ascending=False)
+                    )
+                    st.markdown(f"#### {focus_code} by Insurance")
+                    st.dataframe(by_payer, use_container_width=True, hide_index=True)
+
+    # ------------------------------------------------------------------
+    # TAB 4 — RECOVERY WORKLIST
+    # ------------------------------------------------------------------
+    with tab_work:
+        st.markdown("### Recovery Worklist")
+        st.caption("Operational view for RCM: focus on money that still needs intervention.")
+
+        w1, w2, w3 = st.columns(3)
+        with w1:
+            _card("Action Required", _fmt_aed(action_amount), "Correct / resubmit / investigate")
+        with w2:
+            _card("Pending with Payer", _fmt_aed(pending_amount), "Follow payer turnaround")
+        with w3:
+            _card("Escalation", _fmt_aed(recon_amount), "Reconciliation / complaint / payer meeting")
+
+        st.markdown("#### Needs Review")
+        needs_rows = filtered_rule_detail.loc[
+            filtered_rule_detail.get("ManagementOutstandingBucket", pd.Series("", index=filtered_rule_detail.index)).astype(str).eq("Needs Review")
+        ].copy() if not filtered_rule_detail.empty else pd.DataFrame()
+        if needs_rows.empty:
+            st.success("No outstanding activities currently require manual classification review.")
+        else:
+            needs_summary = build_management_by_reason(needs_rows)
+            st.dataframe(needs_summary, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Reconciliation / Escalation Candidates")
         if df_reconciliation.empty:
-            st.info("No claims currently meet the reconciliation-eligible criteria.")
+            st.success("No claims currently meet the 2+ resubmissions / zero-recovery escalation rule.")
         else:
-            recon_amount = float(pd.to_numeric(
-                df_reconciliation.get("OutstandingAmount", pd.Series(dtype=float)), errors="coerce"
-            ).fillna(0).sum())
             recon_claims = _unique_claim_count(df_reconciliation["UniqueID"]) if "UniqueID" in df_reconciliation.columns else len(df_reconciliation)
+            st.caption(f"{recon_claims:,} unique claims currently flagged.")
+            st.dataframe(df_reconciliation, use_container_width=True, hide_index=True)
 
-            rec1, rec2 = st.columns(2)
-            with rec1:
-                _card("Reconciliation-Eligible Amount", _fmt_aed(recon_amount), "Outstanding, zero recovered after 2+ resubmissions")
-            with rec2:
-                _card("Reconciliation-Eligible Claims", f"{recon_claims:,}", "Unique claims by UniqueID")
+        st.markdown("#### Trace Initial Rejection → Current Status")
+        if not df_recovery_preview.empty:
+            ins_options = sorted([
+                str(x) for x in df_recovery_preview.get("Insurance", pd.Series(dtype=str)).dropna().unique()
+                if str(x).strip()
+            ])
+            bucket_options = sorted([
+                str(x) for x in df_recovery_preview.get("RecoveryBucket", pd.Series(dtype=str)).dropna().unique()
+                if str(x).strip()
+            ])
 
-            st.dataframe(df_reconciliation, use_container_width=True)
+            rf1, rf2, rf3 = st.columns([1, 1, 1])
+            with rf1:
+                rec_ins = st.selectbox("Insurance", ["All"] + ins_options, key="recovery_insurance_filter")
+            with rf2:
+                rec_bucket = st.selectbox("Status", ["All"] + bucket_options, key="recovery_bucket_filter")
+            with rf3:
+                rec_claim = st.text_input("UniqueID contains", key="recovery_uniqueid_filter")
 
-        st.divider()
+            rec_filt = df_recovery_preview.copy()
+            if rec_ins != "All" and "Insurance" in rec_filt.columns:
+                rec_filt = rec_filt[rec_filt["Insurance"].astype(str) == rec_ins]
+            if rec_bucket != "All" and "RecoveryBucket" in rec_filt.columns:
+                rec_filt = rec_filt[rec_filt["RecoveryBucket"].astype(str) == rec_bucket]
+            if rec_claim.strip() and "UniqueID" in rec_filt.columns:
+                rec_filt = rec_filt[
+                    rec_filt["UniqueID"].astype(str).str.contains(rec_claim.strip(), case=False, na=False)
+                ]
 
-        # ===== Email to Management =====
-        st.markdown("## Email to Management")
+            st.dataframe(rec_filt, use_container_width=True, hide_index=True)
+
+    # ------------------------------------------------------------------
+    # TAB 5 — RCM DETAIL
+    # ------------------------------------------------------------------
+    with tab_detail:
+        st.markdown("### RCM Detailed Analysis")
+        with st.expander("View Active Denial Rule Master", expanded=False):
+            st.caption("Insurance-specific rules take priority over global rules. This table is exported in the Excel workbook too.")
+            st.dataframe(df_rule_master, use_container_width=True, hide_index=True)
         st.caption(
-            "Sends a summary (KPIs, top insurers, recovery status, resubmission stages, "
-            "reconciliation candidates) in the email body, with the full Rejection Analysis "
-            "Excel workbook attached."
+            "The detailed analytical tools are kept here so management is not overloaded, while RCM still has full drill-down."
         )
 
-        if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD):
-            st.warning(
-                "Email isn't configured yet. Add SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD "
-                "and SMTP_SENDER to this app's Streamlit secrets (same values used elsewhere on "
-                "the dashboard), then this section will be ready to use."
-            )
-        else:
-            em1, em2 = st.columns([2, 1])
-            with em1:
-                email_recipients_raw = st.text_input(
-                    "Recipients (comma-separated)",
-                    value=DEFAULT_MANAGEMENT_RECIPIENTS,
-                    key="rej_email_recipients",
-                )
-            with em2:
-                email_subject = st.text_input(
-                    "Subject",
-                    value=f"Rejection & Recovery Summary — {R['center'].title()} ({R['year']})",
-                    key="rej_email_subject",
-                )
-
-            if st.button("Send Email to Management", type="primary", key="rej_send_email_btn"):
-                recipients = [r.strip() for r in email_recipients_raw.split(",") if r.strip()]
-                try:
-                    with st.spinner("Sending email..."):
-                        html_body = build_email_summary_html(
-                            center=R["center"], year=R["year"],
-                            total_amount=total_amount, total_claims=total_claims,
-                            top_ins=top_ins,
-                            df_recovery_summary=df_recovery_summary,
-                            df_resub_stage_summary_excl=df_resub_stage_summary_excl,
-                            recon_amount=recon_amount if not df_reconciliation.empty else 0.0,
-                            recon_claims=recon_claims if not df_reconciliation.empty else 0,
-                        )
-                        attach_name = f"Rejection_Analysis_{R['center']}_{R['year']}_{stats['sha1']}.xlsx"
-                        send_email_with_attachment(
-                            recipients=recipients,
-                            subject=email_subject,
-                            html_body=html_body,
-                            attachment_bytes=out_xlsx_bytes,
-                            attachment_filename=attach_name,
-                        )
-                    st.success(f"Email sent to {len(recipients)} recipient(s) ✅")
-                except Exception as e:
-                    st.error(f"Could not send email: {e}")
-
-        st.divider()
-
-
-    with tab_team:
-        # ===== Tabs =====
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        dtab1, dtab2, dtab3, dtab4, dtab5 = st.tabs([
             "By Insurance",
             "By Denial Code",
             "Insurance × Denial",
-            "Aging Summary",
-            "Rejected Detail (Filter + Download)"
+            "Aging",
+            "Rejected Detail",
         ])
 
-        with tab1:
-            st.subheader("Rejected by Insurance")
+        with dtab1:
             st.dataframe(df_by_ins, use_container_width=True)
 
-        with tab2:
-            st.subheader("Rejected by Denial Code")
+        with dtab2:
             st.dataframe(df_by_code, use_container_width=True)
 
-        with tab3:
-            st.subheader("Insurance × Denial Code (Amounts)")
+        with dtab3:
             st.dataframe(df_ins_x_code, use_container_width=True)
 
-        with tab4:
-            st.subheader("Rejected Aging Summary")
+        with dtab4:
             st.dataframe(df_aging, use_container_width=True)
 
-        with tab5:
-            st.subheader("Rejected Detail (Filter + Download)")
-
-            ins_list = sorted([x for x in df_preview["Insurance"].dropna().unique().tolist() if str(x).strip() != ""]) if "Insurance" in df_preview.columns else []
-            code_list = sorted([x for x in df_preview["DenialCode"].dropna().unique().tolist() if str(x).strip() != ""]) if "DenialCode" in df_preview.columns else []
+        with dtab5:
+            ins_list = sorted([
+                x for x in df_preview["Insurance"].dropna().unique().tolist()
+                if str(x).strip() != ""
+            ]) if "Insurance" in df_preview.columns else []
+            _detail_code_col = "DenialCode" if "DenialCode" in df_preview.columns else ("DenialCodeLevel3" if "DenialCodeLevel3" in df_preview.columns else None)
+            code_list = sorted([
+                x for x in df_preview[_detail_code_col].dropna().unique().tolist()
+                if str(x).strip() != ""
+            ]) if _detail_code_col else []
 
             c1, c2, c3 = st.columns([1, 1, 1])
             with c1:
@@ -2107,38 +2432,42 @@ def run_rejection_app():
             with c2:
                 sel_code = st.selectbox("Denial Code", ["All"] + code_list, key="rej_filter_code")
             with c3:
-                show_top = st.number_input("Preview rows", min_value=50, max_value=2000, value=500, step=50, key="rej_preview_rows")
+                show_top = st.number_input(
+                    "Preview rows", min_value=50, max_value=2000,
+                    value=500, step=50, key="rej_preview_rows"
+                )
 
             filt = df_preview.copy()
             if sel_ins != "All" and "Insurance" in filt.columns:
                 filt = filt[filt["Insurance"].astype(str) == str(sel_ins)]
-            if sel_code != "All" and "DenialCode" in filt.columns:
-                filt = filt[filt["DenialCode"].astype(str) == str(sel_code)]
+            if sel_code != "All" and _detail_code_col and _detail_code_col in filt.columns:
+                filt = filt[filt[_detail_code_col].astype(str) == str(sel_code)]
 
-            st.caption(f"Preview (from first {PREVIEW_ROWS} rows only). Use Download for FULL filtered output.")
-            st.dataframe(filt.head(int(show_top)), use_container_width=True)
+            st.dataframe(filt.head(int(show_top)), use_container_width=True, hide_index=True)
 
-            st.divider()
-            st.write("### Download FULL filtered rejected detail")
-            if st.button("Build & Download Filtered Detail Excel", type="primary", key="rej_dl_btn"):
-                with st.spinner("Loading FULL detail and preparing filtered file..."):
+            if st.button("Build Filtered Detail Excel", type="primary", key="rej_dl_btn"):
+                with st.spinner("Preparing full filtered detail..."):
                     xls_full = pd.ExcelFile(io.BytesIO(out_xlsx_bytes), engine="openpyxl")
                     df_full = pd.read_excel(xls_full, sheet_name="Rejected_Detail")
 
                     if sel_ins != "All" and "Insurance" in df_full.columns:
                         df_full = df_full[df_full["Insurance"].astype(str) == str(sel_ins)]
-                    if sel_code != "All" and "DenialCode" in df_full.columns:
-                        df_full = df_full[df_full["DenialCode"].astype(str) == str(sel_code)]
+                    if sel_code != "All":
+                        _full_code_col = "DenialCode" if "DenialCode" in df_full.columns else ("DenialCodeLevel3" if "DenialCodeLevel3" in df_full.columns else None)
+                        if _full_code_col:
+                            df_full = df_full[df_full[_full_code_col].astype(str) == str(sel_code)]
 
                     buf = io.BytesIO()
                     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                         df_full.to_excel(writer, sheet_name="Rejected_Detail_Filtered", index=False)
 
                     safe_name = f"Rejected_Detail_{R['center']}_{R['year']}_{sel_ins}_{sel_code}_{stats['sha1']}.xlsx"
-                    safe_name = (safe_name.replace(" ", "_")
-                                         .replace("/", "_")
-                                         .replace("\\", "_")
-                                         .replace(":", "_"))
+                    safe_name = (
+                        safe_name.replace(" ", "_")
+                        .replace("/", "_")
+                        .replace("\\", "_")
+                        .replace(":", "_")
+                    )
 
                     st.download_button(
                         "Download Filtered Detail Excel",
@@ -2147,5 +2476,69 @@ def run_rejection_app():
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
                     st.success(f"Filtered rows: {len(df_full):,} ✅")
+
+        # Keep the technical recovery tables available, but collapsed.
+        with st.expander("Technical recovery / resubmission tables"):
+            if not df_recovery_summary.empty:
+                st.write("**Recovery Status Summary**")
+                st.dataframe(df_recovery_summary, use_container_width=True)
+            if not df_recovery_by_insurance.empty:
+                st.write("**Recovery by Insurance**")
+                st.dataframe(df_recovery_by_insurance, use_container_width=True)
+            if not df_resub_stage_summary.empty:
+                st.write("**Resubmission Funnel — Cumulative**")
+                st.dataframe(df_resub_stage_summary, use_container_width=True)
+            if not df_resub_stage_summary_excl.empty:
+                st.write("**Resubmission Stages — Exclusive**")
+                st.dataframe(df_resub_stage_summary_excl, use_container_width=True)
+
+        # Email remains available to RCM but no longer dominates the executive view.
+        with st.expander("Email management summary"):
+            if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD):
+                st.warning("Email is not configured in Streamlit secrets.")
+            else:
+                em1, em2 = st.columns([2, 1])
+                with em1:
+                    email_recipients_raw = st.text_input(
+                        "Recipients (comma-separated)",
+                        value=DEFAULT_MANAGEMENT_RECIPIENTS,
+                        key="rej_email_recipients",
+                    )
+                with em2:
+                    email_subject = st.text_input(
+                        "Subject",
+                        value=f"RCM Denial & Recovery Summary — {R['center'].title()} ({R['year']})",
+                        key="rej_email_subject",
+                    )
+
+                if st.button("Send Email to Management", type="primary", key="rej_send_email_btn"):
+                    recipients = [r.strip() for r in email_recipients_raw.split(",") if r.strip()]
+                    try:
+                        with st.spinner("Sending email..."):
+                            top_ins = df_by_ins_nogt.sort_values("RejectedAmount", ascending=False).head(5)
+                            html_body = build_email_summary_html(
+                                center=R["center"], year=R["year"],
+                                total_amount=total_amount, total_claims=total_claims,
+                                top_ins=top_ins,
+                                df_recovery_summary=df_recovery_summary,
+                                df_resub_stage_summary_excl=df_resub_stage_summary_excl,
+                                recon_amount=recon_amount,
+                                recon_claims=(
+                                    _unique_claim_count(df_reconciliation["UniqueID"])
+                                    if (not df_reconciliation.empty and "UniqueID" in df_reconciliation.columns)
+                                    else len(df_reconciliation)
+                                ),
+                            )
+                            attach_name = f"Rejection_Analysis_{R['center']}_{R['year']}_{stats['sha1']}.xlsx"
+                            send_email_with_attachment(
+                                recipients=recipients,
+                                subject=email_subject,
+                                html_body=html_body,
+                                attachment_bytes=out_xlsx_bytes,
+                                attachment_filename=attach_name,
+                            )
+                        st.success(f"Email sent to {len(recipients)} recipient(s) ✅")
+                    except Exception as e:
+                        st.error(f"Could not send email: {e}")
 
 run_rejection_app()
