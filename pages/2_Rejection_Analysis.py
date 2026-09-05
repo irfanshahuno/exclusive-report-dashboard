@@ -2118,9 +2118,9 @@ def run_rejection_app():
 
         cA, cB = st.columns(2)
         with cA:
-            generate = st.button("Generate", type="primary", use_container_width=True)
+            generate = st.button("Generate", type="primary", width="stretch")
         with cB:
-            clear = st.button("Clear", use_container_width=True)
+            clear = st.button("Clear", width="stretch")
 
         if clear:
             # ✅ Clear BOTH session + saved cache (so it won't reappear on refresh)
@@ -2333,10 +2333,10 @@ def run_rejection_app():
             data=out_xlsx_bytes,
             file_name=f"Rejection_Analysis_{R['center']}_{R['year']}_{stats['sha1']}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
     with top_email:
-        if st.button("📧 Email Owner", use_container_width=True, key="toggle_owner_email_top"):
+        if st.button("📧 Email Owner", width="stretch", key="toggle_owner_email_top"):
             st.session_state["show_owner_email"] = not st.session_state.get("show_owner_email", False)
 
     # ===== Main navigation =====
@@ -2407,7 +2407,7 @@ def run_rejection_app():
                 )
 
             st.markdown("##### Email Preview")
-            st.components.v1.html(owner_html, height=980, scrolling=True)
+            st.html(owner_html, width="stretch")
 
             safe_period = re.sub(r"[^A-Za-z0-9_-]+", "_", selected_period_label).strip("_") or "Selected_Period"
             owner_attach_name = f"RCM_Denial_Recovery_{safe_period}.xlsx"
@@ -2418,14 +2418,14 @@ def run_rejection_app():
                     data=owner_xlsx_bytes,
                     file_name=owner_attach_name,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
+                    width="stretch",
                     key="owner_email_attachment_download",
                 )
             with send_col:
                 send_clicked = st.button(
                     "📧 Send Email",
                     type="primary",
-                    use_container_width=True,
+                    width="stretch",
                     key="owner_send_email_btn",
                     disabled=not bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD and SMTP_SENDER),
                 )
@@ -2517,7 +2517,7 @@ def run_rejection_app():
                     rename_map[service_col_all] = "Service / CPT"
                 if desc_col_all:
                     rename_map[desc_col_all] = "Service Description"
-                st.dataframe(detailed_reason_summary.rename(columns=rename_map), use_container_width=True, hide_index=True)
+                st.dataframe(detailed_reason_summary.rename(columns=rename_map), width="stretch", hide_index=True)
 
                 reasons = reason_summary["ManagementReason"].dropna().astype(str).tolist()
                 selected_reason = st.selectbox("Select reason to see services/CPT", reasons, key="nonrec_reason_drill") if reasons else None
@@ -2533,7 +2533,7 @@ def run_rejection_app():
                         Claims=("UniqueID", _unique_claim_count) if "UniqueID" in reason_rows.columns else ("OutstandingAmount", "size"),
                     ).reset_index().sort_values("NonRecoverableAmount", ascending=False)
                     st.markdown(f"##### Services / CPT — {selected_reason}")
-                    st.dataframe(service_summary, use_container_width=True, hide_index=True)
+                    st.dataframe(service_summary, width="stretch", hide_index=True)
 
                     cpt_options = service_summary[service_col].dropna().astype(str).tolist()
                     selected_cpt = st.selectbox("Select CPT/service for claim detail", ["All"] + cpt_options, key="nonrec_cpt_drill")
@@ -2547,7 +2547,7 @@ def run_rejection_app():
                         "RecommendedAction", "RuleApplied"
                     ] if c in claim_rows.columns]
                     st.markdown("##### Claim / Activity Detail")
-                    st.dataframe(claim_rows[detail_cols].sort_values("OutstandingAmount", ascending=False), use_container_width=True, hide_index=True)
+                    st.dataframe(claim_rows[detail_cols].sort_values("OutstandingAmount", ascending=False), width="stretch", hide_index=True)
 
         st.markdown("### Top 5 Insurances")
         if not df_management_by_insurance.empty:
@@ -2621,7 +2621,7 @@ def run_rejection_app():
                     "UniqueClaims": "Claims",
                     "RecoveredPct": "Recovered %",
                 }),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -2645,7 +2645,7 @@ def run_rejection_app():
                         .sort_values("InitialRejected", ascending=False)
                     )
                     st.markdown(f"#### Main denial codes — {selected_ins}")
-                    st.dataframe(code_summary.head(15), use_container_width=True, hide_index=True)
+                    st.dataframe(code_summary.head(15), width="stretch", hide_index=True)
 
     # ------------------------------------------------------------------
     # TAB 3 — DENIAL REASONS
@@ -2670,7 +2670,7 @@ def run_rejection_app():
                     "NeedsReview": "Needs Review",
                     "UniqueClaims": "Claims",
                 }),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -2693,7 +2693,7 @@ def run_rejection_app():
                         .sort_values("InitialRejected", ascending=False)
                     )
                     st.markdown(f"#### {focus_code} by Insurance")
-                    st.dataframe(by_payer, use_container_width=True, hide_index=True)
+                    st.dataframe(by_payer, width="stretch", hide_index=True)
 
     # ------------------------------------------------------------------
     # TAB 4 — RECOVERY WORKLIST
@@ -2718,7 +2718,7 @@ def run_rejection_app():
             st.success("No outstanding activities currently require manual classification review.")
         else:
             needs_summary = build_management_by_reason(needs_rows)
-            st.dataframe(needs_summary, use_container_width=True, hide_index=True)
+            st.dataframe(needs_summary, width="stretch", hide_index=True)
 
         st.markdown("#### Reconciliation / Escalation Candidates")
         if df_reconciliation.empty:
@@ -2726,7 +2726,7 @@ def run_rejection_app():
         else:
             recon_claims = _unique_claim_count(df_reconciliation["UniqueID"]) if "UniqueID" in df_reconciliation.columns else len(df_reconciliation)
             st.caption(f"{recon_claims:,} unique claims currently flagged.")
-            st.dataframe(df_reconciliation, use_container_width=True, hide_index=True)
+            st.dataframe(df_reconciliation, width="stretch", hide_index=True)
 
         st.markdown("#### Trace Initial Rejection → Current Status")
         if not df_recovery_preview.empty:
@@ -2757,7 +2757,7 @@ def run_rejection_app():
                     rec_filt["UniqueID"].astype(str).str.contains(rec_claim.strip(), case=False, na=False)
                 ]
 
-            st.dataframe(rec_filt, use_container_width=True, hide_index=True)
+            st.dataframe(rec_filt, width="stretch", hide_index=True)
 
     # ------------------------------------------------------------------
     # TAB 5 — RCM DETAIL
@@ -2766,7 +2766,7 @@ def run_rejection_app():
         st.markdown("### RCM Detailed Analysis")
         with st.expander("View Active Denial Rule Master", expanded=False):
             st.caption("Insurance-specific rules take priority over global rules. This table is exported in the Excel workbook too.")
-            st.dataframe(df_rule_master, use_container_width=True, hide_index=True)
+            st.dataframe(df_rule_master, width="stretch", hide_index=True)
         st.caption(
             "The detailed analytical tools are kept here so management is not overloaded, while RCM still has full drill-down."
         )
@@ -2780,16 +2780,16 @@ def run_rejection_app():
         ])
 
         with dtab1:
-            st.dataframe(df_by_ins, use_container_width=True)
+            st.dataframe(df_by_ins, width="stretch")
 
         with dtab2:
-            st.dataframe(df_by_code, use_container_width=True)
+            st.dataframe(df_by_code, width="stretch")
 
         with dtab3:
-            st.dataframe(df_ins_x_code, use_container_width=True)
+            st.dataframe(df_ins_x_code, width="stretch")
 
         with dtab4:
-            st.dataframe(df_aging, use_container_width=True)
+            st.dataframe(df_aging, width="stretch")
 
         with dtab5:
             ins_list = sorted([
@@ -2819,7 +2819,7 @@ def run_rejection_app():
             if sel_code != "All" and _detail_code_col and _detail_code_col in filt.columns:
                 filt = filt[filt[_detail_code_col].astype(str) == str(sel_code)]
 
-            st.dataframe(filt.head(int(show_top)), use_container_width=True, hide_index=True)
+            st.dataframe(filt.head(int(show_top)), width="stretch", hide_index=True)
 
             if st.button("Build Filtered Detail Excel", type="primary", key="rej_dl_btn"):
                 with st.spinner("Preparing full filtered detail..."):
@@ -2857,16 +2857,16 @@ def run_rejection_app():
         with st.expander("Technical recovery / resubmission tables"):
             if not df_recovery_summary.empty:
                 st.write("**Recovery Status Summary**")
-                st.dataframe(df_recovery_summary, use_container_width=True)
+                st.dataframe(df_recovery_summary, width="stretch")
             if not df_recovery_by_insurance.empty:
                 st.write("**Recovery by Insurance**")
-                st.dataframe(df_recovery_by_insurance, use_container_width=True)
+                st.dataframe(df_recovery_by_insurance, width="stretch")
             if not df_resub_stage_summary.empty:
                 st.write("**Resubmission Funnel — Cumulative**")
-                st.dataframe(df_resub_stage_summary, use_container_width=True)
+                st.dataframe(df_resub_stage_summary, width="stretch")
             if not df_resub_stage_summary_excl.empty:
                 st.write("**Resubmission Stages — Exclusive**")
-                st.dataframe(df_resub_stage_summary_excl, use_container_width=True)
+                st.dataframe(df_resub_stage_summary_excl, width="stretch")
 
 
 run_rejection_app()
