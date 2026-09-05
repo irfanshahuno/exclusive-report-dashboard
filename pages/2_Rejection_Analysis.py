@@ -166,9 +166,10 @@ def _get_secret(key: str, default: str = "") -> str:
 SMTP_HOST = _get_secret("SMTP_HOST")
 SMTP_PORT = int(_get_secret("SMTP_PORT", "587") or "587")
 SMTP_USER = _get_secret("SMTP_USER")
-SMTP_PASSWORD = _get_secret("SMTP_PASSWORD")
-SMTP_SENDER = _get_secret("SMTP_SENDER", SMTP_USER)
-DEFAULT_MANAGEMENT_RECIPIENTS = _get_secret("MANAGEMENT_EMAIL_RECIPIENTS")
+SMTP_PASSWORD = _get_secret("SMTP_PASSWORD") or _get_secret("SMTP_PASS")
+SMTP_SENDER = _get_secret("SMTP_SENDER", SMTP_USER) or SMTP_USER
+DEFAULT_MANAGEMENT_RECIPIENTS = _get_secret("MANAGEMENT_EMAIL_RECIPIENTS") or _get_secret("EMAIL_TO")
+DEFAULT_MANAGEMENT_CC = _get_secret("EMAIL_CC")
 
 # ✅ Persistent cache (so results stay even after refresh / clicking again)
 REJ_CACHE_PREFIX = "rejection_cache"
@@ -1853,6 +1854,7 @@ def build_owner_workbook_bytes(
 def send_email_with_attachment(
     recipients: list[str], subject: str, html_body: str,
     attachment_bytes: bytes, attachment_filename: str,
+    cc_recipients: list[str] | None = None,
 ) -> None:
     """Send via SMTP using credentials from Streamlit secrets. Works with
     Gmail/Outlook app passwords, a corporate SMTP relay, or AWS SES's SMTP
@@ -1870,6 +1872,9 @@ def send_email_with_attachment(
     msg["Subject"] = subject
     msg["From"] = SMTP_SENDER
     msg["To"] = ", ".join(recipients)
+    cc_recipients = cc_recipients or []
+    if cc_recipients:
+        msg["Cc"] = ", ".join(cc_recipients)
     msg.set_content("This email requires an HTML-capable mail client to view the summary.")
     msg.add_alternative(html_body, subtype="html")
     msg.add_attachment(
@@ -1880,10 +1885,19 @@ def send_email_with_attachment(
     )
 
     context = ssl.create_default_context()
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.starttls(context=context)
-        server.login(SMTP_USER, SMTP_PASSWORD)
-        server.send_message(msg)
+    if SMTP_PORT == 465:
+        # Port 465 uses implicit SSL/TLS.
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context, timeout=30) as server:
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+    else:
+        # Port 587 (and most submission ports) use STARTTLS.
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+            server.ehlo()
+            server.starttls(context=context)
+            server.ehlo()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
 
 def load_result_from_workbook_bytes(xlsx_bytes: bytes, center: str, year: str, s3_key: str) -> dict:
     xls = pd.ExcelFile(io.BytesIO(xlsx_bytes), engine="openpyxl")
@@ -2396,8 +2410,13 @@ def run_rejection_app():
             with em1:
                 owner_recipients_raw = st.text_input(
                     "To (comma-separated)",
-                    value=DEFAULT_MANAGEMENT_RECIPIENTS,
+                    value=DEFAULT_MANAGEMENT_RECIPIENTS.strip().strip(","),
                     key="owner_email_recipients",
+                )
+                owner_cc_raw = st.text_input(
+                    "CC (optional, comma-separated)",
+                    value=DEFAULT_MANAGEMENT_CC.strip().strip(","),
+                    key="owner_email_cc",
                 )
             with em2:
                 owner_subject = st.text_input(
@@ -2433,11 +2452,13 @@ def run_rejection_app():
             if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD and SMTP_SENDER):
                 st.info(
                     "Email preview and Owner Excel are ready. To enable Send Email, configure "
-                    "SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD and SMTP_SENDER in Streamlit secrets."
+                    "SMTP_HOST, SMTP_PORT, SMTP_USER and SMTP_PASSWORD (or SMTP_PASS). "
+                    "SMTP_SENDER is optional and defaults to SMTP_USER."
                 )
 
             if send_clicked:
                 recipients = [r.strip() for r in owner_recipients_raw.split(",") if r.strip()]
+                cc_recipients = [r.strip() for r in owner_cc_raw.split(",") if r.strip()]
                 try:
                     with st.spinner("Sending owner email..."):
                         send_email_with_attachment(
@@ -2446,6 +2467,7 @@ def run_rejection_app():
                             html_body=owner_html,
                             attachment_bytes=owner_xlsx_bytes,
                             attachment_filename=owner_attach_name,
+                            cc_recipients=cc_recipients,
                         )
                     st.success(f"Owner email sent to {len(recipients)} recipient(s) ✅")
                 except Exception as e:
