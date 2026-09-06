@@ -37,6 +37,11 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import smtplib
+import html
+
 # Optional S3
 try:
     import boto3
@@ -195,6 +200,80 @@ h1,h2,h3{letter-spacing:-0.02em;}
 .rcm-label{font-size:13px;font-weight:800;color:#17335f;margin-bottom:4px;}
 .rcm-value{font-size:27px;font-weight:950;color:#071a5d;line-height:1.05;}
 .rcm-sub{font-size:12px;font-weight:700;color:#52667f;margin-top:5px;}
+.premium-header{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:16px;
+    margin:.25rem 0 .65rem 0;
+    padding:16px 20px;
+    border-radius:18px;
+    background:linear-gradient(135deg,#071a5d 0%,#123d86 100%);
+    box-shadow:0 9px 24px rgba(7,26,93,.16);
+}
+.premium-header-title{
+    color:white;
+    font-size:26px;
+    font-weight:900;
+    letter-spacing:-.02em;
+}
+.premium-header-sub{
+    color:#cbdaf5;
+    font-size:12px;
+    font-weight:650;
+    margin-top:3px;
+}
+.premium-table-wrap{
+    border:1px solid #dfe6ef;
+    border-radius:15px;
+    overflow:hidden;
+    box-shadow:0 6px 18px rgba(15,23,42,.05);
+    margin-bottom:.8rem;
+}
+.premium-table{
+    width:100%;
+    border-collapse:collapse;
+    background:white;
+}
+.premium-table th{
+    background:#0b2342;
+    color:white;
+    text-align:left;
+    padding:11px 14px;
+    font-size:12px;
+    font-weight:800;
+}
+.premium-table td{
+    padding:11px 14px;
+    border-bottom:1px solid #edf1f5;
+    font-size:13px;
+    color:#263447;
+}
+.premium-table td.num{
+    text-align:right;
+    font-variant-numeric:tabular-nums;
+}
+.premium-table tr:nth-child(even):not(.total-row){
+    background:#f7faff;
+}
+.premium-table tr.total-row{
+    background:#ff7a00;
+}
+.premium-table tr.total-row td{
+    color:white;
+    font-weight:900;
+    border-bottom:none;
+}
+div[data-testid="stButton"] > button{
+    border-radius:11px !important;
+    font-weight:800 !important;
+}
+div[data-testid="stDataFrame"]{
+    border-radius:14px;
+    overflow:hidden;
+    box-shadow:0 5px 15px rgba(15,23,42,.045);
+}
+
 .rcm-section{
     margin-top:.8rem;
     margin-bottom:.35rem;
@@ -704,6 +783,182 @@ def load_saved_day(day) -> Optional[Dict[str, object]]:
         return None
 
 
+
+# =========================================================
+# EMAIL
+# =========================================================
+def _email_recipients():
+    to_addr = str(st.secrets.get("EMAIL_TO", "") or "").strip()
+    cc_addr = str(st.secrets.get("EMAIL_CC", "") or "").strip()
+    return to_addr, cc_addr
+
+
+def _build_daily_rcm_email(result: Dict[str, object]) -> str:
+    claims = result["claims"]
+    report_day = pd.to_datetime(result["report_day"])
+
+    closed_n, closed_a = status_value(result, "CLOSED")
+    proc_n, proc_a = status_value(result, "PROCESSED")
+    open_n, open_a = status_value(result, "OPEN")
+    na_n, na_a = status_value(result, "NOT ASSIGNED")
+    total_n = int(len(claims))
+    total_a = float(claims["_Amount"].sum())
+    over48_n = int(claims["_NotAssignedOver48h"].sum())
+    over48_a = float(claims.loc[claims["_NotAssignedOver48h"], "_Amount"].sum())
+
+    status_rows = [
+        ("Already Submitted", closed_n, closed_a),
+        ("Ready to Submit", proc_n, proc_a),
+        ("Pending for Query", open_n, open_a),
+        ("Not Coded Yet / Within 48 Hours", na_n, na_a),
+    ]
+
+    def row_html(label, count, amount, total=False):
+        bg = "#FF7A00" if total else ("#F7FAFF" if label in ["Ready to Submit", "Not Coded Yet / Within 48 Hours"] else "#FFFFFF")
+        color = "#FFFFFF" if total else "#263447"
+        fw = "900" if total else "600"
+        return (
+            f"<tr style='background:{bg};color:{color};font-weight:{fw};'>"
+            f"<td style='padding:9px 12px;border-bottom:1px solid #e8eef5;'>{html.escape(str(label))}</td>"
+            f"<td style='padding:9px 12px;border-bottom:1px solid #e8eef5;text-align:right;'>{int(count):,}</td>"
+            f"<td style='padding:9px 12px;border-bottom:1px solid #e8eef5;text-align:right;'>AED {float(amount):,.2f}</td>"
+            f"</tr>"
+        )
+
+    status_html = "".join(row_html(*r) for r in status_rows)
+    status_html += row_html("TOTAL", total_n, total_a, total=True)
+
+    q = result.get("query_summary", pd.DataFrame())
+    query_html = ""
+    if isinstance(q, pd.DataFrame) and not q.empty:
+        q2 = q.copy()
+        q2["Ins Share"] = pd.to_numeric(q2["Ins Share"], errors="coerce").fillna(0)
+        rows = []
+        for _, r in q2.iterrows():
+            rows.append(
+                f"<tr>"
+                f"<td style='padding:8px 12px;border-bottom:1px solid #e8eef5;'>{html.escape(str(r['Query Department']))}</td>"
+                f"<td style='padding:8px 12px;border-bottom:1px solid #e8eef5;text-align:right;'>{int(r['Claims']):,}</td>"
+                f"<td style='padding:8px 12px;border-bottom:1px solid #e8eef5;text-align:right;'>AED {float(r['Ins Share']):,.2f}</td>"
+                f"</tr>"
+            )
+        query_html = f"""
+        <div style="margin-top:20px;font-weight:900;color:#0B2342;font-size:15px;">Open Query Breakdown</div>
+        <table style="width:100%;border-collapse:collapse;margin-top:8px;">
+          <tr style="background:#0B2342;color:white;">
+            <th style="padding:8px 12px;text-align:left;">Department</th>
+            <th style="padding:8px 12px;text-align:right;">Claims</th>
+            <th style="padding:8px 12px;text-align:right;">Ins Share</th>
+          </tr>
+          {''.join(rows)}
+        </table>
+        """
+
+    return f"""
+    <html>
+    <body style="font-family:Segoe UI,Arial,sans-serif;background:#f4f7fb;margin:0;padding:20px;">
+      <div style="max-width:850px;margin:auto;background:white;border-radius:14px;overflow:hidden;box-shadow:0 7px 25px rgba(15,23,42,.10);">
+        <div style="background:#0B2342;color:white;padding:18px 22px;">
+          <div style="font-size:20px;font-weight:900;">Daily RCM Submission Report</div>
+          <div style="font-size:12px;color:#a8c1df;margin-top:4px;">{report_day.strftime('%A, %d %b %Y')} · {html.escape(CENTERS.get(center_key, center_key))}</div>
+        </div>
+        <div style="padding:18px 22px;">
+          <table style="width:100%;border-collapse:separate;border-spacing:8px;">
+            <tr>
+              <td style="background:#eef8ff;padding:12px;border-radius:10px;"><b>Total Claims</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{total_n:,}</span><br>AED {total_a:,.2f}</td>
+              <td style="background:#f0fcf4;padding:12px;border-radius:10px;"><b>Already Submitted</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{closed_n:,}</span><br>AED {closed_a:,.2f}</td>
+              <td style="background:#f7f9fc;padding:12px;border-radius:10px;"><b>Ready to Submit</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{proc_n:,}</span><br>AED {proc_a:,.2f}</td>
+            </tr>
+            <tr>
+              <td style="background:#fff9e9;padding:12px;border-radius:10px;"><b>Pending for Query</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{open_n:,}</span><br>AED {open_a:,.2f}</td>
+              <td style="background:#f7f1ff;padding:12px;border-radius:10px;"><b>Not Coded Yet</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{na_n:,}</span><br>AED {na_a:,.2f}</td>
+              <td style="background:#fff1f3;padding:12px;border-radius:10px;"><b>Not Assigned &gt;48h</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{over48_n:,}</span><br>AED {over48_a:,.2f}</td>
+            </tr>
+          </table>
+
+          <div style="margin-top:18px;font-weight:900;color:#0B2342;font-size:15px;">Status Summary</div>
+          <table style="width:100%;border-collapse:collapse;margin-top:8px;">
+            <tr style="background:#0B2342;color:white;">
+              <th style="padding:9px 12px;text-align:left;">Status</th>
+              <th style="padding:9px 12px;text-align:right;">Claims</th>
+              <th style="padding:9px 12px;text-align:right;">Ins Share</th>
+            </tr>
+            {status_html}
+          </table>
+          {query_html}
+          <div style="margin-top:18px;font-size:11px;color:#8492a6;">Auto-generated by EMC RCM Dashboard.</div>
+        </div>
+      </div>
+    </body>
+    </html>
+    """
+
+
+def _send_daily_rcm_email(result: Dict[str, object]) -> None:
+    host = str(st.secrets.get("SMTP_HOST", "") or "").strip()
+    port = int(st.secrets.get("SMTP_PORT", 465))
+    user = str(st.secrets.get("SMTP_USER", "") or "").strip()
+    pwd = str(st.secrets.get("SMTP_PASS", "") or "").strip()
+    to_addr, cc_addr = _email_recipients()
+
+    if not all([host, user, pwd, to_addr]):
+        raise ValueError(
+            "Missing SMTP settings. Required: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and EMAIL_TO."
+        )
+
+    report_day = pd.to_datetime(result["report_day"])
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"Daily RCM Submission Report - {report_day.strftime('%d %b %Y')}"
+    msg["From"] = user
+    msg["To"] = to_addr
+    if cc_addr:
+        msg["Cc"] = cc_addr
+
+    body = _build_daily_rcm_email(result)
+    msg.attach(MIMEText(body, "html"))
+
+    recipients = [
+        x.strip()
+        for x in (to_addr.split(",") + (cc_addr.split(",") if cc_addr else []))
+        if x.strip()
+    ]
+
+    with smtplib.SMTP_SSL(host, port) as server:
+        server.login(user, pwd)
+        server.sendmail(user, recipients, msg.as_string())
+
+
+def _render_premium_status_table(status_show: pd.DataFrame) -> None:
+    total_claims = int(pd.to_numeric(status_show["Claims"], errors="coerce").fillna(0).sum())
+    total_amount = float(pd.to_numeric(status_show["Ins Share"], errors="coerce").fillna(0).sum())
+
+    rows = []
+    for _, r in status_show.iterrows():
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(r['Status']))}</td>"
+            f"<td class='num'>{int(r['Claims']):,}</td>"
+            f"<td class='num'>AED {float(r['Ins Share']):,.2f}</td>"
+            "</tr>"
+        )
+    rows.append(
+        "<tr class='total-row'>"
+        "<td>TOTAL</td>"
+        f"<td class='num'>{total_claims:,}</td>"
+        f"<td class='num'>AED {total_amount:,.2f}</td>"
+        "</tr>"
+    )
+
+    st.markdown(
+        "<div class='premium-table-wrap'>"
+        "<table class='premium-table'>"
+        "<thead><tr><th>Status</th><th style='text-align:right;'>Claims</th><th style='text-align:right;'>Ins Share</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table></div>",
+        unsafe_allow_html=True,
+    )
+
+
 # =========================================================
 # DISPLAY
 # =========================================================
@@ -727,16 +982,34 @@ def render_result(result: Dict[str, object]):
     open_n, open_a = status_value(result, "OPEN")
     na_n, na_a = status_value(result, "NOT ASSIGNED")
 
-    st.markdown(
-        f"## Daily RCM Submission Report — {report_day.strftime('%d %b %Y')}"
-    )
+    h1, h2 = st.columns([4.8, 1.2], vertical_alignment="center")
+    with h1:
+        st.markdown(
+            f"""
+            <div class="premium-header">
+                <div>
+                    <div class="premium-header-title">Daily RCM Submission Report</div>
+                    <div class="premium-header-sub">{report_day.strftime('%A, %d %b %Y')} · {CENTERS.get(center_key, center_key)}</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with h2:
+        if st.button("✉️ Email Daily Report", use_container_width=True, key="send_daily_rcm_email"):
+            try:
+                _send_daily_rcm_email(result)
+                to_addr, cc_addr = _email_recipients()
+                st.success(f"Email sent to {to_addr}" + (f" · CC: {cc_addr}" if cc_addr else ""))
+            except Exception as exc:
+                st.error(f"Email could not be sent: {exc}")
 
     kpi_cards([
         ("Total Claims", f"{total_claims:,}", money(total_amount), "📊", "rcm-blue"),
         ("Already Submitted", f"{closed_n:,}", money(closed_a), "✅", "rcm-green"),
         ("Ready to Submit", f"{proc_n:,}", money(proc_a), "📤", "rcm-white"),
         ("Open for Query", f"{open_n:,}", money(open_a), "❓", "rcm-yellow"),
-        ("Not Assigned", f"{na_n:,}", money(na_a), "⏳", "rcm-purple"),
+        ("Not Coded Yet / Within 48h", f"{na_n:,}", money(na_a), "⏳", "rcm-purple"),
         (
             "Not Assigned >48h",
             f"{int(claims['_NotAssignedOver48h'].sum()):,}",
@@ -761,7 +1034,7 @@ def render_result(result: Dict[str, object]):
     status_show["Ins Share"] = pd.to_numeric(
         status_show["Ins Share"], errors="coerce"
     ).fillna(0).round(2)
-    st.dataframe(status_show, use_container_width=True, hide_index=True)
+    _render_premium_status_table(status_show)
 
     # OPEN query analysis
     st.markdown('<div class="rcm-section">Open Query Breakdown</div>', unsafe_allow_html=True)
