@@ -1269,14 +1269,14 @@ def _build_daily_rcm_email(result: Dict[str, object]) -> str:
         <div style="padding:18px 22px;">
           <table style="width:100%;border-collapse:separate;border-spacing:8px;">
             <tr>
-              <td style="background:#eef8ff;padding:12px;border-radius:10px;"><b>Total Claims</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{total_n:,}</span><br>AED {total_a:,.2f}</td>
-              <td style="background:#f0fcf4;padding:12px;border-radius:10px;"><b>Already Submitted</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{closed_n:,}</span><br>AED {closed_a:,.2f}</td>
-              <td style="background:#f7f9fc;padding:12px;border-radius:10px;"><b>Ready to Submit</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{proc_n:,}</span><br>AED {proc_a:,.2f}</td>
+              <td style="background:#eef8ff;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Total Claims</div><div style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {total_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{total_n:,} claims</div></td>
+              <td style="background:#f0fcf4;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Already Submitted</div><div style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {closed_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{closed_n:,} claims</div></td>
+              <td style="background:#eef6ff;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Ready to Submit</div><div style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {proc_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{proc_n:,} claims</div></td>
             </tr>
             <tr>
-              <td style="background:#fff9e9;padding:12px;border-radius:10px;"><b>Pending Resolution</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{open_n:,}</span><br>AED {open_a:,.2f}</td>
-              <td style="background:#f7f1ff;padding:12px;border-radius:10px;"><b>Within Coding TAT</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{na_n:,}</span><br>AED {na_a:,.2f}</td>
-              <td style="background:#fff1f3;padding:12px;border-radius:10px;"><b>Coding TAT Breach &gt;48h</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{over48_n:,}</span><br>AED {over48_a:,.2f}</td>
+              <td style="background:#fff9e9;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Pending Resolution</div><div style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {open_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{open_n:,} claims</div></td>
+              <td style="background:#f7f1ff;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Within Coding TAT</div><div style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {na_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{na_n:,} claims</div></td>
+              <td style="background:#fff1f3;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Coding TAT Breach &gt;48h</div><div style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {over48_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{over48_n:,} claims</div></td>
             </tr>
           </table>
 
@@ -1318,7 +1318,11 @@ def _build_colored_excel_attachment(result: Dict[str, object]) -> bytes:
     ws.append(["TOTAL",tc,ta])
     for c in ws[ws.max_row]: c.fill=PatternFill("solid",fgColor=navy); c.font=Font(color=white,bold=True)
     ws.column_dimensions["A"].width=30; ws.column_dimensions["B"].width=15; ws.column_dimensions["C"].width=28
-    for row in range(2,ws.max_row+1): ws.cell(row,3).number_format='AED #,##0.00'
+    for row in range(2,ws.max_row+1):
+        ws.cell(row,3).number_format='AED #,##0.00'
+        ws.cell(row,3).font=Font(bold=True,color="0B2342") if row < ws.max_row else Font(bold=True,color=white)
+        if row < ws.max_row:
+            ws.cell(row,2).font=Font(color="64748B")
     ws.freeze_panes="A2"
     rev=result.get("revenue",{}) or {}; doc=rev.get("doctor") if isinstance(rev,dict) else None
     if isinstance(doc,pd.DataFrame) and not doc.empty:
@@ -1337,7 +1341,11 @@ def _build_colored_excel_attachment(result: Dict[str, object]) -> bytes:
             wd.append(vals)
             for j,cname in enumerate(d.columns,1):
                 cell=wd.cell(wd.max_row,j); cell.fill=PatternFill("solid",fgColor=col_fill.get(cname,"FFFFFF")); cell.border=Border(bottom=thin)
-                if cname in ["Insurance_Amount","Avg_Insurance_Per_Visit"]: cell.number_format='AED #,##0.00'
+                if cname in ["Insurance_Amount","Avg_Insurance_Per_Visit"]:
+                    cell.number_format='AED #,##0.00'
+                    cell.font=Font(bold=True,color="0B2342")
+                elif cname in ["Visits","Lab","Procedure"]:
+                    cell.font=Font(color="64748B")
         for col,w in {"A":32,"B":38,"C":12,"D":10,"E":12,"F":22,"G":24}.items(): wd.column_dimensions[col].width=w
         wd.freeze_panes="A2"
     q=result.get("query_summary",pd.DataFrame())
@@ -1349,6 +1357,8 @@ def _build_colored_excel_attachment(result: Dict[str, object]) -> bytes:
             wq.append([r.get("Query Department","Unspecified"),int(r.get("Claims",0) or 0),float(r.get("Ins Share",0) or 0)]); fill=PatternFill("solid",fgColor=qfills[i%len(qfills)])
             for c in wq[wq.max_row]: c.fill=fill; c.border=Border(bottom=thin)
             wq.cell(wq.max_row,3).number_format='AED #,##0.00'
+            wq.cell(wq.max_row,3).font=Font(bold=True,color="0B2342")
+            wq.cell(wq.max_row,2).font=Font(color="64748B")
         wq.column_dimensions["A"].width=30; wq.column_dimensions["B"].width=14; wq.column_dimensions["C"].width=28; wq.freeze_panes="A2"
     bio=io.BytesIO(); wb.save(bio); return bio.getvalue()
 
