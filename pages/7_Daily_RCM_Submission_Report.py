@@ -30,7 +30,7 @@ import io
 import os
 import re
 import pickle
-from datetime import datetime
+from datetime import datetime, date
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -462,6 +462,206 @@ def read_daily_report(file_obj, filename: str) -> pd.DataFrame:
     return df
 
 
+
+# =========================================================
+# REGISTRATION + DAILY REVENUE HELPERS
+# =========================================================
+def _file_bytes(file_obj) -> bytes:
+    if hasattr(file_obj, "getvalue"):
+        return file_obj.getvalue()
+    data = file_obj.read()
+    try:
+        file_obj.seek(0)
+    except Exception:
+        pass
+    return data
+
+
+def _read_excel_header_scan(file_obj, expected_headers: List[str], sheet_name=None, min_score: int = 2) -> pd.DataFrame:
+    """Generic Excel loader that finds the true header row in the first 60 rows."""
+    data = _file_bytes(file_obj)
+    bio = io.BytesIO(data)
+
+    def score(cols):
+        norms = {norm_col(c) for c in cols}
+        return sum(1 for h in expected_headers if norm_col(h) in norms)
+
+    # Direct read first.
+    try:
+        bio.seek(0)
+        df = pd.read_excel(bio, sheet_name=sheet_name if sheet_name is not None else 0)
+        if score(df.columns) >= min_score:
+            df.columns = [str(c).strip() for c in df.columns]
+            return df.dropna(how="all").reset_index(drop=True)
+    except Exception:
+        pass
+
+    # Header scan.
+    bio.seek(0)
+    raw = pd.read_excel(bio, sheet_name=sheet_name if sheet_name is not None else 0, header=None)
+    best_row, best_score = None, -1
+    for r in range(min(60, len(raw))):
+        vals = [str(v).strip() for v in raw.iloc[r].tolist()]
+        sc = score(vals)
+        if sc > best_score:
+            best_row, best_score = r, sc
+    if best_row is None or best_score < min_score:
+        raise ValueError("Could not detect the report header.")
+    header = [str(v).strip() for v in raw.iloc[best_row].tolist()]
+    df = raw.iloc[best_row + 1:].copy()
+    df.columns = header
+    return df.dropna(how="all").reset_index(drop=True)
+
+
+def read_revenue_report(file_obj) -> pd.DataFrame:
+    """Load Daily Collection Details using the same logic as the previous Registration Summary revenue module."""
+    data = _file_bytes(file_obj)
+    bio = io.BytesIO(data)
+    try:
+        return _read_excel_header_scan(
+            bio,
+            ["Visit Date", "Visit No", "Insurance Name", "Department", "Doctor", "Consultation", "Lab", "Procedure", "Insuance"],
+            sheet_name="Daily Collection Details",
+            min_score=6,
+        )
+    except Exception:
+        bio.seek(0)
+        return _read_excel_header_scan(
+            bio,
+            ["Visit Date", "Visit No", "Insurance Name", "Department", "Doctor", "Consultation", "Lab", "Procedure", "Insuance"],
+            sheet_name=0,
+            min_score=6,
+        )
+
+
+def read_registration_report(file_obj) -> pd.DataFrame:
+    return _read_excel_header_scan(
+        file_obj,
+        ["Visit No", "Reg:Date", "Doctor"],
+        sheet_name=0,
+        min_score=2,
+    )
+
+
+def _filter_by_day(df: pd.DataFrame, date_col: str, selected_day) -> pd.DataFrame:
+    if df is None or df.empty or not date_col or date_col not in df.columns:
+        return pd.DataFrame(columns=df.columns if isinstance(df, pd.DataFrame) else None)
+    d = parse_date_series(df[date_col]).dt.normalize()
+    target = pd.to_datetime(selected_day).normalize()
+    return df.loc[d.eq(target)].copy().reset_index(drop=True)
+
+
+def registration_patient_count(reg_df: pd.DataFrame, selected_day) -> int:
+    if reg_df is None or reg_df.empty:
+        return 0
+    c_visit = find_col(reg_df, ["Visit No", "VisitNo", "Visit ID", "VisitID"])
+    c_date = find_col(reg_df, ["Reg:Date", "Reg Date", "Registration Date", "RegistrationDate", "Date"])
+    if not c_visit or not c_date:
+        raise ValueError("Registration report must contain Visit No and Reg:Date.")
+    d = _filter_by_day(reg_df, c_date, selected_day)
+    visits = d[c_visit].fillna("").astype(str).str.strip()
+    visits = visits[~visits.str.lower().isin(["", "nan", "none"])]
+    return int(visits.nunique())
+
+
+def revenue_analysis(rev_df: pd.DataFrame, selected_day) -> Dict[str, object]:
+    """
+    Previous daily-revenue logic:
+    - unique Visit No = visit count
+    - Service Revenue = Consultation + Lab + Radiology + Procedure
+    - Insurance Amount = strict 'Insuance' column
+    - service counts = unique visits where that service amount > 0
+    """
+    if rev_df is None or rev_df.empty:
+        return {"daily": pd.DataFrame(), "doctor": pd.DataFrame(), "service_counts": {}, "totals": {}}
+
+    c_date = find_col(rev_df, ["Visit Date", "VisitDate"])
+    c_visit = find_col(rev_df, ["Visit No", "VisitNo", "Visit ID", "VisitID"])
+    c_doc = find_col(rev_df, ["Doctor"])
+    c_dept = find_col(rev_df, ["Department"])
+    c_cons = find_col(rev_df, ["Consultation"])
+    c_lab = find_col(rev_df, ["Lab"])
+    c_rad = find_col(rev_df, ["Radiology", "Radiology Amount", "X-Ray", "Xray", "Ultrasound", "USG"])
+    c_proc = find_col(rev_df, ["Procedure"])
+    # Preserve the prior script's strict typo-based insurance amount logic.
+    c_insu = next((c for c in rev_df.columns if norm_col(c) == "insuance"), None)
+
+    required = {"Visit Date": c_date, "Visit No": c_visit, "Doctor": c_doc,
+                "Consultation": c_cons, "Lab": c_lab, "Procedure": c_proc, "Insuance": c_insu}
+    missing = [k for k,v in required.items() if v is None]
+    if missing:
+        raise ValueError("Daily Revenue report missing required column(s): " + ", ".join(missing))
+
+    d = _filter_by_day(rev_df, c_date, selected_day)
+    if d.empty:
+        return {"daily": d, "doctor": pd.DataFrame(), "service_counts": {"Consultation":0,"Lab":0,"Radiology":0,"Procedure":0},
+                "totals": {"visits":0,"service_revenue":0.0,"insurance_amount":0.0,"avg_service":0.0,"avg_insurance":0.0}}
+
+    d[c_visit] = d[c_visit].fillna("").astype(str).str.strip()
+    d[c_doc] = d[c_doc].fillna("UNKNOWN").astype(str).str.strip().replace("", "UNKNOWN")
+    for c in [c_cons, c_lab, c_proc, c_insu]:
+        d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
+    if c_rad:
+        d[c_rad] = pd.to_numeric(d[c_rad], errors="coerce").fillna(0.0)
+    else:
+        d["_Radiology"] = 0.0
+        c_rad = "_Radiology"
+
+    d = d[d[c_visit] != ""].copy()
+    d["_ServiceRevenue"] = d[c_cons] + d[c_lab] + d[c_rad] + d[c_proc]
+    d["_InsuranceAmount"] = d[c_insu]
+
+    group_cols = ([c_dept] if c_dept else []) + [c_doc]
+    doctor = d.groupby(group_cols, dropna=False).agg(
+        Visits=(c_visit, pd.Series.nunique),
+        Consultation=(c_cons, "sum"),
+        Lab=(c_lab, "sum"),
+        Radiology=(c_rad, "sum"),
+        Procedure=(c_proc, "sum"),
+        Total_Service_Revenue=("_ServiceRevenue", "sum"),
+        Insurance_Amount=("_InsuranceAmount", "sum"),
+    ).reset_index()
+    rename = {c_doc: "Doctor"}
+    if c_dept:
+        rename[c_dept] = "Department"
+    doctor = doctor.rename(columns=rename)
+    denom = doctor["Visits"].replace(0, pd.NA)
+    doctor["Avg_Service_Per_Visit"] = (doctor["Total_Service_Revenue"] / denom).fillna(0.0)
+    doctor["Avg_Insurance_Per_Visit"] = (doctor["Insurance_Amount"] / denom).fillna(0.0)
+
+    # Unique-visit service counts, identical to the previous logic.
+    def svc_count(c):
+        mask = pd.to_numeric(d[c], errors="coerce").fillna(0) > 0
+        return int(d.loc[mask, c_visit].nunique())
+    counts = {
+        "Consultation": svc_count(c_cons),
+        "Lab": svc_count(c_lab),
+        "Radiology": svc_count(c_rad),
+        "Procedure": svc_count(c_proc),
+    }
+    visits = int(d[c_visit].nunique())
+    service_total = float(d["_ServiceRevenue"].sum())
+    ins_total = float(d["_InsuranceAmount"].sum())
+    totals = {
+        "visits": visits,
+        "service_revenue": service_total,
+        "insurance_amount": ins_total,
+        "avg_service": service_total / visits if visits else 0.0,
+        "avg_insurance": ins_total / visits if visits else 0.0,
+    }
+    doctor = doctor.sort_values("Total_Service_Revenue", ascending=False).reset_index(drop=True)
+    return {"daily": d, "doctor": doctor, "service_counts": counts, "totals": totals}
+
+
+def _available_dates_from_report(df: pd.DataFrame, candidates: List[str]) -> List[pd.Timestamp]:
+    if df is None or df.empty:
+        return []
+    c = find_col(df, candidates)
+    if not c:
+        return []
+    s = parse_date_series(df[c]).dropna().dt.normalize().drop_duplicates().sort_values()
+    return list(s)
+
 # =========================================================
 # QUERY OWNER CLASSIFICATION
 # =========================================================
@@ -521,7 +721,7 @@ def classify_query_owner(remark: object) -> str:
 STATUS_ORDER = ["CLOSED", "PROCESSED", "OPEN", "NOT ASSIGNED"]
 
 
-def process_report(raw: pd.DataFrame) -> Dict[str, object]:
+def process_report(raw: pd.DataFrame, selected_day=None) -> Dict[str, object]:
     df = raw.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -603,6 +803,11 @@ def process_report(raw: pd.DataFrame) -> Dict[str, object]:
     # Remove clearly empty rows
     df = df[(df["_VisitNo"] != "") | (df["_Status"] != "")].copy()
 
+    # Calendar filter: all three reports use the same selected reporting date.
+    if selected_day is not None and df["_VisitDate"].notna().any():
+        _target = pd.to_datetime(selected_day).normalize()
+        df = df[df["_VisitDate"].dt.normalize().eq(_target)].copy()
+
     # One claim = one Visit No. Keep last report row when duplicates exist.
     # Blank Visit No rows remain as separate rows.
     with_visit = df[df["_VisitNo"] != ""].drop_duplicates(subset=["_VisitNo"], keep="last")
@@ -611,12 +816,15 @@ def process_report(raw: pd.DataFrame) -> Dict[str, object]:
 
     claims["_QueryOwner"] = claims["_Remark"].apply(classify_query_owner)
 
-    # Reporting day: most common Visit Date; fallback today Dubai.
-    valid_days = claims["_VisitDate"].dropna().dt.normalize()
-    if not valid_days.empty:
-        report_day = valid_days.value_counts().index[0]
+    # Reporting day: selected calendar day when supplied, otherwise most common Visit Date.
+    if selected_day is not None:
+        report_day = pd.to_datetime(selected_day).normalize()
     else:
-        report_day = pd.Timestamp.now(tz=ZoneInfo("Asia/Dubai")).tz_localize(None).normalize()
+        valid_days = claims["_VisitDate"].dropna().dt.normalize()
+        if not valid_days.empty:
+            report_day = valid_days.value_counts().index[0]
+        else:
+            report_day = pd.Timestamp.now(tz=ZoneInfo("Asia/Dubai")).tz_localize(None).normalize()
 
     # SLA age for NOT ASSIGNED
     now_dubai = pd.Timestamp.now(tz=ZoneInfo("Asia/Dubai")).tz_localize(None)
@@ -1036,7 +1244,23 @@ def render_result(result: Dict[str, object]):
             except Exception as exc:
                 st.error(f"Email could not be sent: {exc}")
 
-    # Management KPI cards: AED is primary, claim volume is secondary
+    # Combined 3-report management snapshot
+    _patients = int(result.get("registration_count", 0) or 0)
+    _rev = result.get("revenue", {}) or {}
+    _rt = _rev.get("totals", {}) or {}
+    _daily_service_revenue = float(_rt.get("service_revenue", 0.0) or 0.0)
+    _daily_rev_visits = int(_rt.get("visits", 0) or 0)
+    _daily_avg = float(_rt.get("avg_service", 0.0) or 0.0)
+
+    st.markdown('<div class="rcm-section">Daily Management Snapshot</div>', unsafe_allow_html=True)
+    kpi_cards([
+        ("Total Patients", f"{_patients:,}", "Registration report · unique Visit No", "P", "rcm-blue"),
+        ("Daily Service Revenue", money(_daily_service_revenue), f"{_daily_rev_visits:,} revenue visits · Avg {money(_daily_avg)}", "AED", "rcm-green"),
+        ("Submission Net Insurance", money(total_amount), f"{total_claims:,} claims in submission report", "Σ", "rcm-white"),
+    ])
+
+    # Submission KPI cards: AED is primary, claim volume is secondary
+    st.markdown('<div class="rcm-section">RCM Submission Pipeline</div>', unsafe_allow_html=True)
     kpi_cards([
         ("Total Claims", money(total_amount),
          f"{total_claims:,} claims", "Σ", "rcm-blue"),
@@ -1096,6 +1320,24 @@ def render_result(result: Dict[str, object]):
         """,
         unsafe_allow_html=True,
     )
+
+    # Doctor Revenue from Daily Collection Details
+    st.markdown('<div class="rcm-section">Doctor Revenue — Daily Collection Details</div>', unsafe_allow_html=True)
+    _docrev = (_rev.get("doctor") if isinstance(_rev, dict) else None)
+    _svc_counts = (_rev.get("service_counts", {}) if isinstance(_rev, dict) else {}) or {}
+    if isinstance(_docrev, pd.DataFrame) and not _docrev.empty:
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.metric("Consultation Visits", f"{int(_svc_counts.get('Consultation',0)):,}")
+        sc2.metric("Lab Visits", f"{int(_svc_counts.get('Lab',0)):,}")
+        sc3.metric("Radiology Visits", f"{int(_svc_counts.get('Radiology',0)):,}")
+        sc4.metric("Procedure Visits", f"{int(_svc_counts.get('Procedure',0)):,}")
+        _show = _docrev.copy()
+        for _c in ["Consultation","Lab","Radiology","Procedure","Total_Service_Revenue","Insurance_Amount","Avg_Service_Per_Visit","Avg_Insurance_Per_Visit"]:
+            if _c in _show.columns:
+                _show[_c] = pd.to_numeric(_show[_c], errors="coerce").fillna(0).round(2)
+        st.dataframe(_show, use_container_width=True, hide_index=True)
+    else:
+        st.info("No Daily Collection Details revenue found for the selected date.")
 
     # Submission pipeline
     st.markdown('<div class="rcm-section">Status Summary</div>', unsafe_allow_html=True)
@@ -1251,11 +1493,10 @@ def render_result(result: Dict[str, object]):
 # =========================================================
 # TOP UI
 # =========================================================
-st.title("Daily RCM Submission Report")
+st.title("Daily RCM Management Report")
 st.caption(
-    "Status logic: NOT ASSIGNED = not coded yet / 48-hour window · "
-    "CLOSED = submitted · OPEN = pending query · PROCESSED = ready to submit · "
-    "Amount = Ins Share."
+    "3-report dashboard: Registration = patient count · Daily Collection Details = doctor revenue · "
+    "Submission = submitted / ready / pending / coding TAT. One calendar date filters all three reports."
 )
 
 with st.expander("Storage Status", expanded=False):
@@ -1268,42 +1509,91 @@ with st.expander("Storage Status", expanded=False):
     else:
         st.warning("S3 is not configured. The page will work, but results will not persist after restart.")
 
-# Upload
-up = st.file_uploader(
-    "Upload Daily Report (.xls / .xlsx)",
-    type=["xls", "xlsx"],
-    key="daily_rcm_upload",
+# Three report uploads
+st.markdown("### Reporting Date & Source Reports")
+u1, u2, u3 = st.columns(3)
+with u1:
+    reg_up = st.file_uploader(
+        "1) Registration Report (.xlsx)",
+        type=["xls", "xlsx"],
+        key="daily_rcm_registration_upload",
+        help="Used only for Total Patients / unique Visit No.",
+    )
+with u2:
+    rev_up = st.file_uploader(
+        "2) Daily Revenue — Daily Collection Details (.xlsx)",
+        type=["xls", "xlsx"],
+        key="daily_rcm_revenue_upload",
+        help="Uses the previous Doctor Revenue logic.",
+    )
+with u3:
+    sub_up = st.file_uploader(
+        "3) Submission Report (.xls / .xlsx)",
+        type=["xls", "xlsx"],
+        key="daily_rcm_submission_upload",
+        help="Used for Submitted / Ready / Pending / Coding TAT analysis.",
+    )
+
+# Determine a sensible default calendar date from uploaded Registration / Revenue files.
+_default_day = date.today()
+try:
+    _candidate_dates = []
+    if reg_up is not None:
+        _reg_preview = read_registration_report(reg_up)
+        _candidate_dates.extend(_available_dates_from_report(_reg_preview, ["Reg:Date", "Reg Date", "Registration Date", "Date"]))
+    if rev_up is not None:
+        _rev_preview = read_revenue_report(rev_up)
+        _candidate_dates.extend(_available_dates_from_report(_rev_preview, ["Visit Date", "VisitDate"]))
+    if _candidate_dates:
+        _default_day = max(_candidate_dates).date()
+except Exception:
+    pass
+
+if "daily_rcm_calendar_day" not in SS:
+    SS["daily_rcm_calendar_day"] = _default_day
+selected_day = st.date_input(
+    "Reporting Date",
+    key="daily_rcm_calendar_day",
+    help="The same date is applied to Registration, Daily Revenue and Submission reports.",
 )
 
 c1, c2 = st.columns([2, 1])
 with c1:
     process_clicked = st.button(
-        "✅ Process Daily Report",
+        "✅ Process 3 Reports",
         type="primary",
         use_container_width=True,
-        disabled=(up is None),
+        disabled=(reg_up is None or rev_up is None or sub_up is None),
     )
 with c2:
     if st.button("🗑️ Clear Current", use_container_width=True):
         SS.pop("daily_rcm_result", None)
         st.rerun()
 
-if process_clicked and up is not None:
+if process_clicked:
     try:
-        raw = read_daily_report(up, up.name)
-        result = process_report(raw)
+        reg_df = read_registration_report(reg_up)
+        rev_df = read_revenue_report(rev_up)
+        sub_raw = read_daily_report(sub_up, sub_up.name)
+
+        patient_count = registration_patient_count(reg_df, selected_day)
+        rev_result = revenue_analysis(rev_df, selected_day)
+        result = process_report(sub_raw, selected_day=selected_day)
+        result["registration_count"] = patient_count
+        result["revenue"] = rev_result
         SS["daily_rcm_result"] = result
 
+        # Save combined processed analysis. The raw submission file is retained using the existing S3 mechanism.
         if s3_ok:
-            ok, saved_day = save_analysis_to_s3(result, up.getvalue(), up.name)
+            ok, saved_day = save_analysis_to_s3(result, sub_up.getvalue(), sub_up.name)
             if ok:
-                st.success(f"Processed and saved to S3 ✅  {saved_day}")
+                st.success(f"All 3 reports processed and saved to S3 ✅  {saved_day}")
             else:
-                st.warning("Processed successfully, but S3 save failed.")
+                st.warning("All 3 reports processed successfully, but S3 save failed.")
         else:
-            st.success("Processed successfully ✅")
+            st.success("All 3 reports processed successfully ✅")
     except Exception as exc:
-        st.error(f"Could not process the report: {exc}")
+        st.error(f"Could not process the reports: {exc}")
 
 # Saved history
 hist = load_history()
