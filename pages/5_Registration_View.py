@@ -1739,8 +1739,12 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         k = kpi.set_index("Metric")["Value"]
         # Premium KPI cards (management-friendly)
         subtitle = f"Generated: {fmt_dt(datetime.now())}"
+        _total_visits = float(pd.to_numeric(k.get("Total Visits", 0), errors="coerce") or 0)
+        _reporting_days = float(pd.to_numeric(k.get("Reporting Days", 1), errors="coerce") or 1)
+        _patient_avg = k.get("Patient Avg / Day", (_total_visits / _reporting_days if _reporting_days else 0))
         _kpi_cards([
-            ("Total Visits", int(k.get("Total Visits", 0))),
+            ("Total Visits", int(_total_visits)),
+            ("Patient Avg / Day", round(float(_patient_avg), 1)),
             ("New Patients", int(k.get("New Patients", 0))),
             ("Established Patients", int(k.get("Established Patients", 0))),
             ("Follow Up", int(k.get("Follow Up", 0))),
@@ -1767,6 +1771,19 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
     if income_keys:
         st.markdown("---")
         st.header("Income Analysis (Doctor Revenue)")
+
+        # Service activity COUNTS — these are visit counts, not AED amounts.
+        _svc = dfs.get("Income | Service Counts", pd.DataFrame())
+        if isinstance(_svc, pd.DataFrame) and not _svc.empty and {"Metric", "Value"}.issubset(_svc.columns):
+            _svc2 = _svc.copy()
+            _svc2 = _svc2[~_svc2["Metric"].astype(str).str.strip().str.upper().isin(["TOTAL", "GRAND TOTAL"])]
+            _sv = _svc2.set_index("Metric")["Value"]
+            _kpi_cards([
+                ("Consultation Count", int(pd.to_numeric(_sv.get("Consultation Count", 0), errors="coerce") or 0)),
+                ("Lab Count", int(pd.to_numeric(_sv.get("Lab Count", 0), errors="coerce") or 0)),
+                ("Radiology Count", int(pd.to_numeric(_sv.get("Radiology Count", 0), errors="coerce") or 0)),
+                ("Procedure Count", int(pd.to_numeric(_sv.get("Procedure Count", 0), errors="coerce") or 0)),
+            ])
 
         df_doc = _recompute_income_metrics(dfs.get("Income | Doctor Wise Revenue"))
         df_ins = _recompute_income_metrics(dfs.get("Income | Insurance Wise Revenue"))
@@ -2929,13 +2946,32 @@ def load_and_aggregate(day_list: List[pd.Timestamp]) -> Optional[Dict[str, pd.Da
         kk = pd.concat(kpi_rows, ignore_index=True)
         kk["Value"] = pd.to_numeric(kk["Value"], errors="coerce").fillna(0)
         kpi_sum = kk.groupby("Metric", as_index=False)["Value"].sum()
+        # For weekly/monthly views: average patients per SAVED reporting day.
+        # Example: 1000 visits across 6 saved days = 166.7 patients/day.
+        _days_n = len(loaded)
+        _tv_row = kpi_sum.loc[kpi_sum["Metric"] == "Total Visits", "Value"]
+        _tv = float(_tv_row.iloc[0]) if not _tv_row.empty else 0.0
+        kpi_sum = kpi_sum[~kpi_sum["Metric"].isin(["Reporting Days", "Patient Avg / Day"])].copy()
+        kpi_sum = pd.concat([kpi_sum, pd.DataFrame([
+            {"Metric": "Reporting Days", "Value": _days_n},
+            {"Metric": "Patient Avg / Day", "Value": (_tv / _days_n) if _days_n else 0.0},
+        ])], ignore_index=True)
         agg["KPI"] = kpi_sum
 
     for k in keys:
         if k == "KPI":
             continue
         frames = [d.get(k) for d in loaded if isinstance(d.get(k), pd.DataFrame)]
-        if str(k).startswith("Income | "):
+        if str(k) == "Income | Service Counts":
+            # Sum daily visit-count metrics across selected saved days.
+            _sf = [f for f in frames if isinstance(f, pd.DataFrame) and not f.empty and {"Metric", "Value"}.issubset(f.columns)]
+            if _sf:
+                _sd = pd.concat(_sf, ignore_index=True)
+                _sd["Value"] = pd.to_numeric(_sd["Value"], errors="coerce").fillna(0)
+                agg[k] = _sd.groupby("Metric", as_index=False)["Value"].sum()
+            else:
+                agg[k] = pd.DataFrame(columns=["Metric", "Value"])
+        elif str(k).startswith("Income | "):
             agg[k] = aggregate_income(frames)
         else:
             agg[k] = aggregate_tables(frames)
