@@ -198,7 +198,7 @@ h1,h2,h3{letter-spacing:-0.02em;}
 .rcm-white{background:#F5F9FD;border:1px solid #C9DCEF;}
 .rcm-icon{font-size:22px;min-width:34px;text-align:center;line-height:1;color:#17335F;font-weight:900;}
 .rcm-label{font-size:12px;font-weight:800;color:#4B607A;margin-bottom:4px;text-transform:uppercase;letter-spacing:.25px;}
-.rcm-value{font-size:29px;font-weight:950;color:#0B2342;line-height:1.05;letter-spacing:-.3px;}
+.rcm-value{font-size:28px;font-weight:950;color:#0B2342;line-height:1.05;letter-spacing:-.35px;}
 .rcm-sub{font-size:11px;font-weight:700;color:#64748B;margin-top:5px;}
 .premium-header{
     display:flex;
@@ -1036,45 +1036,61 @@ def render_result(result: Dict[str, object]):
             except Exception as exc:
                 st.error(f"Email could not be sent: {exc}")
 
+    # Management KPI cards: AED is primary, claim volume is secondary
     kpi_cards([
-        ("Total Claims", f"{total_claims:,}", money(total_amount), "Σ", "rcm-blue"),
-        ("Already Submitted", f"{closed_n:,}",
-         f"{money(closed_a)} · {(closed_n / total_claims * 100 if total_claims else 0):.1f}%", "✓", "rcm-green"),
-        ("Ready to Submit", f"{proc_n:,}",
-         f"{money(proc_a)} · {(proc_n / total_claims * 100 if total_claims else 0):.1f}%", "↑", "rcm-white"),
-        ("Pending Resolution", f"{open_n:,}",
-         f"{money(open_a)} · {(open_n / total_claims * 100 if total_claims else 0):.1f}%", "?", "rcm-yellow"),
-        ("Within Coding TAT (≤48h)", f"{na_n:,}",
-         f"{money(na_a)} · {(na_n / total_claims * 100 if total_claims else 0):.1f}%", "TAT", "rcm-purple"),
+        ("Total Claims", money(total_amount),
+         f"{total_claims:,} claims", "Σ", "rcm-blue"),
+
+        ("Already Submitted", money(closed_a),
+         f"{closed_n:,} claims · {(closed_n / total_claims * 100 if total_claims else 0):.1f}%",
+         "✓", "rcm-green"),
+
+        ("Ready to Submit", money(proc_a),
+         f"{proc_n:,} claims · {(proc_n / total_claims * 100 if total_claims else 0):.1f}%",
+         "↑", "rcm-white"),
+
+        ("Pending Resolution", money(open_a),
+         f"{open_n:,} claims · {(open_n / total_claims * 100 if total_claims else 0):.1f}%",
+         "?", "rcm-yellow"),
+
+        ("Within Coding TAT (≤48h)", money(na_a),
+         f"{na_n:,} claims · {(na_n / total_claims * 100 if total_claims else 0):.1f}%",
+         "TAT", "rcm-purple"),
+
         (
             "Coding TAT Breach (>48h)",
-            f"{int(claims['_NotAssignedOver48h'].sum()):,}",
             money(claims.loc[claims["_NotAssignedOver48h"], "_Amount"].sum()),
+            f"{int(claims['_NotAssignedOver48h'].sum()):,} claims",
             "!",
             "rcm-red",
         ),
     ])
 
-    _submitted_ready = closed_n + proc_n
-    _submitted_ready_pct = (_submitted_ready / total_claims * 100) if total_claims else 0.0
-    _pending_pct = (open_n / total_claims * 100) if total_claims else 0.0
+    # Executive financial snapshot
     _breach_n = int(claims["_NotAssignedOver48h"].sum())
-    _breach_class = "exec-good" if _breach_n == 0 else "exec-bad"
+    _breach_a = float(claims.loc[claims["_NotAssignedOver48h"], "_Amount"].sum())
+    _pending_total_a = open_a + _breach_a
+    _pending_total_n = open_n + _breach_n
 
     st.markdown(
         f"""
         <div class="exec-strip">
           <div class="exec-item">
-            <div class="exec-label">Submitted / Ready</div>
-            <div class="exec-value exec-good">{_submitted_ready_pct:.1f}%</div>
+            <div class="exec-label">AED Already Submitted</div>
+            <div class="exec-value exec-good">{money(closed_a)}</div>
+            <div class="rcm-sub">{closed_n:,} claims</div>
           </div>
+
           <div class="exec-item">
-            <div class="exec-label">Pending Resolution</div>
-            <div class="exec-value exec-warn">{_pending_pct:.1f}%</div>
+            <div class="exec-label">AED Ready to Submit</div>
+            <div class="exec-value">{money(proc_a)}</div>
+            <div class="rcm-sub">{proc_n:,} claims</div>
           </div>
+
           <div class="exec-item">
-            <div class="exec-label">Coding TAT Breaches</div>
-            <div class="exec-value {_breach_class}">{_breach_n:,}</div>
+            <div class="exec-label">AED Pending / At Risk</div>
+            <div class="exec-value {'exec-good' if _pending_total_a == 0 else 'exec-warn'}">{money(_pending_total_a)}</div>
+            <div class="rcm-sub">{_pending_total_n:,} claims requiring resolution</div>
           </div>
         </div>
         """,
