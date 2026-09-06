@@ -222,27 +222,21 @@ def money(v) -> str:
 
 
 def kpi_cards(items: List[Tuple[str, str, str, str, str]]):
-    """
-    item = (label, value, subtitle, icon, color_class)
-    """
+    """item = (label, value, subtitle, icon, color_class)"""
     cards = []
     for label, value, subtitle, icon, cls in items:
         cards.append(
-            f"""
-            <div class="rcm-card {cls}">
-                <div class="rcm-icon">{icon}</div>
-                <div>
-                    <div class="rcm-label">{label}</div>
-                    <div class="rcm-value">{value}</div>
-                    <div class="rcm-sub">{subtitle}</div>
-                </div>
-            </div>
-            """
+            f'<div class="rcm-card {cls}">'
+            f'<div class="rcm-icon">{icon}</div>'
+            f'<div>'
+            f'<div class="rcm-label">{label}</div>'
+            f'<div class="rcm-value">{value}</div>'
+            f'<div class="rcm-sub">{subtitle}</div>'
+            f'</div>'
+            f'</div>'
         )
-    st.markdown(
-        f'<div class="rcm-kpi-grid">{"".join(cards)}</div>',
-        unsafe_allow_html=True,
-    )
+    html = '<div class="rcm-kpi-grid">' + ''.join(cards) + '</div>'
+    st.markdown(html, unsafe_allow_html=True)
 
 
 # =========================================================
@@ -575,6 +569,16 @@ def process_report(raw: pd.DataFrame) -> Dict[str, object]:
         out = pd.DataFrame(rows)
         if not out.empty:
             out = out.sort_values("Total Ins Share", ascending=False)
+            out = out.rename(columns={
+                "CLOSED Claims": "Already Submitted Claims",
+                "CLOSED Amount": "Already Submitted Amount",
+                "PROCESSED Claims": "Ready to Submit Claims",
+                "PROCESSED Amount": "Ready to Submit Amount",
+                "OPEN Claims": "Pending for Query Claims",
+                "OPEN Amount": "Pending for Query Amount",
+                "NOT ASSIGNED Claims": "Not Coded Yet Claims",
+                "NOT ASSIGNED Amount": "Not Coded Yet Amount",
+            })
         return out
 
     insurance_summary = build_group_summary("_Insurance", "Insurance")
@@ -745,7 +749,18 @@ def render_result(result: Dict[str, object]):
     # Submission pipeline
     st.markdown('<div class="rcm-section">Status Summary</div>', unsafe_allow_html=True)
     status_show = result["status_summary"].copy()
-    status_show["Ins Share"] = pd.to_numeric(status_show["Ins Share"], errors="coerce").fillna(0).round(2)
+    _status_labels = {
+        "CLOSED": "Already Submitted",
+        "PROCESSED": "Ready to Submit",
+        "OPEN": "Pending for Query",
+        "NOT ASSIGNED": "Not Coded Yet / Within 48 Hours",
+    }
+    status_show["Status"] = status_show["Status"].astype(str).str.upper().map(
+        lambda x: _status_labels.get(x, x.title())
+    )
+    status_show["Ins Share"] = pd.to_numeric(
+        status_show["Ins Share"], errors="coerce"
+    ).fillna(0).round(2)
     st.dataframe(status_show, use_container_width=True, hide_index=True)
 
     # OPEN query analysis
@@ -817,7 +832,18 @@ def render_result(result: Dict[str, object]):
     f1, f2, f3 = st.columns(3)
     with f1:
         statuses = sorted([x for x in claims["_Status"].dropna().astype(str).unique() if x])
-        pick_status = st.selectbox("Status", ["All"] + statuses, key="daily_rcm_status_filter")
+        _friendly_status = {
+            "CLOSED": "Already Submitted",
+            "PROCESSED": "Ready to Submit",
+            "OPEN": "Pending for Query",
+            "NOT ASSIGNED": "Not Coded Yet / Within 48 Hours",
+        }
+        pick_status = st.selectbox(
+            "Status",
+            ["All"] + statuses,
+            format_func=lambda x: "All" if x == "All" else _friendly_status.get(x, x.title()),
+            key="daily_rcm_status_filter",
+        )
     with f2:
         doctors = sorted([x for x in claims["_Doctor"].dropna().astype(str).unique() if x])
         pick_doc = st.selectbox("Doctor", ["All"] + doctors, key="daily_rcm_doc_filter")
