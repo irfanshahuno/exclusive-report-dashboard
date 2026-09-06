@@ -1172,6 +1172,12 @@ def _email_recipients():
 def _build_daily_rcm_email(result: Dict[str, object]) -> str:
     claims = result["claims"]
     report_day = pd.to_datetime(result["report_day"])
+    report_start = pd.to_datetime(result.get("report_start", report_day)).normalize()
+    report_end = pd.to_datetime(result.get("report_end", report_day)).normalize()
+    if report_start == report_end:
+        email_period = report_start.strftime("%d %b %Y")
+    else:
+        email_period = f"{report_start.strftime('%d %b %Y')} – {report_end.strftime('%d %b %Y')}"
 
     closed_n, closed_a = status_value(result, "CLOSED")
     proc_n, proc_a = status_value(result, "PROCESSED")
@@ -1262,9 +1268,10 @@ def _build_daily_rcm_email(result: Dict[str, object]) -> str:
     <html>
     <body style="font-family:Segoe UI,Arial,sans-serif;background:#f4f7fb;margin:0;padding:20px;">
       <div style="max-width:850px;margin:auto;background:white;border-radius:14px;overflow:hidden;box-shadow:0 7px 25px rgba(15,23,42,.10);">
-        <div style="background:#0B2342;color:white;padding:18px 22px;">
+        <div style="background:#0B2342;color:white;padding:20px 22px;">
           <div style="font-size:20px;font-weight:900;">Daily RCM Submission Report</div>
-          <div style="font-size:12px;color:#a8c1df;margin-top:4px;">{report_day.strftime('%A, %d %b %Y')} · {html.escape(CENTERS.get(center_key, center_key))}</div>
+          <div style="font-size:26px;line-height:1.2;font-weight:900;color:#ffffff;margin-top:8px;letter-spacing:.2px;">{email_period}</div>
+          <div style="font-size:13px;font-weight:700;color:#a8c1df;margin-top:6px;">{html.escape(CENTERS.get(center_key, center_key))}</div>
         </div>
         <div style="padding:18px 22px;">
           <table style="width:100%;border-collapse:separate;border-spacing:8px;">
@@ -1366,10 +1373,10 @@ def _build_colored_excel_attachment(result: Dict[str, object]) -> bytes:
 def _send_daily_rcm_email(result: Dict[str, object]) -> None:
     host=str(st.secrets.get("SMTP_HOST","") or "").strip(); port=int(st.secrets.get("SMTP_PORT",465)); user=str(st.secrets.get("SMTP_USER","") or "").strip(); pwd=str(st.secrets.get("SMTP_PASS","") or "").strip(); to_addr,cc_addr=_email_recipients()
     if not all([host,user,pwd,to_addr]): raise ValueError("Missing SMTP settings. Required: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and EMAIL_TO.")
-    report_day=pd.to_datetime(result["report_day"]); msg=MIMEMultipart("mixed"); msg["Subject"]=f"Daily RCM Submission Report - {report_day.strftime('%d %b %Y')}"; msg["From"]=user; msg["To"]=to_addr
+    report_day=pd.to_datetime(result["report_day"]); report_start=pd.to_datetime(result.get("report_start",report_day)).normalize(); report_end=pd.to_datetime(result.get("report_end",report_day)).normalize(); period_subject=report_start.strftime("%d %b %Y") if report_start==report_end else f"{report_start.strftime('%d %b %Y')} - {report_end.strftime('%d %b %Y')}"; msg=MIMEMultipart("mixed"); msg["Subject"]=f"Daily RCM Submission Report - {period_subject}"; msg["From"]=user; msg["To"]=to_addr
     if cc_addr: msg["Cc"]=cc_addr
     alt=MIMEMultipart("alternative"); alt.attach(MIMEText(_build_daily_rcm_email(result),"html")); msg.attach(alt)
-    xlsx_bytes=_build_colored_excel_attachment(result); attachment=MIMEApplication(xlsx_bytes,_subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet"); attachment.add_header("Content-Disposition","attachment",filename=f"Daily_RCM_Report_{report_day.strftime('%Y-%m-%d')}.xlsx"); msg.attach(attachment)
+    xlsx_bytes=_build_colored_excel_attachment(result); attachment=MIMEApplication(xlsx_bytes,_subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet"); file_period=report_start.strftime("%Y-%m-%d") if report_start==report_end else f"{report_start.strftime('%Y-%m-%d')}_to_{report_end.strftime('%Y-%m-%d')}"; attachment.add_header("Content-Disposition","attachment",filename=f"Daily_RCM_Report_{file_period}.xlsx"); msg.attach(attachment)
     recipients=[x.strip() for x in (to_addr.split(",")+(cc_addr.split(",") if cc_addr else [])) if x.strip()]
     with smtplib.SMTP_SSL(host,port) as server: server.login(user,pwd); server.sendmail(user,recipients,msg.as_string())
 
