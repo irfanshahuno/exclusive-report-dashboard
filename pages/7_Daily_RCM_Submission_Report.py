@@ -1301,10 +1301,9 @@ def render_result(result: Dict[str, object]):
     _daily_rev_visits = int(_rt.get("visits", 0) or 0)
     _daily_avg = float(_rt.get("avg_service", 0.0) or 0.0)
 
-    st.markdown('<div class="rcm-section">Daily Management Snapshot</div>', unsafe_allow_html=True)
+    st.markdown('<div class="rcm-section">Management Snapshot</div>', unsafe_allow_html=True)
     kpi_cards([
         ("Total Patients", f"{_patients:,}", "Registration report · unique Visit No", "P", "rcm-blue"),
-        ("Daily Service Revenue", money(_daily_service_revenue), f"{_daily_rev_visits:,} revenue visits · Avg {money(_daily_avg)}", "R", "rcm-green"),
         ("Submission Net Insurance", money(total_amount), f"{total_claims:,} claims in submission report", "Σ", "rcm-white"),
     ])
 
@@ -1361,37 +1360,14 @@ def render_result(result: Dict[str, object]):
           </div>
 
           <div class="exec-item">
-            <div class="exec-label">AED Pending / At Risk</div>
+            <div class="exec-label">AED Pending Resolution</div>
             <div class="exec-value {'exec-good' if _pending_total_a == 0 else 'exec-warn'}">{money(_pending_total_a)}</div>
-            <div class="rcm-sub">{_pending_total_n:,} claims requiring resolution</div>
+            <div class="rcm-sub">{_pending_total_n:,} claims pending query / resolution</div>
           </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    # Doctor Revenue from Daily Collection Details
-    st.markdown('<div class="rcm-section">Doctor Revenue — Daily Collection Details</div>', unsafe_allow_html=True)
-    _docrev = (_rev.get("doctor") if isinstance(_rev, dict) else None)
-    _svc_counts = (_rev.get("service_counts", {}) if isinstance(_rev, dict) else {}) or {}
-    if isinstance(_docrev, pd.DataFrame) and not _docrev.empty:
-        sc1, sc2, sc3, sc4 = st.columns(4)
-        sc1.metric("Consultation Visits", f"{int(_svc_counts.get('Consultation',0)):,}")
-        sc2.metric("Lab Visits", f"{int(_svc_counts.get('Lab',0)):,}")
-        sc3.metric("Procedure Visits", f"{int(_svc_counts.get('Procedure',0)):,}")
-        sc4.metric("Radiology Visits", f"{int(_svc_counts.get('Radiology',0)):,}")
-        _show = _docrev.copy()
-        for _c in ["Consultation","Lab","Procedure","Radiology"]:
-            if _c in _show.columns:
-                _show[_c] = pd.to_numeric(_show[_c], errors="coerce").fillna(0).astype(int)
-        for _c in ["Total_Service_Revenue","Insurance_Amount","Avg_Service_Per_Visit","Avg_Insurance_Per_Visit"]:
-            if _c in _show.columns:
-                _show[_c] = pd.to_numeric(_show[_c], errors="coerce").fillna(0).round(2)
-        preferred = ["Department","Doctor","Visits","Consultation","Lab","Procedure","Radiology","Total_Service_Revenue","Insurance_Amount","Avg_Service_Per_Visit","Avg_Insurance_Per_Visit"]
-        _show = _show[[c for c in preferred if c in _show.columns] + [c for c in _show.columns if c not in preferred]]
-        st.dataframe(_show, use_container_width=True, hide_index=True)
-    else:
-        st.info("No Daily Collection Details revenue found for the selected date.")
 
     # Submission pipeline
     st.markdown('<div class="rcm-section">Status Summary</div>', unsafe_allow_html=True)
@@ -1410,17 +1386,27 @@ def render_result(result: Dict[str, object]):
     ).fillna(0).round(2)
     _render_premium_status_table(status_show)
 
-    # OPEN query analysis
+    # OPEN query analysis as management KPI cards
     st.markdown('<div class="rcm-section">Pending Resolution Breakdown</div>', unsafe_allow_html=True)
     q = result["query_summary"].copy()
     if q.empty:
         st.success("No OPEN claims found.")
     else:
         q["Ins Share"] = pd.to_numeric(q["Ins Share"], errors="coerce").fillna(0).round(2)
-        st.dataframe(q, use_container_width=True, hide_index=True)
+        q["Claims"] = pd.to_numeric(q["Claims"], errors="coerce").fillna(0).astype(int)
+
+        _query_cards = []
+        _query_colors = ["rcm-yellow", "rcm-blue", "rcm-purple", "rcm-white", "rcm-green", "rcm-red"]
+        for _i, _row in q.reset_index(drop=True).iterrows():
+            _owner = str(_row.get("Query Department", "Unspecified"))
+            _claims_n = int(_row.get("Claims", 0) or 0)
+            _amount = float(_row.get("Ins Share", 0) or 0)
+            _icon = "LAB" if "lab" in _owner.lower() or "nursing" in _owner.lower() else ("DR" if "doctor" in _owner.lower() else "Q")
+            _query_cards.append((_owner, money(_amount), f"{_claims_n:,} claims pending", _icon, _query_colors[_i % len(_query_colors)]))
+        kpi_cards(_query_cards)
 
         owner_options = ["All"] + sorted(q["Query Department"].dropna().astype(str).unique().tolist())
-        owner_pick = st.selectbox("Open Query Department", owner_options, key="daily_rcm_query_owner")
+        owner_pick = st.selectbox("Pending Query Department", owner_options, key="daily_rcm_query_owner")
         odf = claims[claims["_Status"] == "OPEN"].copy()
         if owner_pick != "All":
             odf = odf[odf["_QueryOwner"] == owner_pick].copy()
@@ -1445,7 +1431,35 @@ def render_result(result: Dict[str, object]):
             detail_cols.append("Query Department")
 
         if detail_cols:
-            st.dataframe(odf[detail_cols], use_container_width=True, hide_index=True)
+            with st.expander("View pending query claim details", expanded=False):
+                st.dataframe(odf[detail_cols], use_container_width=True, hide_index=True)
+
+    # Doctor Revenue from Daily Collection Details — placed after RCM status summary
+    st.markdown('<div class="rcm-section">Doctor Revenue — Daily Collection Details</div>', unsafe_allow_html=True)
+    _docrev = (_rev.get("doctor") if isinstance(_rev, dict) else None)
+    _svc_counts = (_rev.get("service_counts", {}) if isinstance(_rev, dict) else {}) or {}
+    if isinstance(_docrev, pd.DataFrame) and not _docrev.empty:
+        _doctor_visits = int(pd.to_numeric(_docrev.get("Visits", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+        _avg_service = float(_rt.get("avg_service", 0.0) or 0.0)
+        kpi_cards([
+            ("Visits", f"{_doctor_visits:,}", "Unique revenue visits", "V", "rcm-blue"),
+            ("Lab Visits", f"{int(_svc_counts.get('Lab',0)):,}", "Unique visits with lab", "LAB", "rcm-green"),
+            ("Procedure Visits", f"{int(_svc_counts.get('Procedure',0)):,}", "Unique visits with procedure", "P", "rcm-purple"),
+            ("Avg Service / Visit", money(_avg_service), "Service revenue ÷ visits", "AVG", "rcm-white"),
+        ])
+
+        _show = _docrev.copy()
+        for _c in ["Lab","Procedure"]:
+            if _c in _show.columns:
+                _show[_c] = pd.to_numeric(_show[_c], errors="coerce").fillna(0).astype(int)
+        for _c in ["Total_Service_Revenue","Insurance_Amount","Avg_Service_Per_Visit","Avg_Insurance_Per_Visit"]:
+            if _c in _show.columns:
+                _show[_c] = pd.to_numeric(_show[_c], errors="coerce").fillna(0).round(2)
+        preferred = ["Department","Doctor","Visits","Lab","Procedure","Total_Service_Revenue","Insurance_Amount","Avg_Service_Per_Visit","Avg_Insurance_Per_Visit"]
+        _show = _show[[c for c in preferred if c in _show.columns]]
+        st.dataframe(_show, use_container_width=True, hide_index=True)
+    else:
+        st.info("No Daily Collection Details revenue found for the selected date range.")
 
     # Insurance / Doctor tabs
     st.markdown('<div class="rcm-section">Performance Breakdown</div>', unsafe_allow_html=True)
