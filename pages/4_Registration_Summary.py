@@ -570,7 +570,27 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     if col_payer and not doctor_ins_wise.empty:
         doctor_ins_wise = _recalc_avg(doctor_ins_wise)
 
-    out = {"Doctor Wise Revenue": doctor_wise}
+    # Service COUNTS (not AED amounts).
+    # Count unique visits where that service amount is > 0.
+    # Example: 45 visits had a lab charge -> Lab Count = 45.
+    def _visit_service_count(amount_col: str) -> int:
+        try:
+            mask = pd.to_numeric(tmp[amount_col], errors="coerce").fillna(0) > 0
+            return int(tmp.loc[mask, col_visit].nunique())
+        except Exception:
+            return 0
+
+    service_counts = pd.DataFrame([
+        {"Metric": "Consultation Count", "Value": _visit_service_count(col_cons)},
+        {"Metric": "Lab Count",          "Value": _visit_service_count(col_lab)},
+        {"Metric": "Radiology Count",    "Value": _visit_service_count(col_rad)},
+        {"Metric": "Procedure Count",    "Value": _visit_service_count(col_proc)},
+    ])
+
+    out = {
+        "Doctor Wise Revenue": doctor_wise,
+        "Service Counts": service_counts,
+    }
     if col_payer and not insurance_wise.empty:
         out["Insurance Wise Revenue"] = insurance_wise
     if col_payer and not doctor_ins_wise.empty:
