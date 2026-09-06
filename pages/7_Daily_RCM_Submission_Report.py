@@ -1389,7 +1389,7 @@ def _render_premium_status_table(status_show: pd.DataFrame) -> None:
     for _,r in status_show.iterrows():
         label=str(r["Status"]); bg=status_colors.get(label,"#FFFFFF")
         rows.append(f"<tr style='background:{bg};'><td style='font-weight:700;'>{html.escape(label)}</td><td class='num'>{int(r['Claims']):,}</td><td class='num'>AED {float(r['Ins Share']):,.2f}</td></tr>")
-    rows.append(f"<tr style='background:#0B2342;color:#FFFFFF;font-weight:900;'><td>TOTAL</td><td class='num'>{total_claims:,}</td><td class='num'>AED {total_amount:,.2f}</td></tr>")
+    rows.append(f"<tr style='background:#0B2342;font-weight:900;'><td style='color:#FFFFFF !important;'>TOTAL</td><td class='num' style='color:#FFFFFF !important;'>{total_claims:,}</td><td class='num' style='color:#FFFFFF !important;'>AED {total_amount:,.2f}</td></tr>")
     st.markdown("<div class='premium-table-wrap'><table class='premium-table'><thead><tr><th>Status</th><th style='text-align:right;'>Claims</th><th style='text-align:right;'>Net Insurance Amount (AED)</th></tr></thead><tbody>"+''.join(rows)+"</tbody></table></div>", unsafe_allow_html=True)
 
 
@@ -1412,6 +1412,33 @@ def _render_doctor_revenue_table(df: pd.DataFrame) -> None:
                 value=html.escape(str(v)); align="left"
             tds.append(f"<td style='background:{bg};text-align:{align};'>{value}</td>")
         rows.append('<tr>'+''.join(tds)+'</tr>')
+
+    # Grand total row for doctor revenue table.
+    total_visits = int(pd.to_numeric(df.get("Visits", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if "Visits" in df.columns else 0
+    total_lab = int(pd.to_numeric(df.get("Lab", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if "Lab" in df.columns else 0
+    total_proc = int(pd.to_numeric(df.get("Procedure", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if "Procedure" in df.columns else 0
+    total_ins = float(pd.to_numeric(df.get("Insurance_Amount", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if "Insurance_Amount" in df.columns else 0.0
+    total_avg = (total_ins / total_visits) if total_visits else 0.0
+    total_cells=[]
+    for c in headers:
+        if c == "Department":
+            value="TOTAL"; align="left"
+        elif c == "Doctor":
+            value=""; align="left"
+        elif c == "Visits":
+            value=f"{total_visits:,}"; align="right"
+        elif c == "Lab":
+            value=f"{total_lab:,}"; align="right"
+        elif c == "Procedure":
+            value=f"{total_proc:,}"; align="right"
+        elif c == "Insurance_Amount":
+            value=f"{total_ins:,.2f}"; align="right"
+        elif c == "Avg_Insurance_Per_Visit":
+            value=f"{total_avg:,.2f}"; align="right"
+        else:
+            value=""; align="left"
+        total_cells.append(f"<td style='background:#0B2342;color:#FFFFFF !important;font-weight:900;text-align:{align};'>{value}</td>")
+    rows.append('<tr>'+''.join(total_cells)+'</tr>')
     st.markdown("<div class='premium-table-wrap'><table class='premium-table'><thead><tr>"+th+"</tr></thead><tbody>"+''.join(rows)+"</tbody></table></div>", unsafe_allow_html=True)
 
 
