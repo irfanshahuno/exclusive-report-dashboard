@@ -1070,6 +1070,95 @@ def load_saved_day(day) -> Optional[Dict[str, object]]:
 
 
 
+def _bundle_key() -> str:
+    return s3_key(daily_root(cfg, center_key), "latest_source_bundle.pkl")
+
+
+def save_source_bundle_to_s3(bundle: Dict[str, object]) -> bool:
+    """Persist the latest 3 uploaded source reports so date changes never require re-upload."""
+    if not s3_ok:
+        return False
+    try:
+        payload = pickle.dumps(bundle, protocol=pickle.HIGHEST_PROTOCOL)
+        s3_put_bytes(
+            s3,
+            cfg["S3_BUCKET_NAME"],
+            _bundle_key(),
+            payload,
+            "application/octet-stream",
+        )
+        return True
+    except Exception:
+        return False
+
+
+def load_source_bundle_from_s3() -> Optional[Dict[str, object]]:
+    if not s3_ok:
+        return None
+    b = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], _bundle_key())
+    if not b:
+        return None
+    try:
+        bundle = pickle.loads(b)
+        if isinstance(bundle, dict) and all(k in bundle for k in ["registration", "revenue", "submission"]):
+            return bundle
+    except Exception:
+        pass
+    return None
+
+
+def _named_bytes(data: bytes, name: str):
+    bio = io.BytesIO(data)
+    bio.name = name
+    return bio
+
+
+@st.cache_data(show_spinner=False)
+def _cached_registration(data: bytes, name: str) -> pd.DataFrame:
+    return read_registration_report(_named_bytes(data, name))
+
+
+@st.cache_data(show_spinner=False)
+def _cached_revenue(data: bytes, name: str) -> pd.DataFrame:
+    return read_revenue_report(_named_bytes(data, name))
+
+
+@st.cache_data(show_spinner=False)
+def _cached_submission(data: bytes, name: str) -> pd.DataFrame:
+    return read_daily_report(_named_bytes(data, name), name)
+
+
+def read_bundle(bundle: Dict[str, object]):
+    reg = bundle["registration"]
+    rev = bundle["revenue"]
+    sub = bundle["submission"]
+    reg_df = _cached_registration(reg["bytes"], reg["name"])
+    rev_df = _cached_revenue(rev["bytes"], rev["name"])
+    sub_df = _cached_submission(sub["bytes"], sub["name"])
+    return reg_df, rev_df, sub_df
+
+
+def build_result_from_bundle(bundle: Dict[str, object], selected_period):
+    reg_df, rev_df, sub_raw = read_bundle(bundle)
+    patient_count = registration_patient_count(reg_df, selected_period)
+    rev_result = revenue_analysis(rev_df, selected_period)
+    result = process_report(sub_raw, selected_day=selected_period)
+    result["registration_count"] = patient_count
+    result["revenue"] = rev_result
+    result["selected_period"] = selected_period
+
+    reg_days = _date_set_in_period(reg_df, ["Reg:Date", "Reg Date", "Registration Date", "Date"], selected_period)
+    rev_days = _date_set_in_period(rev_df, ["Visit Date", "VisitDate"], selected_period)
+    sub_days = _date_set_in_period(sub_raw, ["Visit Date", "VisitDate", "Enc Date", "Encounter Date"], selected_period)
+    result["date_coverage"] = {
+        "Registration": sorted(reg_days),
+        "Revenue": sorted(rev_days),
+        "Submission": sorted(sub_days),
+    }
+    return result
+
+
+
 # =========================================================
 # EMAIL
 # =========================================================
@@ -1564,53 +1653,69 @@ def render_result(result: Dict[str, object]):
 st.title("Daily RCM Management Report")
 st.caption(
     "3-report dashboard: Registration = patient count · Daily Collection Details = doctor revenue · "
-    "Submission = submitted / ready / pending / coding TAT. The exact same From/To period filters all three reports automatically."
+    "Submission = submitted / ready / pending / coding TAT. The exact same From/To period is applied to all three reports."
 )
 
 SS.setdefault("daily_rcm_show_setup", False)
 
-# Keep the upload/date controls hidden during normal dashboard viewing.
-# The user opens them only when a new report period needs to be processed.
-setup_left, setup_right = st.columns([1, 4])
+# ---------------------------------------------------------
+# Restore saved sources and latest processed result
+# ---------------------------------------------------------
+if SS.get("daily_rcm_source_bundle") is None:
+    _saved_bundle = load_source_bundle_from_s3()
+    if _saved_bundle is not None:
+        SS["daily_rcm_source_bundle"] = _saved_bundle
+
+# Restore latest processed result from S3 when the app/session restarts.
+if SS.get("daily_rcm_result") is None:
+    _hist_boot = load_history()
+    if not _hist_boot.empty:
+        _latest_boot = _hist_boot["day"].dropna().sort_values().iloc[-1]
+        _loaded_boot = load_saved_day(_latest_boot)
+        if _loaded_boot is not None:
+            SS["daily_rcm_result"] = _loaded_boot
+
+bundle = SS.get("daily_rcm_source_bundle")
+current = SS.get("daily_rcm_result")
+
+# ---------------------------------------------------------
+# Upload/source panel: hidden by default; date controls stay visible
+# ---------------------------------------------------------
+setup_left, setup_right = st.columns([1.2, 4.8])
 with setup_left:
     if not SS.get("daily_rcm_show_setup", False):
-        if st.button("📂 Upload / Change Reports", use_container_width=True, key="daily_rcm_open_setup"):
+        if st.button("📂 Upload / Replace Reports", use_container_width=True, key="daily_rcm_open_setup"):
             SS["daily_rcm_show_setup"] = True
             st.rerun()
     else:
-        if st.button("✕ Close", use_container_width=True, key="daily_rcm_close_setup"):
+        if st.button("✕ Close Uploads", use_container_width=True, key="daily_rcm_close_setup"):
             SS["daily_rcm_show_setup"] = False
             st.rerun()
 
-reg_up = rev_up = sub_up = None
+with setup_right:
+    if bundle is not None:
+        _saved_at = bundle.get("saved_at", "")
+        st.caption(f"✅ Source reports saved{' in S3' if s3_ok else ' for this session'}" + (f" · {_saved_at}" if _saved_at else ""))
+    else:
+        st.caption("Upload the 3 source reports once. After processing, they are reused for future date changes.")
 
 if SS.get("daily_rcm_show_setup", False):
     with st.container(border=True):
-        with st.expander("Storage Status", expanded=False):
-            if s3_ok:
-                st.success(
-                    f"S3 connected ✅  Bucket: {cfg['S3_BUCKET_NAME']} · "
-                    f"Center: {CENTERS[center_key]}"
-                )
-                st.caption(f"Path: {daily_root(cfg, center_key)}/<YYYY-MM-DD>/analysis.pkl")
-            else:
-                st.warning("S3 is not configured. The page will work, but results will not persist after restart.")
-
-        st.markdown("### Reporting Date & Source Reports")
+        st.markdown("### Source Reports")
         u1, u2, u3 = st.columns(3)
         with u1:
             reg_up = st.file_uploader(
-                "1) Registration Report (.xlsx)",
+                "1) Registration Report (.xls / .xlsx)",
                 type=["xls", "xlsx"],
                 key="daily_rcm_registration_upload",
                 help="Used only for Total Patients / unique Visit No.",
             )
         with u2:
             rev_up = st.file_uploader(
-                "2) Daily Revenue — Daily Collection Details (.xlsx)",
+                "2) Daily Revenue — Daily Collection Details (.xls / .xlsx)",
                 type=["xls", "xlsx"],
                 key="daily_rcm_revenue_upload",
-                help="Uses the previous Doctor Revenue logic.",
+                help="Used for doctor visits, lab/procedure counts and insurance amount.",
             )
         with u3:
             sub_up = st.file_uploader(
@@ -1620,169 +1725,202 @@ if SS.get("daily_rcm_show_setup", False):
                 help="Used for Submitted / Ready / Pending / Coding TAT analysis.",
             )
 
-        # Read uploaded reports only while this setup panel is open.
-        _default_day = date.today()
-        _reg_preview = _rev_preview = _sub_preview = None
-        _common_dates = set()
-        _source_dates = {"Registration": set(), "Revenue": set(), "Submission": set()}
-        try:
-            if reg_up is not None:
-                _reg_preview = read_registration_report(reg_up)
-                _source_dates["Registration"] = {x.date() for x in _available_dates_from_report(_reg_preview, ["Reg:Date", "Reg Date", "Registration Date", "Date"])}
-            if rev_up is not None:
-                _rev_preview = read_revenue_report(rev_up)
-                _source_dates["Revenue"] = {x.date() for x in _available_dates_from_report(_rev_preview, ["Visit Date", "VisitDate"])}
-            if sub_up is not None:
-                _sub_preview = read_daily_report(sub_up, sub_up.name)
-                _source_dates["Submission"] = {x.date() for x in _available_dates_from_report(_sub_preview, ["Visit Date", "VisitDate", "Enc Date", "Encounter Date"])}
-
-            nonempty_sets = [v for v in _source_dates.values() if v]
-            if len(nonempty_sets) == 3:
-                _common_dates = set.intersection(*nonempty_sets)
-            if _common_dates:
-                _default_day = max(_common_dates)
-            elif nonempty_sets:
-                _default_day = max(set.union(*nonempty_sets))
-        except Exception:
-            pass
-
-        # On the first setup opening, use the latest common date as the initial calendar value.
-        if "daily_rcm_start_date" not in SS:
-            SS["daily_rcm_start_date"] = _default_day
-        if "daily_rcm_end_date" not in SS:
-            SS["daily_rcm_end_date"] = _default_day
-
-        st.markdown("#### Select Reporting Period")
-        p1, p2, p3 = st.columns([1, 1, 1.25])
-        with p1:
-            start_day = st.date_input(
-                "From",
-                key="daily_rcm_start_date",
-                help="First date included in Registration, Revenue and Submission reports.",
-            )
-        with p2:
-            end_day = st.date_input(
-                "To",
-                key="daily_rcm_end_date",
-                help="Last date included in Registration, Revenue and Submission reports.",
-            )
-        with p3:
-            quick_period = st.selectbox(
-                "Quick Period",
-                ["Custom", "Single Day", "Last 7 Days", "This Month", "Previous Month"],
-                key="daily_rcm_quick_period",
-                help="Optional shortcut. Custom uses the From/To dates above.",
-            )
-
-        _anchor = pd.Timestamp(end_day)
-        if quick_period == "Single Day":
-            _qs = _qe = _anchor.date()
-        elif quick_period == "Last 7 Days":
-            _qe = _anchor.date()
-            _qs = (_anchor - pd.Timedelta(days=6)).date()
-        elif quick_period == "This Month":
-            _qs = _anchor.replace(day=1).date()
-            _qe = (_anchor + pd.offsets.MonthEnd(0)).date()
-        elif quick_period == "Previous Month":
-            _prev = _anchor.replace(day=1) - pd.Timedelta(days=1)
-            _qs = _prev.replace(day=1).date()
-            _qe = _prev.date()
-        else:
-            _qs, _qe = start_day, end_day
-
-        if _qs > _qe:
-            _qs, _qe = _qe, _qs
-        selected_day = (_qs, _qe)
-
-        st.caption(
-            f"Applied identically to all 3 reports: **{pd.Timestamp(_qs).strftime('%d %b %Y')} → {pd.Timestamp(_qe).strftime('%d %b %Y')}**"
-        )
-
-        process_clicked = st.button(
-            "▶ Process Reports",
-            type="primary",
-            use_container_width=True,
-            key="daily_rcm_process_reports",
-        )
-
-        if process_clicked:
+        if st.button("▶ Save & Process These Reports", type="primary", use_container_width=True, key="daily_rcm_process_uploads"):
             if reg_up is None or rev_up is None or sub_up is None:
                 st.error("Please upload all 3 reports before processing.")
             else:
                 try:
-                    reg_df = _reg_preview if _reg_preview is not None else read_registration_report(reg_up)
-                    rev_df = _rev_preview if _rev_preview is not None else read_revenue_report(rev_up)
-                    sub_raw = _sub_preview if _sub_preview is not None else read_daily_report(sub_up, sub_up.name)
-
-                    patient_count = registration_patient_count(reg_df, selected_day)
-                    rev_result = revenue_analysis(rev_df, selected_day)
-                    result = process_report(sub_raw, selected_day=selected_day)
-                    result["registration_count"] = patient_count
-                    result["revenue"] = rev_result
-
-                    reg_days = _date_set_in_period(reg_df, ["Reg:Date", "Reg Date", "Registration Date", "Date"], selected_day)
-                    rev_days = _date_set_in_period(rev_df, ["Visit Date", "VisitDate"], selected_day)
-                    sub_days = _date_set_in_period(sub_raw, ["Visit Date", "VisitDate", "Enc Date", "Encounter Date"], selected_day)
-                    result["date_coverage"] = {
-                        "Registration": sorted(reg_days),
-                        "Revenue": sorted(rev_days),
-                        "Submission": sorted(sub_days),
+                    new_bundle = {
+                        "registration": {"name": reg_up.name, "bytes": reg_up.getvalue()},
+                        "revenue": {"name": rev_up.name, "bytes": rev_up.getvalue()},
+                        "submission": {"name": sub_up.name, "bytes": sub_up.getvalue()},
+                        "saved_at": datetime.now().strftime("%d %b %Y %H:%M"),
                     }
-                    result["selected_period"] = selected_day
-                    SS["daily_rcm_result"] = result
-
-                    # Save automatically when S3 is available so the user does not need a second action.
+                    # Validate immediately before saving.
+                    _reg_df, _rev_df, _sub_df = read_bundle(new_bundle)
+                    SS["daily_rcm_source_bundle"] = new_bundle
+                    bundle = new_bundle
                     if s3_ok:
-                        try:
-                            save_analysis_to_s3(result, sub_up.getvalue(), sub_up.name)
-                        except Exception:
-                            pass
+                        save_source_bundle_to_s3(new_bundle)
 
-                    # Processing completed: hide the entire setup/upload area automatically.
+                    # Determine latest date common to all three newly uploaded files.
+                    _reg_dates = {x.date() for x in _available_dates_from_report(_reg_df, ["Reg:Date", "Reg Date", "Registration Date", "Date"])}
+                    _rev_dates = {x.date() for x in _available_dates_from_report(_rev_df, ["Visit Date", "VisitDate"])}
+                    _sub_dates = {x.date() for x in _available_dates_from_report(_sub_df, ["Visit Date", "VisitDate", "Enc Date", "Encounter Date"])}
+                    _common = _reg_dates & _rev_dates & _sub_dates
+                    if _common:
+                        _latest_common = max(_common)
+                        SS["daily_rcm_start_date"] = _latest_common
+                        SS["daily_rcm_end_date"] = _latest_common
+                    SS["daily_rcm_quick_period"] = "Custom"
                     SS["daily_rcm_show_setup"] = False
                     st.rerun()
                 except Exception as exc:
-                    st.error(f"Could not process the reports: {exc}")
+                    st.error(f"Could not read/process the source reports: {exc}")
 
-# Compact dashboard actions stay visible while the setup panel remains hidden.
-a1, a2 = st.columns([1, 5])
-with a1:
-    if st.button("🗑️ Clear Current", use_container_width=True, key="daily_rcm_clear_current"):
-        SS.pop("daily_rcm_result", None)
+# ---------------------------------------------------------
+# Reporting period: ALWAYS VISIBLE
+# ---------------------------------------------------------
+# Prefer the last processed range, then latest common date in saved sources.
+_default_start = date.today()
+_default_end = date.today()
+if current is not None:
+    try:
+        _default_start = pd.to_datetime(current.get("report_start", current.get("report_day"))).date()
+        _default_end = pd.to_datetime(current.get("report_end", current.get("report_day"))).date()
+    except Exception:
+        pass
+elif bundle is not None:
+    try:
+        _reg_df, _rev_df, _sub_df = read_bundle(bundle)
+        _reg_dates = {x.date() for x in _available_dates_from_report(_reg_df, ["Reg:Date", "Reg Date", "Registration Date", "Date"])}
+        _rev_dates = {x.date() for x in _available_dates_from_report(_rev_df, ["Visit Date", "VisitDate"])}
+        _sub_dates = {x.date() for x in _available_dates_from_report(_sub_df, ["Visit Date", "VisitDate", "Enc Date", "Encounter Date"])}
+        _common = _reg_dates & _rev_dates & _sub_dates
+        if _common:
+            _default_start = _default_end = max(_common)
+    except Exception:
+        pass
+
+if "daily_rcm_start_date" not in SS:
+    SS["daily_rcm_start_date"] = _default_start
+if "daily_rcm_end_date" not in SS:
+    SS["daily_rcm_end_date"] = _default_end
+if "daily_rcm_quick_period" not in SS:
+    SS["daily_rcm_quick_period"] = "Custom"
+
+st.markdown("### Select Reporting Period")
+p1, p2, p3 = st.columns([1, 1, 1.25])
+with p1:
+    start_day = st.date_input(
+        "From",
+        key="daily_rcm_start_date",
+        help="First date included in all three reports.",
+    )
+with p2:
+    end_day = st.date_input(
+        "To",
+        key="daily_rcm_end_date",
+        help="Last date included in all three reports.",
+    )
+with p3:
+    quick_period = st.selectbox(
+        "Quick Period",
+        ["Custom", "Single Day", "Last 7 Days", "This Month", "Previous Month"],
+        key="daily_rcm_quick_period",
+        help="Optional shortcut. Custom uses the From/To dates.",
+    )
+
+_anchor = pd.Timestamp(end_day)
+if quick_period == "Single Day":
+    _qs = _qe = _anchor.date()
+elif quick_period == "Last 7 Days":
+    _qe = _anchor.date()
+    _qs = (_anchor - pd.Timedelta(days=6)).date()
+elif quick_period == "This Month":
+    _qs = _anchor.replace(day=1).date()
+    _qe = (_anchor + pd.offsets.MonthEnd(0)).date()
+elif quick_period == "Previous Month":
+    _prev = _anchor.replace(day=1) - pd.Timedelta(days=1)
+    _qs = _prev.replace(day=1).date()
+    _qe = _prev.date()
+else:
+    _qs, _qe = start_day, end_day
+
+if _qs > _qe:
+    _qs, _qe = _qe, _qs
+selected_period = (_qs, _qe)
+
+st.caption(
+    f"Applied identically to Registration + Revenue + Submission: "
+    f"**{pd.Timestamp(_qs).strftime('%d %b %Y')} → {pd.Timestamp(_qe).strftime('%d %b %Y')}**"
+)
+
+# ---------------------------------------------------------
+# AUTO-RECALCULATE whenever From/To/Quick Period changes.
+# No upload and no Process button are required after sources are saved.
+# ---------------------------------------------------------
+if bundle is not None:
+    _current_period = None
+    if current is not None:
+        try:
+            _current_period = (
+                pd.to_datetime(current.get("report_start", current.get("report_day"))).date(),
+                pd.to_datetime(current.get("report_end", current.get("report_day"))).date(),
+            )
+        except Exception:
+            _current_period = None
+
+    if _current_period != selected_period:
+        try:
+            with st.spinner("Updating all 3 reports for the selected period..."):
+                current = build_result_from_bundle(bundle, selected_period)
+                SS["daily_rcm_result"] = current
+
+                # Save the latest selected result as well, so it survives restart.
+                if s3_ok:
+                    try:
+                        sub_meta = bundle["submission"]
+                        save_analysis_to_s3(current, sub_meta["bytes"], sub_meta["name"])
+                    except Exception:
+                        pass
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Could not update the selected period: {exc}")
+
+# If reports were just uploaded and there is still no result, calculate once now.
+if bundle is not None and SS.get("daily_rcm_result") is None:
+    try:
+        current = build_result_from_bundle(bundle, selected_period)
+        SS["daily_rcm_result"] = current
+        if s3_ok:
+            try:
+                sub_meta = bundle["submission"]
+                save_analysis_to_s3(current, sub_meta["bytes"], sub_meta["name"])
+            except Exception:
+                pass
         st.rerun()
+    except Exception as exc:
+        st.error(f"Could not calculate the report: {exc}")
 
-# Saved history
+# ---------------------------------------------------------
+# Saved history remains optional; sources themselves are retained separately.
+# ---------------------------------------------------------
 hist = load_history()
 if not hist.empty:
-    saved_days = list(hist["day"].dt.normalize().drop_duplicates().sort_values())
-    latest = saved_days[-1]
-
-    with st.expander("Saved Daily Reports", expanded=False):
+    with st.expander("Saved Reports", expanded=False):
+        saved_days = list(hist["day"].dt.normalize().drop_duplicates().sort_values())
         pick_day = st.selectbox(
-            "Select saved day",
+            "Select saved report ending on",
             options=saved_days,
             index=len(saved_days) - 1,
             format_func=lambda d: pd.to_datetime(d).strftime("%A, %d %b %Y"),
             key="daily_rcm_saved_day",
         )
-        if st.button("Load Saved Report", use_container_width=True):
+        if st.button("Load Saved Report", use_container_width=True, key="daily_rcm_load_saved"):
             loaded = load_saved_day(pick_day)
             if loaded is None:
                 st.error("Saved report could not be loaded.")
             else:
                 SS["daily_rcm_result"] = loaded
+                try:
+                    SS["daily_rcm_start_date"] = pd.to_datetime(loaded.get("report_start", loaded["report_day"])).date()
+                    SS["daily_rcm_end_date"] = pd.to_datetime(loaded.get("report_end", loaded["report_day"])).date()
+                    SS["daily_rcm_quick_period"] = "Custom"
+                except Exception:
+                    pass
                 st.rerun()
 
-    # Auto-load latest when page opens and nothing is in session.
-    if SS.get("daily_rcm_result") is None and not SS.get("daily_rcm_show_setup", False):
-        latest_result = load_saved_day(latest)
-        if latest_result is not None:
-            SS["daily_rcm_result"] = latest_result
-
+# ---------------------------------------------------------
 # Display current/latest
+# ---------------------------------------------------------
 current = SS.get("daily_rcm_result")
 if current is not None:
     st.markdown("---")
     render_result(current)
 else:
-    st.info("Click **Upload / Change Reports** above to select the three source reports and reporting period.")
+    if bundle is None:
+        st.info("Click **Upload / Replace Reports** once. After processing, the reports are saved and date changes will work without uploading again.")
+    else:
+        st.info("Saved source reports are available. Select a reporting period above.")
+
