@@ -190,12 +190,12 @@ h1,h2,h3{letter-spacing:-0.02em;}
     align-items:center;
     gap:13px;
 }
-.rcm-blue{background:#F4F8FC;border-color:#D7E4F2;}
-.rcm-green{background:#F2FAF5;border-color:#D5EBDD;}
-.rcm-yellow{background:#FFF8E8;border-color:#EFDFAF;}
-.rcm-red{background:#FFF3F3;border-color:#F1CACA;}
-.rcm-purple{background:#F6F8FB;border-color:#DCE3EC;}
-.rcm-white{background:#F5F9FD;border:1px solid #C9DCEF;}
+.rcm-blue{background:#EEF6FF;border-color:#B9D5F3;}
+.rcm-green{background:#ECF9F1;border-color:#B8DFC6;}
+.rcm-yellow{background:#FFF4D9;border-color:#EBCB72;}
+.rcm-red{background:#FFF0F0;border-color:#EFB1B1;}
+.rcm-purple{background:#F1F0FF;border-color:#C9C3F2;}
+.rcm-white{background:#EEF9F8;border:1px solid #B8DDD8;}
 .rcm-icon{font-size:22px;min-width:34px;text-align:center;line-height:1;color:#17335F;font-weight:900;}
 .rcm-label{font-size:12px;font-weight:800;color:#4B607A;margin-bottom:4px;text-transform:uppercase;letter-spacing:.25px;}
 .rcm-value{font-size:28px;font-weight:950;color:#0B2342;line-height:1.05;letter-spacing:-.35px;}
@@ -1390,10 +1390,10 @@ def render_result(result: Dict[str, object]):
     _daily_rev_visits = int(_rt.get("visits", 0) or 0)
     _daily_avg = float(_rt.get("avg_service", 0.0) or 0.0)
 
-    st.markdown('<div class="rcm-section">Management Snapshot</div>', unsafe_allow_html=True)
+    st.markdown('<div class="rcm-section">Patient Footfall & Insurance Value</div>', unsafe_allow_html=True)
     kpi_cards([
         ("Total Patients", f"{_patients:,}", "Registration report · unique Visit No", "P", "rcm-blue"),
-        ("Submission Net Insurance", money(total_amount), f"{total_claims:,} claims in submission report", "Σ", "rcm-white"),
+        ("Submission Net Insurance", money(total_amount), f"{total_claims:,} claims in submission report", "Σ", "rcm-purple"),
     ])
 
     # Submission KPI cards: AED is primary, claim volume is secondary
