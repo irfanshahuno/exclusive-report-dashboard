@@ -1421,34 +1421,47 @@ st.markdown(
       @media (max-width: 700px){ .kpi-grid{grid-template-columns: repeat(1, minmax(0, 1fr));} }
 
       .kpi-card{
-        background: var(--card-bg);
-        border: 1px solid var(--card-border);
-        border-radius: 18px;
-        box-shadow: var(--shadow2);
-        padding: 14px 16px;
+        border: 1px solid rgba(15,23,42,0.08);
+        border-radius: 22px;
+        box-shadow: 0 9px 24px rgba(15,23,42,0.07);
+        padding: 18px 22px;
+        min-height: 132px;
+        display:flex;
+        align-items:center;
+        gap:18px;
       }
+      .kpi-card.kpi-blue{background:linear-gradient(135deg,#f8fcff 0%,#eaf6ff 100%);border-color:#cfe9ff;}
+      .kpi-card.kpi-pink{background:linear-gradient(135deg,#ffffff 0%,#f2f7ff 100%);border:2px solid #1976ff;}
+      .kpi-card.kpi-green{background:linear-gradient(135deg,#fbfffc 0%,#ecfbf1 100%);border-color:#d3f2dc;}
+      .kpi-card.kpi-yellow{background:linear-gradient(135deg,#fffdf8 0%,#fff7df 100%);border-color:#f7e7b9;}
+      .kpi-card.kpi-purple{background:linear-gradient(135deg,#ffffff 0%,#f4edff 100%);border-color:#e7d9ff;}
+      .kpi-card.kpi-red{background:linear-gradient(135deg,#fffefe 0%,#fff0f2 100%);border-color:#ffd5dc;}
+      .kpi-icon{font-size:42px;line-height:1;min-width:54px;text-align:center;filter:saturate(1.15);}
+      .kpi-body{min-width:0;}
       .kpi-label{
-        font-size: 13px;
-        color: var(--muted);
-        font-weight: 700;
-        margin-bottom: 6px;
+        font-size: 17px;
+        color: #0b2a63;
+        font-weight: 900;
+        margin-bottom: 7px;
+        line-height:1.15;
       }
       .kpi-value{
-        font-size: 28px;
-        font-weight: 850;
-        color: var(--text);
-        line-height: 1.1;
+        font-size: 34px;
+        font-weight: 950;
+        color: #081a57;
+        line-height: 1.0;
+        letter-spacing:-0.02em;
       }
       .kpi-sub{
         font-size: 12px;
         color: var(--muted);
-        margin-top: 6px;
+        margin-top: 8px;
       }
       .kpi-note{
-        font-size: 13px;
-        color: var(--text);
-        font-weight: 900;
-        margin-top: 7px;
+        font-size: 15px;
+        color: #081a57;
+        font-weight: 950;
+        margin-top: 8px;
         line-height: 1.15;
       }
 
@@ -1488,26 +1501,34 @@ st.markdown(
 )
 
 def _kpi_cards(items, subtitle: str = ""):
-    """Render premium KPI cards.
-
-    Each item can be:
-      (label, value)
-      (label, value, note)
-    """
+    """Render colorful management KPI cards matching the dashboard mock-up."""
+    icon_map = {
+        "Total Visits": "👥",
+        "Patient Avg / Day": "📈",
+        "New Patients": "🧑‍⚕️",
+        "Established Patients": "👨‍👩‍👦",
+        "Follow Up": "🗓️",
+        "Pending Patients": "🕒",
+        "Consultation Count": "🩺",
+        "Lab Count": "🧪",
+        "Radiology Count": "🩻",
+        "Procedure Count": "💉",
+    }
+    color_classes = ["kpi-blue", "kpi-pink", "kpi-green", "kpi-yellow", "kpi-purple", "kpi-red"]
     cards_html = []
-    for item in items:
+    for idx, item in enumerate(items):
         if len(item) >= 3:
             label, value, note = item[0], item[1], item[2]
         else:
             label, value = item[0], item[1]
             note = ""
-
+        icon = icon_map.get(str(label), "📊")
+        color_class = color_classes[idx % len(color_classes)]
         note_html = f"<div class='kpi-note'>{note}</div>" if note else ""
-        # Keep each card HTML on one line. Indented multiline HTML can be
-        # interpreted by Markdown as a code block and displayed as raw HTML.
         cards_html.append(
-            f"<div class='kpi-card'><div class='kpi-label'>{label}</div>"
-            f"<div class='kpi-value'>{value}</div>{note_html}</div>"
+            f"<div class='kpi-card {color_class}'><div class='kpi-icon'>{icon}</div>"
+            f"<div class='kpi-body'><div class='kpi-label'>{label}</div>"
+            f"<div class='kpi-value'>{value}</div>{note_html}</div></div>"
         )
     sub_html = f"<div class='kpi-sub'>{subtitle}</div>" if subtitle else ""
     html = f"<div class='kpi-grid'>{''.join(cards_html)}</div>{sub_html}"
