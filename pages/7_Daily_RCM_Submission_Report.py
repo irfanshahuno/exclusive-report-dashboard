@@ -1398,6 +1398,17 @@ def _render_doctor_revenue_table(df: pd.DataFrame) -> None:
     st.markdown("<div class='premium-table-wrap'><table class='premium-table'><thead><tr>"+th+"</tr></thead><tbody>"+''.join(rows)+"</tbody></table></div>", unsafe_allow_html=True)
 
 
+def status_value(result: Dict[str, object], status: str) -> Tuple[int, float]:
+    """Return claim count and insurance amount for one submission status."""
+    s = result.get("status_summary")
+    if s is None or getattr(s, "empty", True):
+        return 0, 0.0
+    row = s[s["Status"].astype(str).str.upper() == str(status).upper()]
+    if row.empty:
+        return 0, 0.0
+    return int(row.iloc[0]["Claims"]), float(row.iloc[0]["Ins Share"])
+
+
 def render_result(result: Dict[str, object]):
     claims = result["claims"]
     report_day = pd.to_datetime(result["report_day"])
