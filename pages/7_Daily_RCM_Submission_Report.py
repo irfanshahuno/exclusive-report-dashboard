@@ -1516,7 +1516,7 @@ def render_result(result: Dict[str, object]):
     kpi_cards([
         ("Total Patients", f"{_patients:,}", "Registration report · unique Visit No", "P", "rcm-blue"),
         ("Submission Net Insurance", money(total_amount), f"{total_claims:,} claims in submission report", "Σ", "rcm-purple"),
-        ("Pharmacy Revenue", "Integration in Progress", "Pharmacy revenue amount coming soon", "Rx", "rcm-green"),
+        ("Pharmacy Revenue", "Integration in Progress", "Pharmacy revenue amount coming soon", "Rx", "rcm-yellow"),
     ])
 
     # Submission KPI cards: AED is primary, claim volume is secondary
