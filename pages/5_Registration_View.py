@@ -1414,7 +1414,7 @@ st.markdown(
       .kpi-grid{
         display:grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 14px;
+        gap: 12px;
         margin: 0.25rem 0 0.75rem 0;
       }
       @media (max-width: 1200px){ .kpi-grid{grid-template-columns: repeat(2, minmax(0, 1fr));} }
@@ -1422,13 +1422,13 @@ st.markdown(
 
       .kpi-card{
         border: 1px solid rgba(15,23,42,0.08);
-        border-radius: 22px;
-        box-shadow: 0 9px 24px rgba(15,23,42,0.07);
-        padding: 18px 22px;
-        min-height: 132px;
+        border-radius: 18px;
+        box-shadow: 0 7px 18px rgba(15,23,42,0.065);
+        padding: 14px 18px;
+        min-height: 110px;
         display:flex;
         align-items:center;
-        gap:18px;
+        gap:14px;
       }
       .kpi-card.kpi-blue{background:linear-gradient(135deg,#f8fcff 0%,#eaf6ff 100%);border-color:#cfe9ff;}
       .kpi-card.kpi-pink{background:linear-gradient(135deg,#ffffff 0%,#f2f7ff 100%);border:2px solid #1976ff;}
@@ -1436,17 +1436,17 @@ st.markdown(
       .kpi-card.kpi-yellow{background:linear-gradient(135deg,#fffdf8 0%,#fff7df 100%);border-color:#f7e7b9;}
       .kpi-card.kpi-purple{background:linear-gradient(135deg,#ffffff 0%,#f4edff 100%);border-color:#e7d9ff;}
       .kpi-card.kpi-red{background:linear-gradient(135deg,#fffefe 0%,#fff0f2 100%);border-color:#ffd5dc;}
-      .kpi-icon{font-size:42px;line-height:1;min-width:54px;text-align:center;filter:saturate(1.15);}
+      .kpi-icon{font-size:34px;line-height:1;min-width:44px;text-align:center;filter:saturate(1.15);}
       .kpi-body{min-width:0;}
       .kpi-label{
-        font-size: 17px;
+        font-size: 13px;
         color: #0b2a63;
         font-weight: 900;
-        margin-bottom: 7px;
+        margin-bottom: 5px;
         line-height:1.15;
       }
       .kpi-value{
-        font-size: 34px;
+        font-size: 30px;
         font-weight: 950;
         color: #081a57;
         line-height: 1.0;
@@ -1455,13 +1455,13 @@ st.markdown(
       .kpi-sub{
         font-size: 12px;
         color: var(--muted);
-        margin-top: 8px;
+        margin-top: 6px;
       }
       .kpi-note{
-        font-size: 15px;
+        font-size: 13px;
         color: #081a57;
         font-weight: 950;
-        margin-top: 8px;
+        margin-top: 6px;
         line-height: 1.15;
       }
 
