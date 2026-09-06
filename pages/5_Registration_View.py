@@ -1465,6 +1465,37 @@ st.markdown(
         line-height: 1.15;
       }
 
+      /* Smaller Income Analysis service-count KPI cards */
+      .kpi-grid.kpi-grid-compact{
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin: 0.15rem 0 0.55rem 0;
+      }
+      .kpi-card.kpi-card-compact{
+        min-height: 88px;
+        padding: 10px 14px;
+        border-radius: 15px;
+        gap: 10px;
+        box-shadow: 0 5px 14px rgba(15,23,42,0.055);
+      }
+      .kpi-card-compact .kpi-icon{
+        font-size: 28px;
+        min-width: 36px;
+      }
+      .kpi-card-compact .kpi-label{
+        font-size: 12px;
+        margin-bottom: 4px;
+      }
+      .kpi-card-compact .kpi-value{
+        font-size: 26px;
+      }
+      @media (max-width: 1200px){
+        .kpi-grid.kpi-grid-compact{grid-template-columns: repeat(2, minmax(0, 1fr));}
+      }
+      @media (max-width: 700px){
+        .kpi-grid.kpi-grid-compact{grid-template-columns: repeat(1, minmax(0, 1fr));}
+      }
+
       div[data-testid="stDataFrame"]{
         background: rgba(255,255,255,0.92);
         border: 1px solid rgba(16,24,40,0.08);
@@ -1500,8 +1531,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-def _kpi_cards(items, subtitle: str = ""):
-    """Render colorful management KPI cards matching the dashboard mock-up."""
+def _kpi_cards(items, subtitle: str = "", compact: bool = False):
+    """Render colorful management KPI cards. compact=True is used for service-count cards."""
     icon_map = {
         "Total Visits": "👥",
         "Patient Avg / Day": "📈",
@@ -1525,13 +1556,15 @@ def _kpi_cards(items, subtitle: str = ""):
         icon = icon_map.get(str(label), "📊")
         color_class = color_classes[idx % len(color_classes)]
         note_html = f"<div class='kpi-note'>{note}</div>" if note else ""
+        _compact_class = " kpi-card-compact" if compact else ""
         cards_html.append(
-            f"<div class='kpi-card {color_class}'><div class='kpi-icon'>{icon}</div>"
+            f"<div class='kpi-card {color_class}{_compact_class}'><div class='kpi-icon'>{icon}</div>"
             f"<div class='kpi-body'><div class='kpi-label'>{label}</div>"
             f"<div class='kpi-value'>{value}</div>{note_html}</div></div>"
         )
     sub_html = f"<div class='kpi-sub'>{subtitle}</div>" if subtitle else ""
-    html = f"<div class='kpi-grid'>{''.join(cards_html)}</div>{sub_html}"
+    _grid_class = "kpi-grid kpi-grid-compact" if compact else "kpi-grid"
+    html = f"<div class='{_grid_class}'>{''.join(cards_html)}</div>{sub_html}"
     st.markdown(html, unsafe_allow_html=True)
 
 
@@ -1833,7 +1866,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                 ("Lab Count", int(pd.to_numeric(_sv.get("Lab Count", 0), errors="coerce") or 0)),
                 ("Radiology Count", int(pd.to_numeric(_sv.get("Radiology Count", 0), errors="coerce") or 0)),
                 ("Procedure Count", int(pd.to_numeric(_sv.get("Procedure Count", 0), errors="coerce") or 0)),
-            ])
+            ], compact=True)
 
         df_doc = _recompute_income_metrics(dfs.get("Income | Doctor Wise Revenue"))
         df_ins = _recompute_income_metrics(dfs.get("Income | Insurance Wise Revenue"))
