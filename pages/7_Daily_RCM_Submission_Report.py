@@ -258,7 +258,7 @@ h1,h2,h3{letter-spacing:-0.02em;}
     background:#f7faff;
 }
 .premium-table tr.total-row{
-    background:#ff7a00;
+    background:#0B2342 !important;
 }
 .premium-table tr.total-row td{
     color:#FFFFFF !important;
@@ -1403,7 +1403,7 @@ def _render_premium_status_table(status_show: pd.DataFrame) -> None:
     for _,r in status_show.iterrows():
         label=str(r["Status"]); bg=status_colors.get(label,"#FFFFFF")
         rows.append(f"<tr style='background:{bg};'><td style='font-weight:700;'>{html.escape(label)}</td><td class='num'>{int(r['Claims']):,}</td><td class='num'>AED {float(r['Ins Share']):,.2f}</td></tr>")
-    rows.append(f"<tr class='total-row' style='background:#0B2342 !important;font-weight:900;'><td style='color:#FFFFFF !important;'><span style='color:#FFFFFF !important;'>TOTAL</span></td><td class='num' style='color:#FFFFFF !important;'><span style='color:#FFFFFF !important;'>{total_claims:,}</span></td><td class='num' style='color:#FFFFFF !important;'><span style='color:#FFFFFF !important;'>AED {total_amount:,.2f}</span></td></tr>")
+    rows.append(f"<tr class='total-row' style='background:#0B2342 !important;font-weight:900 !important;'><td style='background:#0B2342 !important;color:#FFFFFF !important;font-weight:900 !important;'>TOTAL</td><td class='num' style='background:#0B2342 !important;color:#FFFFFF !important;font-weight:900 !important;'>{total_claims:,}</td><td class='num' style='background:#0B2342 !important;color:#FFFFFF !important;font-weight:900 !important;white-space:nowrap;'>AED {total_amount:,.2f}</td></tr>")
     st.markdown("<div class='premium-table-wrap'><table class='premium-table'><thead><tr><th>Status</th><th style='text-align:right;'>Claims</th><th style='text-align:right;'>Net Insurance Amount (AED)</th></tr></thead><tbody>"+''.join(rows)+"</tbody></table></div>", unsafe_allow_html=True)
 
 
