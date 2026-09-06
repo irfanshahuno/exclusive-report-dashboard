@@ -462,6 +462,14 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     tmp["_total_service"] = tmp[col_cons] + tmp[col_lab] + tmp[col_rad] + tmp[col_proc]
     tmp["_total_insuance"] = tmp[col_insu_amt]
 
+    # Visit-level service flags. These are COUNTS, not AED amounts.
+    # A visit is counted once for a service when that service amount is > 0,
+    # even if the income export contains more than one row for the same visit.
+    tmp["_has_consultation"] = (tmp[col_cons] > 0).astype(int)
+    tmp["_has_lab"] = (tmp[col_lab] > 0).astype(int)
+    tmp["_has_radiology"] = (tmp[col_rad] > 0).astype(int)
+    tmp["_has_procedure"] = (tmp[col_proc] > 0).astype(int)
+
     def _agg(group_cols: List[str]) -> pd.DataFrame:
         g = tmp.groupby(group_cols, dropna=False).agg(
             Consultation=(col_cons, "sum"),
@@ -472,6 +480,24 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
             Total_Amount_Service=("_total_service", "sum"),
             Total_Amount_Insuance=("_total_insuance", "sum"),
         ).reset_index()
+
+        # Count UNIQUE visits with each service for the same grouping.
+        # First collapse any duplicate income rows inside a visit with max(flag),
+        # then sum those visit-level flags.
+        visit_flags = (
+            tmp.groupby(group_cols + [col_visit], dropna=False)[
+                ["_has_consultation", "_has_lab", "_has_radiology", "_has_procedure"]
+            ].max().reset_index()
+        )
+        counts = visit_flags.groupby(group_cols, dropna=False).agg(
+            Consultation_Count=("_has_consultation", "sum"),
+            Lab_Count=("_has_lab", "sum"),
+            Radiology_Count=("_has_radiology", "sum"),
+            Procedure_Count=("_has_procedure", "sum"),
+        ).reset_index()
+        g = g.merge(counts, on=group_cols, how="left")
+        for _c in ["Consultation_Count", "Lab_Count", "Radiology_Count", "Procedure_Count"]:
+            g[_c] = pd.to_numeric(g[_c], errors="coerce").fillna(0).astype(int)
 
         denom = g["Total_Visit"].replace(0, pd.NA)
         g["Avg_Amount_Service"] = g["Total_Amount_Service"] / denom
@@ -522,6 +548,11 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         row["Procedure"] = proc_sum
         row["Total_Visit"] = total_visit
 
+        # Service counts (unique visits with service > 0)
+        for _cc in ["Consultation_Count", "Lab_Count", "Radiology_Count", "Procedure_Count"]:
+            if _cc in d.columns:
+                row[_cc] = int(pd.to_numeric(d[_cc], errors="coerce").fillna(0).sum())
+
         row["Total_Amount_Service"] = total_service
         row["Total_Amount_Insuance"] = total_insu
 
@@ -570,31 +601,38 @@ def income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     if col_payer and not doctor_ins_wise.empty:
         doctor_ins_wise = _recalc_avg(doctor_ins_wise)
 
-    # Service COUNTS (not AED amounts).
-    # Count unique visits where that service amount is > 0.
-    # Example: 45 visits had a lab charge -> Lab Count = 45.
-    def _visit_service_count(amount_col: str) -> int:
-        try:
-            mask = pd.to_numeric(tmp[amount_col], errors="coerce").fillna(0) > 0
-            return int(tmp.loc[mask, col_visit].nunique())
-        except Exception:
-            return 0
-
-    service_counts = pd.DataFrame([
-        {"Metric": "Consultation Count", "Value": _visit_service_count(col_cons)},
-        {"Metric": "Lab Count",          "Value": _visit_service_count(col_lab)},
-        {"Metric": "Radiology Count",    "Value": _visit_service_count(col_rad)},
-        {"Metric": "Procedure Count",    "Value": _visit_service_count(col_proc)},
-    ])
-
-    out = {
-        "Doctor Wise Revenue": doctor_wise,
-        "Service Counts": service_counts,
-    }
+    out = {"Doctor Wise Revenue": doctor_wise}
     if col_payer and not insurance_wise.empty:
         out["Insurance Wise Revenue"] = insurance_wise
     if col_payer and not doctor_ins_wise.empty:
         out["Doctor x Insurance Revenue"] = doctor_ins_wise
+
+    # Top KPI cards for service activity counts. Use the Doctor Wise GRAND TOTAL
+    # because doctor-wise service counts are unique-visit counts and safely additive.
+    _svc_metrics = {
+        "Consultation Count": 0,
+        "Lab Count": 0,
+        "Radiology Count": 0,
+        "Procedure Count": 0,
+    }
+    if isinstance(doctor_wise, pd.DataFrame) and not doctor_wise.empty:
+        _gt = doctor_wise.iloc[-1] if str(doctor_wise.iloc[-1].get(doctor_wise.columns[0], "")).strip().upper() == "GRAND TOTAL" else None
+        _map = {
+            "Consultation Count": "Consultation_Count",
+            "Lab Count": "Lab_Count",
+            "Radiology Count": "Radiology_Count",
+            "Procedure Count": "Procedure_Count",
+        }
+        for _label, _col in _map.items():
+            if _col in doctor_wise.columns:
+                if _gt is not None:
+                    _svc_metrics[_label] = int(pd.to_numeric(_gt.get(_col, 0), errors="coerce") or 0)
+                else:
+                    _svc_metrics[_label] = int(pd.to_numeric(doctor_wise[_col], errors="coerce").fillna(0).sum())
+    out["Service Counts"] = pd.DataFrame({
+        "Metric": list(_svc_metrics.keys()),
+        "Value": list(_svc_metrics.values()),
+    })
     return out
 
 def _split_multi_codes(s: pd.Series) -> pd.Series:
@@ -663,25 +701,112 @@ def _top_n_codes(df_exp: pd.DataFrame, group_cols: List[str], code_col: str, des
 
 
 def load_cpticd_details(file_obj):
-    """Load CPT/ICD details report (RegistrationDetailswithICDandCPTList).
+    """Load CPT/ICD details report robustly.
 
-    Accepts a file-like object (BytesIO / UploadedFile / path). Returns a DataFrame or empty DF.
+    Handles both the older export and the newer Cortex export where:
+    - title rows appear before the real header, and
+    - the XLSX worksheet dimension is incorrectly saved as A1 even though data exists.
     """
+    import io as _io
+
+    def _good_columns(df: pd.DataFrame) -> bool:
+        if df is None or df.empty:
+            return False
+        checks = [
+            _find_col(df, ["EMR No", "EMRNo", "EMR"]),
+            _find_col(df, ["Visit ID", "VisitID", "VisitNo", "Visit No"]),
+            _find_col(df, ["Doctor"]),
+            _find_col(df, ["ICD (Principal)", "Principal ICD", "Principal DX"]),
+            _find_col(df, ["CPT Codes", "CPT Code", "CPT", "Procedure Code"]),
+        ]
+        return all(c is not None for c in checks)
+
+    # Preserve/obtain raw bytes when possible.
+    raw_bytes = None
     try:
-        # pandas can read file-like objects directly
-        df = pd.read_excel(file_obj)
+        if hasattr(file_obj, "getvalue"):
+            raw_bytes = file_obj.getvalue()
+        elif isinstance(file_obj, (bytes, bytearray)):
+            raw_bytes = bytes(file_obj)
+        elif hasattr(file_obj, "read"):
+            pos = file_obj.tell() if hasattr(file_obj, "tell") else None
+            raw_bytes = file_obj.read()
+            if pos is not None and hasattr(file_obj, "seek"):
+                file_obj.seek(pos)
     except Exception:
-        try:
-            # fallback: if it's an UploadedFile-like object
-            df = pd.read_excel(getattr(file_obj, "getvalue")())
-        except Exception:
-            return pd.DataFrame()
-    # Normalize column names (strip)
+        raw_bytes = None
+
+    # 1) Normal pandas read first (works for older exports).
     try:
+        src = _io.BytesIO(raw_bytes) if raw_bytes is not None else file_obj
+        df = pd.read_excel(src)
         df.columns = [str(c).strip() for c in df.columns]
+        if _good_columns(df):
+            return df
     except Exception:
         pass
-    return df
+
+    # 2) Header scan with pandas. This handles title rows when workbook metadata is normal.
+    try:
+        src = _io.BytesIO(raw_bytes) if raw_bytes is not None else file_obj
+        raw = pd.read_excel(src, header=None)
+        for i in range(min(60, len(raw))):
+            vals = [str(v).strip() for v in raw.iloc[i].tolist()]
+            norm = {_norm_col(v) for v in vals if v and v.lower() not in ("nan", "none")}
+            if ("emrno" in norm or "emr" in norm) and \
+               ("visitid" in norm or "visitno" in norm) and \
+               "doctor" in norm and \
+               ("cptcodes" in norm or "cptcode" in norm or "cpt" in norm):
+                src2 = _io.BytesIO(raw_bytes) if raw_bytes is not None else file_obj
+                df = pd.read_excel(src2, header=i)
+                df.columns = [str(c).strip() for c in df.columns]
+                if _good_columns(df):
+                    return df
+    except Exception:
+        pass
+
+    # 3) New Cortex XLSX workaround.
+    # Some exports incorrectly store worksheet <dimension ref="A1"/>. Pandas/openpyxl
+    # then sees only cell A1. reset_dimensions() forces openpyxl to scan real cells.
+    if raw_bytes is not None:
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(_io.BytesIO(raw_bytes), read_only=True, data_only=True)
+            ws = wb.active
+            try:
+                ws.reset_dimensions()
+            except Exception:
+                pass
+
+            rows = []
+            header_idx = None
+            header_vals = None
+            for r_idx, row in enumerate(ws.iter_rows(values_only=True)):
+                vals = list(row)
+                if r_idx < 60:
+                    norm = {_norm_col(v) for v in vals if v is not None and str(v).strip() != ""}
+                    if ("emrno" in norm or "emr" in norm) and \
+                       ("visitid" in norm or "visitno" in norm) and \
+                       "doctor" in norm and \
+                       ("cptcodes" in norm or "cptcode" in norm or "cpt" in norm):
+                        header_idx = r_idx
+                        header_vals = [str(v).strip() if v is not None else "" for v in vals]
+                        continue
+                if header_idx is not None and r_idx > header_idx:
+                    rows.append(vals)
+
+            if header_vals is not None:
+                ncols = len(header_vals)
+                clean_rows = [(r + [None] * ncols)[:ncols] for r in rows]
+                df = pd.DataFrame(clean_rows, columns=header_vals)
+                df = df.dropna(how="all").reset_index(drop=True)
+                df.columns = [str(c).strip() for c in df.columns]
+                if _good_columns(df):
+                    return df
+        except Exception:
+            pass
+
+    return pd.DataFrame()
 
 def cpticd_tables(df: pd.DataFrame, reg_df: Optional[pd.DataFrame] = None) -> Dict[str, pd.DataFrame]:
     """Build CPT/ICD analytics tables.
