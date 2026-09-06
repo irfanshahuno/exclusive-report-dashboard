@@ -174,8 +174,10 @@ DEFAULT_MANAGEMENT_CC = _get_secret("EMAIL_CC")
 # ✅ Persistent cache (so results stay even after refresh / clicking again)
 REJ_CACHE_PREFIX = "rejection_cache"
 # Bump this whenever analytical rules change so an old cached workbook is NEVER reused.
-ANALYSIS_VERSION = "2026-09-06-v8.9-persistent-results"
-REJ_CACHE_FILENAME = f"rejection_{ANALYSIS_VERSION}.xlsx"
+ANALYSIS_VERSION = "2026-09-07-v9.0-stable-s3-persistence"
+# IMPORTANT: keep this filename stable across code releases.
+# Otherwise every script update looks like a brand-new cache and the dashboard appears empty.
+REJ_CACHE_FILENAME = "latest_rejection_analysis.xlsx"
 
 # =========================================
 # CENTER NORMALIZATION (MUST be BEFORE use)
@@ -221,6 +223,31 @@ def delete_file_from_s3(bucket: str, key: str) -> None:
         s3_client().delete_object(Bucket=bucket, Key=key)
     except Exception:
         pass
+
+
+def find_latest_rejection_cache_key(bucket: str, center: str, year: str) -> str | None:
+    """Return the stable cache if present, otherwise the newest legacy rejection workbook.
+
+    This keeps previously generated dashboards available even when the Python
+    script/version changes and older releases used versioned cache filenames.
+    """
+    stable_key = f"{REJ_CACHE_PREFIX}/{center}/{year}/{REJ_CACHE_FILENAME}"
+    if s3_exists(bucket, stable_key):
+        return stable_key
+
+    prefix = f"{REJ_CACHE_PREFIX}/{center}/{year}/"
+    try:
+        resp = s3_client().list_objects_v2(Bucket=bucket, Prefix=prefix)
+        candidates = [
+            obj for obj in resp.get("Contents", [])
+            if str(obj.get("Key", "")).lower().endswith(".xlsx")
+        ]
+        if not candidates:
+            return None
+        newest = max(candidates, key=lambda x: x.get("LastModified"))
+        return str(newest["Key"])
+    except Exception:
+        return None
 
 # =========================================
 # REJECTION ANALYSIS ENGINE
@@ -2123,13 +2150,26 @@ def run_rejection_app():
         # Persistent dashboard behavior:
         # Always restore the last generated result from S3 when the app/session is reopened.
         # A newly selected upload does NOT replace or hide the saved dashboard until Generate is clicked.
-        if st.session_state.rej_result is None and s3_exists(S3_BUCKET, rej_cache_key):
-            try:
-                cached_bytes = load_file_from_s3(S3_BUCKET, rej_cache_key)
-                st.session_state.rej_result = load_result_from_workbook_bytes(cached_bytes, center, year, s3_key)
-                st.success("Loaded last saved result ✅")
-            except Exception:
-                st.warning("A saved result exists but could not be loaded. Click Generate to rebuild it.")
+        if st.session_state.rej_result is None:
+            saved_cache_key = find_latest_rejection_cache_key(S3_BUCKET, center, year)
+            if saved_cache_key:
+                try:
+                    cached_bytes = load_file_from_s3(S3_BUCKET, saved_cache_key)
+                    st.session_state.rej_result = load_result_from_workbook_bytes(
+                        cached_bytes, center, year, s3_key
+                    )
+
+                    # One-time migration: if this came from an older versioned filename,
+                    # copy it to the stable latest key so all future releases reopen it.
+                    if saved_cache_key != rej_cache_key:
+                        save_file_to_s3(S3_BUCKET, rej_cache_key, cached_bytes)
+
+                    st.success("Loaded last saved result from S3 ✅")
+                except Exception as e:
+                    st.warning(
+                        "A saved S3 result was found but could not be loaded. "
+                        f"Click Generate to rebuild it. ({type(e).__name__})"
+                    )
 
         if pending_upload and st.session_state.rej_result is not None:
             st.info(
@@ -2144,7 +2184,7 @@ def run_rejection_app():
             clear = st.button("Clear", width="stretch")
 
         if clear:
-            # ✅ Clear BOTH session + saved cache (so it won't reappear on refresh)
+            # ✅ Clear current session + stable saved dashboard cache
             st.session_state.rej_result = None
             delete_file_from_s3(S3_BUCKET, rej_cache_key)
             st.rerun()
@@ -2188,7 +2228,7 @@ def run_rejection_app():
 
     # ---- Main UI ----
     if st.session_state.rej_result is None:
-        st.info("No saved result for this center/year yet. Upload a file and click Generate once. After that, the result will reopen automatically.")
+        st.info("No saved S3 result was found for this center/year. Generate once; after that the dashboard will reopen automatically without another upload.")
         return
 
     R = st.session_state.rej_result
