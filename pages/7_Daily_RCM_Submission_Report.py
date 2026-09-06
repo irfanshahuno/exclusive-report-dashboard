@@ -778,6 +778,7 @@ def process_report(raw: pd.DataFrame, selected_day=None) -> Dict[str, object]:
     col_claim_status = find_col(df, ["ClaimStatus", "Claim Status"])
     col_remark = find_col(df, ["User remark", "User Remark", "Remark", "Remarks"])
     col_ins = find_col(df, ["Ins. Company", "Ins Company", "Insurance Company", "Payer"])
+    col_ins_type = find_col(df, ["Ins. Type", "Ins Type", "Insurance Type", "Payer Type"])
     col_doc = find_col(df, ["Doctor Name", "Doctor"])
     col_patient = find_col(df, ["Patient Name", "Name"])
     col_opened = find_col(df, ["Opened Date", "Open Date"])
@@ -848,6 +849,16 @@ def process_report(raw: pd.DataFrame, selected_day=None) -> Dict[str, object]:
 
     # Remove clearly empty rows
     df = df[(df["_VisitNo"] != "") | (df["_Status"] != "")].copy()
+
+    # RCM submission is INSURANCE ONLY — exclude cash/self-pay patients completely.
+    # Cash can be identified either from Ins. Type or Ins. Company depending on the export.
+    cash_terms = r"\b(CASH|SELF[ -]?PAY|SELF[ -]?PAYMENT|PRIVATE[ -]?PAY|CASH[ -]?PATIENT)\b"
+    cash_mask = pd.Series(False, index=df.index)
+    if col_ins_type:
+        cash_mask = cash_mask | df[col_ins_type].fillna("").astype(str).str.upper().str.contains(cash_terms, regex=True, na=False)
+    if col_ins:
+        cash_mask = cash_mask | df[col_ins].fillna("").astype(str).str.upper().str.contains(cash_terms, regex=True, na=False)
+    df = df.loc[~cash_mask].copy()
 
     # Calendar/range filter: all three reports use the same selected period.
     if selected_day is not None and df["_VisitDate"].notna().any():
