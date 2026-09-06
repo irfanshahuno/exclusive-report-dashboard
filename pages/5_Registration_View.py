@@ -92,6 +92,10 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
             "Radiology_Per_Visit":    "Radiology %",
             "Total_Visit":            "Visits",
             "Department":             "Dept",
+            "Consultation_Count":     "Consultation Count",
+            "Lab_Count":              "Lab Count",
+            "Radiology_Count":        "Radiology Count",
+            "Procedure_Count":        "Procedure Count",
         }
         out = out.rename(columns={k: v for k, v in _EMAIL_RENAME.items() if k in out.columns})
         # Remove any duplicate columns (keep first occurrence)
@@ -99,8 +103,9 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
         # Reorder to match Excel
         _ORDER = [
             "Dept", "Doctor", "Insurance",
-            "Consultation", "Lab", "Radiology", "Procedure",
             "Visits",
+            "Consultation Count", "Lab Count", "Radiology Count", "Procedure Count",
+            "Consultation", "Lab", "Radiology", "Procedure",
             "Total Service", "Total Insurance",
             "Avg Service", "Avg Insurance",
             "Lab %", "Procedure %", "Radiology %",
@@ -111,7 +116,9 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
 
     def _round1_df(df):
         out = df.copy()
-        _int_cols = {"Consultation","Lab","Radiology","Procedure","Visits","Total_Visit","Total Visit"}
+        _int_cols = {"Consultation","Lab","Radiology","Procedure","Visits","Total_Visit","Total Visit",
+                     "Consultation Count","Lab Count","Radiology Count","Procedure Count",
+                     "Consultation_Count","Lab_Count","Radiology_Count","Procedure_Count"}
         _pct_cols = {"Lab_%","Lab %","Procedure_Per_Visit","Procedure %","Radiology_Per_Visit","Radiology %",
                      "Avg Service","Avg Insurance","Avg Svc","Avg Ins",
                      "Avg_Amount_Service","Avg_Amount_Insuance","Avg_Amount_Insurance"}
@@ -449,6 +456,8 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
     INT_COLS = {
         "Consultation", "Lab", "Radiology", "Procedure",
         "Visits", "Total_Visit", "Total Visit",
+        "Consultation Count", "Lab Count", "Radiology Count", "Procedure Count",
+        "Consultation_Count", "Lab_Count", "Radiology_Count", "Procedure_Count",
     }
     # Columns that need 2 decimal places
     PCT_COLS = {
@@ -502,8 +511,9 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
     # Desired column order — Avg cols BEFORE % cols (matches Excel image)
     PREFERRED_ORDER = [
         "Dept", "Doctor", "Insurance",
-        "Consultation", "Lab", "Radiology", "Procedure",
         "Visits",
+        "Consultation Count", "Lab Count", "Radiology Count", "Procedure Count",
+        "Consultation", "Lab", "Radiology", "Procedure",
         "Total Service", "Total Insurance",
         "Avg Service", "Avg Insurance",
         "Lab %", "Procedure %", "Radiology %",
@@ -1434,6 +1444,13 @@ st.markdown(
         color: var(--muted);
         margin-top: 6px;
       }
+      .kpi-note{
+        font-size: 13px;
+        color: var(--text);
+        font-weight: 900;
+        margin-top: 7px;
+        line-height: 1.15;
+      }
 
       div[data-testid="stDataFrame"]{
         background: rgba(255,255,255,0.92);
@@ -1471,13 +1488,26 @@ st.markdown(
 )
 
 def _kpi_cards(items, subtitle: str = ""):
-    """Render premium KPI cards. items = list of (label, value)."""
+    """Render premium KPI cards.
+
+    Each item can be:
+      (label, value)
+      (label, value, note)
+    """
     cards_html = []
-    for label, value in items:
+    for item in items:
+        if len(item) >= 3:
+            label, value, note = item[0], item[1], item[2]
+        else:
+            label, value = item[0], item[1]
+            note = ""
+
+        note_html = f"<div class='kpi-note'>{note}</div>" if note else ""
         cards_html.append(
             f"""<div class='kpi-card'>
                   <div class='kpi-label'>{label}</div>
                   <div class='kpi-value'>{value}</div>
+                  {note_html}
                 </div>"""
         )
     sub_html = f"<div class='kpi-sub'>{subtitle}</div>" if subtitle else ""
@@ -1744,7 +1774,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         _patient_avg = k.get("Patient Avg / Day", (_total_visits / _reporting_days if _reporting_days else 0))
         _kpi_cards([
             ("Total Visits", int(_total_visits)),
-            ("Patient Avg / Day", round(float(_patient_avg), 1)),
+            ("Patient Avg / Day", round(float(_patient_avg), 1), "(Including Family Medicine)"),
             ("New Patients", int(k.get("New Patients", 0))),
             ("Established Patients", int(k.get("Established Patients", 0))),
             ("Follow Up", int(k.get("Follow Up", 0))),
@@ -1899,13 +1929,18 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                 "Radiology_Per_Visit":    "Radiology %",
                 "Total_Visit":            "Visits",
                 "Department":             "Dept",
+            "Consultation_Count":     "Consultation Count",
+            "Lab_Count":              "Lab Count",
+            "Radiology_Count":        "Radiology Count",
+            "Procedure_Count":        "Procedure Count",
             })
 
             # Reorder columns
             _ORDER = [
                 "Dept", "Doctor", "Insurance",
-                "Consultation", "Lab", "Radiology", "Procedure",
                 "Visits",
+                "Consultation Count", "Lab Count", "Radiology Count", "Procedure Count",
+                "Consultation", "Lab", "Radiology", "Procedure",
                 "Total Service", "Total Insurance",
                 "Avg Service", "Avg Insurance",
                 "Lab %", "Procedure %", "Radiology %",
