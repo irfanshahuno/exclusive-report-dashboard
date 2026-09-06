@@ -1440,22 +1440,22 @@ def render_result(result: Dict[str, object]):
     _svc_counts = (_rev.get("service_counts", {}) if isinstance(_rev, dict) else {}) or {}
     if isinstance(_docrev, pd.DataFrame) and not _docrev.empty:
         _doctor_visits = int(pd.to_numeric(_docrev.get("Visits", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
-        _avg_service = float(_rt.get("avg_service", 0.0) or 0.0)
+        _avg_insurance = float(_rt.get("avg_insurance", 0.0) or 0.0)
         kpi_cards([
             ("Visits", f"{_doctor_visits:,}", "Unique revenue visits", "V", "rcm-blue"),
             ("Lab Visits", f"{int(_svc_counts.get('Lab',0)):,}", "Unique visits with lab", "LAB", "rcm-green"),
             ("Procedure Visits", f"{int(_svc_counts.get('Procedure',0)):,}", "Unique visits with procedure", "P", "rcm-purple"),
-            ("Avg Service / Visit", money(_avg_service), "Service revenue ÷ visits", "AVG", "rcm-white"),
+            ("Avg Insurance / Visit", money(_avg_insurance), "Insurance amount ÷ visits", "AVG", "rcm-white"),
         ])
 
         _show = _docrev.copy()
         for _c in ["Lab","Procedure"]:
             if _c in _show.columns:
                 _show[_c] = pd.to_numeric(_show[_c], errors="coerce").fillna(0).astype(int)
-        for _c in ["Total_Service_Revenue","Insurance_Amount","Avg_Service_Per_Visit","Avg_Insurance_Per_Visit"]:
+        for _c in ["Insurance_Amount","Avg_Insurance_Per_Visit"]:
             if _c in _show.columns:
                 _show[_c] = pd.to_numeric(_show[_c], errors="coerce").fillna(0).round(2)
-        preferred = ["Department","Doctor","Visits","Lab","Procedure","Total_Service_Revenue","Insurance_Amount","Avg_Service_Per_Visit","Avg_Insurance_Per_Visit"]
+        preferred = ["Department","Doctor","Visits","Lab","Procedure","Insurance_Amount","Avg_Insurance_Per_Visit"]
         _show = _show[[c for c in preferred if c in _show.columns]]
         st.dataframe(_show, use_container_width=True, hide_index=True)
     else:
@@ -1567,180 +1567,187 @@ st.caption(
     "Submission = submitted / ready / pending / coding TAT. The exact same From/To period filters all three reports automatically."
 )
 
-with st.expander("Storage Status", expanded=False):
-    if s3_ok:
-        st.success(
-            f"S3 connected ✅  Bucket: {cfg['S3_BUCKET_NAME']} · "
-            f"Center: {CENTERS[center_key]}"
-        )
-        st.caption(f"Path: {daily_root(cfg, center_key)}/<YYYY-MM-DD>/analysis.pkl")
+SS.setdefault("daily_rcm_show_setup", False)
+
+# Keep the upload/date controls hidden during normal dashboard viewing.
+# The user opens them only when a new report period needs to be processed.
+setup_left, setup_right = st.columns([1, 4])
+with setup_left:
+    if not SS.get("daily_rcm_show_setup", False):
+        if st.button("📂 Upload / Change Reports", use_container_width=True, key="daily_rcm_open_setup"):
+            SS["daily_rcm_show_setup"] = True
+            st.rerun()
     else:
-        st.warning("S3 is not configured. The page will work, but results will not persist after restart.")
+        if st.button("✕ Close", use_container_width=True, key="daily_rcm_close_setup"):
+            SS["daily_rcm_show_setup"] = False
+            st.rerun()
 
-# Three report uploads
-st.markdown("### Reporting Date & Source Reports")
-u1, u2, u3 = st.columns(3)
-with u1:
-    reg_up = st.file_uploader(
-        "1) Registration Report (.xlsx)",
-        type=["xls", "xlsx"],
-        key="daily_rcm_registration_upload",
-        help="Used only for Total Patients / unique Visit No.",
-    )
-with u2:
-    rev_up = st.file_uploader(
-        "2) Daily Revenue — Daily Collection Details (.xlsx)",
-        type=["xls", "xlsx"],
-        key="daily_rcm_revenue_upload",
-        help="Uses the previous Doctor Revenue logic.",
-    )
-with u3:
-    sub_up = st.file_uploader(
-        "3) Submission Report (.xls / .xlsx)",
-        type=["xls", "xlsx"],
-        key="daily_rcm_submission_upload",
-        help="Used for Submitted / Ready / Pending / Coding TAT analysis.",
-    )
+reg_up = rev_up = sub_up = None
 
-# Determine available dates from all 3 uploaded reports and choose a common default day.
-_default_day = date.today()
-_reg_preview = _rev_preview = _sub_preview = None
-_common_dates = set()
-_source_dates = {"Registration": set(), "Revenue": set(), "Submission": set()}
-try:
-    if reg_up is not None:
-        _reg_preview = read_registration_report(reg_up)
-        _source_dates["Registration"] = {x.date() for x in _available_dates_from_report(_reg_preview, ["Reg:Date", "Reg Date", "Registration Date", "Date"])}
-    if rev_up is not None:
-        _rev_preview = read_revenue_report(rev_up)
-        _source_dates["Revenue"] = {x.date() for x in _available_dates_from_report(_rev_preview, ["Visit Date", "VisitDate"])}
-    if sub_up is not None:
-        _sub_preview = read_daily_report(sub_up, sub_up.name)
-        _source_dates["Submission"] = {x.date() for x in _available_dates_from_report(_sub_preview, ["Visit Date", "VisitDate", "Enc Date", "Encounter Date"])}
-
-    nonempty_sets = [v for v in _source_dates.values() if v]
-    if len(nonempty_sets) == 3:
-        _common_dates = set.intersection(*nonempty_sets)
-    if _common_dates:
-        _default_day = max(_common_dates)
-    elif nonempty_sets:
-        _default_day = max(set.union(*nonempty_sets))
-except Exception:
-    pass
-
-# Explicit START and END calendars are more reliable than a single range widget and
-# make it obvious that exactly the same period is used for all three reports.
-SS.setdefault("daily_rcm_start_date", _default_day)
-SS.setdefault("daily_rcm_end_date", _default_day)
-
-st.markdown("#### Select Reporting Period")
-p1, p2, p3 = st.columns([1, 1, 1.25])
-with p1:
-    start_day = st.date_input(
-        "From",
-        key="daily_rcm_start_date",
-        help="First date included in Registration, Revenue and Submission reports.",
-    )
-with p2:
-    end_day = st.date_input(
-        "To",
-        key="daily_rcm_end_date",
-        help="Last date included in Registration, Revenue and Submission reports.",
-    )
-with p3:
-    quick_period = st.selectbox(
-        "Quick Period",
-        ["Custom", "Single Day", "Last 7 Days", "This Month", "Previous Month"],
-        key="daily_rcm_quick_period",
-        help="Optional shortcut. Custom uses the From/To dates above.",
-    )
-
-# Apply quick-period shortcuts using the current END date as the anchor.
-_anchor = pd.Timestamp(end_day)
-if quick_period == "Single Day":
-    _qs = _qe = _anchor.date()
-elif quick_period == "Last 7 Days":
-    _qe = _anchor.date()
-    _qs = (_anchor - pd.Timedelta(days=6)).date()
-elif quick_period == "This Month":
-    _qs = _anchor.replace(day=1).date()
-    _qe = (_anchor + pd.offsets.MonthEnd(0)).date()
-elif quick_period == "Previous Month":
-    _prev = _anchor.replace(day=1) - pd.Timedelta(days=1)
-    _qs = _prev.replace(day=1).date()
-    _qe = _prev.date()
-else:
-    _qs, _qe = start_day, end_day
-
-if _qs > _qe:
-    _qs, _qe = _qe, _qs
-selected_day = (_qs, _qe)
-
-st.caption(
-    f"Applied identically to all 3 reports: **{pd.Timestamp(_qs).strftime('%d %b %Y')} → {pd.Timestamp(_qe).strftime('%d %b %Y')}**"
-)
-
-# AUTO-PROCESS: changing either date immediately recalculates all three reports.
-# No extra Process click is required.
-if reg_up is not None and rev_up is not None and sub_up is not None:
-    try:
-        reg_df = _reg_preview if _reg_preview is not None else read_registration_report(reg_up)
-        rev_df = _rev_preview if _rev_preview is not None else read_revenue_report(rev_up)
-        sub_raw = _sub_preview if _sub_preview is not None else read_daily_report(sub_up, sub_up.name)
-
-        patient_count = registration_patient_count(reg_df, selected_day)
-        rev_result = revenue_analysis(rev_df, selected_day)
-        result = process_report(sub_raw, selected_day=selected_day)
-        result["registration_count"] = patient_count
-        result["revenue"] = rev_result
-
-        # Verify actual date coverage inside the selected period.
-        reg_days = _date_set_in_period(reg_df, ["Reg:Date", "Reg Date", "Registration Date", "Date"], selected_day)
-        rev_days = _date_set_in_period(rev_df, ["Visit Date", "VisitDate"], selected_day)
-        sub_days = _date_set_in_period(sub_raw, ["Visit Date", "VisitDate", "Enc Date", "Encounter Date"], selected_day)
-        result["date_coverage"] = {
-            "Registration": sorted(reg_days),
-            "Revenue": sorted(rev_days),
-            "Submission": sorted(sub_days),
-        }
-        SS["daily_rcm_result"] = result
-
-        if not (reg_days == rev_days == sub_days):
-            st.warning(
-                "The same From/To period is being applied to all three reports, but the source files do not contain exactly the same active dates. "
-                f"Registration: {len(reg_days)} day(s) · Revenue: {len(rev_days)} day(s) · Submission: {len(sub_days)} day(s). "
-                "Please check the source reports if you expected identical date coverage."
-            )
-        else:
-            st.success(f"Date consistency confirmed ✅  All three reports contain the same {len(reg_days)} selected day(s).")
-    except Exception as exc:
-        st.error(f"Could not process the reports: {exc}")
-else:
-    st.info("Upload all 3 reports. After that, changing From/To dates will update the dashboard automatically.")
-
-# Optional persistence button. It saves the currently filtered result; it is not needed for date changes.
-c1, c2 = st.columns([2, 1])
-with c1:
-    save_clicked = st.button(
-        "💾 Save Current Selected Period",
-        type="primary",
-        use_container_width=True,
-        disabled=(SS.get("daily_rcm_result") is None or sub_up is None),
-    )
-    if save_clicked and SS.get("daily_rcm_result") is not None and sub_up is not None:
-        try:
+if SS.get("daily_rcm_show_setup", False):
+    with st.container(border=True):
+        with st.expander("Storage Status", expanded=False):
             if s3_ok:
-                ok, saved_day = save_analysis_to_s3(SS["daily_rcm_result"], sub_up.getvalue(), sub_up.name)
-                if ok:
-                    st.success(f"Selected period saved to S3 ✅  Reference date: {saved_day}")
-                else:
-                    st.warning("Report is processed, but S3 save failed.")
+                st.success(
+                    f"S3 connected ✅  Bucket: {cfg['S3_BUCKET_NAME']} · "
+                    f"Center: {CENTERS[center_key]}"
+                )
+                st.caption(f"Path: {daily_root(cfg, center_key)}/<YYYY-MM-DD>/analysis.pkl")
             else:
-                st.info("S3 is not configured; the current result remains available in this session.")
-        except Exception as exc:
-            st.error(f"Could not save the selected period: {exc}")
-with c2:
-    if st.button("🗑️ Clear Current", use_container_width=True):
+                st.warning("S3 is not configured. The page will work, but results will not persist after restart.")
+
+        st.markdown("### Reporting Date & Source Reports")
+        u1, u2, u3 = st.columns(3)
+        with u1:
+            reg_up = st.file_uploader(
+                "1) Registration Report (.xlsx)",
+                type=["xls", "xlsx"],
+                key="daily_rcm_registration_upload",
+                help="Used only for Total Patients / unique Visit No.",
+            )
+        with u2:
+            rev_up = st.file_uploader(
+                "2) Daily Revenue — Daily Collection Details (.xlsx)",
+                type=["xls", "xlsx"],
+                key="daily_rcm_revenue_upload",
+                help="Uses the previous Doctor Revenue logic.",
+            )
+        with u3:
+            sub_up = st.file_uploader(
+                "3) Submission Report (.xls / .xlsx)",
+                type=["xls", "xlsx"],
+                key="daily_rcm_submission_upload",
+                help="Used for Submitted / Ready / Pending / Coding TAT analysis.",
+            )
+
+        # Read uploaded reports only while this setup panel is open.
+        _default_day = date.today()
+        _reg_preview = _rev_preview = _sub_preview = None
+        _common_dates = set()
+        _source_dates = {"Registration": set(), "Revenue": set(), "Submission": set()}
+        try:
+            if reg_up is not None:
+                _reg_preview = read_registration_report(reg_up)
+                _source_dates["Registration"] = {x.date() for x in _available_dates_from_report(_reg_preview, ["Reg:Date", "Reg Date", "Registration Date", "Date"])}
+            if rev_up is not None:
+                _rev_preview = read_revenue_report(rev_up)
+                _source_dates["Revenue"] = {x.date() for x in _available_dates_from_report(_rev_preview, ["Visit Date", "VisitDate"])}
+            if sub_up is not None:
+                _sub_preview = read_daily_report(sub_up, sub_up.name)
+                _source_dates["Submission"] = {x.date() for x in _available_dates_from_report(_sub_preview, ["Visit Date", "VisitDate", "Enc Date", "Encounter Date"])}
+
+            nonempty_sets = [v for v in _source_dates.values() if v]
+            if len(nonempty_sets) == 3:
+                _common_dates = set.intersection(*nonempty_sets)
+            if _common_dates:
+                _default_day = max(_common_dates)
+            elif nonempty_sets:
+                _default_day = max(set.union(*nonempty_sets))
+        except Exception:
+            pass
+
+        # On the first setup opening, use the latest common date as the initial calendar value.
+        if "daily_rcm_start_date" not in SS:
+            SS["daily_rcm_start_date"] = _default_day
+        if "daily_rcm_end_date" not in SS:
+            SS["daily_rcm_end_date"] = _default_day
+
+        st.markdown("#### Select Reporting Period")
+        p1, p2, p3 = st.columns([1, 1, 1.25])
+        with p1:
+            start_day = st.date_input(
+                "From",
+                key="daily_rcm_start_date",
+                help="First date included in Registration, Revenue and Submission reports.",
+            )
+        with p2:
+            end_day = st.date_input(
+                "To",
+                key="daily_rcm_end_date",
+                help="Last date included in Registration, Revenue and Submission reports.",
+            )
+        with p3:
+            quick_period = st.selectbox(
+                "Quick Period",
+                ["Custom", "Single Day", "Last 7 Days", "This Month", "Previous Month"],
+                key="daily_rcm_quick_period",
+                help="Optional shortcut. Custom uses the From/To dates above.",
+            )
+
+        _anchor = pd.Timestamp(end_day)
+        if quick_period == "Single Day":
+            _qs = _qe = _anchor.date()
+        elif quick_period == "Last 7 Days":
+            _qe = _anchor.date()
+            _qs = (_anchor - pd.Timedelta(days=6)).date()
+        elif quick_period == "This Month":
+            _qs = _anchor.replace(day=1).date()
+            _qe = (_anchor + pd.offsets.MonthEnd(0)).date()
+        elif quick_period == "Previous Month":
+            _prev = _anchor.replace(day=1) - pd.Timedelta(days=1)
+            _qs = _prev.replace(day=1).date()
+            _qe = _prev.date()
+        else:
+            _qs, _qe = start_day, end_day
+
+        if _qs > _qe:
+            _qs, _qe = _qe, _qs
+        selected_day = (_qs, _qe)
+
+        st.caption(
+            f"Applied identically to all 3 reports: **{pd.Timestamp(_qs).strftime('%d %b %Y')} → {pd.Timestamp(_qe).strftime('%d %b %Y')}**"
+        )
+
+        process_clicked = st.button(
+            "▶ Process Reports",
+            type="primary",
+            use_container_width=True,
+            key="daily_rcm_process_reports",
+        )
+
+        if process_clicked:
+            if reg_up is None or rev_up is None or sub_up is None:
+                st.error("Please upload all 3 reports before processing.")
+            else:
+                try:
+                    reg_df = _reg_preview if _reg_preview is not None else read_registration_report(reg_up)
+                    rev_df = _rev_preview if _rev_preview is not None else read_revenue_report(rev_up)
+                    sub_raw = _sub_preview if _sub_preview is not None else read_daily_report(sub_up, sub_up.name)
+
+                    patient_count = registration_patient_count(reg_df, selected_day)
+                    rev_result = revenue_analysis(rev_df, selected_day)
+                    result = process_report(sub_raw, selected_day=selected_day)
+                    result["registration_count"] = patient_count
+                    result["revenue"] = rev_result
+
+                    reg_days = _date_set_in_period(reg_df, ["Reg:Date", "Reg Date", "Registration Date", "Date"], selected_day)
+                    rev_days = _date_set_in_period(rev_df, ["Visit Date", "VisitDate"], selected_day)
+                    sub_days = _date_set_in_period(sub_raw, ["Visit Date", "VisitDate", "Enc Date", "Encounter Date"], selected_day)
+                    result["date_coverage"] = {
+                        "Registration": sorted(reg_days),
+                        "Revenue": sorted(rev_days),
+                        "Submission": sorted(sub_days),
+                    }
+                    result["selected_period"] = selected_day
+                    SS["daily_rcm_result"] = result
+
+                    # Save automatically when S3 is available so the user does not need a second action.
+                    if s3_ok:
+                        try:
+                            save_analysis_to_s3(result, sub_up.getvalue(), sub_up.name)
+                        except Exception:
+                            pass
+
+                    # Processing completed: hide the entire setup/upload area automatically.
+                    SS["daily_rcm_show_setup"] = False
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not process the reports: {exc}")
+
+# Compact dashboard actions stay visible while the setup panel remains hidden.
+a1, a2 = st.columns([1, 5])
+with a1:
+    if st.button("🗑️ Clear Current", use_container_width=True, key="daily_rcm_clear_current"):
         SS.pop("daily_rcm_result", None)
         st.rerun()
 
@@ -1767,7 +1774,7 @@ if not hist.empty:
                 st.rerun()
 
     # Auto-load latest when page opens and nothing is in session.
-    if SS.get("daily_rcm_result") is None and not (reg_up is not None and rev_up is not None and sub_up is not None):
+    if SS.get("daily_rcm_result") is None and not SS.get("daily_rcm_show_setup", False):
         latest_result = load_saved_day(latest)
         if latest_result is not None:
             SS["daily_rcm_result"] = latest_result
@@ -1778,4 +1785,4 @@ if current is not None:
     st.markdown("---")
     render_result(current)
 else:
-    st.info("Upload today's Daily Report to start the analysis.")
+    st.info("Click **Upload / Change Reports** above to select the three source reports and reporting period.")
