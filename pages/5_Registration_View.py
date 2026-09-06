@@ -1636,102 +1636,6 @@ def add_cumulative(hist: pd.DataFrame) -> pd.DataFrame:
     return h.sort_values("day", ascending=False).reset_index(drop=True)
 
 
-def _service_count_kpis(dfs: Dict[str, pd.DataFrame], total_visits: int = 0) -> Dict[str, int]:
-    """Return activity COUNTS for management KPI cards.
-
-    Important: the Income Analysis columns Consultation/Lab/Radiology/Procedure are
-    monetary/service amounts in the saved revenue tables, so they must NOT be used
-    as activity counts. Counts are derived from saved CPT activity data instead.
-
-    Priority:
-      1) CPT mapping table with CPT + Count
-      2) CPT Visit Bundle table (each bundle weighted by Visits)
-
-    CPT grouping used for the management count cards:
-      Consultation: 99200-99499
-      Radiology:    70000-79999
-      Lab:          80000-89999
-      Procedure:    other numeric CPTs (including 963xx, 930xx, etc.)
-
-    If CPT-level data is unavailable, Consultation Count falls back to Total Visits
-    and the other service counts remain 0 rather than showing revenue as a count.
-    """
-    result = {
-        "Consultation Count": 0,
-        "Lab Count": 0,
-        "Radiology Count": 0,
-        "Procedure Count": 0,
-        "Total CPT Activities": 0,
-    }
-
-    def _classify_cpt(code) -> Optional[str]:
-        txt = str(code or "").strip().upper()
-        # Standard CPTs are 5 numeric digits. Ignore HCPCS/J-codes for these 4 cards.
-        m = re.search(r"(?<!\d)(\d{5})(?!\d)", txt)
-        if not m:
-            return None
-        n = int(m.group(1))
-        if 99200 <= n <= 99499:
-            return "Consultation Count"
-        if 70000 <= n <= 79999:
-            return "Radiology Count"
-        if 80000 <= n <= 89999:
-            return "Lab Count"
-        return "Procedure Count"
-
-    # ---- 1) Best source: CPT mapping table with explicit Count ----
-    map_keys = [
-        "CPTICD | CPT -> Top Principal ICD",
-        "CPT -> Top Principal ICD",
-    ]
-    for key in map_keys:
-        df = dfs.get(key)
-        if isinstance(df, pd.DataFrame) and not df.empty and "CPT" in df.columns and "Count" in df.columns:
-            x = df.copy()
-            # Remove footer totals if saved in the table.
-            x = x[~x["CPT"].astype(str).str.strip().str.upper().isin(["TOTAL", "GRAND TOTAL"])]
-            x["Count"] = pd.to_numeric(x["Count"], errors="coerce").fillna(0)
-            for _, row in x.iterrows():
-                cnt = int(round(float(row.get("Count", 0) or 0)))
-                if cnt <= 0:
-                    continue
-                bucket = _classify_cpt(row.get("CPT"))
-                if bucket:
-                    result[bucket] += cnt
-                    result["Total CPT Activities"] += cnt
-            if result["Total CPT Activities"] > 0:
-                return result
-
-    # ---- 2) Fallback: visit-level CPT Bundle weighted by Visits ----
-    dfb = dfs.get("CPT Visit Bundle")
-    if isinstance(dfb, pd.DataFrame) and not dfb.empty and "CPT Bundle" in dfb.columns:
-        x = dfb.copy()
-        if "Visits" in x.columns:
-            weights = pd.to_numeric(x["Visits"], errors="coerce").fillna(0)
-        else:
-            weights = pd.Series(1, index=x.index, dtype=float)
-
-        for idx, row in x.iterrows():
-            w = int(round(float(weights.loc[idx] or 0)))
-            if w <= 0:
-                continue
-            bundle = str(row.get("CPT Bundle", "") or "")
-            # Extract numeric CPTs; de-duplicate within one bundle before weighting.
-            codes = list(dict.fromkeys(re.findall(r"(?<!\d)\d{5}(?!\d)", bundle)))
-            for code in codes:
-                bucket = _classify_cpt(code)
-                if bucket:
-                    result[bucket] += w
-                    result["Total CPT Activities"] += w
-        if result["Total CPT Activities"] > 0:
-            return result
-
-    # Safe fallback only for consultation: one visit ~= one consultation encounter.
-    result["Consultation Count"] = int(total_visits or 0)
-    result["Total CPT Activities"] = int(total_visits or 0)
-    return result
-
-
 def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: str = "header", label: str = "Current Day", picked_label_override: Optional[str] = None):
     # NOTE: day_ts is used only for display/keying; weekly/monthly uses latest saved day.
     title = picked_label_override or f"{label} ({fmt_day(day_ts)})"
@@ -1835,31 +1739,13 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         k = kpi.set_index("Metric")["Value"]
         # Premium KPI cards (management-friendly)
         subtitle = f"Generated: {fmt_dt(datetime.now())}"
-        _total_visits = int(pd.to_numeric(k.get("Total Visits", 0), errors="coerce") or 0)
-        _reporting_days = int(pd.to_numeric(k.get("Reporting Days", 1), errors="coerce") or 1)
-        _reporting_days = max(_reporting_days, 1)
-        _patient_avg = round(_total_visits / _reporting_days, 1)
-
-        # Row 1: patient / visit KPIs
         _kpi_cards([
-            ("Total Visits", _total_visits),
-            ("Patient Avg / Day", f"{_patient_avg:.1f}"),
+            ("Total Visits", int(k.get("Total Visits", 0))),
             ("New Patients", int(k.get("New Patients", 0))),
             ("Established Patients", int(k.get("Established Patients", 0))),
             ("Follow Up", int(k.get("Follow Up", 0))),
             ("Pending Patients", int(k.get("Pending Patients", 0))),
         ], subtitle=subtitle)
-
-        # Row 2: true CPT/activity COUNTS (not revenue amounts)
-        _svc_counts = _service_count_kpis(dfs, total_visits=_total_visits)
-        st.markdown("#### Service Activity Counts")
-        _kpi_cards([
-            ("Consultation Count", _svc_counts.get("Consultation Count", 0)),
-            ("Lab Count", _svc_counts.get("Lab Count", 0)),
-            ("Radiology Count", _svc_counts.get("Radiology Count", 0)),
-            ("Procedure Count", _svc_counts.get("Procedure Count", 0)),
-            ("Total CPT Activities", _svc_counts.get("Total CPT Activities", 0)),
-        ])
     else:
         st.info("KPI is not available for this day.")
 
@@ -3043,13 +2929,6 @@ def load_and_aggregate(day_list: List[pd.Timestamp]) -> Optional[Dict[str, pd.Da
         kk = pd.concat(kpi_rows, ignore_index=True)
         kk["Value"] = pd.to_numeric(kk["Value"], errors="coerce").fillna(0)
         kpi_sum = kk.groupby("Metric", as_index=False)["Value"].sum()
-        # Needed for Patient Avg / Day in weekly/monthly views.
-        # This is the number of saved reporting days actually loaded, not calendar days.
-        kpi_sum = kpi_sum[kpi_sum["Metric"] != "Reporting Days"].copy()
-        kpi_sum = pd.concat([
-            kpi_sum,
-            pd.DataFrame([{"Metric": "Reporting Days", "Value": len(loaded)}])
-        ], ignore_index=True)
         agg["KPI"] = kpi_sum
 
     for k in keys:
