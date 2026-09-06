@@ -543,12 +543,28 @@ def read_registration_report(file_obj) -> pd.DataFrame:
     )
 
 
+def _date_bounds(selected_day):
+    # Streamlit date_input returns either one date or a (start, end) tuple.
+    if isinstance(selected_day, (tuple, list)):
+        if len(selected_day) == 0:
+            return None, None
+        start = pd.to_datetime(selected_day[0]).normalize()
+        end = pd.to_datetime(selected_day[-1]).normalize()
+    else:
+        start = end = pd.to_datetime(selected_day).normalize()
+    if start > end:
+        start, end = end, start
+    return start, end
+
+
 def _filter_by_day(df: pd.DataFrame, date_col: str, selected_day) -> pd.DataFrame:
     if df is None or df.empty or not date_col or date_col not in df.columns:
         return pd.DataFrame(columns=df.columns if isinstance(df, pd.DataFrame) else None)
     d = parse_date_series(df[date_col]).dt.normalize()
-    target = pd.to_datetime(selected_day).normalize()
-    return df.loc[d.eq(target)].copy().reset_index(drop=True)
+    start, end = _date_bounds(selected_day)
+    if start is None:
+        return df.copy().reset_index(drop=True)
+    return df.loc[d.between(start, end, inclusive="both")].copy().reset_index(drop=True)
 
 
 def registration_patient_count(reg_df: pd.DataFrame, selected_day) -> int:
@@ -612,15 +628,19 @@ def revenue_analysis(rev_df: pd.DataFrame, selected_day) -> Dict[str, object]:
     d["_InsuranceAmount"] = d[c_insu]
 
     group_cols = ([c_dept] if c_dept else []) + [c_doc]
-    doctor = d.groupby(group_cols, dropna=False).agg(
+    # Doctor table: service columns are COUNTS of unique visits, not AED amounts.
+    base = d.groupby(group_cols, dropna=False).agg(
         Visits=(c_visit, pd.Series.nunique),
-        Consultation=(c_cons, "sum"),
-        Lab=(c_lab, "sum"),
-        Radiology=(c_rad, "sum"),
-        Procedure=(c_proc, "sum"),
         Total_Service_Revenue=("_ServiceRevenue", "sum"),
         Insurance_Amount=("_InsuranceAmount", "sum"),
     ).reset_index()
+
+    doctor = base.copy()
+    for label, amount_col in [("Consultation", c_cons), ("Lab", c_lab), ("Procedure", c_proc), ("Radiology", c_rad)]:
+        positive = d[pd.to_numeric(d[amount_col], errors="coerce").fillna(0) > 0]
+        cnt = positive.groupby(group_cols, dropna=False)[c_visit].nunique().rename(label).reset_index()
+        doctor = doctor.merge(cnt, on=group_cols, how="left")
+        doctor[label] = pd.to_numeric(doctor[label], errors="coerce").fillna(0).astype(int)
     rename = {c_doc: "Doctor"}
     if c_dept:
         rename[c_dept] = "Department"
@@ -803,10 +823,10 @@ def process_report(raw: pd.DataFrame, selected_day=None) -> Dict[str, object]:
     # Remove clearly empty rows
     df = df[(df["_VisitNo"] != "") | (df["_Status"] != "")].copy()
 
-    # Calendar filter: all three reports use the same selected reporting date.
+    # Calendar/range filter: all three reports use the same selected period.
     if selected_day is not None and df["_VisitDate"].notna().any():
-        _target = pd.to_datetime(selected_day).normalize()
-        df = df[df["_VisitDate"].dt.normalize().eq(_target)].copy()
+        _start, _end = _date_bounds(selected_day)
+        df = df[df["_VisitDate"].dt.normalize().between(_start, _end, inclusive="both")].copy()
 
     # One claim = one Visit No. Keep last report row when duplicates exist.
     # Blank Visit No rows remain as separate rows.
@@ -818,7 +838,8 @@ def process_report(raw: pd.DataFrame, selected_day=None) -> Dict[str, object]:
 
     # Reporting day: selected calendar day when supplied, otherwise most common Visit Date.
     if selected_day is not None:
-        report_day = pd.to_datetime(selected_day).normalize()
+        _start, _end = _date_bounds(selected_day)
+        report_day = _end
     else:
         valid_days = claims["_VisitDate"].dropna().dt.normalize()
         if not valid_days.empty:
@@ -1329,12 +1350,17 @@ def render_result(result: Dict[str, object]):
         sc1, sc2, sc3, sc4 = st.columns(4)
         sc1.metric("Consultation Visits", f"{int(_svc_counts.get('Consultation',0)):,}")
         sc2.metric("Lab Visits", f"{int(_svc_counts.get('Lab',0)):,}")
-        sc3.metric("Radiology Visits", f"{int(_svc_counts.get('Radiology',0)):,}")
-        sc4.metric("Procedure Visits", f"{int(_svc_counts.get('Procedure',0)):,}")
+        sc3.metric("Procedure Visits", f"{int(_svc_counts.get('Procedure',0)):,}")
+        sc4.metric("Radiology Visits", f"{int(_svc_counts.get('Radiology',0)):,}")
         _show = _docrev.copy()
-        for _c in ["Consultation","Lab","Radiology","Procedure","Total_Service_Revenue","Insurance_Amount","Avg_Service_Per_Visit","Avg_Insurance_Per_Visit"]:
+        for _c in ["Consultation","Lab","Procedure","Radiology"]:
+            if _c in _show.columns:
+                _show[_c] = pd.to_numeric(_show[_c], errors="coerce").fillna(0).astype(int)
+        for _c in ["Total_Service_Revenue","Insurance_Amount","Avg_Service_Per_Visit","Avg_Insurance_Per_Visit"]:
             if _c in _show.columns:
                 _show[_c] = pd.to_numeric(_show[_c], errors="coerce").fillna(0).round(2)
+        preferred = ["Department","Doctor","Visits","Consultation","Lab","Procedure","Radiology","Total_Service_Revenue","Insurance_Amount","Avg_Service_Per_Visit","Avg_Insurance_Per_Visit"]
+        _show = _show[[c for c in preferred if c in _show.columns] + [c for c in _show.columns if c not in preferred]]
         st.dataframe(_show, use_container_width=True, hide_index=True)
     else:
         st.info("No Daily Collection Details revenue found for the selected date.")
@@ -1550,11 +1576,11 @@ except Exception:
     pass
 
 if "daily_rcm_calendar_day" not in SS:
-    SS["daily_rcm_calendar_day"] = _default_day
+    SS["daily_rcm_calendar_day"] = (_default_day, _default_day)
 selected_day = st.date_input(
-    "Reporting Date",
+    "Reporting Period",
     key="daily_rcm_calendar_day",
-    help="The same date is applied to Registration, Daily Revenue and Submission reports.",
+    help="Select one day or a date range. You can select a few days, a week, or a full month; the same period is applied to all 3 reports.",
 )
 
 c1, c2 = st.columns([2, 1])
