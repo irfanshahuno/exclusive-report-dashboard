@@ -1503,12 +1503,11 @@ def _kpi_cards(items, subtitle: str = ""):
             note = ""
 
         note_html = f"<div class='kpi-note'>{note}</div>" if note else ""
+        # Keep each card HTML on one line. Indented multiline HTML can be
+        # interpreted by Markdown as a code block and displayed as raw HTML.
         cards_html.append(
-            f"""<div class='kpi-card'>
-                  <div class='kpi-label'>{label}</div>
-                  <div class='kpi-value'>{value}</div>
-                  {note_html}
-                </div>"""
+            f"<div class='kpi-card'><div class='kpi-label'>{label}</div>"
+            f"<div class='kpi-value'>{value}</div>{note_html}</div>"
         )
     sub_html = f"<div class='kpi-sub'>{subtitle}</div>" if subtitle else ""
     html = f"<div class='kpi-grid'>{''.join(cards_html)}</div>{sub_html}"
