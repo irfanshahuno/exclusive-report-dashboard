@@ -190,16 +190,16 @@ h1,h2,h3{letter-spacing:-0.02em;}
     align-items:center;
     gap:13px;
 }
-.rcm-blue{background:#eef8ff;border-color:#bfe2ff;}
-.rcm-green{background:#f0fcf4;border-color:#c9efd4;}
-.rcm-yellow{background:#fff9e9;border-color:#f4dda0;}
-.rcm-red{background:#fff1f3;border-color:#ffcbd2;}
-.rcm-purple{background:#f7f1ff;border-color:#e1ccff;}
-.rcm-white{background:#f7f9fc;border:2px solid #2b78ff;}
-.rcm-icon{font-size:32px;min-width:42px;text-align:center;line-height:1;}
-.rcm-label{font-size:13px;font-weight:800;color:#17335f;margin-bottom:4px;}
-.rcm-value{font-size:27px;font-weight:950;color:#071a5d;line-height:1.05;}
-.rcm-sub{font-size:12px;font-weight:700;color:#52667f;margin-top:5px;}
+.rcm-blue{background:#F4F8FC;border-color:#D7E4F2;}
+.rcm-green{background:#F2FAF5;border-color:#D5EBDD;}
+.rcm-yellow{background:#FFF8E8;border-color:#EFDFAF;}
+.rcm-red{background:#FFF3F3;border-color:#F1CACA;}
+.rcm-purple{background:#F6F8FB;border-color:#DCE3EC;}
+.rcm-white{background:#F5F9FD;border:1px solid #C9DCEF;}
+.rcm-icon{font-size:22px;min-width:34px;text-align:center;line-height:1;color:#17335F;font-weight:900;}
+.rcm-label{font-size:12px;font-weight:800;color:#4B607A;margin-bottom:4px;text-transform:uppercase;letter-spacing:.25px;}
+.rcm-value{font-size:29px;font-weight:950;color:#0B2342;line-height:1.05;letter-spacing:-.3px;}
+.rcm-sub{font-size:11px;font-weight:700;color:#64748B;margin-top:5px;}
 .premium-header{
     display:flex;
     justify-content:space-between;
@@ -208,7 +208,7 @@ h1,h2,h3{letter-spacing:-0.02em;}
     margin:.25rem 0 .65rem 0;
     padding:16px 20px;
     border-radius:18px;
-    background:linear-gradient(135deg,#071a5d 0%,#123d86 100%);
+    background:linear-gradient(135deg,#0B2342 0%,#153A63 100%);
     box-shadow:0 9px 24px rgba(7,26,93,.16);
 }
 .premium-header-title{
@@ -273,6 +273,38 @@ div[data-testid="stDataFrame"]{
     overflow:hidden;
     box-shadow:0 5px 15px rgba(15,23,42,.045);
 }
+
+
+.exec-strip{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:10px;
+    margin:.15rem 0 .85rem 0;
+}
+.exec-item{
+    background:#FFFFFF;
+    border:1px solid #E2E8F0;
+    border-radius:12px;
+    padding:10px 14px;
+    box-shadow:0 3px 10px rgba(15,23,42,.035);
+}
+.exec-label{
+    color:#64748B;
+    font-size:11px;
+    font-weight:800;
+    text-transform:uppercase;
+    letter-spacing:.3px;
+}
+.exec-value{
+    color:#0B2342;
+    font-size:20px;
+    font-weight:900;
+    margin-top:2px;
+}
+.exec-good{color:#16784A;}
+.exec-warn{color:#A66B00;}
+.exec-bad{color:#B42318;}
+@media(max-width:800px){.exec-strip{grid-template-columns:1fr;}}
 
 .rcm-section{
     margin-top:.8rem;
@@ -653,10 +685,10 @@ def process_report(raw: pd.DataFrame) -> Dict[str, object]:
                 "CLOSED Amount": "Already Submitted Amount",
                 "PROCESSED Claims": "Ready to Submit Claims",
                 "PROCESSED Amount": "Ready to Submit Amount",
-                "OPEN Claims": "Pending for Query Claims",
-                "OPEN Amount": "Pending for Query Amount",
-                "NOT ASSIGNED Claims": "Not Coded Yet Claims",
-                "NOT ASSIGNED Amount": "Not Coded Yet Amount",
+                "OPEN Claims": "Pending Resolution Claims",
+                "OPEN Amount": "Pending Resolution Amount",
+                "NOT ASSIGNED Claims": "Within Coding TAT Claims",
+                "NOT ASSIGNED Amount": "Within Coding TAT Amount",
             })
         return out
 
@@ -809,12 +841,12 @@ def _build_daily_rcm_email(result: Dict[str, object]) -> str:
     status_rows = [
         ("Already Submitted", closed_n, closed_a),
         ("Ready to Submit", proc_n, proc_a),
-        ("Pending for Query", open_n, open_a),
-        ("Not Coded Yet / Within 48 Hours", na_n, na_a),
+        ("Pending Resolution", open_n, open_a),
+        ("Within Coding TAT (≤48h)", na_n, na_a),
     ]
 
     def row_html(label, count, amount, total=False):
-        bg = "#FF7A00" if total else ("#F7FAFF" if label in ["Ready to Submit", "Not Coded Yet / Within 48 Hours"] else "#FFFFFF")
+        bg = "#FF7A00" if total else ("#F7FAFF" if label in ["Ready to Submit", "Within Coding TAT (≤48h)"] else "#FFFFFF")
         color = "#FFFFFF" if total else "#263447"
         fw = "900" if total else "600"
         return (
@@ -870,9 +902,9 @@ def _build_daily_rcm_email(result: Dict[str, object]) -> str:
               <td style="background:#f7f9fc;padding:12px;border-radius:10px;"><b>Ready to Submit</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{proc_n:,}</span><br>AED {proc_a:,.2f}</td>
             </tr>
             <tr>
-              <td style="background:#fff9e9;padding:12px;border-radius:10px;"><b>Pending for Query</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{open_n:,}</span><br>AED {open_a:,.2f}</td>
-              <td style="background:#f7f1ff;padding:12px;border-radius:10px;"><b>Not Coded Yet</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{na_n:,}</span><br>AED {na_a:,.2f}</td>
-              <td style="background:#fff1f3;padding:12px;border-radius:10px;"><b>Not Assigned &gt;48h</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{over48_n:,}</span><br>AED {over48_a:,.2f}</td>
+              <td style="background:#fff9e9;padding:12px;border-radius:10px;"><b>Pending Resolution</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{open_n:,}</span><br>AED {open_a:,.2f}</td>
+              <td style="background:#f7f1ff;padding:12px;border-radius:10px;"><b>Within Coding TAT</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{na_n:,}</span><br>AED {na_a:,.2f}</td>
+              <td style="background:#fff1f3;padding:12px;border-radius:10px;"><b>Coding TAT Breach &gt;48h</b><br><span style="font-size:24px;font-weight:900;color:#071a5d;">{over48_n:,}</span><br>AED {over48_a:,.2f}</td>
             </tr>
           </table>
 
@@ -952,7 +984,7 @@ def _render_premium_status_table(status_show: pd.DataFrame) -> None:
     st.markdown(
         "<div class='premium-table-wrap'>"
         "<table class='premium-table'>"
-        "<thead><tr><th>Status</th><th style='text-align:right;'>Claims</th><th style='text-align:right;'>Ins Share</th></tr></thead>"
+        "<thead><tr><th>Status</th><th style='text-align:right;'>Claims</th><th style='text-align:right;'>Net Insurance Amount (AED)</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table></div>",
         unsafe_allow_html=True,
@@ -1005,19 +1037,49 @@ def render_result(result: Dict[str, object]):
                 st.error(f"Email could not be sent: {exc}")
 
     kpi_cards([
-        ("Total Claims", f"{total_claims:,}", money(total_amount), "📊", "rcm-blue"),
-        ("Already Submitted", f"{closed_n:,}", money(closed_a), "✅", "rcm-green"),
-        ("Ready to Submit", f"{proc_n:,}", money(proc_a), "📤", "rcm-white"),
-        ("Open for Query", f"{open_n:,}", money(open_a), "❓", "rcm-yellow"),
-        ("Not Coded Yet / Within 48h", f"{na_n:,}", money(na_a), "⏳", "rcm-purple"),
+        ("Total Claims", f"{total_claims:,}", money(total_amount), "Σ", "rcm-blue"),
+        ("Already Submitted", f"{closed_n:,}",
+         f"{money(closed_a)} · {(closed_n / total_claims * 100 if total_claims else 0):.1f}%", "✓", "rcm-green"),
+        ("Ready to Submit", f"{proc_n:,}",
+         f"{money(proc_a)} · {(proc_n / total_claims * 100 if total_claims else 0):.1f}%", "↑", "rcm-white"),
+        ("Pending Resolution", f"{open_n:,}",
+         f"{money(open_a)} · {(open_n / total_claims * 100 if total_claims else 0):.1f}%", "?", "rcm-yellow"),
+        ("Within Coding TAT (≤48h)", f"{na_n:,}",
+         f"{money(na_a)} · {(na_n / total_claims * 100 if total_claims else 0):.1f}%", "TAT", "rcm-purple"),
         (
-            "Not Assigned >48h",
+            "Coding TAT Breach (>48h)",
             f"{int(claims['_NotAssignedOver48h'].sum()):,}",
             money(claims.loc[claims["_NotAssignedOver48h"], "_Amount"].sum()),
-            "⚠️",
+            "!",
             "rcm-red",
         ),
     ])
+
+    _submitted_ready = closed_n + proc_n
+    _submitted_ready_pct = (_submitted_ready / total_claims * 100) if total_claims else 0.0
+    _pending_pct = (open_n / total_claims * 100) if total_claims else 0.0
+    _breach_n = int(claims["_NotAssignedOver48h"].sum())
+    _breach_class = "exec-good" if _breach_n == 0 else "exec-bad"
+
+    st.markdown(
+        f"""
+        <div class="exec-strip">
+          <div class="exec-item">
+            <div class="exec-label">Submitted / Ready</div>
+            <div class="exec-value exec-good">{_submitted_ready_pct:.1f}%</div>
+          </div>
+          <div class="exec-item">
+            <div class="exec-label">Pending Resolution</div>
+            <div class="exec-value exec-warn">{_pending_pct:.1f}%</div>
+          </div>
+          <div class="exec-item">
+            <div class="exec-label">Coding TAT Breaches</div>
+            <div class="exec-value {_breach_class}">{_breach_n:,}</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     # Submission pipeline
     st.markdown('<div class="rcm-section">Status Summary</div>', unsafe_allow_html=True)
@@ -1025,8 +1087,8 @@ def render_result(result: Dict[str, object]):
     _status_labels = {
         "CLOSED": "Already Submitted",
         "PROCESSED": "Ready to Submit",
-        "OPEN": "Pending for Query",
-        "NOT ASSIGNED": "Not Coded Yet / Within 48 Hours",
+        "OPEN": "Pending Resolution",
+        "NOT ASSIGNED": "Within Coding TAT (≤48h)",
     }
     status_show["Status"] = status_show["Status"].astype(str).str.upper().map(
         lambda x: _status_labels.get(x, x.title())
@@ -1037,7 +1099,7 @@ def render_result(result: Dict[str, object]):
     _render_premium_status_table(status_show)
 
     # OPEN query analysis
-    st.markdown('<div class="rcm-section">Open Query Breakdown</div>', unsafe_allow_html=True)
+    st.markdown('<div class="rcm-section">Pending Resolution Breakdown</div>', unsafe_allow_html=True)
     q = result["query_summary"].copy()
     if q.empty:
         st.success("No OPEN claims found.")
@@ -1108,8 +1170,8 @@ def render_result(result: Dict[str, object]):
         _friendly_status = {
             "CLOSED": "Already Submitted",
             "PROCESSED": "Ready to Submit",
-            "OPEN": "Pending for Query",
-            "NOT ASSIGNED": "Not Coded Yet / Within 48 Hours",
+            "OPEN": "Pending Resolution",
+            "NOT ASSIGNED": "Within Coding TAT (≤48h)",
         }
         pick_status = st.selectbox(
             "Status",
