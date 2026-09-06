@@ -1465,6 +1465,42 @@ st.markdown(
         line-height: 1.15;
       }
 
+
+      /* Monthly Summary: same compact card sizing as Income Analysis KPI cards */
+      .kpi-grid.kpi-grid-monthly-compact{
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        margin: 0.15rem 0 0.55rem 0;
+      }
+      .kpi-card.kpi-card-monthly-compact{
+        min-height: 88px;
+        padding: 10px 14px;
+        border-radius: 15px;
+        gap: 10px;
+        box-shadow: 0 5px 14px rgba(15,23,42,0.055);
+      }
+      .kpi-card-monthly-compact .kpi-icon{
+        font-size: 28px;
+        min-width: 36px;
+      }
+      .kpi-card-monthly-compact .kpi-label{
+        font-size: 12px;
+        margin-bottom: 4px;
+      }
+      .kpi-card-monthly-compact .kpi-value{
+        font-size: 26px;
+      }
+      .kpi-card-monthly-compact .kpi-note{
+        font-size: 11px;
+        margin-top: 4px;
+      }
+      @media (max-width: 1000px){
+        .kpi-grid.kpi-grid-monthly-compact{grid-template-columns: repeat(2, minmax(0, 1fr));}
+      }
+      @media (max-width: 700px){
+        .kpi-grid.kpi-grid-monthly-compact{grid-template-columns: repeat(1, minmax(0, 1fr));}
+      }
+
       /* Smaller Income Analysis service-count KPI cards */
       .kpi-grid.kpi-grid-compact{
         grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1531,7 +1567,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-def _kpi_cards(items, subtitle: str = "", compact: bool = False):
+def _kpi_cards(items, subtitle: str = "", compact: bool = False, monthly_compact: bool = False):
     """Render colorful management KPI cards. compact=True is used for service-count cards."""
     icon_map = {
         "Total Visits": "👥",
@@ -1556,14 +1592,24 @@ def _kpi_cards(items, subtitle: str = "", compact: bool = False):
         icon = icon_map.get(str(label), "📊")
         color_class = color_classes[idx % len(color_classes)]
         note_html = f"<div class='kpi-note'>{note}</div>" if note else ""
-        _compact_class = " kpi-card-compact" if compact else ""
+        if compact:
+            _compact_class = " kpi-card-compact"
+        elif monthly_compact:
+            _compact_class = " kpi-card-monthly-compact"
+        else:
+            _compact_class = ""
         cards_html.append(
             f"<div class='kpi-card {color_class}{_compact_class}'><div class='kpi-icon'>{icon}</div>"
             f"<div class='kpi-body'><div class='kpi-label'>{label}</div>"
             f"<div class='kpi-value'>{value}</div>{note_html}</div></div>"
         )
     sub_html = f"<div class='kpi-sub'>{subtitle}</div>" if subtitle else ""
-    _grid_class = "kpi-grid kpi-grid-compact" if compact else "kpi-grid"
+    if compact:
+        _grid_class = "kpi-grid kpi-grid-compact"
+    elif monthly_compact:
+        _grid_class = "kpi-grid kpi-grid-monthly-compact"
+    else:
+        _grid_class = "kpi-grid"
     html = f"<div class='{_grid_class}'>{''.join(cards_html)}</div>{sub_html}"
     st.markdown(html, unsafe_allow_html=True)
 
@@ -1832,7 +1878,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             ("Established Patients", int(k.get("Established Patients", 0))),
             ("Follow Up", int(k.get("Follow Up", 0))),
             ("Pending Patients", int(k.get("Pending Patients", 0))),
-        ], subtitle=subtitle)
+        ], subtitle=subtitle, monthly_compact=True)
     else:
         st.info("KPI is not available for this day.")
 
