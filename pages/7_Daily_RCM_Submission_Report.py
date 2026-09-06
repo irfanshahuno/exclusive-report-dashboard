@@ -261,9 +261,12 @@ h1,h2,h3{letter-spacing:-0.02em;}
     background:#ff7a00;
 }
 .premium-table tr.total-row td{
-    color:white;
-    font-weight:900;
+    color:#FFFFFF !important;
+    font-weight:900 !important;
     border-bottom:none;
+}
+.premium-table tr.total-row td *{
+    color:#FFFFFF !important;
 }
 div[data-testid="stButton"] > button{
     border-radius:11px !important;
@@ -1389,7 +1392,7 @@ def _render_premium_status_table(status_show: pd.DataFrame) -> None:
     for _,r in status_show.iterrows():
         label=str(r["Status"]); bg=status_colors.get(label,"#FFFFFF")
         rows.append(f"<tr style='background:{bg};'><td style='font-weight:700;'>{html.escape(label)}</td><td class='num'>{int(r['Claims']):,}</td><td class='num'>AED {float(r['Ins Share']):,.2f}</td></tr>")
-    rows.append(f"<tr style='background:#0B2342;font-weight:900;'><td style='color:#FFFFFF !important;'>TOTAL</td><td class='num' style='color:#FFFFFF !important;'>{total_claims:,}</td><td class='num' style='color:#FFFFFF !important;'>AED {total_amount:,.2f}</td></tr>")
+    rows.append(f"<tr class='total-row' style='background:#0B2342 !important;font-weight:900;'><td style='color:#FFFFFF !important;'><span style='color:#FFFFFF !important;'>TOTAL</span></td><td class='num' style='color:#FFFFFF !important;'><span style='color:#FFFFFF !important;'>{total_claims:,}</span></td><td class='num' style='color:#FFFFFF !important;'><span style='color:#FFFFFF !important;'>AED {total_amount:,.2f}</span></td></tr>")
     st.markdown("<div class='premium-table-wrap'><table class='premium-table'><thead><tr><th>Status</th><th style='text-align:right;'>Claims</th><th style='text-align:right;'>Net Insurance Amount (AED)</th></tr></thead><tbody>"+''.join(rows)+"</tbody></table></div>", unsafe_allow_html=True)
 
 
@@ -1437,8 +1440,8 @@ def _render_doctor_revenue_table(df: pd.DataFrame) -> None:
             value=f"{total_avg:,.2f}"; align="right"
         else:
             value=""; align="left"
-        total_cells.append(f"<td style='background:#0B2342;color:#FFFFFF !important;font-weight:900;text-align:{align};'>{value}</td>")
-    rows.append('<tr>'+''.join(total_cells)+'</tr>')
+        total_cells.append(f"<td style='background:#0B2342 !important;color:#FFFFFF !important;font-weight:900 !important;text-align:{align};'><span style='color:#FFFFFF !important;font-weight:900 !important;'>{value}</span></td>")
+    rows.append("<tr class='total-row' style='background:#0B2342 !important;'>"+''.join(total_cells)+"</tr>")
     st.markdown("<div class='premium-table-wrap'><table class='premium-table'><thead><tr>"+th+"</tr></thead><tbody>"+''.join(rows)+"</tbody></table></div>", unsafe_allow_html=True)
 
 
