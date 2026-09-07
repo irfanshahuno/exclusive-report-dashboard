@@ -1346,31 +1346,6 @@ def _build_daily_rcm_email(result: Dict[str, object]) -> str:
             body_rows.append('<tr>'+''.join(cells)+'</tr>')
         doctor_email_html=f"<div class='desktop-only'><div style='margin-top:20px;font-weight:900;color:#0B2342;font-size:15px;'>Doctor Revenue — Daily Collection Details</div><table style='width:100%;border-collapse:collapse;margin-top:8px;'><tr style='background:#0B2342;color:white;'>{header_cells}</tr>{''.join(body_rows)}</table></div>"
 
-        mobile_cards=[]
-        for _, rr in d.iterrows():
-            dept=html.escape(str(rr.get('Department','')))
-            doctor=html.escape(str(rr.get('Doctor','')))
-            visits=int(pd.to_numeric(rr.get('Visits',0),errors='coerce') if not pd.isna(pd.to_numeric(rr.get('Visits',0),errors='coerce')) else 0)
-            lab=int(pd.to_numeric(rr.get('Lab',0),errors='coerce') if not pd.isna(pd.to_numeric(rr.get('Lab',0),errors='coerce')) else 0)
-            proc=int(pd.to_numeric(rr.get('Procedure',0),errors='coerce') if not pd.isna(pd.to_numeric(rr.get('Procedure',0),errors='coerce')) else 0)
-            referral=int(pd.to_numeric(rr.get('Referral',0),errors='coerce') if not pd.isna(pd.to_numeric(rr.get('Referral',0),errors='coerce')) else 0)
-            ins=float(pd.to_numeric(rr.get('Insurance_Amount',0),errors='coerce') if not pd.isna(pd.to_numeric(rr.get('Insurance_Amount',0),errors='coerce')) else 0)
-            avg=float(pd.to_numeric(rr.get('Avg_Insurance_Per_Visit',0),errors='coerce') if not pd.isna(pd.to_numeric(rr.get('Avg_Insurance_Per_Visit',0),errors='coerce')) else 0)
-            mobile_cards.append(f"""
-            <div class='doctor-card' style='border:1px solid #dfe7f0;border-radius:10px;margin:10px 0;overflow:hidden;background:#ffffff;'>
-              <div style='background:#0B2342;color:#ffffff;padding:10px 12px;font-weight:800;font-size:14px;'>{doctor}</div>
-              <div style='padding:8px 12px;color:#64748b;font-size:11px;font-weight:700;'>{dept}</div>
-              <table role='presentation' style='width:100%;border-collapse:collapse;font-size:12px;'>
-                <tr><td style='padding:7px 12px;background:#EEF6FF;'>Visits</td><td style='padding:7px 12px;background:#EEF6FF;text-align:right;font-weight:800;'>{visits:,}</td></tr>
-                <tr><td style='padding:7px 12px;background:#ECF9F1;'>Lab</td><td style='padding:7px 12px;background:#ECF9F1;text-align:right;font-weight:800;'>{lab:,}</td></tr>
-                <tr><td style='padding:7px 12px;background:#F1F0FF;'>Procedure</td><td style='padding:7px 12px;background:#F1F0FF;text-align:right;font-weight:800;'>{proc:,}</td></tr>
-                <tr><td style='padding:7px 12px;background:#FFF7E6;'>Referral</td><td style='padding:7px 12px;background:#FFF7E6;text-align:right;font-weight:800;'>{referral:,}</td></tr>
-                <tr><td style='padding:7px 12px;background:#EAF8F7;'>Insurance Amount</td><td style='padding:7px 12px;background:#EAF8F7;text-align:right;font-weight:900;color:#0B2342;'>AED {ins:,.2f}</td></tr>
-                <tr><td style='padding:7px 12px;background:#F7F9FC;'>Avg Insurance / Visit</td><td style='padding:7px 12px;background:#F7F9FC;text-align:right;font-weight:800;'>{avg:,.2f}</td></tr>
-              </table>
-            </div>
-            """)
-        doctor_email_html += "<div class='mobile-only' style='display:none;max-height:0;overflow:hidden;'><div style='margin-top:20px;font-weight:900;color:#0B2342;font-size:16px;'>Doctor Revenue — Daily Collection Details</div>" + ''.join(mobile_cards) + "</div>"
 
     return f"""
     <html>
@@ -1392,8 +1367,10 @@ def _build_daily_rcm_email(result: Dict[str, object]) -> str:
           .kpi-table, .kpi-table tbody, .kpi-table tr, .kpi-cell {{ display:block !important; width:100% !important; }}
           .kpi-cell {{ box-sizing:border-box !important; margin:0 0 9px 0 !important; }}
           .kpi-amount {{ font-size:25px !important; line-height:1.12 !important; }}
-          .desktop-only {{ display:none !important; max-height:0 !important; overflow:hidden !important; mso-hide:all !important; }}
-          .mobile-only {{ display:block !important; max-height:none !important; overflow:visible !important; }}
+          .desktop-only {{ display:block !important; max-height:none !important; overflow:visible !important; }}
+          .mobile-only {{ display:none !important; max-height:0 !important; overflow:hidden !important; mso-hide:all !important; }}
+          .desktop-only table {{ width:100% !important; table-layout:fixed !important; font-size:9px !important; }}
+          .desktop-only th, .desktop-only td {{ padding:6px 4px !important; font-size:9px !important; line-height:1.15 !important; word-break:break-word !important; }}
           .summary-table th, .summary-table td {{ padding:8px 7px !important; font-size:12px !important; }}
           .summary-table th:nth-child(1), .summary-table td:nth-child(1) {{ width:46% !important; }}
           .summary-table th:nth-child(2), .summary-table td:nth-child(2) {{ width:18% !important; }}
