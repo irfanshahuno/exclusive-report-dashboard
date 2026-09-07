@@ -547,6 +547,47 @@ def read_registration_report(file_obj) -> pd.DataFrame:
     )
 
 
+def read_referral_report(file_obj) -> pd.DataFrame:
+    """Load the referral report and detect the real header row."""
+    return _read_excel_header_scan(
+        file_obj,
+        ["Referred Date", "Referred To", "Referred By", "EMRNO", "Visit No"],
+        sheet_name=0,
+        min_score=4,
+    )
+
+
+def _doctor_key(value: object) -> str:
+    text = str(value or "").upper().strip()
+    text = re.sub(r"\bDR\.?\b", "", text)
+    return re.sub(r"[^A-Z0-9]+", "", text)
+
+
+def referral_analysis(ref_df: pd.DataFrame, selected_day) -> Dict[str, object]:
+    """Unique Visit No referral count overall and doctor-wise by Referred By."""
+    if ref_df is None or ref_df.empty:
+        return {"daily": pd.DataFrame(), "doctor": pd.DataFrame(), "total_referrals": 0}
+    c_date = find_col(ref_df, ["Referred Date", "Referral Date", "Date"])
+    c_visit = find_col(ref_df, ["Visit No", "VisitNo", "Visit ID", "VisitID"])
+    c_by = find_col(ref_df, ["Referred By", "Referral By", "Doctor", "Doctor Name"])
+    if not c_date or not c_visit or not c_by:
+        raise ValueError("Referral report must contain Referred Date, Referred By and Visit No.")
+    d = _filter_by_day(ref_df, c_date, selected_day)
+    if d.empty:
+        return {"daily": d, "doctor": pd.DataFrame(columns=["Doctor_Key", "Referral"]), "total_referrals": 0}
+    d[c_visit] = d[c_visit].fillna("").astype(str).str.strip()
+    d[c_by] = d[c_by].fillna("").astype(str).str.strip()
+    d = d[(d[c_visit] != "") & (~d[c_visit].str.lower().isin(["nan", "none"]))].copy()
+    d["Doctor_Key"] = d[c_by].map(_doctor_key)
+    dg = (d[d["Doctor_Key"] != ""]
+          .groupby("Doctor_Key", dropna=False)[c_visit]
+          .nunique()
+          .rename("Referral")
+          .reset_index())
+    total = int(d[c_visit].nunique())
+    return {"daily": d, "doctor": dg, "total_referrals": total}
+
+
 def _date_bounds(selected_day):
     # Streamlit date_input returns either one date or a (start, end) tuple.
     if isinstance(selected_day, (tuple, list)):
@@ -1090,7 +1131,7 @@ def _bundle_key() -> str:
 
 
 def save_source_bundle_to_s3(bundle: Dict[str, object]) -> bool:
-    """Persist the latest 3 uploaded source reports so date changes never require re-upload."""
+    """Persist the latest 4 uploaded source reports so date changes never require re-upload."""
     if not s3_ok:
         return False
     try:
@@ -1115,7 +1156,7 @@ def load_source_bundle_from_s3() -> Optional[Dict[str, object]]:
         return None
     try:
         bundle = pickle.loads(b)
-        if isinstance(bundle, dict) and all(k in bundle for k in ["registration", "revenue", "submission"]):
+        if isinstance(bundle, dict) and all(k in bundle for k in ["registration", "revenue", "submission", "referral"]):
             return bundle
     except Exception:
         pass
@@ -1143,32 +1184,59 @@ def _cached_submission(data: bytes, name: str) -> pd.DataFrame:
     return read_daily_report(_named_bytes(data, name), name)
 
 
+@st.cache_data(show_spinner=False)
+def _cached_referral(data: bytes, name: str) -> pd.DataFrame:
+    return read_referral_report(_named_bytes(data, name))
+
+
 def read_bundle(bundle: Dict[str, object]):
     reg = bundle["registration"]
     rev = bundle["revenue"]
     sub = bundle["submission"]
+    ref = bundle["referral"]
     reg_df = _cached_registration(reg["bytes"], reg["name"])
     rev_df = _cached_revenue(rev["bytes"], rev["name"])
     sub_df = _cached_submission(sub["bytes"], sub["name"])
-    return reg_df, rev_df, sub_df
+    ref_df = _cached_referral(ref["bytes"], ref["name"])
+    return reg_df, rev_df, sub_df, ref_df
 
 
 def build_result_from_bundle(bundle: Dict[str, object], selected_period):
-    reg_df, rev_df, sub_raw = read_bundle(bundle)
+    reg_df, rev_df, sub_raw, ref_df = read_bundle(bundle)
     patient_count = registration_patient_count(reg_df, selected_period)
     rev_result = revenue_analysis(rev_df, selected_period)
+    ref_result = referral_analysis(ref_df, selected_period)
+
+    # Add doctor-wise referral counts into the existing doctor revenue table.
+    doc = rev_result.get("doctor") if isinstance(rev_result, dict) else None
+    ref_doc = ref_result.get("doctor") if isinstance(ref_result, dict) else None
+    if isinstance(doc, pd.DataFrame) and not doc.empty:
+        doc = doc.copy()
+        doc["Doctor_Key"] = doc["Doctor"].map(_doctor_key)
+        if isinstance(ref_doc, pd.DataFrame) and not ref_doc.empty:
+            doc = doc.merge(ref_doc, on="Doctor_Key", how="left")
+        else:
+            doc["Referral"] = 0
+        doc["Referral"] = pd.to_numeric(doc.get("Referral", 0), errors="coerce").fillna(0).astype(int)
+        doc = doc.drop(columns=["Doctor_Key"], errors="ignore")
+        rev_result["doctor"] = doc
+
     result = process_report(sub_raw, selected_day=selected_period)
     result["registration_count"] = patient_count
     result["revenue"] = rev_result
+    result["referral"] = ref_result
+    result["referral_count"] = int(ref_result.get("total_referrals", 0) or 0)
     result["selected_period"] = selected_period
 
     reg_days = _date_set_in_period(reg_df, ["Reg:Date", "Reg Date", "Registration Date", "Date"], selected_period)
     rev_days = _date_set_in_period(rev_df, ["Visit Date", "VisitDate"], selected_period)
     sub_days = _date_set_in_period(sub_raw, ["Visit Date", "VisitDate", "Enc Date", "Encounter Date"], selected_period)
+    ref_days = _date_set_in_period(ref_df, ["Referred Date", "Referral Date", "Date"], selected_period)
     result["date_coverage"] = {
         "Registration": sorted(reg_days),
         "Revenue": sorted(rev_days),
         "Submission": sorted(sub_days),
+        "Referral": sorted(ref_days),
     }
     return result
 
@@ -1260,15 +1328,15 @@ def _build_daily_rcm_email(result: Dict[str, object]) -> str:
     rev = result.get("revenue", {}) or {}
     doc = rev.get("doctor") if isinstance(rev, dict) else None
     if isinstance(doc, pd.DataFrame) and not doc.empty:
-        preferred=["Department","Doctor","Visits","Lab","Procedure","Insurance_Amount","Avg_Insurance_Per_Visit"]
+        preferred=["Department","Doctor","Visits","Lab","Procedure","Referral","Insurance_Amount","Avg_Insurance_Per_Visit"]
         d=doc[[c for c in preferred if c in doc.columns]].copy()
         header_cells=''.join(f"<th style='padding:8px 10px;text-align:{'left' if c in ['Department','Doctor'] else 'right'};'>{html.escape(c)}</th>" for c in d.columns)
-        body_rows=[]; col_colors={"Visits":"#EEF6FF","Lab":"#ECF9F1","Procedure":"#F1F0FF","Insurance_Amount":"#EAF8F7","Avg_Insurance_Per_Visit":"#F7F9FC"}
+        body_rows=[]; col_colors={"Visits":"#EEF6FF","Lab":"#ECF9F1","Procedure":"#F1F0FF","Referral":"#FFF7E6","Insurance_Amount":"#EAF8F7","Avg_Insurance_Per_Visit":"#F7F9FC"}
         for _,rr in d.iterrows():
             cells=[]
             for c in d.columns:
                 bg=col_colors.get(c,"#FFFFFF"); v=rr[c]
-                if c in ["Visits","Lab","Procedure"]:
+                if c in ["Visits","Lab","Procedure","Referral"]:
                     num=pd.to_numeric(v,errors="coerce"); val=f"{int(0 if pd.isna(num) else num):,}"; align="right"
                 elif c in ["Insurance_Amount","Avg_Insurance_Per_Visit"]:
                     num=pd.to_numeric(v,errors="coerce"); val=f"{float(0 if pd.isna(num) else num):,.2f}"; align="right"
@@ -1276,33 +1344,87 @@ def _build_daily_rcm_email(result: Dict[str, object]) -> str:
                     val=html.escape(str(v)); align="left"
                 cells.append(f"<td style='padding:7px 10px;border-bottom:1px solid #e8eef5;background:{bg};text-align:{align};'>{val}</td>")
             body_rows.append('<tr>'+''.join(cells)+'</tr>')
-        doctor_email_html=f"<div style='margin-top:20px;font-weight:900;color:#0B2342;font-size:15px;'>Doctor Revenue — Daily Collection Details</div><table style='width:100%;border-collapse:collapse;margin-top:8px;'><tr style='background:#0B2342;color:white;'>{header_cells}</tr>{''.join(body_rows)}</table>"
+        doctor_email_html=f"<div class='desktop-only'><div style='margin-top:20px;font-weight:900;color:#0B2342;font-size:15px;'>Doctor Revenue — Daily Collection Details</div><table style='width:100%;border-collapse:collapse;margin-top:8px;'><tr style='background:#0B2342;color:white;'>{header_cells}</tr>{''.join(body_rows)}</table></div>"
+
+        mobile_cards=[]
+        for _, rr in d.iterrows():
+            dept=html.escape(str(rr.get('Department','')))
+            doctor=html.escape(str(rr.get('Doctor','')))
+            visits=int(pd.to_numeric(rr.get('Visits',0),errors='coerce') if not pd.isna(pd.to_numeric(rr.get('Visits',0),errors='coerce')) else 0)
+            lab=int(pd.to_numeric(rr.get('Lab',0),errors='coerce') if not pd.isna(pd.to_numeric(rr.get('Lab',0),errors='coerce')) else 0)
+            proc=int(pd.to_numeric(rr.get('Procedure',0),errors='coerce') if not pd.isna(pd.to_numeric(rr.get('Procedure',0),errors='coerce')) else 0)
+            referral=int(pd.to_numeric(rr.get('Referral',0),errors='coerce') if not pd.isna(pd.to_numeric(rr.get('Referral',0),errors='coerce')) else 0)
+            ins=float(pd.to_numeric(rr.get('Insurance_Amount',0),errors='coerce') if not pd.isna(pd.to_numeric(rr.get('Insurance_Amount',0),errors='coerce')) else 0)
+            avg=float(pd.to_numeric(rr.get('Avg_Insurance_Per_Visit',0),errors='coerce') if not pd.isna(pd.to_numeric(rr.get('Avg_Insurance_Per_Visit',0),errors='coerce')) else 0)
+            mobile_cards.append(f"""
+            <div class='doctor-card' style='border:1px solid #dfe7f0;border-radius:10px;margin:10px 0;overflow:hidden;background:#ffffff;'>
+              <div style='background:#0B2342;color:#ffffff;padding:10px 12px;font-weight:800;font-size:14px;'>{doctor}</div>
+              <div style='padding:8px 12px;color:#64748b;font-size:11px;font-weight:700;'>{dept}</div>
+              <table role='presentation' style='width:100%;border-collapse:collapse;font-size:12px;'>
+                <tr><td style='padding:7px 12px;background:#EEF6FF;'>Visits</td><td style='padding:7px 12px;background:#EEF6FF;text-align:right;font-weight:800;'>{visits:,}</td></tr>
+                <tr><td style='padding:7px 12px;background:#ECF9F1;'>Lab</td><td style='padding:7px 12px;background:#ECF9F1;text-align:right;font-weight:800;'>{lab:,}</td></tr>
+                <tr><td style='padding:7px 12px;background:#F1F0FF;'>Procedure</td><td style='padding:7px 12px;background:#F1F0FF;text-align:right;font-weight:800;'>{proc:,}</td></tr>
+                <tr><td style='padding:7px 12px;background:#FFF7E6;'>Referral</td><td style='padding:7px 12px;background:#FFF7E6;text-align:right;font-weight:800;'>{referral:,}</td></tr>
+                <tr><td style='padding:7px 12px;background:#EAF8F7;'>Insurance Amount</td><td style='padding:7px 12px;background:#EAF8F7;text-align:right;font-weight:900;color:#0B2342;'>AED {ins:,.2f}</td></tr>
+                <tr><td style='padding:7px 12px;background:#F7F9FC;'>Avg Insurance / Visit</td><td style='padding:7px 12px;background:#F7F9FC;text-align:right;font-weight:800;'>{avg:,.2f}</td></tr>
+              </table>
+            </div>
+            """)
+        doctor_email_html += "<div class='mobile-only' style='display:none;max-height:0;overflow:hidden;'><div style='margin-top:20px;font-weight:900;color:#0B2342;font-size:16px;'>Doctor Revenue — Daily Collection Details</div>" + ''.join(mobile_cards) + "</div>"
 
     return f"""
     <html>
-    <body style="font-family:Segoe UI,Arial,sans-serif;background:#f4f7fb;margin:0;padding:20px;">
-      <div style="max-width:850px;margin:auto;background:white;border-radius:14px;overflow:hidden;box-shadow:0 7px 25px rgba(15,23,42,.10);">
-        <div style="background:#0B2342;color:white;padding:20px 22px;">
-          <div style="font-size:20px;font-weight:900;">Daily RCM Submission Report</div>
-          <div style="font-size:26px;line-height:1.2;font-weight:900;color:#ffffff;margin-top:8px;letter-spacing:.2px;">{email_period}</div>
+    <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <style>
+        body {{ margin:0 !important; padding:0 !important; background:#f4f7fb !important; }}
+        .email-shell {{ width:100% !important; max-width:850px !important; margin:0 auto !important; }}
+        .kpi-table {{ width:100% !important; table-layout:fixed !important; }}
+        .kpi-cell {{ width:33.333% !important; vertical-align:top !important; }}
+        .mobile-only {{ display:none !important; mso-hide:all !important; max-height:0 !important; overflow:hidden !important; }}
+        @media only screen and (max-width: 640px) {{
+          .outer-pad {{ padding:8px !important; }}
+          .email-shell {{ width:100% !important; max-width:100% !important; border-radius:10px !important; }}
+          .header-pad {{ padding:18px 16px !important; }}
+          .content-pad {{ padding:14px 12px !important; }}
+          .report-title {{ font-size:22px !important; line-height:1.18 !important; }}
+          .report-period {{ font-size:24px !important; line-height:1.18 !important; }}
+          .kpi-table, .kpi-table tbody, .kpi-table tr, .kpi-cell {{ display:block !important; width:100% !important; }}
+          .kpi-cell {{ box-sizing:border-box !important; margin:0 0 9px 0 !important; }}
+          .kpi-amount {{ font-size:25px !important; line-height:1.12 !important; }}
+          .desktop-only {{ display:none !important; max-height:0 !important; overflow:hidden !important; mso-hide:all !important; }}
+          .mobile-only {{ display:block !important; max-height:none !important; overflow:visible !important; }}
+          .summary-table th, .summary-table td {{ padding:8px 7px !important; font-size:12px !important; }}
+          .summary-table th:nth-child(1), .summary-table td:nth-child(1) {{ width:46% !important; }}
+          .summary-table th:nth-child(2), .summary-table td:nth-child(2) {{ width:18% !important; }}
+          .summary-table th:nth-child(3), .summary-table td:nth-child(3) {{ width:36% !important; }}
+        }}
+      </style>
+    </head>
+    <body style="font-family:Segoe UI,Arial,sans-serif;background:#f4f7fb;margin:0;padding:0;">
+      <div class="outer-pad" style="padding:20px;">
+      <div class="email-shell" style="width:100%;max-width:850px;margin:auto;background:white;border-radius:14px;overflow:hidden;box-shadow:0 7px 25px rgba(15,23,42,.10);">
+        <div class="header-pad" style="background:#0B2342;color:white;padding:20px 22px;">
+          <div class="report-title" style="font-size:20px;font-weight:900;">Daily RCM Submission Report</div>
+          <div class="report-period" style="font-size:26px;line-height:1.2;font-weight:900;color:#ffffff;margin-top:8px;letter-spacing:.2px;">{email_period}</div>
           <div style="font-size:13px;font-weight:700;color:#a8c1df;margin-top:6px;">{html.escape(CENTERS.get(center_key, center_key))}</div>
         </div>
-        <div style="padding:18px 22px;">
-          <table style="width:100%;border-collapse:separate;border-spacing:8px;">
+        <div class="content-pad" style="padding:18px 22px;">
+          <table role="presentation" class="kpi-table" style="width:100%;border-collapse:separate;border-spacing:8px;table-layout:fixed;">
             <tr>
-              <td style="background:#eef8ff;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Total Claims</div><div style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {total_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{total_n:,} claims</div></td>
-              <td style="background:#f0fcf4;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Already Submitted</div><div style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {closed_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{closed_n:,} claims</div></td>
-              <td style="background:#eef6ff;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Ready to Submit</div><div style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {proc_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{proc_n:,} claims</div></td>
+              <td class="kpi-cell" style="width:33.333%;background:#eef8ff;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Total Claims</div><div class="kpi-amount" style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {total_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{total_n:,} claims</div></td>
+              <td class="kpi-cell" style="width:33.333%;background:#f0fcf4;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Already Submitted</div><div class="kpi-amount" style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {closed_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{closed_n:,} claims</div></td>
+              <td class="kpi-cell" style="width:33.333%;background:#eef6ff;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Ready to Submit</div><div class="kpi-amount" style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {proc_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{proc_n:,} claims</div></td>
             </tr>
             <tr>
-              <td style="background:#fff9e9;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Pending Resolution</div><div style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {open_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{open_n:,} claims</div></td>
-              <td style="background:#f7f1ff;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Within Coding TAT</div><div style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {na_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{na_n:,} claims</div></td>
-              <td style="background:#fff1f3;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Coding TAT Breach &gt;48h</div><div style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {over48_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{over48_n:,} claims</div></td>
+              <td class="kpi-cell" style="width:33.333%;background:#fff9e9;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Pending Resolution</div><div class="kpi-amount" style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {open_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{open_n:,} claims</div></td>
+              <td class="kpi-cell" style="width:33.333%;background:#f7f1ff;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Within Coding TAT</div><div class="kpi-amount" style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {na_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{na_n:,} claims</div></td>
+              <td class="kpi-cell" style="width:33.333%;background:#fff1f3;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Coding TAT Breach &gt;48h</div><div class="kpi-amount" style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {over48_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{over48_n:,} claims</div></td>
             </tr>
           </table>
 
           <div style="margin-top:18px;font-weight:900;color:#0B2342;font-size:15px;">Status Summary</div>
-          <table style="width:100%;border-collapse:collapse;margin-top:8px;">
+          <table class="summary-table" style="width:100%;border-collapse:collapse;margin-top:8px;table-layout:fixed;">
             <tr style="background:#0B2342;color:white;">
               <th style="padding:9px 12px;text-align:left;">Status</th>
               <th style="padding:9px 12px;text-align:right;">Claims</th>
@@ -1314,6 +1436,7 @@ def _build_daily_rcm_email(result: Dict[str, object]) -> str:
           {doctor_email_html}
           <div style="margin-top:18px;font-size:11px;color:#8492a6;">Auto-generated by EMC RCM Dashboard.</div>
         </div>
+      </div>
       </div>
     </body>
     </html>
@@ -1347,14 +1470,14 @@ def _build_colored_excel_attachment(result: Dict[str, object]) -> bytes:
     ws.freeze_panes="A2"
     rev=result.get("revenue",{}) or {}; doc=rev.get("doctor") if isinstance(rev,dict) else None
     if isinstance(doc,pd.DataFrame) and not doc.empty:
-        preferred=["Department","Doctor","Visits","Lab","Procedure","Insurance_Amount","Avg_Insurance_Per_Visit"]; d=doc[[c for c in preferred if c in doc.columns]].copy(); wd=wb.create_sheet("Doctor Revenue"); wd.append(list(d.columns))
+        preferred=["Department","Doctor","Visits","Lab","Procedure","Referral","Insurance_Amount","Avg_Insurance_Per_Visit"]; d=doc[[c for c in preferred if c in doc.columns]].copy(); wd=wb.create_sheet("Doctor Revenue"); wd.append(list(d.columns))
         for c in wd[1]: c.fill=PatternFill("solid",fgColor=navy); c.font=Font(color=white,bold=True); c.alignment=Alignment(horizontal="center")
-        col_fill={"Visits":"EEF6FF","Lab":"ECF9F1","Procedure":"F1F0FF","Insurance_Amount":"EAF8F7","Avg_Insurance_Per_Visit":"F7F9FC"}
+        col_fill={"Visits":"EEF6FF","Lab":"ECF9F1","Procedure":"F1F0FF","Referral":"FFF7E6","Insurance_Amount":"EAF8F7","Avg_Insurance_Per_Visit":"F7F9FC"}
         for _,rr in d.iterrows():
             vals=[]
             for cname in d.columns:
                 v=rr[cname]
-                if cname in ["Visits","Lab","Procedure"]:
+                if cname in ["Visits","Lab","Procedure","Referral"]:
                     n=pd.to_numeric(v,errors="coerce"); v=int(0 if pd.isna(n) else n)
                 elif cname in ["Insurance_Amount","Avg_Insurance_Per_Visit"]:
                     n=pd.to_numeric(v,errors="coerce"); v=float(0 if pd.isna(n) else n)
@@ -1365,9 +1488,9 @@ def _build_colored_excel_attachment(result: Dict[str, object]) -> bytes:
                 if cname in ["Insurance_Amount","Avg_Insurance_Per_Visit"]:
                     cell.number_format='AED #,##0.00'
                     cell.font=Font(bold=True,color="0B2342")
-                elif cname in ["Visits","Lab","Procedure"]:
+                elif cname in ["Visits","Lab","Procedure","Referral"]:
                     cell.font=Font(color="64748B")
-        for col,w in {"A":32,"B":38,"C":12,"D":10,"E":12,"F":22,"G":24}.items(): wd.column_dimensions[col].width=w
+        for col,w in {"A":32,"B":38,"C":12,"D":10,"E":12,"F":12,"G":22,"H":24}.items(): wd.column_dimensions[col].width=w
         wd.freeze_panes="A2"
     q=result.get("query_summary",pd.DataFrame())
     if isinstance(q,pd.DataFrame) and not q.empty:
@@ -1410,7 +1533,7 @@ def _render_premium_status_table(status_show: pd.DataFrame) -> None:
 def _render_doctor_revenue_table(df: pd.DataFrame) -> None:
     if df is None or df.empty:
         return
-    col_colors={"Visits":"#EEF6FF","Lab":"#ECF9F1","Procedure":"#F1F0FF","Insurance_Amount":"#EAF8F7","Avg_Insurance_Per_Visit":"#F7F9FC"}
+    col_colors={"Visits":"#EEF6FF","Lab":"#ECF9F1","Procedure":"#F1F0FF","Referral":"#FFF7E6","Insurance_Amount":"#EAF8F7","Avg_Insurance_Per_Visit":"#F7F9FC"}
     headers=list(df.columns)
     th=''.join(f"<th>{html.escape(str(c))}</th>" for c in headers)
     rows=[]
@@ -1418,7 +1541,7 @@ def _render_doctor_revenue_table(df: pd.DataFrame) -> None:
         tds=[]
         for c in headers:
             bg=col_colors.get(c,"#FFFFFF"); v=r[c]
-            if c in ["Visits","Lab","Procedure"]:
+            if c in ["Visits","Lab","Procedure","Referral"]:
                 num=pd.to_numeric(v,errors="coerce"); value=f"{int(0 if pd.isna(num) else num):,}"; align="right"
             elif c in ["Insurance_Amount","Avg_Insurance_Per_Visit"]:
                 num=pd.to_numeric(v,errors="coerce"); value=f"{float(0 if pd.isna(num) else num):,.2f}"; align="right"
@@ -1431,6 +1554,7 @@ def _render_doctor_revenue_table(df: pd.DataFrame) -> None:
     total_visits = int(pd.to_numeric(df.get("Visits", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if "Visits" in df.columns else 0
     total_lab = int(pd.to_numeric(df.get("Lab", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if "Lab" in df.columns else 0
     total_proc = int(pd.to_numeric(df.get("Procedure", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if "Procedure" in df.columns else 0
+    total_ref = int(pd.to_numeric(df.get("Referral", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if "Referral" in df.columns else 0
     total_ins = float(pd.to_numeric(df.get("Insurance_Amount", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if "Insurance_Amount" in df.columns else 0.0
     total_avg = (total_ins / total_visits) if total_visits else 0.0
     total_cells=[]
@@ -1445,6 +1569,8 @@ def _render_doctor_revenue_table(df: pd.DataFrame) -> None:
             value=f"{total_lab:,}"; align="right"
         elif c == "Procedure":
             value=f"{total_proc:,}"; align="right"
+        elif c == "Referral":
+            value=f"{total_ref:,}"; align="right"
         elif c == "Insurance_Amount":
             value=f"{total_ins:,.2f}"; align="right"
         elif c == "Avg_Insurance_Per_Visit":
@@ -1516,6 +1642,7 @@ def render_result(result: Dict[str, object]):
     kpi_cards([
         ("Total Patients", f"{_patients:,}", "Registration report · unique Visit No", "P", "rcm-blue"),
         ("Submission Net Insurance", money(total_amount), f"{total_claims:,} claims in submission report", "Σ", "rcm-purple"),
+        ("Total Referrals", f"{int(result.get('referral_count', 0) or 0):,}", "Unique referral Visit No", "R", "rcm-yellow"),
         ("Pharmacy Revenue", "Integration in Progress", "Pharmacy revenue amount coming soon", "Rx", "rcm-yellow"),
     ])
 
@@ -1661,13 +1788,13 @@ def render_result(result: Dict[str, object]):
         ])
 
         _show = _docrev.copy()
-        for _c in ["Lab","Procedure"]:
+        for _c in ["Lab","Procedure","Referral"]:
             if _c in _show.columns:
                 _show[_c] = pd.to_numeric(_show[_c], errors="coerce").fillna(0).astype(int)
         for _c in ["Insurance_Amount","Avg_Insurance_Per_Visit"]:
             if _c in _show.columns:
                 _show[_c] = pd.to_numeric(_show[_c], errors="coerce").fillna(0).round(2)
-        preferred = ["Department","Doctor","Visits","Lab","Procedure","Insurance_Amount","Avg_Insurance_Per_Visit"]
+        preferred = ["Department","Doctor","Visits","Lab","Procedure","Referral","Insurance_Amount","Avg_Insurance_Per_Visit"]
         _show = _show[[c for c in preferred if c in _show.columns]]
         _render_doctor_revenue_table(_show)
     else:
@@ -1775,8 +1902,8 @@ def render_result(result: Dict[str, object]):
 # =========================================================
 st.title("Daily RCM Management Report")
 st.caption(
-    "3-report dashboard: Registration = patient count · Daily Collection Details = doctor revenue · "
-    "Submission = submitted / ready / pending / coding TAT. The exact same From/To period is applied to all three reports."
+    "4-report dashboard: Registration = patient count · Daily Collection Details = doctor revenue · "
+    "Submission = submitted / ready / pending / coding TAT · Referral = referral count. The exact same From/To period is applied to all four reports."
 )
 
 SS.setdefault("daily_rcm_show_setup", False)
@@ -1820,12 +1947,12 @@ with setup_right:
         _saved_at = bundle.get("saved_at", "")
         st.caption(f"✅ Source reports saved{' in S3' if s3_ok else ' for this session'}" + (f" · {_saved_at}" if _saved_at else ""))
     else:
-        st.caption("Upload the 3 source reports once. After processing, they are reused for future date changes.")
+        st.caption("Upload the 4 source reports once. After processing, they are reused for future date changes.")
 
 if SS.get("daily_rcm_show_setup", False):
     with st.container(border=True):
         st.markdown("### Source Reports")
-        u1, u2, u3 = st.columns(3)
+        u1, u2, u3, u4 = st.columns(4)
         with u1:
             reg_up = st.file_uploader(
                 "1) Registration Report (.xls / .xlsx)",
@@ -1847,30 +1974,39 @@ if SS.get("daily_rcm_show_setup", False):
                 key="daily_rcm_submission_upload",
                 help="Used for Submitted / Ready / Pending / Coding TAT analysis.",
             )
+        with u4:
+            ref_up = st.file_uploader(
+                "4) Referral Report (.xls / .xlsx)",
+                type=["xls", "xlsx"],
+                key="daily_rcm_referral_upload",
+                help="Used for total referrals and doctor-wise referral counts by Referred By.",
+            )
 
         if st.button("▶ Save & Process These Reports", type="primary", use_container_width=True, key="daily_rcm_process_uploads"):
-            if reg_up is None or rev_up is None or sub_up is None:
-                st.error("Please upload all 3 reports before processing.")
+            if reg_up is None or rev_up is None or sub_up is None or ref_up is None:
+                st.error("Please upload all 4 reports before processing.")
             else:
                 try:
                     new_bundle = {
                         "registration": {"name": reg_up.name, "bytes": reg_up.getvalue()},
                         "revenue": {"name": rev_up.name, "bytes": rev_up.getvalue()},
                         "submission": {"name": sub_up.name, "bytes": sub_up.getvalue()},
+                        "referral": {"name": ref_up.name, "bytes": ref_up.getvalue()},
                         "saved_at": datetime.now().strftime("%d %b %Y %H:%M"),
                     }
                     # Validate immediately before saving.
-                    _reg_df, _rev_df, _sub_df = read_bundle(new_bundle)
+                    _reg_df, _rev_df, _sub_df, _ref_df = read_bundle(new_bundle)
                     SS["daily_rcm_source_bundle"] = new_bundle
                     bundle = new_bundle
                     if s3_ok:
                         save_source_bundle_to_s3(new_bundle)
 
-                    # Determine latest date common to all three newly uploaded files.
+                    # Determine latest date common to all four newly uploaded files.
                     _reg_dates = {x.date() for x in _available_dates_from_report(_reg_df, ["Reg:Date", "Reg Date", "Registration Date", "Date"])}
                     _rev_dates = {x.date() for x in _available_dates_from_report(_rev_df, ["Visit Date", "VisitDate"])}
                     _sub_dates = {x.date() for x in _available_dates_from_report(_sub_df, ["Visit Date", "VisitDate", "Enc Date", "Encounter Date"])}
-                    _common = _reg_dates & _rev_dates & _sub_dates
+                    _ref_dates = {x.date() for x in _available_dates_from_report(_ref_df, ["Referred Date", "Referral Date", "Date"])}
+                    _common = _reg_dates & _rev_dates & _sub_dates & _ref_dates
                     if _common:
                         _latest_common = max(_common)
                         SS["daily_rcm_start_date"] = _latest_common
@@ -1895,11 +2031,12 @@ if current is not None:
         pass
 elif bundle is not None:
     try:
-        _reg_df, _rev_df, _sub_df = read_bundle(bundle)
+        _reg_df, _rev_df, _sub_df, _ref_df = read_bundle(bundle)
         _reg_dates = {x.date() for x in _available_dates_from_report(_reg_df, ["Reg:Date", "Reg Date", "Registration Date", "Date"])}
         _rev_dates = {x.date() for x in _available_dates_from_report(_rev_df, ["Visit Date", "VisitDate"])}
         _sub_dates = {x.date() for x in _available_dates_from_report(_sub_df, ["Visit Date", "VisitDate", "Enc Date", "Encounter Date"])}
-        _common = _reg_dates & _rev_dates & _sub_dates
+        _ref_dates = {x.date() for x in _available_dates_from_report(_ref_df, ["Referred Date", "Referral Date", "Date"])}
+        _common = _reg_dates & _rev_dates & _sub_dates & _ref_dates
         if _common:
             _default_start = _default_end = max(_common)
     except Exception:
@@ -1918,13 +2055,13 @@ with p1:
     start_day = st.date_input(
         "From",
         key="daily_rcm_start_date",
-        help="First date included in all three reports.",
+        help="First date included in all four reports.",
     )
 with p2:
     end_day = st.date_input(
         "To",
         key="daily_rcm_end_date",
-        help="Last date included in all three reports.",
+        help="Last date included in all four reports.",
     )
 with p3:
     quick_period = st.selectbox(
@@ -1955,7 +2092,7 @@ if _qs > _qe:
 selected_period = (_qs, _qe)
 
 st.caption(
-    f"Applied identically to Registration + Revenue + Submission: "
+    f"Applied identically to Registration + Revenue + Submission + Referral: "
     f"**{pd.Timestamp(_qs).strftime('%d %b %Y')} → {pd.Timestamp(_qe).strftime('%d %b %Y')}**"
 )
 
@@ -1976,7 +2113,7 @@ if bundle is not None:
 
     if _current_period != selected_period:
         try:
-            with st.spinner("Updating all 3 reports for the selected period..."):
+            with st.spinner("Updating all 4 reports for the selected period..."):
                 current = build_result_from_bundle(bundle, selected_period)
                 SS["daily_rcm_result"] = current
 
@@ -2043,7 +2180,7 @@ if current is not None:
     render_result(current)
 else:
     if bundle is None:
-        st.info("Click **Upload / Replace Reports** once. After processing, the reports are saved and date changes will work without uploading again.")
+        st.info("Click **Upload / Replace Reports** once. Upload all 4 reports; after processing, they are saved and date changes will work without uploading again.")
     else:
         st.info("Saved source reports are available. Select a reporting period above.")
 
