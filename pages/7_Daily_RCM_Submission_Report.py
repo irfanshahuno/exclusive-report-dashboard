@@ -1387,6 +1387,17 @@ def _build_daily_rcm_email(result: Dict[str, object]) -> str:
           <div style="font-size:13px;font-weight:700;color:#a8c1df;margin-top:6px;">{html.escape(CENTERS.get(center_key, center_key))}</div>
         </div>
         <div class="content-pad" style="padding:18px 22px;">
+          <div style="font-size:17px;font-weight:900;color:#0B2342;margin:0 0 8px 0;">Patient Footfall &amp; Insurance Value</div>
+          <table role="presentation" class="kpi-table" style="width:100%;border-collapse:separate;border-spacing:8px;table-layout:fixed;">
+            <tr>
+              <td class="kpi-cell" style="width:25%;background:#eef6ff;padding:14px;border-radius:10px;"><div style="font-size:11px;font-weight:800;color:#4b6380;text-transform:uppercase;">Total Patients</div><div class="kpi-amount" style="font-size:26px;font-weight:900;color:#071a5d;margin-top:5px;">{int(result.get('registration_count', 0) or 0):,}</div><div style="font-size:12px;font-weight:700;color:#64748b;margin-top:4px;">Registration report · unique Visit No</div></td>
+              <td class="kpi-cell" style="width:25%;background:#f1f0ff;padding:14px;border-radius:10px;"><div style="font-size:11px;font-weight:800;color:#4b6380;text-transform:uppercase;">Submission Net Insurance</div><div class="kpi-amount" style="font-size:26px;font-weight:900;color:#071a5d;margin-top:5px;">AED {total_a:,.2f}</div><div style="font-size:12px;font-weight:700;color:#64748b;margin-top:4px;">{total_n:,} claims in submission report</div></td>
+              <td class="kpi-cell" style="width:25%;background:#ecf9f1;padding:14px;border-radius:10px;"><div style="font-size:11px;font-weight:800;color:#4b6380;text-transform:uppercase;">Total Referrals</div><div class="kpi-amount" style="font-size:26px;font-weight:900;color:#071a5d;margin-top:5px;">{int(result.get('referral_count', 0) or 0):,}</div><div style="font-size:12px;font-weight:700;color:#64748b;margin-top:4px;">Unique referral Visit No</div></td>
+              <td class="kpi-cell" style="width:25%;background:#fff7e6;padding:14px;border-radius:10px;"><div style="font-size:11px;font-weight:800;color:#4b6380;text-transform:uppercase;">Pharmacy Revenue</div><div style="font-size:19px;font-weight:900;color:#071a5d;margin-top:6px;line-height:1.15;">Integration in Progress</div><div style="font-size:12px;font-weight:700;color:#64748b;margin-top:5px;">Pharmacy revenue amount coming soon</div></td>
+            </tr>
+          </table>
+
+          <div style="font-size:17px;font-weight:900;color:#0B2342;margin:18px 0 8px 0;">RCM Submission Pipeline</div>
           <table role="presentation" class="kpi-table" style="width:100%;border-collapse:separate;border-spacing:8px;table-layout:fixed;">
             <tr>
               <td class="kpi-cell" style="width:33.333%;background:#eef8ff;padding:14px;border-radius:10px;"><div style="font-size:12px;font-weight:800;color:#4b6380;text-transform:uppercase;">Total Claims</div><div class="kpi-amount" style="font-size:27px;font-weight:900;color:#071a5d;margin-top:5px;">AED {total_a:,.2f}</div><div style="font-size:13px;font-weight:700;color:#64748b;margin-top:4px;">{total_n:,} claims</div></td>
