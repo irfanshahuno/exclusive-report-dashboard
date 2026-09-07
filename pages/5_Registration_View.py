@@ -313,35 +313,31 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
         bg, accent = KPI_STYLES[style_key]
 
         if focus:
-            badge = (
-                "<span style='display:inline-block;background:#1976FF;color:#FFFFFF;"
-                "font-size:8px;font-weight:800;padding:3px 7px;border-radius:10px;"
-                "margin-left:5px;vertical-align:1px;'>KEY KPI</span>"
-            )
+            badge = ""
             note_html = (
-                f"<div style='font-size:9px;color:#18345F;font-weight:700;"
-                f"margin-top:4px;line-height:1.1;'>{note}</div>"
+                f"<div style='font-size:7px;color:#526987;font-weight:700;"
+                f"margin-top:4px;line-height:1;white-space:nowrap;'>{note}</div>"
                 if note else ""
             )
             return f"""
             <td width="20%" valign="top" style="padding:4px;">
               <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
                      style="border-collapse:separate;background:{bg};
-                            border:2px solid {accent};
-                            box-shadow:0 2px 8px rgba(25,118,255,0.16);">
+                            border:2px solid {accent};border-left:5px solid {accent};
+                            box-shadow:0 2px 6px rgba(25,118,255,0.12);">
                 <tr>
                   <td width="34" valign="middle"
-                      style="padding:10px 4px 9px 8px;text-align:center;
-                             font-size:22px;line-height:1;">{icon}</td>
-                  <td valign="middle" style="padding:8px 7px 8px 3px;">
+                      style="padding:9px 4px 8px 8px;text-align:center;
+                             font-size:20px;line-height:1;">{icon}</td>
+                  <td valign="middle" style="padding:8px 6px 8px 3px;">
                     <div style="font-family:Segoe UI,Arial,sans-serif;
-                                color:#17335B;font-size:9px;font-weight:800;
+                                color:#17335B;font-size:8px;font-weight:800;
                                 text-transform:uppercase;line-height:1.05;
                                 margin-bottom:4px;white-space:nowrap;">
-                      {label}{badge}
+                      {label}
                     </div>
                     <div style="font-family:Segoe UI,Arial,sans-serif;
-                                color:#0B2342;font-size:27px;font-weight:900;
+                                color:#0B2342;font-size:25px;font-weight:900;
                                 line-height:1;">{val}</div>
                     {note_html}
                   </td>
@@ -365,7 +361,7 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
                          font-size:20px;line-height:1;">{icon}</td>
               <td valign="middle" style="padding:8px 5px 8px 2px;">
                 <div style="font-family:Segoe UI,Arial,sans-serif;
-                            color:#17335B;font-size:9px;font-weight:800;
+                            color:#17335B;font-size:8px;font-weight:800;
                             text-transform:uppercase;line-height:1.05;
                             margin-bottom:4px;white-space:nowrap;">{label}</div>
                 <div style="font-family:Segoe UI,Arial,sans-serif;
