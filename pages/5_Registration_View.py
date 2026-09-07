@@ -302,15 +302,53 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     # Keeps the colored "new" style but at the same compact scale as the older email.
     KPI_STYLES = {
         "blue":   ("#EFF8FF", "#2E86C1"),
-        "focus":  ("#F4F8FF", "#1976FF"),
+        "focus":  ("#EAF2FF", "#1976FF"),
         "green":  ("#EFFBF3", "#27AE60"),
         "yellow": ("#FFF9E8", "#E6B84A"),
         "purple": ("#F7F1FF", "#8E44AD"),
         "red":    ("#FFF2F4", "#E66778"),
     }
 
-    def _kpi_card(label, val, icon, style_key="blue", note=""):
+    def _kpi_card(label, val, icon, style_key="blue", note="", focus=False):
         bg, accent = KPI_STYLES[style_key]
+
+        if focus:
+            badge = (
+                "<span style='display:inline-block;background:#1976FF;color:#FFFFFF;"
+                "font-size:8px;font-weight:800;padding:3px 7px;border-radius:10px;"
+                "margin-left:5px;vertical-align:1px;'>KEY KPI</span>"
+            )
+            note_html = (
+                f"<div style='font-size:9px;color:#18345F;font-weight:700;"
+                f"margin-top:4px;line-height:1.1;'>{note}</div>"
+                if note else ""
+            )
+            return f"""
+            <td width="20%" valign="top" style="padding:4px;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+                     style="border-collapse:separate;background:{bg};
+                            border:2px solid {accent};
+                            box-shadow:0 2px 8px rgba(25,118,255,0.16);">
+                <tr>
+                  <td width="34" valign="middle"
+                      style="padding:10px 4px 9px 8px;text-align:center;
+                             font-size:22px;line-height:1;">{icon}</td>
+                  <td valign="middle" style="padding:8px 7px 8px 3px;">
+                    <div style="font-family:Segoe UI,Arial,sans-serif;
+                                color:#17335B;font-size:9px;font-weight:800;
+                                text-transform:uppercase;line-height:1.05;
+                                margin-bottom:4px;white-space:nowrap;">
+                      {label}{badge}
+                    </div>
+                    <div style="font-family:Segoe UI,Arial,sans-serif;
+                                color:#0B2342;font-size:27px;font-weight:900;
+                                line-height:1;">{val}</div>
+                    {note_html}
+                  </td>
+                </tr>
+              </table>
+            </td>"""
+
         note_html = (
             f"<div style='font-size:8px;color:#18345F;font-weight:700;"
             f"margin-top:3px;line-height:1.1;'>{note}</div>"
@@ -362,17 +400,13 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
            style="width:100%;border-collapse:collapse;table-layout:fixed;">
       <tr>
         {_kpi_card("Total Visits", total_visits, "👥", "blue")}
-        {_kpi_card("Patient Avg / Day", f"{patient_avg:.1f}", "📈", "focus")}
+        {_kpi_card("Patient Avg / Day", f"{patient_avg:.1f}", "📈", "focus", "(Including Family Medicine)", True)}
         {_kpi_card("New Patients", new_patients, "🧑‍⚕️", "green")}
         {_kpi_card("Established", established, "👨‍👩‍👦", "yellow")}
         {_kpi_card("Follow Up", follow_up, "🗓️", "purple")}
         {_kpi_card("Pending", pending_patients, "🕒", "red")}
       </tr>
     </table>
-    <div style="font-size:8px;color:#18345F;font-weight:700;
-                text-align:center;margin-top:1px;">
-      Patient Avg / Day includes Family Medicine
-    </div>
   </div>
 
   <!-- Tables -->
