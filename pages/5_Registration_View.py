@@ -290,46 +290,81 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     df_ins = _safe_df(dfs.get("Income | Insurance Wise Revenue"))
     df_dx  = _safe_df(dfs.get("Income | Doctor x Insurance Revenue"))
 
-    CARD_ACCENTS = ["#2E86C1", "#27AE60", "#16A085", "#E67E22", "#8E44AD"]
+    # Patient average is stored in KPI for day/week/month views.
+    # Fallback keeps the email safe for older saved summaries.
+    reporting_days = _num(_kpi_value("Reporting Days", 1), 1) or 1
+    patient_avg = _num(
+        _kpi_value("Patient Avg / Day", (total_visits / reporting_days if reporting_days else 0)),
+        0,
+    )
 
-    def _kpi_card(label, val, idx=0):
-        accent = CARD_ACCENTS[idx % len(CARD_ACCENTS)]
-        return (
-            f"<td style='padding:5px;'>"
-            f"<div style='background:#ffffff;border-top:3px solid {accent};"
-            f"border-radius:0 0 8px 8px;padding:12px 16px 14px 16px;"
-            f"box-shadow:0 2px 8px rgba(10,38,71,0.10);'>"
-            f"<div style='color:#34495E;font-size:11px;font-weight:700;"
-            f"text-transform:uppercase;letter-spacing:0.6px;margin-bottom:8px;'>{label}</div>"
-            f"<div style='color:#0B2342;font-size:26px;font-weight:900;"
-            f"letter-spacing:-0.5px;line-height:1;'>{val}</div>"
-            f"</div></td>"
+    # Email-safe KPI cards. Table-based layout is intentional because Outlook
+    # renders it much more reliably than CSS grid/flex/gradients.
+    KPI_STYLES = {
+        "blue":   ("#EFF8FF", "#CFE9FF", "1px"),
+        "focus":  ("#F4F8FF", "#1976FF", "2px"),
+        "green":  ("#EFFBF3", "#D3F2DC", "1px"),
+        "yellow": ("#FFF9E8", "#F7E7B9", "1px"),
+        "purple": ("#F7F1FF", "#E7D9FF", "1px"),
+        "red":    ("#FFF2F4", "#FFD5DC", "1px"),
+    }
+
+    def _kpi_card(label, val, icon, style_key="blue", note=""):
+        bg, border, border_w = KPI_STYLES[style_key]
+        note_html = (
+            f"<div style='font-size:11px;color:#081A57;font-weight:800;"
+            f"margin-top:5px;line-height:1.15;'>{note}</div>"
+            if note else ""
         )
+        return f"""
+        <td width="33.33%" valign="middle" style="padding:6px;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+                 style="border-collapse:separate;background:{bg};
+                        border:{border_w} solid {border};border-radius:15px;">
+            <tr>
+              <td width="64" valign="middle"
+                  style="padding:18px 8px 18px 18px;text-align:center;
+                         font-size:31px;line-height:1;">{icon}</td>
+              <td valign="middle" style="padding:15px 14px 15px 4px;">
+                <div style="font-family:Segoe UI,Arial,sans-serif;
+                            color:#0B2A63;font-size:13px;font-weight:800;
+                            line-height:1.15;margin-bottom:6px;">{label}</div>
+                <div style="font-family:Segoe UI,Arial,sans-serif;
+                            color:#081A57;font-size:30px;font-weight:900;
+                            line-height:1;letter-spacing:-0.5px;">{val}</div>
+                {note_html}
+              </td>
+            </tr>
+          </table>
+        </td>"""
 
     parts = [f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
-<body style="margin:0;padding:0;background:#f0f4f8;font-family:Segoe UI,Inter,Arial,sans-serif;">
-<div style="max-width:900px;margin:20px auto;border-radius:12px;
-     box-shadow:0 8px 30px rgba(10,38,71,0.13);overflow:hidden;">
+<body style="margin:0;padding:0;background:#ffffff;font-family:Segoe UI,Arial,sans-serif;">
+<div style="max-width:980px;margin:0 auto;">
 
   <!-- Header -->
   <div style="background:#0B2342;padding:16px 22px;">
-    <div style="color:#ffffff;font-size:17px;font-weight:900;letter-spacing:-0.02em;">
+    <div style="color:#ffffff;font-size:17px;font-weight:900;">
       📌 EMC Income Analysis Report
     </div>
-    <div style="color:#7fa8d4;font-size:11px;margin-top:4px;">
+    <div style="color:#A8C3DF;font-size:11px;margin-top:4px;">
       {picked_label} &nbsp;·&nbsp; Generated: {pd.Timestamp.now().strftime('%d %b %Y %H:%M')}
     </div>
   </div>
 
-  <!-- KPI Cards -->
-  <div style="background:#f0f4f8;padding:16px 12px 12px 12px;">
-    <table style="width:100%;border-collapse:collapse;">
+  <!-- KPI Cards: same 3 x 2 visual style as the Streamlit dashboard -->
+  <div style="background:#ffffff;padding:14px 14px 8px 14px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+           style="width:100%;border-collapse:collapse;">
       <tr>
-        {_kpi_card("Total Visits", total_visits, 0)}
-        {_kpi_card("New Patients", new_patients, 1)}
-        {_kpi_card("Established Patients", established, 2)}
-        {_kpi_card("Follow Up", follow_up, 3)}
-        {_kpi_card("Pending Patients", pending_patients, 4)}
+        {_kpi_card("Total Visits", total_visits, "👥", "blue")}
+        {_kpi_card("Patient Avg / Day", f"{patient_avg:.1f}", "📈", "focus", "(Including Family Medicine)")}
+        {_kpi_card("New Patients", new_patients, "🧑‍⚕️", "green")}
+      </tr>
+      <tr>
+        {_kpi_card("Established Patients", established, "👨‍👩‍👦", "yellow")}
+        {_kpi_card("Follow Up", follow_up, "🗓️", "purple")}
+        {_kpi_card("Pending Patients", pending_patients, "🕒", "red")}
       </tr>
     </table>
   </div>
