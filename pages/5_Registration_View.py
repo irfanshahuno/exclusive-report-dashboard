@@ -315,7 +315,7 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
         if focus:
             badge = ""
             note_html = (
-                f"<div style='font-size:7px;color:#526987;font-weight:700;"
+                f"<div style='font-size:8px;color:#526987;font-weight:700;"
                 f"margin-top:4px;line-height:1;white-space:nowrap;'>{note}</div>"
                 if note else ""
             )
@@ -327,9 +327,9 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
                             box-shadow:0 2px 6px rgba(25,118,255,0.12);">
                 <tr>
                   <td width="34" valign="middle"
-                      style="padding:9px 4px 8px 8px;text-align:center;
+                      style="padding:7px 4px 7px 8px;text-align:center;
                              font-size:20px;line-height:1;">{icon}</td>
-                  <td valign="middle" style="padding:8px 6px 8px 3px;">
+                  <td valign="middle" style="padding:7px 6px 7px 3px;">
                     <div style="font-family:Segoe UI,Arial,sans-serif;
                                 color:#17335B;font-size:8px;font-weight:800;
                                 text-transform:uppercase;line-height:1.05;
@@ -337,7 +337,7 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
                       {label}
                     </div>
                     <div style="font-family:Segoe UI,Arial,sans-serif;
-                                color:#0B2342;font-size:25px;font-weight:900;
+                                color:#0B2342;font-size:24px;font-weight:900;
                                 line-height:1;">{val}</div>
                     {note_html}
                   </td>
@@ -396,7 +396,7 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
            style="width:100%;border-collapse:collapse;table-layout:fixed;">
       <tr>
         {_kpi_card("Total Visits", total_visits, "👥", "blue")}
-        {_kpi_card("Patient Avg / Day", f"{patient_avg:.1f}", "📈", "focus", "(Including Family Medicine)", True)}
+        {_kpi_card("Patient Avg/Day", f"{patient_avg:.1f}", "📈", "focus", "Including Family Medicine", True)}
         {_kpi_card("New Patients", new_patients, "🧑‍⚕️", "green")}
         {_kpi_card("Established", established, "👨‍👩‍👦", "yellow")}
         {_kpi_card("Follow Up", follow_up, "🗓️", "purple")}
