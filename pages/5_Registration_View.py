@@ -298,40 +298,41 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
         0,
     )
 
-    # Email-safe KPI cards. Table-based layout is intentional because Outlook
-    # renders it much more reliably than CSS grid/flex/gradients.
+    # Compact email-safe KPI cards.
+    # Keeps the colored "new" style but at the same compact scale as the older email.
     KPI_STYLES = {
-        "blue":   ("#EFF8FF", "#CFE9FF", "1px"),
-        "focus":  ("#F4F8FF", "#1976FF", "2px"),
-        "green":  ("#EFFBF3", "#D3F2DC", "1px"),
-        "yellow": ("#FFF9E8", "#F7E7B9", "1px"),
-        "purple": ("#F7F1FF", "#E7D9FF", "1px"),
-        "red":    ("#FFF2F4", "#FFD5DC", "1px"),
+        "blue":   ("#EFF8FF", "#2E86C1"),
+        "focus":  ("#F4F8FF", "#1976FF"),
+        "green":  ("#EFFBF3", "#27AE60"),
+        "yellow": ("#FFF9E8", "#E6B84A"),
+        "purple": ("#F7F1FF", "#8E44AD"),
+        "red":    ("#FFF2F4", "#E66778"),
     }
 
     def _kpi_card(label, val, icon, style_key="blue", note=""):
-        bg, border, border_w = KPI_STYLES[style_key]
+        bg, accent = KPI_STYLES[style_key]
         note_html = (
-            f"<div style='font-size:11px;color:#081A57;font-weight:800;"
-            f"margin-top:5px;line-height:1.15;'>{note}</div>"
+            f"<div style='font-size:8px;color:#18345F;font-weight:700;"
+            f"margin-top:3px;line-height:1.1;'>{note}</div>"
             if note else ""
         )
         return f"""
-        <td width="33.33%" valign="middle" style="padding:6px;">
+        <td valign="top" style="padding:4px;">
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
                  style="border-collapse:separate;background:{bg};
-                        border:{border_w} solid {border};border-radius:15px;">
+                        border:1px solid #E2E8F0;border-top:3px solid {accent};">
             <tr>
-              <td width="64" valign="middle"
-                  style="padding:18px 8px 18px 18px;text-align:center;
-                         font-size:31px;line-height:1;">{icon}</td>
-              <td valign="middle" style="padding:15px 14px 15px 4px;">
+              <td width="30" valign="middle"
+                  style="padding:9px 3px 8px 7px;text-align:center;
+                         font-size:20px;line-height:1;">{icon}</td>
+              <td valign="middle" style="padding:8px 5px 8px 2px;">
                 <div style="font-family:Segoe UI,Arial,sans-serif;
-                            color:#0B2A63;font-size:13px;font-weight:800;
-                            line-height:1.15;margin-bottom:6px;">{label}</div>
+                            color:#17335B;font-size:9px;font-weight:800;
+                            text-transform:uppercase;line-height:1.05;
+                            margin-bottom:4px;white-space:nowrap;">{label}</div>
                 <div style="font-family:Segoe UI,Arial,sans-serif;
-                            color:#081A57;font-size:30px;font-weight:900;
-                            line-height:1;letter-spacing:-0.5px;">{val}</div>
+                            color:#0B2342;font-size:22px;font-weight:900;
+                            line-height:1;">{val}</div>
                 {note_html}
               </td>
             </tr>
@@ -339,34 +340,39 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
         </td>"""
 
     parts = [f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
-<body style="margin:0;padding:0;background:#ffffff;font-family:Segoe UI,Arial,sans-serif;">
-<div style="max-width:980px;margin:0 auto;">
+<body style="margin:0;padding:0;background:#f0f4f8;font-family:Segoe UI,Arial,sans-serif;">
+<div style="max-width:900px;margin:20px auto;border-radius:12px;
+     box-shadow:0 8px 30px rgba(10,38,71,0.13);overflow:hidden;">
 
   <!-- Header -->
-  <div style="background:#0B2342;padding:16px 22px;">
+  <div style="background:#0B2342;padding:8px 12px;">
     <div style="color:#ffffff;font-size:17px;font-weight:900;">
       📌 EMC Income Analysis Report
     </div>
-    <div style="color:#A8C3DF;font-size:11px;margin-top:4px;">
+  </div>
+  <div style="background:#0B2342;padding:3px 0 3px 0;margin-top:6px;">
+    <div style="color:#A8C3DF;font-size:11px;">
       {picked_label} &nbsp;·&nbsp; Generated: {pd.Timestamp.now().strftime('%d %b %Y %H:%M')}
     </div>
   </div>
 
-  <!-- KPI Cards: same 3 x 2 visual style as the Streamlit dashboard -->
-  <div style="background:#ffffff;padding:14px 14px 8px 14px;">
+  <!-- Compact KPI Cards -->
+  <div style="background:#f0f4f8;padding:12px 8px 4px 8px;">
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
-           style="width:100%;border-collapse:collapse;">
+           style="width:100%;border-collapse:collapse;table-layout:fixed;">
       <tr>
         {_kpi_card("Total Visits", total_visits, "👥", "blue")}
-        {_kpi_card("Patient Avg / Day", f"{patient_avg:.1f}", "📈", "focus", "(Including Family Medicine)")}
+        {_kpi_card("Patient Avg / Day", f"{patient_avg:.1f}", "📈", "focus")}
         {_kpi_card("New Patients", new_patients, "🧑‍⚕️", "green")}
-      </tr>
-      <tr>
-        {_kpi_card("Established Patients", established, "👨‍👩‍👦", "yellow")}
+        {_kpi_card("Established", established, "👨‍👩‍👦", "yellow")}
         {_kpi_card("Follow Up", follow_up, "🗓️", "purple")}
-        {_kpi_card("Pending Patients", pending_patients, "🕒", "red")}
+        {_kpi_card("Pending", pending_patients, "🕒", "red")}
       </tr>
     </table>
+    <div style="font-size:8px;color:#18345F;font-weight:700;
+                text-align:center;margin-top:1px;">
+      Patient Avg / Day includes Family Medicine
+    </div>
   </div>
 
   <!-- Tables -->
