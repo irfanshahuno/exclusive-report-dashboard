@@ -28,6 +28,40 @@ import pandas as pd
 import streamlit as st
 
 
+def _get_income_df(dfs: dict, kind: str) -> pd.DataFrame:
+    """Find income tables even if their saved key wording changed slightly."""
+    if not isinstance(dfs, dict):
+        return pd.DataFrame()
+
+    exact = {
+        "doctor": "Income | Doctor Wise Revenue",
+        "insurance": "Income | Insurance Wise Revenue",
+        "doctor_insurance": "Income | Doctor x Insurance Revenue",
+    }
+    key = exact.get(kind)
+    if key in dfs and isinstance(dfs.get(key), pd.DataFrame):
+        return dfs.get(key)
+
+    # Flexible fallback for older/newer saved summaries.
+    def norm(s):
+        return re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()
+
+    for k, v in dfs.items():
+        if not isinstance(v, pd.DataFrame):
+            continue
+        nk = norm(k)
+        if "income" not in nk:
+            continue
+        if kind == "doctor" and "doctor" in nk and "insurance" not in nk and "revenue" in nk:
+            return v
+        if kind == "insurance" and "insurance" in nk and "doctor" not in nk and "revenue" in nk:
+            return v
+        if kind == "doctor_insurance" and "doctor" in nk and "insurance" in nk and "revenue" in nk:
+            return v
+
+    return pd.DataFrame()
+
+
 # ==========================
 # Email helpers (SMTP)
 # ==========================
@@ -286,9 +320,9 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
     unclassified     = int(_num(_kpi_value("Unclassified Visits", 0)) or 0)
     pending_patients = int(_num(_kpi_value("Pending Patients", 0)) or 0)
 
-    df_doc = _safe_df(dfs.get("Income | Doctor Wise Revenue"))
-    df_ins = _safe_df(dfs.get("Income | Insurance Wise Revenue"))
-    df_dx  = _safe_df(dfs.get("Income | Doctor x Insurance Revenue"))
+    df_doc = _safe_df(_get_income_df(dfs, "doctor"))
+    df_ins = _safe_df(_get_income_df(dfs, "insurance"))
+    df_dx  = _safe_df(_get_income_df(dfs, "doctor_insurance"))
 
     # Patient average is stored in KPI for day/week/month views.
     # Fallback keeps the email safe for older saved summaries.
@@ -672,9 +706,9 @@ def _build_income_excel(dfs: dict, period_label: str) -> bytes:
         out = out[ordered + remaining]
         return out
 
-    df_doc = _clean_df(_recompute_income_metrics(dfs.get("Income | Doctor Wise Revenue")))
-    df_ins = _clean_df(_recompute_income_metrics(dfs.get("Income | Insurance Wise Revenue")))
-    df_dx  = _clean_df(_recompute_income_metrics(dfs.get("Income | Doctor x Insurance Revenue")))
+    df_doc = _clean_df(_recompute_income_metrics(_get_income_df(dfs, "doctor")))
+    df_ins = _clean_df(_recompute_income_metrics(_get_income_df(dfs, "insurance")))
+    df_dx  = _clean_df(_recompute_income_metrics(_get_income_df(dfs, "doctor_insurance")))
 
     buf = _io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -1904,6 +1938,25 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
             try:
                 _report_dt = pd.to_datetime(day_ts)
                 _fname = _report_dt.strftime("EMC - INCOME ANALYSIS REPORT - %d %B %Y.xlsx")
+                _email_doc = _get_income_df(dfs, "doctor")
+                _email_ins = _get_income_df(dfs, "insurance")
+                _email_dx  = _get_income_df(dfs, "doctor_insurance")
+
+                _missing_income = []
+                if _email_doc is None or _email_doc.empty:
+                    _missing_income.append("Doctor Wise Revenue")
+                if _email_ins is None or _email_ins.empty:
+                    _missing_income.append("Insurance Wise Revenue")
+                if _email_dx is None or _email_dx.empty:
+                    _missing_income.append("Doctor x Insurance Revenue")
+
+                if _missing_income:
+                    raise ValueError(
+                        "Income tables are missing from the saved summary for this date: "
+                        + ", ".join(_missing_income)
+                        + ". Please regenerate/save the Registration Summary for this date before emailing."
+                    )
+
                 _excel_bytes = _build_income_excel(dfs, title)
                 _html_body = _dfs_to_html(dfs, "Income Analysis (Doctor Revenue)", title)
                 _subject = f"EMC Income Analysis Report – {title}"
@@ -2037,9 +2090,9 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                 ("Procedure Count", int(pd.to_numeric(_sv.get("Procedure Count", 0), errors="coerce") or 0)),
             ], compact=True)
 
-        df_doc = _recompute_income_metrics(dfs.get("Income | Doctor Wise Revenue"))
-        df_ins = _recompute_income_metrics(dfs.get("Income | Insurance Wise Revenue"))
-        df_dx  = _recompute_income_metrics(dfs.get("Income | Doctor x Insurance Revenue"))
+        df_doc = _recompute_income_metrics(_get_income_df(dfs, "doctor"))
+        df_ins = _recompute_income_metrics(_get_income_df(dfs, "insurance"))
+        df_dx  = _recompute_income_metrics(_get_income_df(dfs, "doctor_insurance"))
 
         def _add_proc_rad_per_visit(df: pd.DataFrame) -> pd.DataFrame:
             """Override Procedure/Radiology per-visit values for display (Procedure/Visits, Radiology/Visits).
@@ -2375,7 +2428,7 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
                     expected_visits = None
 
             if expected_visits is None:
-                df_income_dx = dfs.get("Income | Doctor x Insurance Revenue")
+                df_income_dx = _get_income_df(dfs, "doctor_insurance")
                 if isinstance(df_income_dx, pd.DataFrame) and not df_income_dx.empty and "Total_Visit" in df_income_dx.columns:
                     tmp = df_income_dx.copy()
                     if pick_doc != "All" and "Doctor" in tmp.columns:
