@@ -389,9 +389,82 @@ def clean_amount(series: pd.Series) -> pd.Series:
 
 
 def parse_date_series(series: pd.Series) -> pd.Series:
-    s1 = pd.to_datetime(series, errors="coerce", dayfirst=False)
-    s2 = pd.to_datetime(series, errors="coerce", dayfirst=True)
-    return s2 if s2.notna().sum() >= s1.notna().sum() else s1
+    """
+    Robust date parser for all four source reports.
+
+    Handles:
+    - real Excel/Pandas datetimes
+    - Excel serial date numbers
+    - DD-MM-YYYY HH:MM AM/PM (Registration report)
+    - DD/MM/YYYY and YYYY-MM-DD variants
+    - mixed date columns
+    """
+    if series is None:
+        return pd.Series(dtype="datetime64[ns]")
+
+    s = series.copy()
+
+    # Start with an empty datetime series preserving the original index.
+    out = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
+
+    # 1) Preserve already-datetime values.
+    dt_mask = s.map(lambda x: isinstance(x, (pd.Timestamp, datetime, date)))
+    if dt_mask.any():
+        out.loc[dt_mask] = pd.to_datetime(s.loc[dt_mask], errors="coerce")
+
+    # 2) Excel serial dates, usually around 40,000-60,000.
+    num = pd.to_numeric(s, errors="coerce")
+    serial_mask = out.isna() & num.between(20000, 80000)
+    if serial_mask.any():
+        out.loc[serial_mask] = pd.to_datetime(
+            num.loc[serial_mask],
+            unit="D",
+            origin="1899-12-30",
+            errors="coerce",
+        )
+
+    remaining = out.isna()
+    if not remaining.any():
+        return out
+
+    txt = s.loc[remaining].astype(str).str.strip()
+    txt = txt.replace({"": None, "nan": None, "NaN": None, "None": None, "NaT": None})
+
+    # 3) Registration export's normal format: 06-09-2026 05:23 PM
+    explicit_formats = [
+        "%d-%m-%Y %I:%M %p",
+        "%d-%m-%Y %H:%M",
+        "%d-%m-%Y",
+        "%d/%m/%Y %I:%M %p",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+    ]
+
+    parsed = pd.Series(pd.NaT, index=txt.index, dtype="datetime64[ns]")
+    for fmt in explicit_formats:
+        need = parsed.isna() & txt.notna()
+        if not need.any():
+            break
+        parsed.loc[need] = pd.to_datetime(txt.loc[need], format=fmt, errors="coerce")
+
+    # 4) Final mixed-format fallback. Prefer day-first because the Registration
+    # export is DD-MM-YYYY.
+    need = parsed.isna() & txt.notna()
+    if need.any():
+        try:
+            parsed.loc[need] = pd.to_datetime(
+                txt.loc[need], errors="coerce", dayfirst=True, format="mixed"
+            )
+        except TypeError:
+            parsed.loc[need] = pd.to_datetime(
+                txt.loc[need], errors="coerce", dayfirst=True
+            )
+
+    out.loc[remaining] = parsed
+    return out
 
 
 # =========================================================
@@ -635,16 +708,69 @@ def _filter_by_day(df: pd.DataFrame, date_col: str, selected_day) -> pd.DataFram
 
 
 def registration_patient_count(reg_df: pd.DataFrame, selected_day) -> int:
+    """
+    Count unique Registration Visit No for the EXACT selected From/To period.
+
+    This deliberately recalculates from the saved Registration source every
+    time the reporting period changes; it does not reuse a previous patient KPI.
+    """
     if reg_df is None or reg_df.empty:
         return 0
+
     c_visit = find_col(reg_df, ["Visit No", "VisitNo", "Visit ID", "VisitID"])
-    c_date = find_col(reg_df, ["Reg:Date", "Reg Date", "Registration Date", "RegistrationDate", "Date"])
+    c_date = find_col(
+        reg_df,
+        ["Reg:Date", "Reg Date", "Registration Date", "RegistrationDate", "Date"],
+    )
     if not c_visit or not c_date:
         raise ValueError("Registration report must contain Visit No and Reg:Date.")
-    d = _filter_by_day(reg_df, c_date, selected_day)
-    visits = d[c_visit].fillna("").astype(str).str.strip()
+
+    dates = parse_date_series(reg_df[c_date]).dt.normalize()
+    start, end = _date_bounds(selected_day)
+    if start is None:
+        mask = dates.notna()
+    else:
+        mask = dates.between(start, end, inclusive="both")
+
+    visits = (
+        reg_df.loc[mask, c_visit]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
     visits = visits[~visits.str.lower().isin(["", "nan", "none"])]
-    return int(visits.nunique())
+
+    count = int(visits.nunique())
+
+    # Extra fallback specifically for Registration exports stored as text.
+    # Example: "06-09-2026 05:23 PM". This prevents a zero count if pandas
+    # encounters an unusual mixed-format cell in the saved source workbook.
+    if count == 0 and start is not None:
+        raw = reg_df[c_date].fillna("").astype(str).str.strip()
+        extracted = raw.str.extract(
+            r"(?P<d>\d{1,2})[-/](?P<m>\d{1,2})[-/](?P<y>\d{4})",
+            expand=True,
+        )
+        fallback_dates = pd.to_datetime(
+            {
+                "year": pd.to_numeric(extracted["y"], errors="coerce"),
+                "month": pd.to_numeric(extracted["m"], errors="coerce"),
+                "day": pd.to_numeric(extracted["d"], errors="coerce"),
+            },
+            errors="coerce",
+        ).dt.normalize()
+
+        fb_mask = fallback_dates.between(start, end, inclusive="both")
+        fb_visits = (
+            reg_df.loc[fb_mask, c_visit]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        fb_visits = fb_visits[~fb_visits.str.lower().isin(["", "nan", "none"])]
+        count = int(fb_visits.nunique())
+
+    return count
 
 
 def revenue_analysis(rev_df: pd.DataFrame, selected_day) -> Dict[str, object]:
@@ -1390,7 +1516,7 @@ def _build_daily_rcm_email(result: Dict[str, object]) -> str:
           <div style="font-size:17px;font-weight:900;color:#0B2342;margin:0 0 8px 0;">Patient Footfall &amp; Insurance Value</div>
           <table role="presentation" class="kpi-table" style="width:100%;border-collapse:separate;border-spacing:8px;table-layout:fixed;">
             <tr>
-              <td class="kpi-cell" style="width:25%;background:#eef6ff;padding:14px;border-radius:10px;"><div style="font-size:11px;font-weight:800;color:#4b6380;text-transform:uppercase;">Total Patients</div><div class="kpi-amount" style="font-size:26px;font-weight:900;color:#071a5d;margin-top:5px;">{int(result.get('registration_count', 0) or 0):,}</div><div style="font-size:12px;font-weight:700;color:#64748b;margin-top:4px;">Registration report · unique Visit No</div></td>
+              <td class="kpi-cell" style="width:25%;background:#eef6ff;padding:14px;border-radius:10px;"><div style="font-size:11px;font-weight:800;color:#4b6380;text-transform:uppercase;">Total Patients</div><div class="kpi-amount" style="font-size:26px;font-weight:900;color:#071a5d;margin-top:5px;">{int(result.get('registration_count', 0) or 0):,}</div><div style="font-size:12px;font-weight:700;color:#64748b;margin-top:4px;">Registration report · unique Visit No · selected period</div></td>
               <td class="kpi-cell" style="width:25%;background:#f1f0ff;padding:14px;border-radius:10px;"><div style="font-size:11px;font-weight:800;color:#4b6380;text-transform:uppercase;">Submission Net Insurance</div><div class="kpi-amount" style="font-size:26px;font-weight:900;color:#071a5d;margin-top:5px;">AED {total_a:,.2f}</div><div style="font-size:12px;font-weight:700;color:#64748b;margin-top:4px;">{total_n:,} claims in submission report</div></td>
               <td class="kpi-cell" style="width:25%;background:#ecf9f1;padding:14px;border-radius:10px;"><div style="font-size:11px;font-weight:800;color:#4b6380;text-transform:uppercase;">Total Referrals</div><div class="kpi-amount" style="font-size:26px;font-weight:900;color:#071a5d;margin-top:5px;">{int(result.get('referral_count', 0) or 0):,}</div><div style="font-size:12px;font-weight:700;color:#64748b;margin-top:4px;">Unique referral Visit No</div></td>
               <td class="kpi-cell" style="width:25%;background:#fff7e6;padding:14px;border-radius:10px;"><div style="font-size:11px;font-weight:800;color:#4b6380;text-transform:uppercase;">Pharmacy Revenue</div><div style="font-size:19px;font-weight:900;color:#071a5d;margin-top:6px;line-height:1.15;">Integration in Progress</div><div style="font-size:12px;font-weight:700;color:#64748b;margin-top:5px;">Pharmacy revenue amount coming soon</div></td>
@@ -1628,7 +1754,7 @@ def render_result(result: Dict[str, object]):
 
     st.markdown('<div class="rcm-section">Patient Footfall & Insurance Value</div>', unsafe_allow_html=True)
     kpi_cards([
-        ("Total Patients", f"{_patients:,}", "Registration report · unique Visit No", "P", "rcm-blue"),
+        ("Total Patients", f"{_patients:,}", "Registration report · unique Visit No · selected period", "P", "rcm-blue"),
         ("Submission Net Insurance", money(total_amount), f"{total_claims:,} claims in submission report", "Σ", "rcm-purple"),
         ("Total Referrals", f"{int(result.get('referral_count', 0) or 0):,}", "Unique referral Visit No", "R", "rcm-yellow"),
         ("Pharmacy Revenue", "Integration in Progress", "Pharmacy revenue amount coming soon", "Rx", "rcm-yellow"),
