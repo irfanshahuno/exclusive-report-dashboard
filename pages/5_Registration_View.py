@@ -62,6 +62,217 @@ def _get_income_df(dfs: dict, kind: str) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+
+# ==========================
+# Income recovery from saved S3 income.xlsx
+# ==========================
+def _email_norm_col(x: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(x).strip().lower())
+
+
+def _email_find_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    if df is None or not isinstance(df, pd.DataFrame):
+        return None
+    norm_map = {_email_norm_col(c): c for c in df.columns}
+    for cand in candidates:
+        k = _email_norm_col(cand)
+        if k in norm_map:
+            return norm_map[k]
+    for cand in candidates:
+        k = _email_norm_col(cand)
+        for nk, original in norm_map.items():
+            if k and k in nk:
+                return original
+    return None
+
+
+def _email_detect_income_header(df_raw: pd.DataFrame) -> Optional[int]:
+    required = ["doctor", "department", "insurance name", "visit no"]
+    for i in range(min(50, len(df_raw))):
+        row = df_raw.iloc[i].astype(str).str.strip().str.lower().tolist()
+        if all(any(term in cell for cell in row) for term in required):
+            return i
+    return None
+
+
+def _email_load_saved_income(income_bytes: bytes) -> Optional[pd.DataFrame]:
+    if not income_bytes:
+        return None
+    bio = io.BytesIO(income_bytes)
+    try:
+        raw = pd.read_excel(bio, sheet_name="Daily Collection Details", header=None)
+    except Exception:
+        bio.seek(0)
+        try:
+            raw = pd.read_excel(bio, sheet_name=0, header=None)
+        except Exception:
+            return None
+
+    hdr = _email_detect_income_header(raw)
+    if hdr is None:
+        return None
+
+    header = raw.iloc[hdr].astype(str).str.strip()
+    df = raw.iloc[hdr + 1:].copy()
+    df.columns = header
+    df = df.dropna(how="all").reset_index(drop=True)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def _email_build_income_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    """Rebuild the same 3 revenue tables produced by the uploader."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return {}
+
+    col_dept = _email_find_col(df, ["Department"])
+    col_doc = _email_find_col(df, ["Doctor"])
+    col_payer = _email_find_col(df, ["Insurance Name", "Insurance", "Payer", "Payer Name"])
+    col_visit = _email_find_col(df, ["Visit No", "VisitNo", "Visit ID", "VisitID"])
+    col_cons = _email_find_col(df, ["Consultation"])
+    col_lab = _email_find_col(df, ["Lab"])
+    col_rad = _email_find_col(df, ["Radiology", "Radiology Amount", "X-Ray", "Xray", "XRAY", "Ultrasound", "USG"])
+    col_proc = _email_find_col(df, ["Procedure"])
+
+    # Keep the uploader's strict spelling rule for the insurance amount field.
+    col_ins_amt = next((c for c in df.columns if _email_norm_col(c) == "insuance"), None)
+
+    needed = [col_doc, col_visit, col_cons, col_lab, col_proc, col_ins_amt]
+    if any(c is None for c in needed):
+        return {}
+
+    tmp = df.copy()
+    tmp[col_doc] = tmp[col_doc].fillna("").astype(str).str.strip()
+    tmp = tmp[~tmp[col_doc].str.lower().isin(["", "none", "nan"])].copy()
+
+    if col_dept:
+        tmp[col_dept] = tmp[col_dept].fillna("").astype(str).str.strip()
+
+    if col_payer:
+        tmp[col_payer] = tmp[col_payer].fillna("CASH").astype(str).str.strip().replace("", "CASH")
+
+    tmp[col_visit] = tmp[col_visit].fillna("").astype(str).str.strip()
+    tmp = tmp[tmp[col_visit] != ""].copy()
+
+    for c in [col_cons, col_lab, col_proc, col_ins_amt]:
+        tmp[c] = pd.to_numeric(tmp[c], errors="coerce").fillna(0.0)
+
+    if col_rad:
+        tmp[col_rad] = pd.to_numeric(tmp[col_rad], errors="coerce").fillna(0.0)
+    else:
+        tmp["_email_radiology"] = 0.0
+        col_rad = "_email_radiology"
+
+    tmp["_email_total_service"] = tmp[col_cons] + tmp[col_lab] + tmp[col_rad] + tmp[col_proc]
+    tmp["_email_total_insurance"] = tmp[col_ins_amt]
+
+    def _agg(group_cols):
+        g = tmp.groupby(group_cols, dropna=False).agg(
+            Consultation=(col_cons, "sum"),
+            Lab=(col_lab, "sum"),
+            Radiology=(col_rad, "sum"),
+            Procedure=(col_proc, "sum"),
+            Total_Visit=(col_visit, pd.Series.nunique),
+            Total_Amount_Service=("_email_total_service", "sum"),
+            Total_Amount_Insuance=("_email_total_insurance", "sum"),
+        ).reset_index()
+
+        denom = g["Total_Visit"].replace(0, pd.NA)
+        g["Avg_Amount_Service"] = (g["Total_Amount_Service"] / denom).fillna(0.0)
+        g["Avg_Amount_Insuance"] = (g["Total_Amount_Insuance"] / denom).fillna(0.0)
+
+        svc = g["Total_Amount_Service"].replace(0, pd.NA)
+        g["Lab_%"] = (g["Lab"] / svc * 100).fillna(0.0)
+        g["Radiology_%"] = (g["Radiology"] / svc * 100).fillna(0.0)
+        g["Procedure_%"] = (g["Procedure"] / svc * 100).fillna(0.0)
+        return g
+
+    if col_dept:
+        doctor = _agg([col_dept, col_doc]).rename(columns={col_dept: "Department", col_doc: "Doctor"})
+    else:
+        doctor = _agg([col_doc]).rename(columns={col_doc: "Doctor"})
+
+    insurance = pd.DataFrame()
+    doctor_ins = pd.DataFrame()
+    if col_payer:
+        insurance = _agg([col_payer]).rename(columns={col_payer: "Insurance"})
+        doctor_ins = _agg([col_doc, col_payer]).rename(columns={col_doc: "Doctor", col_payer: "Insurance"})
+
+    def _add_total(d, label_candidates):
+        if d is None or d.empty:
+            return d
+        row = {c: "" for c in d.columns}
+        for lc in label_candidates:
+            if lc in row:
+                row[lc] = "GRAND TOTAL"
+                break
+
+        numeric_sum_cols = [
+            "Consultation", "Lab", "Radiology", "Procedure",
+            "Total_Visit", "Total_Amount_Service", "Total_Amount_Insuance"
+        ]
+        for c in numeric_sum_cols:
+            if c in d.columns:
+                row[c] = pd.to_numeric(d[c], errors="coerce").fillna(0).sum()
+
+        visits = float(row.get("Total_Visit", 0) or 0)
+        svc = float(row.get("Total_Amount_Service", 0) or 0)
+        ins = float(row.get("Total_Amount_Insuance", 0) or 0)
+        row["Avg_Amount_Service"] = svc / visits if visits else 0.0
+        row["Avg_Amount_Insuance"] = ins / visits if visits else 0.0
+        row["Lab_%"] = float(row.get("Lab", 0) or 0) / svc * 100 if svc else 0.0
+        row["Radiology_%"] = float(row.get("Radiology", 0) or 0) / svc * 100 if svc else 0.0
+        row["Procedure_%"] = float(row.get("Procedure", 0) or 0) / svc * 100 if svc else 0.0
+        return pd.concat([d, pd.DataFrame([row])], ignore_index=True)
+
+    doctor = _add_total(doctor, ["Department", "Doctor"])
+    if not insurance.empty:
+        insurance = _add_total(insurance, ["Insurance"])
+    if not doctor_ins.empty:
+        doctor_ins = _add_total(doctor_ins, ["Doctor"])
+
+    result = {"Doctor Wise Revenue": doctor}
+    if not insurance.empty:
+        result["Insurance Wise Revenue"] = insurance
+    if not doctor_ins.empty:
+        result["Doctor x Insurance Revenue"] = doctor_ins
+    return result
+
+
+def _email_enrich_summary_from_saved_income(
+    s3, cfg: Dict[str, str], root_prefix: str, day_ts: pd.Timestamp, dfs: dict
+) -> dict:
+    """If summary.pkl lacks revenue tables, recover them from the day's income.xlsx."""
+    if not isinstance(dfs, dict):
+        return dfs
+
+    required = [
+        "Income | Doctor Wise Revenue",
+        "Income | Insurance Wise Revenue",
+        "Income | Doctor x Insurance Revenue",
+    ]
+    if all(isinstance(dfs.get(k), pd.DataFrame) and not dfs.get(k).empty for k in required):
+        return dfs
+
+    day_str = pd.to_datetime(day_ts).date().isoformat()
+    income_key = s3_key(root_prefix, day_str, "income.xlsx")
+    try:
+        income_bytes = s3_get_bytes(s3, cfg["S3_BUCKET_NAME"], income_key)
+    except Exception:
+        income_bytes = None
+
+    if not income_bytes:
+        return dfs
+
+    raw_income = _email_load_saved_income(income_bytes)
+    rebuilt = _email_build_income_tables(raw_income)
+    if rebuilt:
+        dfs = dict(dfs)
+        for k, v in rebuilt.items():
+            dfs[f"Income | {k}"] = v
+    return dfs
+
+
 # ==========================
 # Email helpers (SMTP)
 # ==========================
@@ -1905,7 +2116,9 @@ def load_summary_from_s3(
     if not b:
         return None
     try:
-        return pickle.loads(b)
+        dfs = pickle.loads(b)
+        dfs = _email_enrich_summary_from_saved_income(s3, cfg, root_prefix, day_ts, dfs)
+        return dfs
     except Exception:
         return None
 
@@ -1936,6 +2149,13 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
         st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
         if st.button("📧 Email Income Analysis", key=f"email_income_top_{label}_{str(day_ts.date())}"):
             try:
+                # Recover missing Income Analysis tables at CLICK TIME.
+                # This bypasses stale Streamlit/session cache and older loaded_summary data.
+                if "_email_enrich_summary_from_saved_income" in globals():
+                    dfs = _email_enrich_summary_from_saved_income(
+                        s3, cfg, root_prefix, pd.to_datetime(day_ts), dfs
+                    )
+
                 _report_dt = pd.to_datetime(day_ts)
                 _fname = _report_dt.strftime("EMC - INCOME ANALYSIS REPORT - %d %B %Y.xlsx")
                 _email_doc = _get_income_df(dfs, "doctor")
@@ -1952,9 +2172,9 @@ def render_summary(dfs: Dict[str, pd.DataFrame], day_ts: pd.Timestamp, heading: 
 
                 if _missing_income:
                     raise ValueError(
-                        "Income tables are missing from the saved summary for this date: "
+                        "Income Analysis source is not available for this date: "
                         + ", ".join(_missing_income)
-                        + ". Please regenerate/save the Registration Summary for this date before emailing."
+                        + ". Upload the Step 4 Daily Collection Details/Income Analysis file for this date and click Process & Save to S3 again."
                     )
 
                 _excel_bytes = _build_income_excel(dfs, title)
