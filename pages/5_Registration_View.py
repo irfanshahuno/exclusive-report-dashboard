@@ -320,8 +320,8 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
                 if note else ""
             )
             return f"""
-            <td width="20%" valign="top" style="padding:4px;">
-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+            <td class="kpi-cell" width="20%" valign="top" style="padding:4px;">
+              <table class="kpi-inner" role="presentation" width="100%" cellspacing="0" cellpadding="0"
                      style="border-collapse:separate;background:{bg};
                             border:2px solid {accent};border-left:5px solid {accent};
                             box-shadow:0 2px 6px rgba(25,118,255,0.12);">
@@ -330,13 +330,13 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
                       style="padding:6px 4px 6px 8px;text-align:center;
                              font-size:20px;line-height:1;">{icon}</td>
                   <td valign="middle" style="padding:6px 6px 6px 3px;">
-                    <div style="font-family:Segoe UI,Arial,sans-serif;
+                    <div class="kpi-title" style="font-family:Segoe UI,Arial,sans-serif;
                                 color:#17335B;font-size:8px;font-weight:800;
                                 text-transform:uppercase;line-height:1.05;
                                 margin-bottom:4px;white-space:nowrap;">
                       {label}
                     </div>
-                    <div style="font-family:Segoe UI,Arial,sans-serif;
+                    <div class="kpi-value" style="font-family:Segoe UI,Arial,sans-serif;
                                 color:#0B2342;font-size:24px;font-weight:900;
                                 line-height:1;">{val}</div>
                     {note_html}
@@ -351,8 +351,8 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
             if note else ""
         )
         return f"""
-        <td valign="top" style="padding:4px;">
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+        <td class="kpi-cell" valign="top" style="padding:4px;">
+          <table class="kpi-inner" role="presentation" width="100%" cellspacing="0" cellpadding="0"
                  style="border-collapse:separate;background:{bg};
                         border:1px solid #E2E8F0;border-top:3px solid {accent};">
             <tr>
@@ -360,11 +360,11 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
                   style="padding:9px 3px 8px 7px;text-align:center;
                          font-size:20px;line-height:1;">{icon}</td>
               <td valign="middle" style="padding:8px 5px 8px 2px;">
-                <div style="font-family:Segoe UI,Arial,sans-serif;
+                <div class="kpi-title" style="font-family:Segoe UI,Arial,sans-serif;
                             color:#17335B;font-size:8px;font-weight:800;
                             text-transform:uppercase;line-height:1.05;
                             margin-bottom:4px;white-space:nowrap;">{label}</div>
-                <div style="font-family:Segoe UI,Arial,sans-serif;
+                <div class="kpi-value" style="font-family:Segoe UI,Arial,sans-serif;
                             color:#0B2342;font-size:22px;font-weight:900;
                             line-height:1;">{val}</div>
                 {note_html}
@@ -373,26 +373,78 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
           </table>
         </td>"""
 
-    parts = [f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
+    parts = [f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body {{ margin:0 !important; padding:0 !important; }}
+  .email-shell {{ width:100% !important; max-width:900px !important; }}
+  .kpi-grid {{ width:100% !important; table-layout:fixed !important; }}
+  .kpi-cell {{ vertical-align:top !important; }}
+
+  @media only screen and (max-width:620px) {{
+    .email-shell {{
+      width:100% !important;
+      max-width:100% !important;
+      margin:0 !important;
+    }}
+    .kpi-grid,
+    .kpi-grid tbody,
+    .kpi-grid tr {{
+      display:block !important;
+      width:100% !important;
+    }}
+    .kpi-cell {{
+      display:inline-block !important;
+      width:50% !important;
+      box-sizing:border-box !important;
+      padding:4px !important;
+    }}
+    .kpi-inner {{
+      width:100% !important;
+      min-height:88px !important;
+    }}
+    .kpi-title {{
+      font-size:10px !important;
+      white-space:normal !important;
+    }}
+    .kpi-value {{
+      font-size:24px !important;
+    }}
+    .kpi-note {{
+      font-size:8px !important;
+      white-space:normal !important;
+    }}
+    .report-title {{
+      font-size:20px !important;
+    }}
+    .report-meta {{
+      font-size:11px !important;
+      line-height:1.35 !important;
+    }}
+    .section-title {{
+      font-size:16px !important;
+    }}
+  }}
+</style>
+</head>
 <body style="margin:0;padding:0;background:#f0f4f8;font-family:Segoe UI,Arial,sans-serif;">
-<div style="max-width:900px;margin:20px auto;border-radius:12px;
+<div class="email-shell" style="width:100%;max-width:900px;margin:20px auto;border-radius:12px;
      box-shadow:0 8px 30px rgba(10,38,71,0.13);overflow:hidden;">
 
   <!-- Header -->
   <div style="background:#0B2342;padding:8px 12px;">
-    <div style="color:#ffffff;font-size:17px;font-weight:900;">
+    <div class="report-title" style="color:#ffffff;font-size:17px;font-weight:900;">
       📌 EMC Income Analysis Report
     </div>
   </div>
   <div style="background:#0B2342;padding:3px 0 3px 0;margin-top:6px;">
-    <div style="color:#A8C3DF;font-size:11px;">
+    <div class="report-meta" style="color:#A8C3DF;font-size:11px;">
       {picked_label} &nbsp;·&nbsp; Generated: {pd.Timestamp.now().strftime('%d %b %Y %H:%M')}
     </div>
   </div>
 
   <!-- Compact KPI Cards -->
   <div style="background:#f0f4f8;padding:12px 8px 4px 8px;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+    <table class="kpi-grid" role="presentation" width="100%" cellspacing="0" cellpadding="0"
            style="width:100%;border-collapse:collapse;table-layout:fixed;">
       <tr>
         {_kpi_card("Total Visits", total_visits, "👥", "blue")}
@@ -408,7 +460,7 @@ def _dfs_to_html(dfs: dict, title: str, picked_label: str) -> str:
   <!-- Tables -->
   <div style="background:#ffffff;padding:16px 18px 20px 18px;">
     <div style="background:#0B2342;border-radius:8px;padding:10px 16px;margin-bottom:16px;">
-      <span style="color:#ffffff;font-size:13px;font-weight:800;">
+      <span class="section-title" style="color:#ffffff;font-size:13px;font-weight:800;">
         📊 Income Analysis — Doctor Revenue
       </span>
     </div>
