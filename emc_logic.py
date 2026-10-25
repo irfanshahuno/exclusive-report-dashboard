@@ -17,7 +17,7 @@ CONSULT = {
     "other": {"est": (56.0, "99212"), "new": (98.0, "99202")},    # all other insurers level 2
 }
 STD_CONSULT = {"99212": 56.0, "99213": 95.0, "99202": 98.0, "99203": 142.0, "99214": 142.0, "99204": 190.0}
-CASH_COPAY_CONSULT = 20.0   # cash: consultation copay taken out (typical non-Daman flat copay)
+CASH_CONSULT = 75.0         # cash: every consultation (new or established) counts 75 in runs
 CASH_COPAY_MED = 0.30       # cash: medicine copay share taken out
 FOLLOW_UP_BELOW = 30.0      # insurance consult billed under this = free / copay-only follow-up, left as billed
 LAB_COPAY = 0.20            # copay used when a zero-priced lab gets priced
@@ -207,8 +207,7 @@ def correct(lines):
                 # cash: price like other insurers, patient pays all
                 price = None
                 if l["type"] == "CONSULTATION" and l["gross"] > 0:
-                    price, code = CONSULT["other"]["new" if l["code"].startswith("9920") else "est"]
-                    c["code"] = code
+                    price = CASH_CONSULT
                 elif l["type"] in ("LAB", "RADIOLOGY"):
                     price = deck_lab(l["code"], lab_price)
                     if price is None and l["gross"] == 0:
@@ -223,7 +222,7 @@ def correct(lines):
                 # runs for cash = what an insurer would pay: copay taken out like an insured visit
                 g = c["gross"]
                 if l["type"] == "CONSULTATION":
-                    val = max(0.0, g - CASH_COPAY_CONSULT)
+                    val = g                 # cash consultation counts a flat 75
                 elif l["type"] == "MEDICINES":
                     val = g * (1 - CASH_COPAY_MED)
                 else:                       # labs (deck price is already after copay) and procedures (no copay)
