@@ -61,7 +61,7 @@ with tab1:
     show = ddf[["Doctor", "Balls", "Dots", "4s", "6s", "Scoring", "Scoring needed", "Runs", "Runs needed", "% of day", "Status", "Scoring still needed"]]
     st.dataframe(show.style.map(color_status, subset=["Status"]).format({"Runs": "{:,.0f}", "Runs needed": "{:,.0f}"}),
                  hide_index=True, width="stretch")
-    st.caption("Dot = consultation only · 4 = one lab or procedure · 6 = two or more. Runs = insurance money after copay. "
+    st.caption("Dot = consultation only · 4 = one lab or procedure · 6 = two or more. Runs = insurance money after copay; cash at other-insurer prices. "
                "Target per GP: 34 balls, 22 scoring balls, 3,388 runs; Family Medicine 30 balls, 3,592 runs.")
     st.subheader("Ball by ball")
     for doc, balls in strips.items():
@@ -81,7 +81,7 @@ with tab3:
 
 with tab4:
     st.caption("Daman level 3 (99213 = 95, 99203 = 142); other insurers level 2 (99212 = 56, 99202 = 98); one consultation "
-               "line per visit; labs at 0 priced from the Daman list; medicine max 3 AED; follow-ups and cash as billed.")
+               "line per visit; labs at 0 priced from the Daman list; medicine max 3 AED; free follow-ups as billed; cash priced as other insurers (level 2, same lab and procedure prices).")
     if len(logdf):
         st.dataframe(logdf, hide_index=True, width="stretch")
     else:
