@@ -3,7 +3,7 @@
 Reads the raw HIS "ProcedureDetails" report (coded or not coded), corrects it and scores
 each doctor like cricket: every patient is a ball.
   Dot = consultation only, 4 = one lab or procedure, 6 = two or more.
-  Runs = insurance money after copay, on corrected prices. Cash visits are priced like other insurers (patient pays all).
+  Runs = insurance money after copay, on corrected prices. Cash visits are priced like other insurers, with the copay taken out.
 """
 import io
 import re
@@ -16,6 +16,9 @@ CONSULT = {
     "daman": {"est": (95.0, "99213"), "new": (142.0, "99203")},   # Daman always level 3
     "other": {"est": (56.0, "99212"), "new": (98.0, "99202")},    # all other insurers level 2
 }
+STD_CONSULT = {"99212": 56.0, "99213": 95.0, "99202": 98.0, "99203": 142.0, "99214": 142.0, "99204": 190.0}
+CASH_COPAY_CONSULT = 20.0   # cash: consultation copay taken out (typical non-Daman flat copay)
+CASH_COPAY_MED = 0.30       # cash: medicine copay share taken out
 FOLLOW_UP_BELOW = 30.0      # insurance consult billed under this = free / copay-only follow-up, left as billed
 LAB_COPAY = 0.20            # copay used when a zero-priced lab gets priced
 SKIP_SCORING = {"36415"}    # blood collection: part of the lab, not a ball
@@ -30,6 +33,13 @@ PACE = {"12 PM": 0.25, "4 PM": 0.50, "8 PM": 0.75, "Closing": 1.00}
 PROC_PRICES = {"96372": 20, "96374": 20, "96360": 71, "96361": 20, "96365": 86, "94640": 32, "93000": 65,
                "51-01": 25, "82948": 11, "10060": 341, "12001": 253, "12002": 253, "11730": 226,
                "69210": 122, "69209": 106, "36415": 0}
+# Non-Daman medicine unit prices (per 1 quantity) from EMC Oct-2026 claims, standard insurers only - used for cash
+MED_OTHER = {"A54-5631-01796-01": 2.99, "B62-2849-02488-01": 2.6, "F13-3258-03783-01": 3.89, "F67-5477-05016-01": 15.5,
+             "F68-5480-05000-01": 1.32, "G05-4021-13346-03": 8.8, "H21-0927-01181-01": 1.2, "H21-4013-04300-01": 36.0,
+             "H21-4261-03760-01": 0.9, "H21-4745-02881-01": 4.6, "K57-4621-00881-01": 4.5, "K57-4867-05178-01": 4.5,
+             "O62-5653-04308-01": 12.0}
+OWN_TARIFF = ("ALMADALLAH",)   # payers with their own discounted tariff - not used as the reference price
+
 # Deck lab prices (insurance money, after copay and lab company share) - used for non-Daman labs billed at 0 and cash
 DECK_LAB = {"85025": 18.58, "86140": 12.61, "81001": 7.30, "80051": 23.89, "80061": 43.13, "83036": 23.22,
             "80053": 128.06, "80069": 112.14, "80076": 82.28}
@@ -147,15 +157,20 @@ def correct(lines):
         if l["type"] in ("LAB", "RADIOLOGY") and l["gross"] > 0 and l["code"] not in lab_price:
             lab_price[l["code"]] = l["gross"]
 
-    # medicine unit prices as billed to non-Daman insurers (Daman UPP price as fallback) - used for cash visits
-    med_unit, med_unit_daman = {}, {}
+    # medicine unit prices for cash: standard non-Daman price (built-in list, then this report), Daman UPP as last resort
+    seen, seen_daman = {}, {}
     for l in lines:
-        if l["type"] == "MEDICINES" and l["insurance"] and l["gross"] > 0 and l.get("qty", 0) > 0:
-            target = med_unit_daman if "DAMAN" in l["insurance"].upper() else med_unit
-            target.setdefault(l["code"], []).append(l["gross"] / l["qty"])
-    med_unit = {k: sorted(v)[len(v) // 2] for k, v in med_unit.items()}
-    for k, v in med_unit_daman.items():
-        med_unit.setdefault(k, sorted(v)[len(v) // 2])
+        ins = l["insurance"].upper()
+        if l["type"] == "MEDICINES" and ins and l["gross"] > 0 and l.get("qty", 0) > 0 and not any(k in ins for k in OWN_TARIFF):
+            (seen_daman if "DAMAN" in ins else seen).setdefault(l["code"], []).append(round(l["gross"] / l["qty"], 2))
+
+    def _mode(v):
+        return max(set(v), key=lambda x: (v.count(x), x))
+    med_unit = dict(MED_OTHER)
+    for k, v in seen.items():
+        med_unit.setdefault(k, _mode(v))
+    for k, v in seen_daman.items():
+        med_unit.setdefault(k, _mode(v))
 
     proc_price = dict(PROC_PRICES)
     for l in lines:
@@ -205,11 +220,23 @@ def correct(lines):
                 if price is not None and abs(price - l["gross"]) > 0.01:
                     note("Cash priced as other insurers", l["code"], l["gross"], price, item_name(l["code"], l["name"]))
                     c.update(gross=price)
-                c.update(pat=c["gross"], ins=0.0)
+                # runs for cash = what an insurer would pay: copay taken out like an insured visit
+                g = c["gross"]
+                if l["type"] == "CONSULTATION":
+                    val = max(0.0, g - CASH_COPAY_CONSULT)
+                elif l["type"] == "MEDICINES":
+                    val = g * (1 - CASH_COPAY_MED)
+                else:                       # labs (deck price is already after copay) and procedures (no copay)
+                    val = g
+                c.update(pat=round(g - val, 2), ins=round(val, 2))
             elif l["type"] == "CONSULTATION" and l["gross"] >= FOLLOW_UP_BELOW:
                 is_new = l["code"].startswith("9920")
                 price, code = CONSULT["daman" if daman else "other"]["new" if is_new else "est"]
-                if abs(l["gross"] - price) > 0.01 or l["code"] != code:
+                # only the LEVEL is corrected; a payer's own tariff (e.g. Almadallah 80%) is kept
+                std_old = STD_CONSULT.get(l["code"])
+                if l["code"] != code and std_old:
+                    price = round(price * l["gross"] / std_old, 2)
+                if l["code"] != code:
                     if daman:
                         pat = min(l["pat"] if l["pat"] > 0 else 20.0, price)
                     elif l["gross"] > 0 and abs(l["pat"] / l["gross"] - 0.2) < 0.006:
@@ -240,7 +267,7 @@ def correct(lines):
                       and c["code"] not in SKIP_SCORING]
         n = len(v["items"])
         v["ball"] = 0 if n == 0 else 4 if n == 1 else 6
-        v["runs"] = round(sum(c["gross"] if v["cash"] else c["ins"] for c in v["lines"]), 2)
+        v["runs"] = round(sum(c["ins"] for c in v["lines"]), 2)
         v["billed_ins"] = 0.0 if v["cash"] else round(sum(l["ins"] for l in ls), 2)
         visits.append(v)
     dates = sorted({l["date"] for l in lines})
@@ -264,7 +291,7 @@ def summarize(visits, pace=1.0):
             it = items.setdefault((v["doctor"], c["type"], c["code"]), {"Doctor": v["doctor"], "Item": item_name(c["code"], c["name"]),
                                                                           "Type": c["type"].title(), "Code": c["code"], "Count": 0, "Runs": 0.0})
             it["Count"] += 1
-            it["Runs"] += c["gross"] if v["cash"] else c["ins"]
+            it["Runs"] += c["ins"]
 
     rows = []
     for name in sorted(docs):
