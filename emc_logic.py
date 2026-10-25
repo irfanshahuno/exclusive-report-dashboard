@@ -3,7 +3,7 @@
 Reads the raw HIS "ProcedureDetails" report (coded or not coded), corrects it and scores
 each doctor like cricket: every patient is a ball.
   Dot = consultation only, 4 = one lab or procedure, 6 = two or more.
-  Runs = insurance money after copay, on corrected prices (cash visits are balls, not runs).
+  Runs = insurance money after copay, on corrected prices. Cash visits are priced like other insurers (patient pays all).
 """
 import io
 import re
@@ -17,16 +17,32 @@ CONSULT = {
     "other": {"est": (56.0, "99212"), "new": (98.0, "99202")},    # all other insurers level 2
 }
 FOLLOW_UP_BELOW = 30.0      # insurance consult billed under this = free / copay-only follow-up, left as billed
-MED_CAP = 3.0               # max AED per medicine line
 LAB_COPAY = 0.20            # copay used when a zero-priced lab gets priced
 SKIP_SCORING = {"36415"}    # blood collection: part of the lab, not a ball
-TARGETS = {"gp": {"balls": 34, "scoring": 22, "runs": 3388},
-           "fm": {"balls": 30, "scoring": 22, "runs": 3592}}
+# Full-care targets per day. Consultation base uses real new/established mix from Oct-2026 claims:
+# GP: 5 referrals x 75 + 17 Daman x 80.37 + 12 non-Daman x 46.24 = 2,296 + labs/procedures 1,342 = 3,639
+# FM: 5 referrals x 75 + 15 Daman x 105.95 + 10 non-Daman x 69.01 = 2,654 + 1,342 = 3,997
+TARGETS = {"gp": {"balls": 34, "scoring": 22, "runs": 3639},
+           "fm": {"balls": 30, "scoring": 22, "runs": 3997}}
 PACE = {"12 PM": 0.25, "4 PM": 0.50, "8 PM": 0.75, "Closing": 1.00}
 
-# Daman lab prices from coded EMC claims (gross, before copay). Add X-ray prices here when known.
+# Procedure prices billed to insurers (used to price cash visits)
+PROC_PRICES = {"96372": 20, "96374": 20, "96360": 71, "96361": 20, "96365": 86, "94640": 32, "93000": 65,
+               "51-01": 25, "82948": 11, "10060": 341, "12001": 253, "12002": 253, "11730": 226,
+               "69210": 122, "69209": 106, "36415": 0}
+# Deck lab prices (insurance money, after copay and lab company share) - used for non-Daman labs billed at 0 and cash
+DECK_LAB = {"85025": 18.58, "86140": 12.61, "81001": 7.30, "80051": 23.89, "80061": 43.13, "83036": 23.22,
+            "80053": 128.06, "80069": 112.14, "80076": 82.28}
+DECK_RATIO = 0.6636         # deck price = Daman gross x 0.6636 (used for lab codes not in the deck)
 LAB_PRICES = {"80051": 36, "80061": 65, "80069": 169, "81001": 11, "82565": 18, "83036": 35,
-              "84520": 14, "84550": 16, "85025": 28, "86140": 19}
+              "84520": 14, "84550": 16, "85025": 28, "86140": 19}   # Daman lab gross prices; add X-ray prices when known
+
+
+def deck_lab(code, lab_price):
+    if code in DECK_LAB:
+        return DECK_LAB[code]
+    g = lab_price.get(code)
+    return round(g * DECK_RATIO, 2) if g else None
 
 SHORT = {"85025": "CBC", "80061": "Lipid panel", "83036": "HbA1c", "82565": "Creatinine", "84520": "Urea",
          "81001": "Urinalysis", "80051": "Electrolytes", "80069": "Renal panel", "84550": "Uric acid",
@@ -114,7 +130,7 @@ def read_report(file_bytes, filename=""):
         if not inv:
             continue
         lines.append({"date": _clean(g(r, "Date")), "inv": inv, "code": _clean(g(r, "Procedure Code")),
-                      "name": _clean(g(r, "Procedure Name")), "ins": _num(g(r, "Ins: Amount")),
+                      "name": _clean(g(r, "Procedure Name")), "qty": _num(g(r, "Quantity")), "ins": _num(g(r, "Ins: Amount")),
                       "pat": _num(g(r, "Pat share")), "gross": _num(g(r, "Gross Amount")),
                       "dept": _clean(g(r, "Department")), "doctor": _clean(g(r, "Doctor")),
                       "type": _clean(g(r, "CPT:Type")).upper(), "insurance": _clean(g(r, "Insurance"))})
@@ -130,6 +146,21 @@ def correct(lines):
     for l in lines:
         if l["type"] in ("LAB", "RADIOLOGY") and l["gross"] > 0 and l["code"] not in lab_price:
             lab_price[l["code"]] = l["gross"]
+
+    # medicine unit prices as billed to non-Daman insurers (Daman UPP price as fallback) - used for cash visits
+    med_unit, med_unit_daman = {}, {}
+    for l in lines:
+        if l["type"] == "MEDICINES" and l["insurance"] and l["gross"] > 0 and l.get("qty", 0) > 0:
+            target = med_unit_daman if "DAMAN" in l["insurance"].upper() else med_unit
+            target.setdefault(l["code"], []).append(l["gross"] / l["qty"])
+    med_unit = {k: sorted(v)[len(v) // 2] for k, v in med_unit.items()}
+    for k, v in med_unit_daman.items():
+        med_unit.setdefault(k, sorted(v)[len(v) // 2])
+
+    proc_price = dict(PROC_PRICES)
+    for l in lines:
+        if l["type"] == "PROCEDURE" and l["insurance"] and l["gross"] > 0 and l["code"] not in proc_price:
+            proc_price[l["code"]] = l["gross"]
 
     by_inv = {}
     for l in lines:
@@ -157,7 +188,25 @@ def correct(lines):
             if l["type"] == "CONSULTATION" and l is not keep:
                 continue
             c = dict(l)
-            if l["type"] == "CONSULTATION" and not v["cash"] and l["gross"] >= FOLLOW_UP_BELOW:
+            if v["cash"]:
+                # cash: price like other insurers, patient pays all
+                price = None
+                if l["type"] == "CONSULTATION" and l["gross"] > 0:
+                    price, code = CONSULT["other"]["new" if l["code"].startswith("9920") else "est"]
+                    c["code"] = code
+                elif l["type"] in ("LAB", "RADIOLOGY"):
+                    price = deck_lab(l["code"], lab_price)
+                    if price is None and l["gross"] == 0:
+                        note("No price found (left at 0)", l["code"], 0, 0, item_name(l["code"], l["name"]))
+                elif l["type"] == "PROCEDURE":
+                    price = proc_price.get(l["code"])
+                elif l["type"] == "MEDICINES" and l["code"] in med_unit and l.get("qty", 0) > 0:
+                    price = round(med_unit[l["code"]] * l["qty"], 2)
+                if price is not None and abs(price - l["gross"]) > 0.01:
+                    note("Cash priced as other insurers", l["code"], l["gross"], price, item_name(l["code"], l["name"]))
+                    c.update(gross=price)
+                c.update(pat=c["gross"], ins=0.0)
+            elif l["type"] == "CONSULTATION" and l["gross"] >= FOLLOW_UP_BELOW:
                 is_new = l["code"].startswith("9920")
                 price, code = CONSULT["daman" if daman else "other"]["new" if is_new else "est"]
                 if abs(l["gross"] - price) > 0.01 or l["code"] != code:
@@ -170,25 +219,28 @@ def correct(lines):
                     note("Daman consultation set to level 3" if daman else "Consultation set to level 2",
                          f'{l["code"]} → {code}', l["gross"], price)
                     c.update(code=code, gross=price, pat=pat, ins=round(price - pat, 2))
+            elif l["type"] in ("LAB", "RADIOLOGY") and l["gross"] == 0 and not daman:
+                dp = deck_lab(l["code"], lab_price)
+                if dp:
+                    c.update(gross=dp, pat=0.0, ins=dp)
+                    note("Non-Daman lab at 0 priced (deck price)", l["code"], 0, dp, item_name(l["code"], l["name"]))
+                else:
+                    note("No price found (left at 0)", l["code"], 0, 0, item_name(l["code"], l["name"]))
             elif l["type"] in ("LAB", "RADIOLOGY") and l["gross"] == 0:
                 lp = lab_price.get(l["code"])
                 if lp:
-                    pat = lp if v["cash"] else round(lp * LAB_COPAY, 2)
+                    pat = round(lp * LAB_COPAY, 2)
                     c.update(gross=lp, pat=pat, ins=round(lp - pat, 2))
-                    note("Unpriced lab priced", l["code"], 0, lp, item_name(l["code"], l["name"]))
+                    note("Daman lab at 0 priced", l["code"], 0, lp, item_name(l["code"], l["name"]))
                 else:
                     note("No price found (left at 0)", l["code"], 0, 0, item_name(l["code"], l["name"]))
-            elif l["type"] == "MEDICINES" and l["gross"] > MED_CAP:
-                k = MED_CAP / l["gross"]
-                c.update(gross=MED_CAP, ins=round(l["ins"] * k, 2), pat=round(l["pat"] * k, 2))
-                note("Medicine price capped at 3", l["code"], l["gross"], MED_CAP, l["name"])
             v["lines"].append(c)
 
         v["items"] = [c for c in v["lines"] if c["type"] in ("LAB", "RADIOLOGY", "PROCEDURE")
                       and c["code"] not in SKIP_SCORING]
         n = len(v["items"])
         v["ball"] = 0 if n == 0 else 4 if n == 1 else 6
-        v["runs"] = 0.0 if v["cash"] else round(sum(c["ins"] for c in v["lines"]), 2)
+        v["runs"] = round(sum(c["gross"] if v["cash"] else c["ins"] for c in v["lines"]), 2)
         v["billed_ins"] = 0.0 if v["cash"] else round(sum(l["ins"] for l in ls), 2)
         visits.append(v)
     dates = sorted({l["date"] for l in lines})
@@ -212,7 +264,7 @@ def summarize(visits, pace=1.0):
             it = items.setdefault((v["doctor"], c["type"], c["code"]), {"Doctor": v["doctor"], "Item": item_name(c["code"], c["name"]),
                                                                           "Type": c["type"].title(), "Code": c["code"], "Count": 0, "Runs": 0.0})
             it["Count"] += 1
-            it["Runs"] += 0 if v["cash"] else c["ins"]
+            it["Runs"] += c["gross"] if v["cash"] else c["ins"]
 
     rows = []
     for name in sorted(docs):
@@ -240,7 +292,6 @@ def summarize(visits, pace=1.0):
     if len(idf):
         idf["Runs"] = idf["Runs"].round()
         idf["Runs per ball"] = (idf["Runs"] / idf["Balls"]).round()
-        idf.loc[idf["Insurance"] == "Cash", "Runs per ball"] = None
         idf = idf.sort_values(["Doctor", "Balls"], ascending=[True, False]).reset_index(drop=True)
     itdf = pd.DataFrame(list(items.values()))
     if len(itdf):
@@ -310,7 +361,7 @@ def email_html(ddf, idf, itdf, logdf, meta, check):
             f'<p style="color:#5D6A62;margin:0 0 12px">{meta}</p>{head}'
             f'<h3 style="margin:14px 0 4px">Doctor scorecard</h3>{_table(ddf, cols, money=("Runs", "Runs needed"))}'
             f'<p style="font-size:12px;color:#5D6A62">Dot = consultation only · 4 = one lab or procedure · 6 = two or more. '
-            f'Runs = insurance money after copay on corrected prices (Daman level 3, other insurers level 2, medicine max 3 AED). Cash visits are not runs.</p>')
+            f'Runs = insurance money after copay on corrected prices (Daman level 3, other insurers level 2, medicine as billed). Cash visits priced as other insurers.</p>')
     if len(idf):
         html += '<h3 style="margin:14px 0 4px">Each doctor by insurance</h3>'
         html += _table(idf, ["Doctor", "Insurance", "Balls", "Dots", "4s", "6s", "Runs", "Runs per ball"], money=("Runs", "Runs per ball"))
