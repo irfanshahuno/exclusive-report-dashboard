@@ -84,6 +84,7 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .sr-id span{font-size:12px; color:var(--muted);}
 .sr-items{display:flex; flex-wrap:wrap; gap:6px;}
 .chip-i{font-size:12.5px; padding:4px 10px; border-radius:999px; font-weight:500; white-space:nowrap;}
+.chip-i em{font-style:normal; font-weight:700; margin-left:4px; opacity:.85;}
 .chip-i.lab{background:#E8EEFB; color:#2546A0;} .chip-i.proc{background:var(--pitch-soft); color:#17553A;}
 .sr-runs{text-align:right; font-family:'Barlow Semi Condensed',sans-serif; font-size:20px; font-weight:700; color:var(--ink); line-height:1;}
 .sr-runs span{display:block; font-family:'IBM Plex Sans',sans-serif; font-size:10.5px; font-weight:500; color:var(--muted); text-transform:uppercase; letter-spacing:.06em;}
@@ -172,18 +173,19 @@ for _v in visits:
 
 
 def items_text(v):
-    names = {}
-    for c in v["items"]:
-        n = L.item_name(c["code"], c["name"])
-        names[n] = names.get(n, 0) + 1
-    return " + ".join(f"{n} ×{k}" if k > 1 else n for n, k in names.items())
+    return " + ".join(f'{L.item_name(c["code"], c["name"])} ({round(c["ins"], 2):g})' for c in v["items"])
+
+
+def money(x):
+    x = round(float(x), 2)
+    return f"{x:,.0f}" if x == int(x) else f"{x:,.2f}".rstrip("0").rstrip(".")
 
 
 def chips(v):
     out = []
     for c in v["items"]:
         kind = "lab" if c["type"] in ("LAB", "RADIOLOGY") else "proc"
-        out.append(f'<span class="chip-i {kind}">{E(L.item_name(c["code"], c["name"]))}</span>')
+        out.append(f'<span class="chip-i {kind}">{E(L.item_name(c["code"], c["name"]))} <em>{money(c["ins"])}</em></span>')
     return "".join(out)
 
 
@@ -191,18 +193,20 @@ def agg_names(vs):
     cnt = {}
     for v in vs:
         for c in v["items"]:
-            nm = L.item_name(c["code"], c["name"])
-            cnt[nm] = cnt.get(nm, 0) + 1
-    return ", ".join(f"{n} ×{k}" if k > 1 else n for n, k in sorted(cnt.items(), key=lambda x: -x[1]))
+            key = (L.item_name(c["code"], c["name"]), round(c["ins"], 2))
+            cnt[key] = cnt.get(key, 0) + 1
+    return ", ".join(f"{n} ({money(pr)})" + (f" ×{k}" if k > 1 else "")
+                     for (n, pr), k in sorted(cnt.items(), key=lambda x: (-x[1], x[0][0])))
 
 
 def top_items(vs, n=6):
-    cnt = {}
+    cnt, amt = {}, {}
     for v in vs:
         for c in v["items"]:
             nm = L.item_name(c["code"], c["name"])
             cnt[nm] = cnt.get(nm, 0) + 1
-    return sorted(cnt.items(), key=lambda x: -x[1])[:n]
+            amt[nm] = amt.get(nm, 0) + c["ins"]
+    return [(f"{nm} ({money(amt[nm] / k)})", k) for nm, k in sorted(cnt.items(), key=lambda x: -x[1])[:n]]
 
 st.markdown(f"""
 <div class="hero"><div><h1>EMC Revenue Scorecard</h1>
