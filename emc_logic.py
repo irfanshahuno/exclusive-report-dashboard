@@ -60,7 +60,13 @@ SHORT = {"85025": "CBC", "80061": "Lipid panel", "83036": "HbA1c", "82565": "Cre
          "96360": "IV drip, first hour", "96361": "IV drip, each extra hour", "96372": "IM / SC injection",
          "96374": "IV push injection", "94640": "Nebulizer", "69209": "Ear wax removal", "69210": "Ear wax removal",
          "71045": "Chest X-ray", "73560": "Knee X-ray", "10060": "Incision and drainage",
-         "12002": "Wound repair, small", "16020": "Burn dressing", "11730": "Nail removal"}
+         "12002": "Wound repair, small", "16020": "Burn dressing", "11730": "Nail removal",
+         "82435": "Chloride", "84132": "Potassium", "84295": "Sodium", "87338": "Rapid antigen test (H. pylori)",
+         "82043": "Urine microalbumin", "84450": "AST", "84460": "ALT", "80047": "Basic metabolic panel",
+         "82947": "Blood glucose", "84443": "TSH", "87070": "Bacterial culture", "82948": "Glucose strip",
+         "51-01": "Wound cleansing", "96365": "IV drip with medicine", "12001": "Wound repair, small",
+         "76770": "Renal ultrasound", "76700": "Abdominal ultrasound", "81003": "Urinalysis (automated)",
+         "82550": "CK", "84153": "PSA", "84436": "T4 total", "84439": "Free T4", "84481": "Free T3"}
 DOC_ALIAS = {"MDERSHADUL ALAM": "Dr. Ershadul Alam", "SYED BILAL HAIDER": "Dr. Syed Bilal Haider",
              "SANA ULLAH AFRIDI": "Dr. Sana Ullah Afridi", "SAAD HABIB": "Dr. Saad Habib", "SANT DAS": "Dr. Sant Das"}
 INS_NAMES = [("DAMAN", "Daman"), ("E CARE", "E Care"), ("NAS ADMIN", "NAS"), ("INAYAH", "Inayah"), ("FMC", "FMC"),
