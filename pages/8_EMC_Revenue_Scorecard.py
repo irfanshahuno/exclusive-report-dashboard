@@ -75,6 +75,20 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .made b{color:var(--ink); font-weight:600;}
 .ball{cursor:default;}
 .tag4{color:var(--four); font-weight:700;} .tag6{color:var(--pitch); font-weight:700;}
+.sl{display:grid; gap:8px; padding:4px 0 6px;}
+.sr{display:grid; grid-template-columns:34px 150px 1fr 70px; gap:14px; align-items:center; background:var(--card);
+    border:1px solid var(--line); border-radius:12px; padding:10px 14px;}
+.bb{width:30px; height:30px; border-radius:50%; color:#fff; font:700 14px/30px 'Barlow Semi Condensed',sans-serif; text-align:center;}
+.bb.b4{background:var(--four);} .bb.b6{background:var(--pitch);}
+.sr-id b{display:block; font-size:13.5px; color:var(--ink); font-variant-numeric:tabular-nums;}
+.sr-id span{font-size:12px; color:var(--muted);}
+.sr-items{display:flex; flex-wrap:wrap; gap:6px;}
+.chip-i{font-size:12.5px; padding:4px 10px; border-radius:999px; font-weight:500; white-space:nowrap;}
+.chip-i.lab{background:#E8EEFB; color:#2546A0;} .chip-i.proc{background:var(--pitch-soft); color:#17553A;}
+.sr-runs{text-align:right; font-family:'Barlow Semi Condensed',sans-serif; font-size:20px; font-weight:700; color:var(--ink); line-height:1;}
+.sr-runs span{display:block; font-family:'IBM Plex Sans',sans-serif; font-size:10.5px; font-weight:500; color:var(--muted); text-transform:uppercase; letter-spacing:.06em;}
+.tbl td.nm,.tbl th.nm{text-align:left; color:var(--muted); font-size:12.5px; white-space:normal; min-width:180px;}
+.tbl.ins td.nm{color:#33413A;}
 
 /* tables */
 .tbl{width:100%; border-collapse:separate; border-spacing:0; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; font-size:13.5px; margin-bottom:18px;}
@@ -165,6 +179,23 @@ def items_text(v):
     return " + ".join(f"{n} ×{k}" if k > 1 else n for n, k in names.items())
 
 
+def chips(v):
+    out = []
+    for c in v["items"]:
+        kind = "lab" if c["type"] in ("LAB", "RADIOLOGY") else "proc"
+        out.append(f'<span class="chip-i {kind}">{E(L.item_name(c["code"], c["name"]))}</span>')
+    return "".join(out)
+
+
+def agg_names(vs):
+    cnt = {}
+    for v in vs:
+        for c in v["items"]:
+            nm = L.item_name(c["code"], c["name"])
+            cnt[nm] = cnt.get(nm, 0) + 1
+    return ", ".join(f"{n} ×{k}" if k > 1 else n for n, k in sorted(cnt.items(), key=lambda x: -x[1]))
+
+
 def top_items(vs, n=6):
     cnt = {}
     for v in vs:
@@ -207,7 +238,7 @@ with tab1:
         key = str(d["Doctor"]).replace(" (FM)", "")
         vs = doc_visits.get(key, [])
         strip = "".join(
-            f'<i class="ball b{v["ball"]}" title="{E(v["insurance"])} · inv {E(v["inv"])} · '
+            f'<i class="ball b{v["ball"]}" title="{E(v["insurance"])} · EMR {E(v.get("emr") or v["inv"])} · '
             f'{E(items_text(v) or "consultation only")} · {fmt(v["runs"])} AED">{v["ball"] if v["ball"] else ""}</i>'
             for v in vs)
         tops = top_items(vs)
@@ -236,7 +267,7 @@ with tab1:
           <div class="need">{need_txt} · {fmt(d["Runs"] / max(d["Balls"],1))} AED per ball</div>
         </div>"""
     st.markdown(f'<div class="docs">{cards}</div>', unsafe_allow_html=True)
-    st.markdown('<div class="note" style="margin-top:8px">Hover a ball to see the insurance, invoice, items and runs.</div>',
+    st.markdown('<div class="note" style="margin-top:8px">Hover a ball to see the insurance, EMR number, items and runs.</div>',
                 unsafe_allow_html=True)
 
     st.markdown('<div class="sec">What made the 4s and 6s</div>', unsafe_allow_html=True)
@@ -247,13 +278,13 @@ with tab1:
         n4 = sum(1 for v in scored if v["ball"] == 4)
         n6 = len(scored) - n4
         with st.expander(f"{key}  ·  {n4} fours · {n6} sixes"):
-            rows = "".join(
-                f'<tr><td><span class="tag{v["ball"]}">{v["ball"]}</span></td><td>{E(v["inv"])}</td>'
-                f'<td>{E(v["insurance"])}</td><td style="text-align:left">{E(items_text(v))}</td><td>{fmt(v["runs"])}</td></tr>'
-                for v in sorted(scored, key=lambda x: (-x["ball"], -x["runs"])))
-            st.markdown('<table class="tbl"><thead><tr><th>Ball</th><th>Invoice</th><th>Insurance</th>'
-                        '<th style="text-align:left">Labs and procedures</th><th>Runs</th></tr></thead>'
-                        f'<tbody>{rows}</tbody></table>', unsafe_allow_html=True)
+            rows = ""
+            for v in sorted(scored, key=lambda x: (-x["ball"], -x["runs"])):
+                rows += (f'<div class="sr"><span class="bb b{v["ball"]}">{v["ball"]}</span>'
+                         f'<div class="sr-id"><b>EMR {E(v.get("emr") or "–")}</b><span>{E(v["insurance"])}</span></div>'
+                         f'<div class="sr-items">{chips(v)}</div>'
+                         f'<div class="sr-runs">{fmt(v["runs"])}<span>runs</span></div></div>')
+            st.markdown(f'<div class="sl">{rows}</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sec">Summary</div>', unsafe_allow_html=True)
     st.markdown(table(ddf, ["Doctor", "Balls", "Dots", "4s", "6s", "Scoring", "Scoring needed", "Runs", "Runs needed",
@@ -265,14 +296,31 @@ with tab1:
 
 # ---------------------------------------------------------------- by insurance
 with tab2:
-    for doc, g in idf.groupby("Doctor", sort=True):
-        tot = pd.DataFrame([{"Insurance": "Total", "Balls": g["Balls"].sum(), "Dots": g["Dots"].sum(), "4s": g["4s"].sum(),
-                             "6s": g["6s"].sum(), "Runs": g["Runs"].sum(),
-                             "Runs per ball": g["Runs"].sum() / max(g["Balls"].sum(), 1)}])
-        g2 = pd.concat([g.drop(columns="Doctor"), tot], ignore_index=True)
+    for doc in sorted(doc_visits):
+        vs = doc_visits[doc]
+        by = {}
+        for v in vs:
+            by.setdefault(v["insurance"], []).append(v)
+        rows = ""
+        for ins, ivs in sorted(by.items(), key=lambda x: -len(x[1])):
+            f4 = [v for v in ivs if v["ball"] == 4]
+            f6 = [v for v in ivs if v["ball"] == 6]
+            runs = sum(v["runs"] for v in ivs)
+            rows += (f'<tr><td>{E(ins)}</td><td>{len(ivs)}</td><td>{sum(1 for v in ivs if v["ball"] == 0)}</td>'
+                     f'<td class="c4">{len(f4)}</td><td class="nm">{E(agg_names(f4)) or "–"}</td>'
+                     f'<td class="c6">{len(f6)}</td><td class="nm">{E(agg_names(f6)) or "–"}</td>'
+                     f'<td>{fmt(runs)}</td><td>{fmt(runs / len(ivs))}</td></tr>')
+        f4 = [v for v in vs if v["ball"] == 4]
+        f6 = [v for v in vs if v["ball"] == 6]
+        runs = sum(v["runs"] for v in vs)
+        rows += (f'<tr class="tot"><td>Total</td><td>{len(vs)}</td><td>{sum(1 for v in vs if v["ball"] == 0)}</td>'
+                 f'<td class="c4">{len(f4)}</td><td class="nm"></td><td class="c6">{len(f6)}</td><td class="nm"></td>'
+                 f'<td>{fmt(runs)}</td><td>{fmt(runs / max(len(vs), 1))}</td></tr>')
         st.markdown(f'<div class="sec">{E(doc)}</div>', unsafe_allow_html=True)
-        st.markdown(table(g2, ["Insurance", "Balls", "Dots", "4s", "6s", "Runs", "Runs per ball"],
-                          money=("Runs", "Runs per ball"), total_key="Total"), unsafe_allow_html=True)
+        st.markdown('<table class="tbl ins"><thead><tr><th>Insurance</th><th>Balls</th><th>Dots</th>'
+                    '<th>4s</th><th class="nm">What the 4s were</th><th>6s</th><th class="nm">What the 6s were</th>'
+                    f'<th>Runs</th><th>Runs per ball</th></tr></thead><tbody>{rows}</tbody></table>',
+                    unsafe_allow_html=True)
 
 # ---------------------------------------------------------------- labs and procedures
 with tab3:
