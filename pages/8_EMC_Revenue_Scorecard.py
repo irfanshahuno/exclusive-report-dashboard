@@ -199,14 +199,25 @@ def agg_names(vs):
                      for (n, pr), k in sorted(cnt.items(), key=lambda x: (-x[1], x[0][0])))
 
 
-def top_items(vs, n=6):
-    cnt, amt = {}, {}
+def price_groups(vs):
+    g = {}
     for v in vs:
         for c in v["items"]:
             nm = L.item_name(c["code"], c["name"])
-            cnt[nm] = cnt.get(nm, 0) + 1
-            amt[nm] = amt.get(nm, 0) + c["ins"]
-    return [(f"{nm} ({money(amt[nm] / k)})", k) for nm, k in sorted(cnt.items(), key=lambda x: -x[1])[:n]]
+            pr = round(c["ins"], 2)
+            g.setdefault(nm, {})
+            g[nm][pr] = g[nm].get(pr, 0) + 1
+    return g
+
+
+def top_items(vs, n=6):
+    g = price_groups(vs)
+    out = []
+    for nm, prices in sorted(g.items(), key=lambda x: -sum(x[1].values()))[:n]:
+        plist = " / ".join(money(pr) for pr in sorted(prices, reverse=True))
+        out.append((f"{nm} ({plist})", sum(prices.values())))
+    return out
+
 
 st.markdown(f"""
 <div class="hero"><div><h1>EMC Revenue Scorecard</h1>
@@ -328,14 +339,35 @@ with tab2:
 
 # ---------------------------------------------------------------- labs and procedures
 with tab3:
-    st.markdown('<div class="note">Blood collection (36415) is part of the lab and is not counted as a ball.</div>',
-                unsafe_allow_html=True)
-    if len(itdf):
-        for doc, g in itdf.groupby("Doctor", sort=True):
-            st.markdown(f'<div class="sec">{E(doc)}</div>', unsafe_allow_html=True)
-            st.markdown(table(g, ["Item", "Type", "Code", "Count", "Runs"], money=("Runs",), four="", six=""),
-                        unsafe_allow_html=True)
-    else:
+    st.markdown('<div class="note">Blood collection (36415) is part of the lab and is not counted as a ball. '
+                'Price = insurance share per item (copay out). The same item paid at a different price '
+                '(e.g. Almadallah tariff) shows on its own line.</div>', unsafe_allow_html=True)
+    any_items = False
+    for doc in sorted(doc_visits):
+        rowsd = {}
+        for v in doc_visits[doc]:
+            for c in v["items"]:
+                key = (L.item_name(c["code"], c["name"]), "Lab" if c["type"] in ("LAB", "RADIOLOGY") else "Procedure",
+                       c["code"], round(c["ins"], 2))
+                r = rowsd.setdefault(key, {"n": 0, "ins": set()})
+                r["n"] += 1
+                r["ins"].add(v["insurance"])
+        if not rowsd:
+            continue
+        any_items = True
+        body = ""
+        tot_n = tot_r = 0
+        for (nm, typ, code, pr), r in sorted(rowsd.items(), key=lambda x: (x[0][1], -x[1]["n"], x[0][0])):
+            tot_n += r["n"]
+            tot_r += pr * r["n"]
+            body += (f'<tr><td>{E(nm)}</td><td>{typ}</td><td>{E(code)}</td><td class="nm">{E(", ".join(sorted(r["ins"])))}</td>'
+                     f'<td><b>{money(pr)}</b></td><td>{r["n"]}</td><td>{fmt(pr * r["n"])}</td></tr>')
+        body += f'<tr class="tot"><td>Total</td><td></td><td></td><td class="nm"></td><td></td><td>{tot_n}</td><td>{fmt(tot_r)}</td></tr>'
+        st.markdown(f'<div class="sec">{E(doc)}</div>', unsafe_allow_html=True)
+        st.markdown('<table class="tbl"><thead><tr><th>Item</th><th>Type</th><th>Code</th><th class="nm">Insurance</th>'
+                    f'<th>Price</th><th>Count</th><th>Runs</th></tr></thead><tbody>{body}</tbody></table>',
+                    unsafe_allow_html=True)
+    if not any_items:
         st.markdown('<div class="empty"><b>No labs or procedures</b>Every patient in this report had a consultation only.</div>',
                     unsafe_allow_html=True)
 
