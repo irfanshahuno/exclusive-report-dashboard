@@ -71,6 +71,10 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .b0{border:1.5px solid var(--dot);} .b4{background:var(--four);} .b6{background:var(--pitch);}
 .need{font-size:12.5px; color:var(--muted); margin-top:10px;}
 .need b{color:var(--ink);}
+.made{font-size:12.5px; color:var(--muted); margin-top:10px; line-height:1.6;}
+.made b{color:var(--ink); font-weight:600;}
+.ball{cursor:default;}
+.tag4{color:var(--four); font-weight:700;} .tag6{color:var(--pitch); font-weight:700;}
 
 /* tables */
 .tbl{width:100%; border-collapse:separate; border-spacing:0; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; font-size:13.5px; margin-bottom:18px;}
@@ -148,6 +152,26 @@ ddf, idf, itdf, strips = L.summarize(visits, L.PACE[check])
 meta = f"Date {', '.join(dates)} · {len(visits)} patients · file {up.name}"
 clinic = ddf[ddf["Doctor"] == "Clinic"].iloc[0]
 docs = ddf[ddf["Doctor"] != "Clinic"]
+doc_visits = {}
+for _v in visits:
+    doc_visits.setdefault(_v["doctor"], []).append(_v)
+
+
+def items_text(v):
+    names = {}
+    for c in v["items"]:
+        n = L.item_name(c["code"], c["name"])
+        names[n] = names.get(n, 0) + 1
+    return " + ".join(f"{n} ×{k}" if k > 1 else n for n, k in names.items())
+
+
+def top_items(vs, n=6):
+    cnt = {}
+    for v in vs:
+        for c in v["items"]:
+            nm = L.item_name(c["code"], c["name"])
+            cnt[nm] = cnt.get(nm, 0) + 1
+    return sorted(cnt.items(), key=lambda x: -x[1])[:n]
 
 st.markdown(f"""
 <div class="hero"><div><h1>EMC Revenue Scorecard</h1>
@@ -181,7 +205,13 @@ with tab1:
     cards = ""
     for _, d in docs.sort_values("% of day", ascending=False).iterrows():
         key = str(d["Doctor"]).replace(" (FM)", "")
-        strip = "".join(f'<i class="ball b{b}">{b if b else ""}</i>' for b in strips.get(key, []))
+        vs = doc_visits.get(key, [])
+        strip = "".join(
+            f'<i class="ball b{v["ball"]}" title="{E(v["insurance"])} · inv {E(v["inv"])} · '
+            f'{E(items_text(v) or "consultation only")} · {fmt(v["runs"])} AED">{v["ball"] if v["ball"] else ""}</i>'
+            for v in vs)
+        tops = top_items(vs)
+        made = " · ".join(f"<b>{E(n)}</b> ×{k}" for n, k in tops) if tops else "No labs or procedures yet"
         st_cls = str(d["Status"]).split()[0]
         need = int(d["Scoring still needed"]) if d["Scoring still needed"] not in ("", None) else 0
         ratio = d["Runs"] / max(d["Runs needed"], 1)
@@ -202,9 +232,28 @@ with tab1:
             <div class="stat"><b>{d["Scoring"]}</b><span>Scoring</span></div>
           </div>
           <div class="strip">{strip}</div>
+          <div class="made">{made}</div>
           <div class="need">{need_txt} · {fmt(d["Runs"] / max(d["Balls"],1))} AED per ball</div>
         </div>"""
     st.markdown(f'<div class="docs">{cards}</div>', unsafe_allow_html=True)
+    st.markdown('<div class="note" style="margin-top:8px">Hover a ball to see the insurance, invoice, items and runs.</div>',
+                unsafe_allow_html=True)
+
+    st.markdown('<div class="sec">What made the 4s and 6s</div>', unsafe_allow_html=True)
+    for key in sorted(doc_visits):
+        scored = [v for v in doc_visits[key] if v["ball"]]
+        if not scored:
+            continue
+        n4 = sum(1 for v in scored if v["ball"] == 4)
+        n6 = len(scored) - n4
+        with st.expander(f"{key}  ·  {n4} fours · {n6} sixes"):
+            rows = "".join(
+                f'<tr><td><span class="tag{v["ball"]}">{v["ball"]}</span></td><td>{E(v["inv"])}</td>'
+                f'<td>{E(v["insurance"])}</td><td style="text-align:left">{E(items_text(v))}</td><td>{fmt(v["runs"])}</td></tr>'
+                for v in sorted(scored, key=lambda x: (-x["ball"], -x["runs"])))
+            st.markdown('<table class="tbl"><thead><tr><th>Ball</th><th>Invoice</th><th>Insurance</th>'
+                        '<th style="text-align:left">Labs and procedures</th><th>Runs</th></tr></thead>'
+                        f'<tbody>{rows}</tbody></table>', unsafe_allow_html=True)
 
     st.markdown('<div class="sec">Summary</div>', unsafe_allow_html=True)
     st.markdown(table(ddf, ["Doctor", "Balls", "Dots", "4s", "6s", "Scoring", "Scoring needed", "Runs", "Runs needed",
