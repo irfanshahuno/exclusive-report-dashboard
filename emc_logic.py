@@ -146,7 +146,7 @@ def read_report(file_bytes, filename=""):
         if not inv:
             continue
         lines.append({"date": _clean(g(r, "Date")), "inv": inv, "code": _clean(g(r, "Procedure Code")),
-                      "name": _clean(g(r, "Procedure Name")), "qty": _num(g(r, "Quantity")), "ins": _num(g(r, "Ins: Amount")),
+                      "name": _clean(g(r, "Procedure Name")), "emr": _clean(g(r, "EMR No")), "qty": _num(g(r, "Quantity")), "ins": _num(g(r, "Ins: Amount")),
                       "pat": _num(g(r, "Pat share")), "gross": _num(g(r, "Gross Amount")),
                       "dept": _clean(g(r, "Department")), "doctor": _clean(g(r, "Doctor")),
                       "type": _clean(g(r, "CPT:Type")).upper(), "insurance": _clean(g(r, "Insurance"))})
@@ -190,7 +190,7 @@ def correct(lines):
     visits = []
     for inv, ls in by_inv.items():
         f = ls[0]
-        v = {"inv": inv, "date": f["date"], "doctor": doc_name(f["doctor"]), "fm": "FAMILY" in f["dept"].upper(),
+        v = {"inv": inv, "emr": f.get("emr", ""), "date": f["date"], "doctor": doc_name(f["doctor"]), "fm": "FAMILY" in f["dept"].upper(),
              "insurance": ins_name(f["insurance"]), "cash": not f["insurance"], "lines": []}
         daman = v["insurance"] == "Daman"
 
