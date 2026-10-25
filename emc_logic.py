@@ -180,7 +180,8 @@ def correct(lines):
 
     proc_price = dict(PROC_PRICES)
     for l in lines:
-        if l["type"] == "PROCEDURE" and l["insurance"] and l["gross"] > 0 and l["code"] not in proc_price:
+        if (l["type"] == "PROCEDURE" and l["insurance"] and l["gross"] > 0 and l["code"] not in proc_price
+                and not any(k in l["insurance"].upper() for k in OWN_TARIFF)):
             proc_price[l["code"]] = l["gross"]
 
     by_inv = {}
@@ -251,6 +252,11 @@ def correct(lines):
                     note("Daman consultation set to level 3" if daman else "Consultation set to level 2",
                          f'{l["code"]} → {code}', l["gross"], price)
                     c.update(code=code, gross=price, pat=pat, ins=round(price - pat, 2))
+            elif l["type"] == "PROCEDURE" and proc_price.get(l["code"]):
+                std = float(proc_price[l["code"]])   # same procedure price for every insurer, no copay
+                if abs(l["ins"] - std) > 0.01 or abs(l["gross"] - std) > 0.01:
+                    note("Procedure set to standard price", l["code"], l["ins"], std, item_name(l["code"], l["name"]))
+                    c.update(gross=std, pat=0.0, ins=std)
             elif l["type"] in ("LAB", "RADIOLOGY") and l["gross"] == 0 and not daman:
                 dp = deck_lab(l["code"], lab_price)
                 if dp:
