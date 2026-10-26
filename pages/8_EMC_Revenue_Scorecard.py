@@ -72,6 +72,15 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .gaps{display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:-4px 0 10px;}
 .gaps .stat{display:flex; align-items:center; justify-content:center; gap:10px; padding:9px 6px;}
 .p-VAC,.p-OFF{background:#EEF1EF; color:#5D6A62;} .doc.st-VAC,.doc.st-OFF{border-left:5px solid #9AA79F; background:#FAFBFA;}
+.doc.hire{border:1.5px dashed #E0A93B; border-left:5px solid #E0A93B; background:#FFFBF2;}
+.hico{display:inline-flex; align-items:center; justify-content:center; width:30px; height:30px; border-radius:50%; background:#E0A93B; color:#fff; font-weight:700; margin-right:10px; vertical-align:middle;}
+.p-HIRE{background:#FBEBC8; color:#8A5A00;}
+.hrow{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:16px 0 10px;}
+.hbox{background:#fff; border:1px solid #F1D9A4; border-radius:12px; padding:12px 14px;}
+.hbox span{display:block; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:#8A5A00; font-weight:600; margin-bottom:4px;}
+.hbox b{display:block; font-family:'Barlow Semi Condensed',sans-serif; font-size:20px; color:#18211C; line-height:1.25;}
+.hbox.big{background:#FBEBC8; border-color:#E0A93B;} .hbox.big b{color:#8A5A00; font-size:22px;}
+.hnote{font-size:12.5px; color:#8A5A00;}
 .empty b{display:inline !important; font:inherit !important; font-weight:700 !important; color:#18211C !important;}
 .empty{background:#F2F5F1; border:1px dashed #C9D2CB; border-radius:10px; padding:10px 12px; font-size:13px; color:#5D6A62; margin:4px 0 8px;}
 .stat.gb{background:#FBE4E1; border:1px solid #F1B8B1;} .stat.gb b{color:#B3261E; font-size:16px;} .stat.gb span{color:#B3261E;}
@@ -391,7 +400,7 @@ def status_key(d):
     return str(d["Status"]).split()[0]
 
 
-STATUS_LABEL = {"ON": "ON TRACK", "WATCH": "CLOSE", "CHECK": "BEHIND", "VAC": "VACANCY", "OFF": "NO PATIENTS"}
+STATUS_LABEL = {"ON": "ON TRACK", "WATCH": "CLOSE", "CHECK": "BEHIND", "VAC": "HIRING", "OFF": "NO PATIENTS"}
 
 
 def empty_note(d):
@@ -401,6 +410,26 @@ def empty_note(d):
     if int(d["Balls"]) == 0:
         return '<div class="empty">No patients in this report.</div>'
     return ""
+
+
+MONTH_DAYS = 26
+
+
+def hiring_numbers(d):
+    days = max(1, int(clinic.get("Days", 1) or 1))
+    per_day_pts = int(d["Balls target"]) // days
+    per_day_rev = float(d["Runs target (day)"]) / days
+    return days, per_day_pts, per_day_rev
+
+
+def hiring_card_html(d):
+    days, pts, rev = hiring_numbers(d)
+    period = "Missing today" if days == 1 else f"Missing in these {days} days"
+    return (f'<div class="doc hire"><div class="top"><div><div class="name"><span class="hico">+</span>New GP needed</div>'
+            f'<div class="role">Replacing Dr. Mahedi · General Practice</div></div><span class="pill p-HIRE">HIRING</span></div>'
+            f'<div class="hrow"><div class="hbox"><span>{period}</span><b>{int(d["Balls target"]):,} patients</b><b>{fmt(d["Runs target (day)"])} AED</b></div>'
+            f'<div class="hbox big"><span>Missing a month ({MONTH_DAYS} working days)</span><b>{pts * MONTH_DAYS:,} patients</b><b>{fmt(rev * MONTH_DAYS)} AED</b></div></div>'
+            f'<div class="hnote">The clinic target of 200 patients and 22,192 a day includes this place.</div></div>')
 
 
 def gap(done, target):
@@ -495,7 +524,8 @@ with tab1:
     <span><i class="ball bR">R</i>Referred to Family Medicine</span><span><i class="ball bX">R</i>Referred outside</span>
     <span><i class="ball bR warn">R</i>Referred but GP gave a lab or procedure</span></div>""",
                 unsafe_allow_html=True)
-    ranked = docs.sort_values(["% of day", "Scoring"], ascending=False).reset_index(drop=True)
+    ranked = docs.sort_values(["% of day", "Scoring"], ascending=False)
+    ranked = pd.concat([ranked[~ranked["Vacancy"].astype(bool)], ranked[ranked["Vacancy"].astype(bool)]]).reset_index(drop=True)
     board = ""
     for i, d in ranked[ranked["Balls"] > 0].head(3).iterrows():
         board += (f'<div class="b"><span class="rank r{i+1}">{i+1}</span><div><div class="nm">{E(str(d["Doctor"]).replace(" (FM)", ""))}</div>'
@@ -503,6 +533,9 @@ with tab1:
     st.markdown(f'<div class="board">{board}</div>', unsafe_allow_html=True)
     cards = ""
     for rank, d in ranked.iterrows():
+        if d.get("Vacancy"):
+            cards += hiring_card_html(d)
+            continue
         key = str(d["Doctor"]).replace(" (FM)", "")
         vs = doc_visits.get(key, [])
         strip = "".join(ball_html(v) for v in vs)
@@ -738,7 +771,8 @@ def build_excel():
         bg = SOFT if rank % 2 else None
         n = rank + 1
         body_cell(ws, r, 1, n, bold=True, bg=MEDAL.get(n, bg))
-        body_cell(ws, r, 2, str(d["Doctor"]).replace(" (FM)", ""), bold=True, bg=bg, align=left)
+        body_cell(ws, r, 2, "New GP needed" if d.get("Vacancy") else str(d["Doctor"]).replace(" (FM)", ""), bold=True,
+                  bg="FBEBC8" if d.get("Vacancy") else bg, align=left, color="8A5A00" if d.get("Vacancy") else None)
         body_cell(ws, r, 3, "Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice", color="5D6A62", bg=bg)
         body_cell(ws, r, 4, int(d["Balls"]), bg=bg)
         body_cell(ws, r, 5, int(d["Dots"]), bg=bg)
@@ -1035,6 +1069,26 @@ def email_dashboard_html():
     # doctor cards
     out.append(section("Doctor scorecards"))
     for rank, d in ranked.iterrows():
+        if d.get("Vacancy"):
+            days, pts, rev = hiring_numbers(d)
+            period = "Missing today" if days == 1 else f"Missing in these {days} days"
+            hb = lambda lbl, a, b, big=False: (
+                f'<td width="50%" valign="top" bgcolor="{"#FBEBC8" if big else "#ffffff"}" style="background:{"#FBEBC8" if big else "#ffffff"};'
+                f'border:1px solid #E0A93B;border-radius:12px;padding:12px 14px;">'
+                f'<div style="font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:#8A5A00;font-weight:bold;">{lbl}</div>'
+                f'<div style="font:bold 19px Arial,sans-serif;color:{"#8A5A00" if big else INK};padding-top:4px;">{a}<br>{b}</div></td>')
+            out.append(
+                f'<tr><td style="padding-bottom:14px;"><table {T} width="100%" bgcolor="#FFFBF2" style="background:#FFFBF2;border:2px dashed #E0A93B;border-radius:14px;">'
+                f'<tr><td width="6" bgcolor="#E0A93B" style="background:#E0A93B;font-size:1px;">&nbsp;</td><td style="padding:18px 20px;">'
+                f'<table {T} width="100%"><tr><td><span style="font:bold 22px Arial,sans-serif;color:{INK};">+ New GP needed</span>'
+                f'<div style="font-size:12.5px;color:{MUT};padding-top:4px;">Replacing Dr. Mahedi · General Practice</div></td>'
+                f'<td align="right" valign="top"><table {T}><tr><td bgcolor="#FBEBC8" style="background:#FBEBC8;color:#8A5A00;border:1px solid #E0A93B;border-radius:14px;padding:5px 12px;font:bold 11px Arial,sans-serif;letter-spacing:1px;">HIRING</td></tr></table></td></tr></table>'
+                f'<table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:10px -8px 4px;"><tr>'
+                + hb(period, f'{int(d["Balls target"]):,} patients', f'{fmt(d["Runs target (day)"])} AED')
+                + hb(f"Missing a month ({MONTH_DAYS} working days)", f"{pts * MONTH_DAYS:,} patients", f"{fmt(rev * MONTH_DAYS)} AED", True)
+                + f'</tr></table><div style="font-size:12.5px;color:#8A5A00;">The clinic target of 200 patients and 22,192 a day includes this place.</div>'
+                '</td></tr></table></td></tr>')
+            continue
         key = str(d["Doctor"]).replace(" (FM)", "")
         vs = doc_visits.get(key, [])
         sk = status_key(d)
