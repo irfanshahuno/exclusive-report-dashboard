@@ -371,8 +371,75 @@ def read_registration(file_bytes, filename=""):
     return out
 
 
+def read_rxmatch(file_bytes, filename=""):
+    """Read the pharmacy Rx_Match workbook (Dashboard + Summary sheets) -> dict with totals, by doctor, by insurer, medicines."""
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=False)
+    if "Dashboard" not in wb.sheetnames:
+        raise ValueError('This is not an Rx Match file: no "Dashboard" sheet.')
+    ws = wb["Dashboard"]
+    grid = [[c for c in row] for row in ws.iter_rows(values_only=True)]
+
+    def find(text):
+        for i, row in enumerate(grid):
+            for j, v in enumerate(row):
+                if isinstance(v, str) and v.strip().upper().startswith(text.upper()):
+                    return i, j
+        return None, None
+
+    def num(v):
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = re.sub(r"[^0-9.]", "", str(v or ""))
+        return float(s) if s else 0.0
+
+    out = {"date": "", "totals": {}, "doctors": [], "insurers": [], "top_presc": [], "top_missed": []}
+    i, _ = find("PATIENTS WITH RX")
+    if i is not None:
+        hdr, val = grid[i], grid[i + 1]
+        for j, h in enumerate(hdr):
+            if isinstance(h, str):
+                out["totals"][h.strip().upper()] = num(val[j]) if j < len(val) else 0.0
+    t = out["totals"]
+    t.setdefault("PATIENTS WITH RX", 0.0); t.setdefault("FILLED AT PHARMACY", 0.0)
+    t.setdefault("MEDICINES PRESCRIBED", 0.0); t.setdefault("MEDICINES GIVEN", 0.0); t.setdefault("MISSED VALUE", 0.0)
+    r, c = find("Excellent Pharmacy")
+    sub = grid[2][1] if len(grid) > 2 and len(grid[2]) > 1 else ""
+    out["date"] = str(sub or "").split("·")[0].strip()
+
+    def table(title, key):
+        i, _ = find(title)
+        if i is None:
+            return []
+        hdr = [str(h or "").replace("\n", " ").strip().upper() for h in grid[i + 1]]
+        col = {h: j for j, h in enumerate(hdr) if h}
+        rows = []
+        for row in grid[i + 2:]:
+            name = row[col.get(key.upper(), 1)]
+            if not name or not isinstance(name, str) or not isinstance(row[col.get("PATIENTS", 4)], (int, float)):
+                break
+            g = lambda h: num(row[col[h]]) if h in col else 0.0
+            rows.append({"name": name.strip(), "patients": g("PATIENTS"), "filled": g("FILLED"),
+                         "presc": g("MEDS PRESCRIBED"), "given": g("MEDS GIVEN"), "missed": g("MISSED")})
+        return rows
+    out["doctors"] = table("Capture by doctor", "Doctor")
+    for d in out["doctors"]:
+        d["doctor"] = doc_name(d["name"].upper())
+    out["insurers"] = table("Capture by insurer", "Insurer")
+    i, j = find("Top 10 prescribed medicines")
+    k, m = find("Top 10 missed medicines")
+    if i is not None:
+        for row in grid[i + 2:i + 12]:
+            if row[j]:
+                out["top_presc"].append({"name": str(row[j]), "use": str(row[j + 2] or ""), "times": num(row[j + 4]), "given": num(row[j + 5])})
+            if m is not None and row[m]:
+                out["top_missed"].append({"name": str(row[m]), "use": str(row[m + 2] or ""), "times": num(row[m + 4]),
+                                          "aed": num(row[m + 5]) if len(row) > m + 5 else 0.0})
+    return out
+
+
 def add_free_followups(visits, regs):
-    """Registered FOLLOW UP visits with no billed line are free follow-ups: added as 'F' balls (0 runs, not dots)."""
+    """Registered FOLLOW UP visits with no billed line are free follow-ups: added as dots marked F (0 runs)."""
     have = {(v.get("emr", ""), v["doctor"], v["date"]) for v in visits}
     fm_docs = {v["doctor"] for v in visits if v.get("fm")} | {n for n, fm in TEAM if fm}
     added = 0
@@ -416,12 +483,14 @@ def summarize(visits, pace=1.0):
         d = docs.setdefault(v["doctor"], {"Doctor": v["doctor"], "FM": False, "Balls": 0, "Dots": 0, "4s": 0, "6s": 0, "Runs": 0.0, "Referrals": 0, "Follow-ups": 0})
         d["FM"] = d["FM"] or v["fm"]
         # a referred patient is a Referral, not a Dot
-        key = "Follow-ups" if v.get("fu") else "Referrals" if v.get("ref") else "Dots" if v["ball"] == 0 else "4s" if v["ball"] == 4 else "6s"
+        key = "Referrals" if v.get("ref") else "Dots" if v["ball"] == 0 else "4s" if v["ball"] == 4 else "6s"
         d["Balls"] += 1; d[key] += 1; d["Runs"] += v["runs"]
+        d["Follow-ups"] += 1 if v.get("fu") else 0          # free follow-ups are dots; also counted here to explain them
         strips.setdefault(v["doctor"], []).append(v["ball"])
         i = ins.setdefault((v["doctor"], v["insurance"]), {"Doctor": v["doctor"], "Insurance": v["insurance"],
                                                            "Balls": 0, "Dots": 0, "Referrals": 0, "Follow-ups": 0, "4s": 0, "6s": 0, "Runs": 0.0})
         i["Balls"] += 1; i[key] += 1; i["Runs"] += v["runs"]
+        i["Follow-ups"] += 1 if v.get("fu") else 0
         for c in v["items"]:
             it = items.setdefault((v["doctor"], c["type"], c["code"]), {"Doctor": v["doctor"], "Item": item_name(c["code"], c["name"]),
                                                                           "Type": c["type"].title(), "Code": c["code"], "Count": 0, "Runs": 0.0})
