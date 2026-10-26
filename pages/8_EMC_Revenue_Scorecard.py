@@ -687,12 +687,9 @@ def build_excel():
     legend = [("·", "FFFFFF", "9AA79F", "Dot · consultation only"), ("4", BLUE, "FFFFFF", "One lab or procedure"),
               ("6", G, "FFFFFF", "Two or more"), ("R", GREY, "FFFFFF", "Referred to Family Medicine"),
               ("R", ORNG, "FFFFFF", "Referred outside")]
-    col = 2
+    leg_rows = []
     for sym, bgc, fgc, txt in legend:
-        c = ws.cell(r, col, f"{sym}  {txt}"); c.font = Font(size=9.5, bold=True, color=fgc if bgc != "FFFFFF" else "5D6A62"); c.fill = fill(bgc); c.border = box
-        c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
-        col += 7
-    r += 2
+        leg_rows.append((sym, bgc, fgc, txt))
     first_ball_col = 3
     for rank, d in ranked.iterrows():
         key = str(d["Doctor"]).replace(" (FM)", "")
@@ -704,7 +701,7 @@ def build_excel():
             elif v["ball"] == 0:
                 sym, bgc, fgc = "·", "FFFFFF", "9AA79F"
             else:
-                sym, bgc, fgc = str(v["ball"]), (BLUE if v["ball"] == 4 else G), "FFFFFF"
+                sym, bgc, fgc = int(v["ball"]), (BLUE if v["ball"] == 4 else G), "FFFFFF"
             c = ws.cell(r, first_ball_col + j, sym)
             c.fill = fill(bgc); c.font = Font(bold=True, color=fgc, size=9); c.alignment = center
             c.border = Border(left=Side(style="thin", color="FFFFFF"), right=Side(style="thin", color="FFFFFF"),
@@ -715,8 +712,19 @@ def build_excel():
             ws.column_dimensions[get_column_letter(first_ball_col + j)].width = 3.4
         ws.row_dimensions[r].height = 19
         r += 1
+    r += 1
+    ws.cell(r, 2, "Key").font = Font(bold=True, size=11, color=G)
+    r += 1
+    for sym, bgc, fgc, txt in leg_rows:
+        t = ws.cell(r, 2, txt); t.font = Font(size=10, color="5D6A62"); t.alignment = Alignment(horizontal="right", vertical="center")
+        c = ws.cell(r, 3, int(sym) if sym.isdigit() else sym)
+        c.fill = fill(bgc); c.font = Font(bold=True, color=fgc, size=9); c.alignment = center
+        if bgc == "FFFFFF":
+            c.border = box
+        ws.row_dimensions[r].height = 18
+        r += 1
     ws.column_dimensions["A"].width = 2
-    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["B"].width = 28
     ws.freeze_panes = "C4"
 
     # ---- By insurance
