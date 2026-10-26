@@ -840,7 +840,16 @@ with tab4:
         st.success("Nothing to correct in this report.")
 
 # ---------------------------------------------------------------- colourful Excel (no corrections sheet)
-def build_excel():
+def scope(only=None):
+    """(ranked, doc_visits, visits) for everyone, or for one doctor only."""
+    if not only:
+        return ranked, doc_visits, visits
+    rk = ranked[ranked["Doctor"].astype(str).str.replace(" (FM)", "", regex=False) == only].reset_index(drop=True)
+    return rk, {only: doc_visits.get(only, [])}, [v for v in visits if v["doctor"] == only]
+
+
+def build_excel(only=None):
+    _rk, _dv, _vv = scope(only)
     import io
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -886,7 +895,7 @@ def build_excel():
         return c
 
     wb = Workbook()
-    sub = f"{', '.join(dates)}  ·  {len(visits)} patients  ·  {check} check  ·  uploaded {report_meta['uploaded_at']}"
+    sub = f"{', '.join(dates)}  ·  {len(_vv)} patients  ·  {check} check  ·  uploaded {report_meta['uploaded_at']}"
 
     # ---- Scorecard
     ws = wb.active; ws.title = "Scorecard"; ws.sheet_view.showGridLines = False
@@ -902,7 +911,7 @@ def build_excel():
     banner(ws, 1, "EMC Revenue Scorecard", len(cols), sub)
     header(ws, 4, cols)
     r = 5
-    for rank, d in ranked.iterrows():
+    for rank, d in _rk.iterrows():
         bg = SOFT if rank % 2 else None
         n = rank + 1
         body_cell(ws, r, 1, n, bold=True, bg=MEDAL.get(n, bg))
@@ -926,12 +935,15 @@ def build_excel():
         ws.row_dimensions[r].height = 21
         r += 1
     last = r - 1
-    vals = ["", "Clinic", "", int(clinic["Balls"]), int(clinic["Dots"]), int(clinic["Referrals"]), int(clinic["4s"]), int(clinic["6s"]),
+    if only:
+        vals = None
+    else:
+      vals = ["", "Clinic", "", int(clinic["Balls"]), int(clinic["Dots"]), int(clinic["Referrals"]), int(clinic["4s"]), int(clinic["6s"]),
             int(clinic["Scoring"]), f'{gap(clinic["Balls"], clinic["Balls target"])[0]} ({int(clinic["Balls target"])})',
             float(clinic["Runs"]), float(clinic["Runs target (day)"]),
             gap(clinic["Runs"], clinic["Runs target (day)"])[0], clinic["Runs"] / max(clinic["Balls"], 1), ""]
     fmts = {11: "#,##0", 12: "#,##0", 14: "#,##0"}
-    for i, v in enumerate(vals, 1):
+    for i, v in enumerate(vals or [], 1):
         c = body_cell(ws, r, i, v, fmts.get(i), color="FFFFFF", bold=True, bg=G_DARK, align=left if i == 2 else center)
     ws.row_dimensions[r].height = 22
     widths = [5, 26, 17, 9, 8, 10, 7, 7, 9, 19, 11, 11, 17, 12, 12]
@@ -941,7 +953,7 @@ def build_excel():
     ws.freeze_panes = "C5"
     # ball strips on their own sheet
     ws = wb.create_sheet("Balls"); ws.sheet_view.showGridLines = False
-    maxb = max([len(v) for v in doc_visits.values()] + [10])
+    maxb = max([len(v) for v in _dv.values()] + [10])
     banner(ws, 1, "Every patient is a ball", min(maxb + 2, 40), sub)
     r = 4
     legend = [("·", "FFFFFF", "9AA79F", "Dot · consultation only"), ("4", BLUE, "FFFFFF", "One lab or procedure"),
@@ -951,10 +963,10 @@ def build_excel():
     for sym, bgc, fgc, txt in legend:
         leg_rows.append((sym, bgc, fgc, txt))
     first_ball_col = 3
-    for rank, d in ranked.iterrows():
+    for rank, d in _rk.iterrows():
         key = str(d["Doctor"]).replace(" (FM)", "")
         body_cell(ws, r, 2, key, bold=True, align=left)
-        for j, v in enumerate(doc_visits.get(key, [])):
+        for j, v in enumerate(_dv.get(key, [])):
             ref = v.get("ref")
             if ref:
                 sym, bgc, fgc = "R", (ORNG if ref["external"] else GREY), "FFFFFF"
@@ -992,8 +1004,8 @@ def build_excel():
     icols = ["Insurance", "Balls", "Dots", "Referral", "4s", "What the 4s were", "6s", "What the 6s were", "Runs", "Runs per ball"]
     banner(wi, 1, "Each doctor by insurance", len(icols), sub)
     r = 4
-    for doc in [str(d["Doctor"]).replace(" (FM)", "") for _, d in ranked.iterrows()]:
-        vs = doc_visits.get(doc, [])
+    for doc in [str(d["Doctor"]).replace(" (FM)", "") for _, d in _rk.iterrows()]:
+        vs = _dv.get(doc, [])
         if not vs:
             continue
         wi.merge_cells(start_row=r, start_column=1, end_row=r, end_column=len(icols))
@@ -1034,7 +1046,7 @@ def build_excel():
     banner(wl, 1, "Labs and procedures", len(lcols), sub)
     header(wl, 4, lcols)
     agg, agg_runs = {}, {}
-    for v in visits:
+    for v in _vv:
         for c in v["items"]:
             k = (v["doctor"], L.item_name(c["code"], c["name"]), "Lab" if c["type"] in ("LAB", "RADIOLOGY") else "Procedure", c["code"], PR(c))
             agg[k] = agg.get(k, 0) + 1
@@ -1060,12 +1072,14 @@ def build_excel():
         wl.column_dimensions[get_column_letter(i)].width = w
 
     del wb["Balls"]   # not wanted in the Excel
-    if rx:
+    if rx and (not only or rx_for(only)):
         wp = wb.create_sheet("Pharmacy"); wp.sheet_view.showGridLines = False
         pcols = ["Doctor / insurer", "Patients with Rx", "Filled", "Fill %", "Lost", "Meds prescribed", "Meds given", "Given %", "Missed lines"]
         banner(wp, 1, "Pharmacy capture (target 100%)", len(pcols), f"{rx['date']}  ·  EMC Cortex prescriptions vs Excellent Pharmacy")
         r = 4
-        for title, rows in (("By doctor", rx["doctors"]), ("By insurer", rx["insurers"])):
+        _sets = ((("Your pharmacy capture", [x for x in rx["doctors"] if x["doctor"] == only]),) if only
+                 else (("By doctor", rx["doctors"]), ("By insurer", rx["insurers"])))
+        for title, rows in _sets:
             wp.cell(r, 1, title).font = Font(bold=True, size=12, color=G_DARK); r += 1
             header(wp, r, pcols); r += 1
             for row in rows:
@@ -1095,7 +1109,8 @@ fname = f"EMC_Scorecard_{dates[0] if dates else ''}_{check.replace(' ', '')}.xls
 # ---------------------------------------------------------------- email
 
 # ---------------------------------------------------------------- email (same look as the dashboard, inline styles for mail apps)
-def email_dashboard_html():
+def email_dashboard_html(only=None):
+    ranked, doc_visits, visits = scope(only)
     """Outlook-safe email: tables + bgcolor everywhere (Outlook desktop ignores div backgrounds, % widths on divs, margins on spans)."""
     F = "font-family:Segoe UI,Arial,Helvetica,sans-serif;"
     INK, MUT, SOFT, LINE, EDGE = "#18211C", "#5D6A62", "#F2F5F1", "#E1E6E0", "#C9D2CB"
@@ -1197,11 +1212,12 @@ def email_dashboard_html():
     # header
     out.append(f'<tr><td bgcolor="#1E6A49" style="background:#1E6A49;background-image:linear-gradient(135deg,#16492F,#1E6A49 60%,#2A8A5E);'
                f'border-radius:16px;padding:22px 26px;color:#ffffff;">'
-               f'<div style="font:bold 26px Arial,sans-serif;color:#ffffff;">EMC Revenue Scorecard</div>'
-               f'<div style="font-size:14px;color:#DDEFE5;padding-top:6px;">{E(", ".join(dates))} &nbsp;·&nbsp; {len(visits)} patients &nbsp;·&nbsp; {len(docs)} doctors &nbsp;·&nbsp; <b style="color:#ffffff;">{E(check)} check</b></div>'
-               f'<div style="font-size:12px;color:#BFE0CE;padding-top:8px;">{len(logdf)} corrections applied &nbsp;·&nbsp; uploaded {E(report_meta["uploaded_at"])}</div></td></tr>')
-    # KPIs
-    out.append(f'<tr><td style="padding-top:12px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
+               f'<div style="font:bold 26px Arial,sans-serif;color:#ffffff;">{("Your scorecard · " + E(only)) if only else "EMC Revenue Scorecard"}</div>'
+               f'<div style="font-size:14px;color:#DDEFE5;padding-top:6px;">{E(", ".join(dates))} &nbsp;·&nbsp; {len(visits)} patients{"" if only else f" &nbsp;·&nbsp; {len(docs)} doctors"} &nbsp;·&nbsp; <b style="color:#ffffff;">{E(check)} check</b></div>'
+               f'<div style="font-size:12px;color:#BFE0CE;padding-top:8px;">{"" if only else f"{len(logdf)} corrections applied &nbsp;·&nbsp; "}uploaded {E(report_meta["uploaded_at"])}</div></td></tr>')
+    # KPIs (management email only)
+    if not only:
+      out.append(f'<tr><td style="padding-top:12px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
                + kpi("Patients", int(clinic["Balls"]), f'/ {int(clinic["Balls target"])}', (f'<b style="background:#E3F1E9;color:#17553A;">&nbsp;{int(clinic["Balls"] - clinic["Follow-ups"])} billed patients&nbsp;</b> + {int(clinic["Follow-ups"])} free follow-ups (no bill) = {int(clinic["Balls"])} visits, same as reception<br>' if clinic.get("Follow-ups") else "") + f'GP {int(clinic["GP visits"])} / {int(clinic["GP target"])} · referrals {int(clinic["Referrals"])} / {int(clinic["Referral allowance"])} · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen',
                      gap_pill(clinic["Balls"], clinic["Balls target"]))
                + kpi("Revenue (runs)", fmt(clinic["Runs"]), f'/ {fmt(clinic["Runs target (day)"])}', "insurance share, full-day target",
@@ -1226,17 +1242,18 @@ def email_dashboard_html():
                + lg({"ball": 0, "ref": {"external": False}, "ref_given": [1]}, "Referred but GP gave a lab or procedure")
                + lg({"ball": 0, "fu": True}, "Dot · free follow-up (no bill)")
                + '</tr></table></td></tr>')
-    # top 3
-    out.append(section("Top of the table"))
-    out.append(f'<tr><td><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>')
-    for i, d in ranked[ranked["Balls"] > 0].head(3).iterrows():
-        out.append(f'<td width="33%" bgcolor="#ffffff" style="background:#ffffff;border:1px solid {EDGE};border-radius:12px;padding:12px;">'
-                   f'<table {T}><tr>{rank_cell(i + 1)}<td style="padding-left:10px;font:bold 14px Arial,sans-serif;">{E(str(d["Doctor"]).replace(" (FM)", ""))}</td></tr></table>'
-                   f'<div style="font-size:12px;color:{MUT};padding-top:6px;">{fmt(d["Runs"])} runs · {d["% of day"]}% of target · {d["Scoring"]} scoring</div></td>')
-    out.append('</tr></table></td></tr>')
+    # top 3 (management email only)
+    if not only:
+      out.append(section("Top of the table"))
+      out.append(f'<tr><td><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>')
+      for i, d in ranked[ranked["Balls"] > 0].head(3).iterrows():
+          out.append(f'<td width="33%" bgcolor="#ffffff" style="background:#ffffff;border:1px solid {EDGE};border-radius:12px;padding:12px;">'
+                     f'<table {T}><tr>{rank_cell(i + 1)}<td style="padding-left:10px;font:bold 14px Arial,sans-serif;">{E(str(d["Doctor"]).replace(" (FM)", ""))}</td></tr></table>'
+                     f'<div style="font-size:12px;color:{MUT};padding-top:6px;">{fmt(d["Runs"])} runs · {d["% of day"]}% of target · {d["Scoring"]} scoring</div></td>')
+      out.append('</tr></table></td></tr>')
 
     # doctor cards
-    out.append(section("Doctor scorecards"))
+    out.append(section("Your scorecard" if only else "Doctor scorecards"))
     for rank, d in ranked.iterrows():
         if d.get("Vacancy"):
             days, pts, rev = hiring_numbers(d)
@@ -1282,7 +1299,7 @@ def email_dashboard_html():
             f'<tr><td width="6" bgcolor="{fg}" style="background:{fg};border-radius:14px 0 0 14px;font-size:1px;">&nbsp;</td>'
             f'<td style="padding:18px 20px;">'
             # name row
-            f'<table {T} width="100%"><tr><td><table {T}><tr>{rank_cell(rank + 1) if d["Balls"] else rank_cell("–")}'
+            f'<table {T} width="100%"><tr><td><table {T}><tr>{"" if only else (rank_cell(rank + 1) if d["Balls"] else rank_cell("–"))}'
             f'<td style="padding-left:10px;font:bold 22px Arial,sans-serif;color:{INK};">{E(key)}</td></tr></table>'
             f'<div style="font-size:12.5px;color:{MUT};padding-top:4px;">{"Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice"} · target {fmt(d["Runs target (day)"])} a day</div></td>'
             f'<td align="right" valign="top"><table {T}><tr><td bgcolor="{bg}" style="background:{bg};color:{fg};border:1px solid {fg};border-radius:14px;'
@@ -1319,7 +1336,7 @@ def email_dashboard_html():
             '</td></tr></table></td></tr>')
 
     # by insurance
-    out.append(section("Each doctor by insurance"))
+    out.append(section("Your patients by insurance" if only else "Each doctor by insurance"))
     th = f'bgcolor="{SOFT}" style="background:{SOFT};color:{MUT};font-size:10.5px;letter-spacing:1px;text-transform:uppercase;padding:9px 10px;text-align:right;border-bottom:2px solid {EDGE};"'
     thl = th.replace("text-align:right", "text-align:left")
     td = f'style="padding:8px 10px;border-bottom:1px solid {LINE};text-align:right;font-size:13px;"'
@@ -1349,8 +1366,8 @@ def email_dashboard_html():
                    f'{rows}</table></td></tr>')
 
     out.append(f'<tr><td style="font-size:12px;color:{MUT};padding:20px 0 0;">Runs = insurance share after copay on corrected prices. '
-               f'{len(logdf)} corrections applied – details in the attached Excel file. '
-               f'Sent from the EMC Revenue Scorecard, {datetime.now(UAE):%d-%m-%Y %I:%M %p}.</td></tr>')
+               + ("" if only else f'{len(logdf)} corrections applied – details in the attached Excel file. ')
+               + f'Sent from the EMC Revenue Scorecard, {datetime.now(UAE):%d-%m-%Y %I:%M %p}.</td></tr>')
     out.append('</table></td></tr></table>')
     return "".join(out)
 
@@ -1360,29 +1377,60 @@ with tab5:
             "user": _secret("SMTP_USER"), "password": _secret("SMTP_PASS")}
     if not (smtp["host"] and smtp["user"] and smtp["password"]):
         smtp = {}
+    import re as _re
+    doc_emails = {doc_name: em for doc_name, em in
+                  ((m.group(1).strip(), m.group(2).strip()) for m in _re.finditer(r"([^:,;]+):\s*([^,;\s]+@[^,;\s]+)", _secret("DOCTOR_EMAILS")))}
+    docs_with_pts = [str(d["Doctor"]).replace(" (FM)", "") for _, d in ranked.iterrows() if d["Balls"] > 0 and not d.get("Vacancy")]
+    who = st.selectbox("Send for", ["All doctors (management)"] + docs_with_pts,
+                       help="Pick one doctor to send only their own performance (no clinic totals, no other doctors).")
+    only = None if who.startswith("All doctors") else who
     c1, c2 = st.columns(2)
-    to = c1.text_input("Send to (comma separated)", value=_secret("EMAIL_TO"))
-    cc = c2.text_input("CC (comma separated)", value=_secret("EMAIL_CC"))
-    subject = st.text_input("Subject", value=f"EMC Revenue Scorecard - {', '.join(dates)} - {check} check")
-    html = email_dashboard_html()
+    to = c1.text_input("Send to (comma separated)", key=f"to_{who}",
+                       value=_secret("EMAIL_TO") if not only else doc_emails.get(only, ""))
+    cc = c2.text_input("CC (comma separated)", key=f"cc_{who}", value=_secret("EMAIL_CC") if not only else "")
+    subject = st.text_input("Subject", key=f"sub_{who}",
+                            value=(f"Your performance - {only} - {', '.join(dates)}" if only
+                                   else f"EMC Revenue Scorecard - {', '.join(dates)} - {check} check"))
+    html = email_dashboard_html(only)
+    x_bytes = build_excel(only) if only else xlsx
+    x_name = (f"Scorecard_{only.replace('Dr. ', '').replace(' ', '_')}_{dates[0] if dates else ''}.xlsx" if only else fname)
     with st.expander("Preview email"):
         st.html(html)
-    b1, b2 = st.columns([1, 3])
-    b2.download_button("Download Excel", xlsx, file_name=fname,
+    b1, b2, b3 = st.columns([1.2, 1.4, 2])
+    b3.download_button("Download Excel", x_bytes, file_name=x_name, key=f"dl_{who}",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     if not smtp:
         st.warning("Email is not set up yet. Add SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and EMAIL_TO in the app's Settings → Secrets.")
-    elif b1.button("Send to management", type="primary"):
-        recipients = [x.strip() for x in to.split(",") if x.strip()]
-        if not recipients:
-            st.error("Add at least one email address.")
-        else:
-            try:
-                L.send_email(smtp, recipients, subject, html, xlsx, fname,
-                             [x.strip() for x in cc.split(",") if x.strip()])
-                st.success(f"Sent to {', '.join(recipients)}.")
-            except Exception as e:  # noqa: BLE001
-                st.error(f"Email not sent: {e}")
+    else:
+        if b1.button("Send" if only else "Send to management", type="primary"):
+            recipients = [x.strip() for x in to.split(",") if x.strip()]
+            if not recipients:
+                st.error("Add at least one email address.")
+            else:
+                try:
+                    L.send_email(smtp, recipients, subject, html, x_bytes, x_name,
+                                 [x.strip() for x in cc.split(",") if x.strip()])
+                    st.success(f"Sent to {', '.join(recipients)}.")
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"Email not sent: {e}")
+        if b2.button("Send to each doctor", help="Every doctor gets only their own scorecard, to the address in DOCTOR_EMAILS."):
+            sent, missing = [], []
+            for dname in docs_with_pts:
+                em = doc_emails.get(dname)
+                if not em:
+                    missing.append(dname)
+                    continue
+                try:
+                    L.send_email(smtp, [em], f"Your performance - {dname} - {', '.join(dates)}", email_dashboard_html(dname),
+                                 build_excel(dname), f"Scorecard_{dname.replace('Dr. ', '').replace(' ', '_')}_{dates[0] if dates else ''}.xlsx")
+                    sent.append(dname)
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"{dname}: not sent ({e})")
+            if sent:
+                st.success("Sent to " + ", ".join(sent) + ".")
+            if missing:
+                st.warning("No email address saved for: " + ", ".join(missing) +
+                           '. Add them in Settings → Secrets as DOCTOR_EMAILS = "Dr. Name: email, Dr. Name: email".')
 
 st.download_button("Download Excel", xlsx, file_name=fname, key="dl_bottom",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
