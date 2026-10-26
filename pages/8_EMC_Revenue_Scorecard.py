@@ -28,7 +28,7 @@ st.markdown("""
   --ok:#1E7A45; --ok-bg:#E2F3E8; --warn:#9A6200; --warn-bg:#FBF0D9; --bad:#B3261E; --bad-bg:#FBE4E1;
 }
 html, body, [class*="css"], .stMarkdown, .stText, p, li, label, input, button, textarea {font-family:'IBM Plex Sans', system-ui, sans-serif;}
-.block-container{padding-top:1.6rem; max-width:1280px;}
+.block-container{padding-top:3.8rem; max-width:1280px;}
 h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !important; letter-spacing:.01em;}
 
 /* hero */
@@ -229,10 +229,12 @@ with up_col:
         with st.form("upload_form", clear_on_submit=True, border=False):
             f_proc = st.file_uploader("1 · HIS ProcedureDetails report", type=["xlsx", "xls"],
                                       help="Coded or not coded. The file is corrected automatically.")
-            f_refs = st.file_uploader("2 · Referral reports (optional, one or more)", type=["xlsx", "xls"],
-                                      accept_multiple_files=True,
-                                      help="Internal (Family Medicine) and external (hospital) referral reports.")
+            f_ref_in = st.file_uploader("2 · Referral report: Family Medicine (optional)", type=["xlsx", "xls"],
+                                        help="HIS Referral report for referrals to Family Medicine.")
+            f_ref_out = st.file_uploader("3 · Referral report: outside hospitals (optional)", type=["xlsx", "xls"],
+                                         help="HIS Referral report for referrals to Lifecare and other hospitals.")
             go = st.form_submit_button("Process reports", type="primary")
+        f_refs = [f for f in (f_ref_in, f_ref_out) if f] if go else []
         if go:
             if not f_proc:
                 st.error("Add the ProcedureDetails report first.")
