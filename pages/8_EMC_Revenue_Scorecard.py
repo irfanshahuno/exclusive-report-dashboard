@@ -590,6 +590,176 @@ xlsx = L.to_excel(ddf, idf, itdf, logdf, meta)
 fname = f"EMC_Scorecard_{dates[0] if dates else ''}_{check.replace(' ', '')}.xlsx"
 
 # ---------------------------------------------------------------- email
+
+# ---------------------------------------------------------------- email (same look as the dashboard, inline styles for mail apps)
+def email_dashboard_html():
+    FONT = "font-family:'Segoe UI',Arial,Helvetica,sans-serif;"
+    INK, MUT, SOFT, LINE = "#18211C", "#5D6A62", "#F2F5F1", "#E1E6E0"
+    FOUR, SIX, GREY, ORNG = "#2F5FC9", "#1E6A49", "#7D8A83", "#E07B39"
+    ST = {"ON": ("ON TRACK", "#1E7A45", "#E2F3E8"), "WATCH": ("CLOSE", "#9A6200", "#FBF0D9"), "CHECK": ("BEHIND", "#B3261E", "#FBE4E1")}
+    MEDAL = {1: ("#E9C46A", "#4A3A07"), 2: ("#CFD6DA", "#33413A"), 3: ("#D9A47A", "#4A2A10")}
+
+    def ball(v):
+        base = "display:inline-block;width:16px;height:16px;border-radius:50%;margin:0 3px 4px 0;text-align:center;font:700 9px/16px Arial,sans-serif;color:#fff;box-sizing:border-box;"
+        r = v.get("ref")
+        if r:
+            bg = ORNG if r["external"] else GREY
+            ring = "border:2px solid #D62D20;line-height:12px;" if v.get("ref_given") else ""
+            return f'<span style="{base}background:{bg};{ring}">R</span>'
+        if v["ball"] == 0:
+            return f'<span style="{base}border:1.5px solid #C3CCC5;">&nbsp;</span>'
+        return f'<span style="{base}background:{FOUR if v["ball"] == 4 else SIX};">{v["ball"]}</span>'
+
+    def bar(ratio, color, h=8):
+        w = max(0, min(ratio, 1)) * 100
+        return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">'
+                f'<tr><td style="background:{LINE};border-radius:6px;height:{h}px;font-size:0;line-height:0;">'
+                f'<div style="width:{w:.0f}%;height:{h}px;background:{color};border-radius:6px;"></div></td></tr></table>')
+
+    def rank_badge(n):
+        bg, fg = MEDAL.get(n, (SOFT, INK))
+        return (f'<span style="display:inline-block;width:28px;height:28px;border-radius:50%;background:{bg};color:{fg};'
+                f'text-align:center;font:700 13px/28px Arial,sans-serif;margin-right:8px;vertical-align:middle;">{n}</span>')
+
+    def chip_list(vs, n=8):
+        g = {}
+        for v in vs:
+            for c in v["items"]:
+                nm = L.item_name(c["code"], c["name"])
+                e = g.setdefault(nm, {"lab": c["type"] in ("LAB", "RADIOLOGY"), "p": set(), "n": 0})
+                e["p"].add(round(c["ins"], 2)); e["n"] += 1
+        out = []
+        for nm, e in sorted(g.items(), key=lambda x: -x[1]["n"])[:n]:
+            bg, fg = ("#E8EEFB", "#2546A0") if e["lab"] else ("#E3F1E9", "#17553A")
+            pl = " / ".join(money(x) for x in sorted(e["p"], reverse=True))
+            out.append(f'<span style="display:inline-block;background:{bg};color:{fg};border-radius:999px;padding:4px 11px;'
+                       f'margin:0 6px 6px 0;font-size:12.5px;">{E(nm)} <b>{pl}</b>' + (f' <span style="opacity:.7">×{e["n"]}</span>' if e["n"] > 1 else "") + "</span>")
+        if len(g) > n:
+            out.append(f'<span style="display:inline-block;background:#EEF1EF;color:{MUT};border-radius:999px;padding:4px 11px;font-size:12.5px;">+{len(g) - n} more</span>')
+        return "".join(out) or f'<span style="color:{MUT}">No labs or procedures yet</span>'
+
+    def stat(val, label, color=INK, extra=""):
+        return (f'<td width="16.6%" style="padding:3px;"><div style="background:{SOFT};border-radius:10px;padding:9px 4px;text-align:center;">'
+                f'<div style="font:700 20px/1.1 Arial,sans-serif;color:{color};white-space:nowrap;">{val}</div>{extra}'
+                f'<div style="font-size:9.5px;color:{MUT};text-transform:uppercase;letter-spacing:.06em;margin-top:3px;">{label}</div></div></td>')
+
+    # header + KPIs
+    runs_r = clinic["Runs"] / max(clinic["Runs needed"], 1)
+    sc_r = clinic["Scoring"] / max(clinic["Scoring needed"], 1)
+    def kpi(lbl, val, small, sub, b=""):
+        return (f'<td width="25%" style="padding:5px;vertical-align:top;"><div style="background:#fff;border:1px solid {LINE};border-radius:14px;padding:14px 16px;">'
+                f'<div style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:{MUT};font-weight:600;">{lbl}</div>'
+                f'<div style="font:700 24px/1.15 Arial,sans-serif;color:{INK};margin-top:4px;white-space:nowrap;">{val} <span style="font-size:14px;color:{MUT};font-weight:400;">{small}</span></div>'
+                f'<div style="font-size:12px;color:{MUT};margin:4px 0 8px;">{sub}</div>{b}</div></td>')
+    html = [f'<div style="{FONT}color:{INK};background:#F7F8F6;padding:18px;">'
+            f'<div style="max-width:780px;margin:0 auto;">'
+            f'<div style="background:linear-gradient(135deg,#16492F,#1E6A49 60%,#2A8A5E);background-color:#1E6A49;border-radius:18px;padding:22px 26px;color:#fff;">'
+            f'<div style="font:700 26px/1.2 Arial,sans-serif;">EMC Revenue Scorecard</div>'
+            f'<div style="font-size:13.5px;opacity:.9;margin-top:6px;">{E(", ".join(dates))} · {len(visits)} patients · {len(docs)} doctors · {E(check)} check</div>'
+            f'<div style="margin-top:12px;"><span style="display:inline-block;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.25);border-radius:999px;padding:4px 12px;font-size:12px;margin-right:6px;">{len(logdf)} corrections applied</span>'
+            f'<span style="display:inline-block;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.25);border-radius:999px;padding:4px 12px;font-size:12px;">Uploaded {E(report_meta["uploaded_at"])}</span></div></div>'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:12px 0 6px;"><tr>'
+            + kpi("Clinic runs", fmt(clinic["Runs"]), f'/ {fmt(clinic["Runs needed"])}', f'{runs_r:.0%} of the {E(check)} pace', bar(runs_r, SIX, 6))
+            + kpi("Scoring balls", int(clinic["Scoring"]), f'/ {int(clinic["Scoring needed"])}', f'{int(clinic["4s"])} fours · {int(clinic["6s"])} sixes', bar(sc_r, FOUR, 6))
+            + kpi("Balls faced", int(clinic["Balls"]), "", f'{int(clinic["Dots"])} dots · {int(clinic["Referrals"])} referrals')
+            + kpi("Runs per ball", f'{clinic["Runs"] / max(clinic["Balls"], 1):,.0f}', "AED", "Insurance money per patient")
+            + '</tr></table>']
+
+    # legend
+    lg = lambda b, t: f'<span style="display:inline-block;margin:0 14px 6px 0;font-size:12px;color:{MUT};">{b} {t}</span>'
+    html.append('<div style="padding:4px 4px 8px;">'
+                + lg(ball({"ball": 0}), "Dot · consultation only") + lg(ball({"ball": 4}), "One lab or procedure")
+                + lg(ball({"ball": 6}), "Two or more") + lg(ball({"ball": 0, "ref": {"external": False}}), "Referred to Family Medicine")
+                + lg(ball({"ball": 0, "ref": {"external": True}}), "Referred outside")
+                + lg(ball({"ball": 0, "ref": {"external": False}, "ref_given": [1]}), "Referred but GP gave a lab or procedure") + '</div>')
+
+    # top 3
+    html.append('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:6px;"><tr>')
+    for i, d in ranked.head(3).iterrows():
+        html.append(f'<td width="33%" style="padding:5px;"><div style="background:#fff;border:1px solid {LINE};border-radius:14px;padding:12px 14px;">'
+                    f'{rank_badge(i + 1)}<b style="vertical-align:middle;">{E(str(d["Doctor"]).replace(" (FM)", ""))}</b>'
+                    f'<div style="font-size:12px;color:{MUT};margin:4px 0 0 36px;">{fmt(d["Runs"])} runs · {d["% of day"]}% of target · {d["Scoring"]} scoring</div></div></td>')
+    html.append('</tr></table>')
+
+    # doctor cards
+    for rank, d in ranked.iterrows():
+        key = str(d["Doctor"]).replace(" (FM)", "")
+        vs = doc_visits.get(key, [])
+        lab, fg, bg = ST.get(str(d["Status"]).split()[0], (str(d["Status"]), MUT, SOFT))
+        ratio = d["Runs"] / max(d["Runs needed"], 1)
+        scn = int(d["Scoring needed"]) or 1
+        rv = [v for v in vs if v.get("ref")]
+        ref_line = ""
+        if rv:
+            dest = {}
+            for v in rv:
+                nm = "Family Medicine" if not v["ref"]["external"] else v["ref"]["to"].title()
+                dest[nm] = dest.get(nm, 0) + 1
+            ref_line = "Referrals: " + " · ".join(f"<b>{k}</b> to {E(n)}" for n, k in dest.items())
+            nw = sum(1 for v in rv if v.get("ref_given"))
+            if nw:
+                ref_line += f' · <span style="color:#B3261E"><b>{nw}</b> given a lab or procedure</span>'
+        need = int(d["Scoring still needed"]) if d["Scoring still needed"] not in ("", None) else 0
+        need_txt = f"Needs <b>{need} more scoring balls</b> by {E(check)}" if need else f"Scoring on pace for {E(check)}"
+        html.append(
+            f'<div style="background:#fff;border:1px solid {LINE};border-left:5px solid {fg};border-radius:16px;padding:18px 20px;margin:10px 5px 0;">'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td>{rank_badge(rank + 1)}'
+            f'<span style="font:700 21px Arial,sans-serif;vertical-align:middle;">{E(key)}</span>'
+            f'<div style="font-size:12.5px;color:{MUT};margin-top:3px;">{"Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice"} · target {fmt(d["Runs target (day)"])} a day</div></td>'
+            f'<td align="right" style="vertical-align:top;"><span style="display:inline-block;background:{bg};color:{fg};border-radius:999px;padding:5px 12px;font-size:11px;font-weight:700;letter-spacing:.07em;">{lab}</span></td></tr></table>'
+            f'<div style="margin:12px 0 8px;"><span style="font:700 38px/1 Arial,sans-serif;">{fmt(d["Runs"])}</span>'
+            f'<span style="font-size:13px;color:{MUT};margin-left:8px;">runs of {fmt(d["Runs needed"])} needed by {E(check)} · {d["% of day"]}% of day target</span></div>'
+            + bar(ratio, SIX) +
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:10px 0 8px;"><tr>'
+            + stat(d["Balls"], "Balls") + stat(d["Dots"], "Dots") + stat(d["Referrals"], "Referral", GREY)
+            + stat(d["4s"], "4s", FOUR) + stat(d["6s"], "6s", SIX)
+            + stat(f'{d["Scoring"]}<span style="font-size:12px;color:{MUT};">/{scn}</span>', "Scoring", INK,
+                   f'<div style="margin:5px 10px 0;">{bar(d["Scoring"] / scn, FOUR, 4)}</div>')
+            + '</tr></table>'
+            f'<div style="margin:6px 0 8px;line-height:0;">{"".join(ball(v) for v in vs)}</div>'
+            f'<div style="margin:4px 0 4px;">{chip_list(vs)}</div>'
+            + (f'<div style="font-size:13px;color:{MUT};margin-top:6px;">{ref_line}</div>' if ref_line else "")
+            + f'<div style="font-size:13px;color:{MUT};margin-top:8px;">{need_txt} · {fmt(d["Runs"] / max(d["Balls"], 1))} AED per ball</div></div>')
+
+    # by insurance
+    th = f'style="background:{SOFT};color:{MUT};font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;padding:8px 10px;text-align:right;border-bottom:1px solid {LINE};"'
+    thl = th.replace("text-align:right", "text-align:left")
+    td = f'style="padding:7px 10px;border-bottom:1px solid {LINE};text-align:right;font-size:13px;"'
+    tdl = td.replace("text-align:right", "text-align:left")
+    html.append(f'<div style="font:700 19px Arial,sans-serif;margin:24px 5px 4px;">Each doctor by insurance</div>')
+    for doc in sorted(doc_visits):
+        vs = doc_visits[doc]
+        by = {}
+        for v in vs:
+            by.setdefault(v["insurance"], []).append(v)
+        rows = ""
+        def row(name, ivs, tot=False):
+            f4 = [v for v in ivs if v["ball"] == 4]; f6 = [v for v in ivs if v["ball"] == 6]
+            runs = sum(v["runs"] for v in ivs); nref = sum(1 for v in ivs if v.get("ref"))
+            bgc = f"background:{SOFT};font-weight:700;" if tot else ""
+            return (f'<tr style="{bgc}"><td {tdl}>{E(name)}</td><td {td}>{len(ivs)}</td><td {td}>{sum(1 for v in ivs if v["ball"] == 0)}</td>'
+                    f'<td {td}><span style="color:{GREY};font-weight:700;">{nref if (nref or tot) else "–"}</span></td>'
+                    f'<td {td}><span style="color:{FOUR};font-weight:700;">{len(f4)}</span></td>'
+                    f'<td {tdl}><span style="font-size:12px;color:{MUT};">{"" if tot else (E(agg_names(f4)) or "–")}</span></td>'
+                    f'<td {td}><span style="color:{SIX};font-weight:700;">{len(f6)}</span></td>'
+                    f'<td {tdl}><span style="font-size:12px;color:{MUT};">{"" if tot else (E(agg_names(f6)) or "–")}</span></td>'
+                    f'<td {td}>{fmt(runs)}</td><td {td}>{fmt(runs / max(len(ivs), 1))}</td></tr>')
+        for ins, ivs in sorted(by.items(), key=lambda x: -len(x[1])):
+            rows += row(ins, ivs)
+        rows += row("Total", vs, True)
+        html.append(f'<div style="font:700 15px Arial,sans-serif;margin:16px 5px 6px;">{E(doc)}</div>'
+                    f'<div style="background:#fff;border:1px solid {LINE};border-radius:12px;overflow:hidden;margin:0 5px;">'
+                    f'<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">'
+                    f'<tr><th {thl}>Insurance</th><th {th}>Balls</th><th {th}>Dots</th><th {th}>Referral</th><th {th}>4s</th>'
+                    f'<th {thl}>What the 4s were</th><th {th}>6s</th><th {thl}>What the 6s were</th><th {th}>Runs</th><th {th}>Per ball</th></tr>'
+                    f'{rows}</table></div>')
+
+    html.append(f'<p style="font-size:12px;color:{MUT};margin:18px 5px 0;">Runs = insurance share after copay on corrected prices. '
+                f'{len(logdf)} corrections applied – details in the attached Excel file. Sent from the EMC Revenue Scorecard, {datetime.now(UAE):%d-%m-%Y %I:%M %p}.</p>'
+                '</div></div>')
+    return "".join(html)
+
+
 with tab5:
     smtp = {"host": _secret("SMTP_HOST"), "port": _secret("SMTP_PORT", "465"),
             "user": _secret("SMTP_USER"), "password": _secret("SMTP_PASS")}
@@ -599,7 +769,7 @@ with tab5:
     to = c1.text_input("Send to (comma separated)", value=_secret("EMAIL_TO"))
     cc = c2.text_input("CC (comma separated)", value=_secret("EMAIL_CC"))
     subject = st.text_input("Subject", value=f"EMC Revenue Scorecard - {', '.join(dates)} - {check} check")
-    html = L.email_html(ddf, idf, itdf, logdf, meta, check)
+    html = email_dashboard_html()
     with st.expander("Preview email"):
         st.html(html)
     b1, b2 = st.columns([1, 3])
