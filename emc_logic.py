@@ -328,8 +328,10 @@ def apply_referrals(visits, refs):
         idx.setdefault((r["emr"], r["date"]), []).append(r)
     matched = 0
     for v in visits:
+        if v.get("fm"):            # Family Medicine receives the referral; its own visit is not a referral
+            continue
         cand = idx.get((v.get("emr", ""), v["date"]), [])
-        hit = next((r for r in cand if r["by"] == v["doctor"]), cand[0] if cand else None)
+        hit = next((r for r in cand if r["by"] == v["doctor"]), None)
         if hit:
             v["ref"] = hit
             v["ref_given"] = list(v["items"])
