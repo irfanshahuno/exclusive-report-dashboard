@@ -797,6 +797,7 @@ def build_excel():
     for i, w in enumerate([24, 30, 12, 10, 20, 8, 10], 1):
         wl.column_dimensions[get_column_letter(i)].width = w
 
+    del wb["Balls"]   # not wanted in the Excel
     for s in wb.worksheets:
         s.sheet_properties.tabColor = {"Scorecard": G, "Balls": GREY, "By insurance": BLUE, "Labs and procedures": ORNG}[s.title]
     buf = io.BytesIO()
