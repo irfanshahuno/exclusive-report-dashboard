@@ -586,102 +586,342 @@ with tab4:
     else:
         st.success("Nothing to correct in this report.")
 
-xlsx = L.to_excel(ddf, idf, itdf, logdf, meta)
+# ---------------------------------------------------------------- colourful Excel (no corrections sheet)
+def build_excel():
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.formatting.rule import DataBarRule
+    from openpyxl.utils import get_column_letter
+
+    G_DARK, G, G_SOFT, SOFT, LINE = "16492F", "1E6A49", "E3F1E9", "F2F5F1", "D5DCD6"
+    BLUE, BLUE_SOFT, GREY, ORNG, RED = "2F5FC9", "E8EEFB", "7D8A83", "E07B39", "D62D20"
+    STF = {"ON": ("ON TRACK", "1E7A45", "E2F3E8"), "WATCH": ("CLOSE", "9A6200", "FBF0D9"), "CHECK": ("BEHIND", "B3261E", "FBE4E1")}
+    MEDAL = {1: "E9C46A", 2: "CFD6DA", 3: "D9A47A"}
+    fill = lambda c: PatternFill("solid", start_color=c, end_color=c)
+    thin = Side(style="thin", color=LINE)
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal="center", vertical="center")
+    left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    def banner(ws, row, text, ncols, sub=None):
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=ncols)
+        c = ws.cell(row, 1, text); c.font = Font(bold=True, size=16, color="FFFFFF"); c.fill = fill(G); c.alignment = Alignment(vertical="center", indent=1)
+        ws.row_dimensions[row].height = 30
+        for col in range(2, ncols + 1):
+            ws.cell(row, col).fill = fill(G)
+        if sub:
+            ws.merge_cells(start_row=row + 1, start_column=1, end_row=row + 1, end_column=ncols)
+            s = ws.cell(row + 1, 1, sub); s.font = Font(size=10, color="FFFFFF"); s.alignment = Alignment(vertical="center", indent=1)
+            for col in range(1, ncols + 1):
+                ws.cell(row + 1, col).fill = fill(G_DARK)
+            ws.row_dimensions[row + 1].height = 20
+
+    def header(ws, row, names, color=G):
+        for i, n in enumerate(names, 1):
+            c = ws.cell(row, i, n)
+            c.font = Font(bold=True, color="FFFFFF", size=10); c.fill = fill(color); c.alignment = center; c.border = box
+        ws.row_dimensions[row].height = 22
+
+    def body_cell(ws, r, col, val, fmt=None, color=None, bold=False, bg=None, align=center):
+        c = ws.cell(r, col, val); c.border = box; c.alignment = align
+        c.font = Font(color=color or "18211C", bold=bold, size=10.5)
+        if bg:
+            c.fill = fill(bg)
+        if fmt:
+            c.number_format = fmt
+        return c
+
+    wb = Workbook()
+    sub = f"{', '.join(dates)}  ·  {len(visits)} patients  ·  {check} check  ·  uploaded {report_meta['uploaded_at']}"
+
+    # ---- Scorecard
+    ws = wb.active; ws.title = "Scorecard"; ws.sheet_view.showGridLines = False
+    cols = ["#", "Doctor", "Role", "Balls", "Dots", "Referral", "4s", "6s", "Scoring", "Scoring needed",
+            "Runs", "Runs needed", "% of day target", "Runs per ball", "Status"]
+    banner(ws, 1, "EMC Revenue Scorecard", len(cols), sub)
+    header(ws, 4, cols)
+    r = 5
+    for rank, d in ranked.iterrows():
+        bg = SOFT if rank % 2 else None
+        n = rank + 1
+        body_cell(ws, r, 1, n, bold=True, bg=MEDAL.get(n, bg))
+        body_cell(ws, r, 2, str(d["Doctor"]).replace(" (FM)", ""), bold=True, bg=bg, align=left)
+        body_cell(ws, r, 3, "Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice", color="5D6A62", bg=bg)
+        body_cell(ws, r, 4, int(d["Balls"]), bg=bg)
+        body_cell(ws, r, 5, int(d["Dots"]), bg=bg)
+        body_cell(ws, r, 6, int(d["Referrals"]), color=GREY, bold=True, bg=bg)
+        body_cell(ws, r, 7, int(d["4s"]), color=BLUE, bold=True, bg=bg)
+        body_cell(ws, r, 8, int(d["6s"]), color=G, bold=True, bg=bg)
+        body_cell(ws, r, 9, int(d["Scoring"]), bold=True, bg=bg)
+        body_cell(ws, r, 10, int(d["Scoring needed"]), color="5D6A62", bg=bg)
+        body_cell(ws, r, 11, float(d["Runs"]), "#,##0", bold=True, bg=bg)
+        body_cell(ws, r, 12, float(d["Runs needed"]), "#,##0", color="5D6A62", bg=bg)
+        body_cell(ws, r, 13, d["% of day"] / 100, "0%", bold=True, bg=bg)
+        body_cell(ws, r, 14, d["Runs"] / max(d["Balls"], 1), "#,##0", bg=bg)
+        lab, fg, sbg = STF.get(str(d["Status"]).split()[0], (str(d["Status"]), "5D6A62", SOFT))
+        body_cell(ws, r, 15, lab, color=fg, bold=True, bg=sbg)
+        ws.row_dimensions[r].height = 21
+        r += 1
+    last = r - 1
+    vals = ["", "Clinic", "", int(clinic["Balls"]), int(clinic["Dots"]), int(clinic["Referrals"]), int(clinic["4s"]), int(clinic["6s"]),
+            int(clinic["Scoring"]), int(clinic["Scoring needed"]), float(clinic["Runs"]), float(clinic["Runs needed"]),
+            clinic["% of day"] / 100, clinic["Runs"] / max(clinic["Balls"], 1), ""]
+    fmts = {11: "#,##0", 12: "#,##0", 13: "0%", 14: "#,##0"}
+    for i, v in enumerate(vals, 1):
+        c = body_cell(ws, r, i, v, fmts.get(i), color="FFFFFF", bold=True, bg=G_DARK, align=left if i == 2 else center)
+    ws.row_dimensions[r].height = 22
+    if last >= 5:
+        ws.conditional_formatting.add(f"M5:M{last}", DataBarRule(start_type="num", start_value=0, end_type="num", end_value=1, color="5FA37F"))
+        ws.conditional_formatting.add(f"I5:I{last}", DataBarRule(start_type="num", start_value=0, end_type="num", end_value=22, color="7B9BE0"))
+    widths = [5, 26, 17, 8, 8, 10, 7, 7, 10, 10, 11, 12, 15, 12, 12]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    ws.freeze_panes = "C5"
+    # ball strips on their own sheet
+    ws = wb.create_sheet("Balls"); ws.sheet_view.showGridLines = False
+    maxb = max([len(v) for v in doc_visits.values()] + [10])
+    banner(ws, 1, "Every patient is a ball", min(maxb + 2, 40), sub)
+    r = 4
+    legend = [("·", "FFFFFF", "9AA79F", "Dot · consultation only"), ("4", BLUE, "FFFFFF", "One lab or procedure"),
+              ("6", G, "FFFFFF", "Two or more"), ("R", GREY, "FFFFFF", "Referred to Family Medicine"),
+              ("R", ORNG, "FFFFFF", "Referred outside")]
+    col = 2
+    for sym, bgc, fgc, txt in legend:
+        c = ws.cell(r, col, f"{sym}  {txt}"); c.font = Font(size=9.5, bold=True, color=fgc if bgc != "FFFFFF" else "5D6A62"); c.fill = fill(bgc); c.border = box
+        c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
+        col += 7
+    r += 2
+    first_ball_col = 3
+    for rank, d in ranked.iterrows():
+        key = str(d["Doctor"]).replace(" (FM)", "")
+        body_cell(ws, r, 2, key, bold=True, align=left)
+        for j, v in enumerate(doc_visits.get(key, [])):
+            ref = v.get("ref")
+            if ref:
+                sym, bgc, fgc = "R", (ORNG if ref["external"] else GREY), "FFFFFF"
+            elif v["ball"] == 0:
+                sym, bgc, fgc = "·", "FFFFFF", "9AA79F"
+            else:
+                sym, bgc, fgc = str(v["ball"]), (BLUE if v["ball"] == 4 else G), "FFFFFF"
+            c = ws.cell(r, first_ball_col + j, sym)
+            c.fill = fill(bgc); c.font = Font(bold=True, color=fgc, size=9); c.alignment = center
+            c.border = Border(left=Side(style="thin", color="FFFFFF"), right=Side(style="thin", color="FFFFFF"),
+                              top=Side(style="thin", color="FFFFFF"), bottom=Side(style="thin", color="FFFFFF"))
+            if ref and v.get("ref_given"):
+                red = Side(style="medium", color=RED)
+                c.border = Border(left=red, right=red, top=red, bottom=red)
+            ws.column_dimensions[get_column_letter(first_ball_col + j)].width = 3.4
+        ws.row_dimensions[r].height = 19
+        r += 1
+    ws.column_dimensions["A"].width = 2
+    ws.column_dimensions["B"].width = 24
+    ws.freeze_panes = "C4"
+
+    # ---- By insurance
+    wi = wb.create_sheet("By insurance"); wi.sheet_view.showGridLines = False
+    icols = ["Insurance", "Balls", "Dots", "Referral", "4s", "What the 4s were", "6s", "What the 6s were", "Runs", "Runs per ball"]
+    banner(wi, 1, "Each doctor by insurance", len(icols), sub)
+    r = 4
+    for doc in [str(d["Doctor"]).replace(" (FM)", "") for _, d in ranked.iterrows()]:
+        vs = doc_visits.get(doc, [])
+        if not vs:
+            continue
+        wi.merge_cells(start_row=r, start_column=1, end_row=r, end_column=len(icols))
+        c = wi.cell(r, 1, doc); c.font = Font(bold=True, size=12, color=G_DARK); c.fill = fill(G_SOFT)
+        for k in range(1, len(icols) + 1):
+            wi.cell(r, k).fill = fill(G_SOFT)
+        wi.row_dimensions[r].height = 22
+        r += 1
+        header(wi, r, icols, G); r += 1
+        by = {}
+        for v in vs:
+            by.setdefault(v["insurance"], []).append(v)
+        rows = sorted(by.items(), key=lambda x: -len(x[1])) + [("Total", vs)]
+        for k, (ins, ivs) in enumerate(rows):
+            tot = ins == "Total"
+            bg = G_DARK if tot else (SOFT if k % 2 else None)
+            fc = "FFFFFF" if tot else None
+            f4 = [v for v in ivs if v["ball"] == 4]; f6 = [v for v in ivs if v["ball"] == 6]
+            runs = sum(v["runs"] for v in ivs)
+            body_cell(wi, r, 1, ins, color=fc, bold=True, bg=bg, align=left)
+            body_cell(wi, r, 2, len(ivs), color=fc, bold=tot, bg=bg)
+            body_cell(wi, r, 3, sum(1 for v in ivs if v["ball"] == 0), color=fc, bold=tot, bg=bg)
+            body_cell(wi, r, 4, sum(1 for v in ivs if v.get("ref")), color=fc or GREY, bold=True, bg=bg)
+            body_cell(wi, r, 5, len(f4), color=fc or BLUE, bold=True, bg=bg)
+            body_cell(wi, r, 6, "" if tot else (agg_names(f4) or "–"), color=fc or "2546A0", bg=bg if tot else (BLUE_SOFT if f4 else bg), align=left)
+            body_cell(wi, r, 7, len(f6), color=fc or G, bold=True, bg=bg)
+            body_cell(wi, r, 8, "" if tot else (agg_names(f6) or "–"), color=fc or "17553A", bg=bg if tot else (G_SOFT if f6 else bg), align=left)
+            body_cell(wi, r, 9, runs, "#,##0", color=fc, bold=True, bg=bg)
+            body_cell(wi, r, 10, runs / max(len(ivs), 1), "#,##0", color=fc, bg=bg)
+            r += 1
+        r += 1
+    for i, w in enumerate([18, 8, 8, 10, 6, 44, 6, 44, 10, 12], 1):
+        wi.column_dimensions[get_column_letter(i)].width = w
+
+    # ---- Labs and procedures
+    wl = wb.create_sheet("Labs and procedures"); wl.sheet_view.showGridLines = False
+    lcols = ["Doctor", "Item", "Type", "Code", "Price (insurance share)", "Count", "Runs"]
+    banner(wl, 1, "Labs and procedures", len(lcols), sub)
+    header(wl, 4, lcols)
+    agg = {}
+    for v in visits:
+        for c in v["items"]:
+            k = (v["doctor"], L.item_name(c["code"], c["name"]), "Lab" if c["type"] in ("LAB", "RADIOLOGY") else "Procedure", c["code"], round(c["ins"], 2))
+            agg[k] = agg.get(k, 0) + 1
+    r = 5
+    for (doc, item, typ, code, pr), n in sorted(agg.items(), key=lambda x: (x[0][0], x[0][2], -x[1])):
+        lab = typ == "Lab"
+        bg = BLUE_SOFT if lab else G_SOFT
+        fc = "2546A0" if lab else "17553A"
+        body_cell(wl, r, 1, doc, bold=True, align=left)
+        body_cell(wl, r, 2, item, color=fc, bold=True, bg=bg, align=left)
+        body_cell(wl, r, 3, typ, color=fc, bg=bg)
+        body_cell(wl, r, 4, code, color="5D6A62")
+        body_cell(wl, r, 5, pr, "#,##0.00")
+        body_cell(wl, r, 6, n, bold=True)
+        body_cell(wl, r, 7, pr * n, "#,##0", bold=True)
+        r += 1
+    if r > 5:
+        wl.conditional_formatting.add(f"G5:G{r - 1}", DataBarRule(start_type="min", end_type="max", color="5FA37F"))
+    wl.freeze_panes = "A5"
+    for i, w in enumerate([24, 30, 12, 10, 20, 8, 10], 1):
+        wl.column_dimensions[get_column_letter(i)].width = w
+
+    for s in wb.worksheets:
+        s.sheet_properties.tabColor = {"Scorecard": G, "Balls": GREY, "By insurance": BLUE, "Labs and procedures": ORNG}[s.title]
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+xlsx = build_excel()
 fname = f"EMC_Scorecard_{dates[0] if dates else ''}_{check.replace(' ', '')}.xlsx"
 
 # ---------------------------------------------------------------- email
 
 # ---------------------------------------------------------------- email (same look as the dashboard, inline styles for mail apps)
 def email_dashboard_html():
-    FONT = "font-family:'Segoe UI',Arial,Helvetica,sans-serif;"
-    INK, MUT, SOFT, LINE = "#18211C", "#5D6A62", "#F2F5F1", "#E1E6E0"
-    FOUR, SIX, GREY, ORNG = "#2F5FC9", "#1E6A49", "#7D8A83", "#E07B39"
+    """Outlook-safe email: tables + bgcolor everywhere (Outlook desktop ignores div backgrounds, % widths on divs, margins on spans)."""
+    F = "font-family:Segoe UI,Arial,Helvetica,sans-serif;"
+    INK, MUT, SOFT, LINE, EDGE = "#18211C", "#5D6A62", "#F2F5F1", "#E1E6E0", "#C9D2CB"
+    FOUR, SIX, GREY, ORNG, RED = "#2F5FC9", "#1E6A49", "#7D8A83", "#E07B39", "#D62D20"
     ST = {"ON": ("ON TRACK", "#1E7A45", "#E2F3E8"), "WATCH": ("CLOSE", "#9A6200", "#FBF0D9"), "CHECK": ("BEHIND", "#B3261E", "#FBE4E1")}
     MEDAL = {1: ("#E9C46A", "#4A3A07"), 2: ("#CFD6DA", "#33413A"), 3: ("#D9A47A", "#4A2A10")}
+    W = 760
+    T = 'role="presentation" cellpadding="0" cellspacing="0" border="0"'
 
-    def ball(v):
-        base = "display:inline-block;width:16px;height:16px;border-radius:50%;margin:0 3px 4px 0;text-align:center;font:700 9px/16px Arial,sans-serif;color:#fff;box-sizing:border-box;"
+    def bar(ratio, color, h=10):
+        pct = int(round(max(0, min(ratio, 1)) * 100))
+        cells = ""
+        if pct > 0:
+            cells += f'<td width="{pct}%" bgcolor="{color}" style="background:{color};height:{h}px;font-size:1px;line-height:1px;">&nbsp;</td>'
+        if pct < 100:
+            cells += f'<td width="{100 - pct}%" bgcolor="{LINE}" style="background:{LINE};height:{h}px;font-size:1px;line-height:1px;">&nbsp;</td>'
+        return f'<table {T} width="100%"><tr>{cells}</tr></table>'
+
+    def ball_cell(v):
+        base = (f"width:18px;height:18px;border-radius:50%;text-align:center;vertical-align:middle;"
+                f"font:bold 10px Arial,sans-serif;color:#ffffff;mso-line-height-rule:exactly;line-height:18px;")
         r = v.get("ref")
         if r:
             bg = ORNG if r["external"] else GREY
-            ring = "border:2px solid #D62D20;line-height:12px;" if v.get("ref_given") else ""
-            return f'<span style="{base}background:{bg};{ring}">R</span>'
+            ring = f"border:2px solid {RED};" if v.get("ref_given") else ""
+            return f'<td width="18" height="18" bgcolor="{bg}" style="{base}background:{bg};{ring}">R</td>'
         if v["ball"] == 0:
-            return f'<span style="{base}border:1.5px solid #C3CCC5;">&nbsp;</span>'
-        return f'<span style="{base}background:{FOUR if v["ball"] == 4 else SIX};">{v["ball"]}</span>'
+            return f'<td width="18" height="18" bgcolor="#ffffff" style="{base}background:#ffffff;border:2px solid #C3CCC5;color:#ffffff;">&nbsp;</td>'
+        bg = FOUR if v["ball"] == 4 else SIX
+        return f'<td width="18" height="18" bgcolor="{bg}" style="{base}background:{bg};">{v["ball"]}</td>'
 
-    def bar(ratio, color, h=8):
-        w = max(0, min(ratio, 1)) * 100
-        return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">'
-                f'<tr><td style="background:{LINE};border-radius:6px;height:{h}px;font-size:0;line-height:0;">'
-                f'<div style="width:{w:.0f}%;height:{h}px;background:{color};border-radius:6px;"></div></td></tr></table>')
+    def balls(vs, per_row=26):
+        if not vs:
+            return ""
+        rows = ""
+        for i in range(0, len(vs), per_row):
+            rows += "<tr>" + "".join(ball_cell(v) for v in vs[i:i + per_row]) + "</tr>"
+        return f'<table {T.replace("cellspacing=\"0\"", "cellspacing=\"4\"")}>{rows}</table>'
 
-    def rank_badge(n):
+    def rank_cell(n, size=30):
         bg, fg = MEDAL.get(n, (SOFT, INK))
-        return (f'<span style="display:inline-block;width:28px;height:28px;border-radius:50%;background:{bg};color:{fg};'
-                f'text-align:center;font:700 13px/28px Arial,sans-serif;margin-right:8px;vertical-align:middle;">{n}</span>')
+        return (f'<td width="{size}" height="{size}" bgcolor="{bg}" style="background:{bg};color:{fg};border-radius:50%;text-align:center;'
+                f'font:bold 14px Arial,sans-serif;border:1px solid {EDGE};">{n}</td>')
 
-    def chip_list(vs, n=8):
+    def chips(vs, n=8):
         g = {}
         for v in vs:
             for c in v["items"]:
                 nm = L.item_name(c["code"], c["name"])
                 e = g.setdefault(nm, {"lab": c["type"] in ("LAB", "RADIOLOGY"), "p": set(), "n": 0})
                 e["p"].add(round(c["ins"], 2)); e["n"] += 1
-        out = []
+        if not g:
+            return f'<span style="color:{MUT};font-size:13px;">No labs or procedures yet</span>'
+        cells = []
         for nm, e in sorted(g.items(), key=lambda x: -x[1]["n"])[:n]:
-            bg, fg = ("#E8EEFB", "#2546A0") if e["lab"] else ("#E3F1E9", "#17553A")
+            bg, fg, bd = ("#E8EEFB", "#2546A0", "#C5D3F3") if e["lab"] else ("#E3F1E9", "#17553A", "#BFDCCB")
             pl = " / ".join(money(x) for x in sorted(e["p"], reverse=True))
-            out.append(f'<span style="display:inline-block;background:{bg};color:{fg};border-radius:999px;padding:4px 11px;'
-                       f'margin:0 6px 6px 0;font-size:12.5px;">{E(nm)} <b>{pl}</b>' + (f' <span style="opacity:.7">×{e["n"]}</span>' if e["n"] > 1 else "") + "</span>")
+            cells.append(f'<td bgcolor="{bg}" style="background:{bg};color:{fg};border:1px solid {bd};border-radius:14px;padding:5px 11px;'
+                         f'font-size:12.5px;white-space:nowrap;">{E(nm)} <b>{pl}</b>' + (f' &times;{e["n"]}' if e["n"] > 1 else "") + "</td>")
         if len(g) > n:
-            out.append(f'<span style="display:inline-block;background:#EEF1EF;color:{MUT};border-radius:999px;padding:4px 11px;font-size:12.5px;">+{len(g) - n} more</span>')
-        return "".join(out) or f'<span style="color:{MUT}">No labs or procedures yet</span>'
+            cells.append(f'<td style="color:{MUT};font-size:12.5px;padding:5px 8px;">+{len(g) - n} more</td>')
+        rows = "".join(f"<tr>{''.join(cells[i:i + 3])}</tr>" for i in range(0, len(cells), 3))
+        return f'<table {T.replace("cellspacing=\"0\"", "cellspacing=\"6\"")} style="margin-left:-6px;">{rows}</table>'
 
     def stat(val, label, color=INK, extra=""):
-        return (f'<td width="16.6%" style="padding:3px;"><div style="background:{SOFT};border-radius:10px;padding:9px 4px;text-align:center;">'
-                f'<div style="font:700 20px/1.1 Arial,sans-serif;color:{color};white-space:nowrap;">{val}</div>{extra}'
-                f'<div style="font-size:9.5px;color:{MUT};text-transform:uppercase;letter-spacing:.06em;margin-top:3px;">{label}</div></div></td>')
+        return (f'<td width="16%" bgcolor="{SOFT}" align="center" style="background:{SOFT};border:1px solid {EDGE};border-radius:10px;padding:10px 4px;">'
+                f'<div style="font:bold 22px Arial,sans-serif;color:{color};white-space:nowrap;">{val}</div>{extra}'
+                f'<div style="font-size:10px;color:{MUT};letter-spacing:1px;text-transform:uppercase;padding-top:4px;">{label}</div></td>')
 
-    # header + KPIs
+    def kpi(lbl, val, small, sub, b=""):
+        return (f'<td width="25%" valign="top" bgcolor="#ffffff" style="background:#ffffff;border:1px solid {EDGE};border-radius:12px;padding:14px 14px;">'
+                f'<div style="font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:{MUT};font-weight:bold;">{lbl}</div>'
+                f'<div style="font:bold 26px Arial,sans-serif;color:{INK};padding-top:4px;white-space:nowrap;">{val}'
+                f'<span style="font-size:13px;color:{MUT};font-weight:normal;">&nbsp;{small}</span></div>'
+                f'<div style="font-size:12px;color:{MUT};padding:4px 0 8px;">{sub}</div>{b}</td>')
+
+    def section(title):
+        return (f'<tr><td style="padding:26px 0 8px;"><table {T} width="100%"><tr>'
+                f'<td style="font:bold 19px Arial,sans-serif;color:{INK};border-bottom:3px solid {SIX};padding-bottom:6px;">{title}</td></tr></table></td></tr>')
+
     runs_r = clinic["Runs"] / max(clinic["Runs needed"], 1)
     sc_r = clinic["Scoring"] / max(clinic["Scoring needed"], 1)
-    def kpi(lbl, val, small, sub, b=""):
-        return (f'<td width="25%" style="padding:5px;vertical-align:top;"><div style="background:#fff;border:1px solid {LINE};border-radius:14px;padding:14px 16px;">'
-                f'<div style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:{MUT};font-weight:600;">{lbl}</div>'
-                f'<div style="font:700 24px/1.15 Arial,sans-serif;color:{INK};margin-top:4px;white-space:nowrap;">{val} <span style="font-size:14px;color:{MUT};font-weight:400;">{small}</span></div>'
-                f'<div style="font-size:12px;color:{MUT};margin:4px 0 8px;">{sub}</div>{b}</div></td>')
-    html = [f'<div style="{FONT}color:{INK};background:#F7F8F6;padding:18px;">'
-            f'<div style="max-width:780px;margin:0 auto;">'
-            f'<div style="background:linear-gradient(135deg,#16492F,#1E6A49 60%,#2A8A5E);background-color:#1E6A49;border-radius:18px;padding:22px 26px;color:#fff;">'
-            f'<div style="font:700 26px/1.2 Arial,sans-serif;">EMC Revenue Scorecard</div>'
-            f'<div style="font-size:13.5px;opacity:.9;margin-top:6px;">{E(", ".join(dates))} · {len(visits)} patients · {len(docs)} doctors · {E(check)} check</div>'
-            f'<div style="margin-top:12px;"><span style="display:inline-block;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.25);border-radius:999px;padding:4px 12px;font-size:12px;margin-right:6px;">{len(logdf)} corrections applied</span>'
-            f'<span style="display:inline-block;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.25);border-radius:999px;padding:4px 12px;font-size:12px;">Uploaded {E(report_meta["uploaded_at"])}</span></div></div>'
-            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:12px 0 6px;"><tr>'
-            + kpi("Clinic runs", fmt(clinic["Runs"]), f'/ {fmt(clinic["Runs needed"])}', f'{runs_r:.0%} of the {E(check)} pace', bar(runs_r, SIX, 6))
-            + kpi("Scoring balls", int(clinic["Scoring"]), f'/ {int(clinic["Scoring needed"])}', f'{int(clinic["4s"])} fours · {int(clinic["6s"])} sixes', bar(sc_r, FOUR, 6))
-            + kpi("Balls faced", int(clinic["Balls"]), "", f'{int(clinic["Dots"])} dots · {int(clinic["Referrals"])} referrals')
-            + kpi("Runs per ball", f'{clinic["Runs"] / max(clinic["Balls"], 1):,.0f}', "AED", "Insurance money per patient")
-            + '</tr></table>']
+    out = [f'<table {T} width="100%" bgcolor="#EEF1ED" style="background:#EEF1ED;{F}"><tr><td align="center" style="padding:18px 10px;">'
+           f'<table {T} width="{W}" style="width:{W}px;max-width:100%;{F}color:{INK};">']
 
+    # header
+    out.append(f'<tr><td bgcolor="#1E6A49" style="background:#1E6A49;background-image:linear-gradient(135deg,#16492F,#1E6A49 60%,#2A8A5E);'
+               f'border-radius:16px;padding:22px 26px;color:#ffffff;">'
+               f'<div style="font:bold 26px Arial,sans-serif;color:#ffffff;">EMC Revenue Scorecard</div>'
+               f'<div style="font-size:14px;color:#DDEFE5;padding-top:6px;">{E(", ".join(dates))} &nbsp;·&nbsp; {len(visits)} patients &nbsp;·&nbsp; {len(docs)} doctors &nbsp;·&nbsp; <b style="color:#ffffff;">{E(check)} check</b></div>'
+               f'<div style="font-size:12px;color:#BFE0CE;padding-top:8px;">{len(logdf)} corrections applied &nbsp;·&nbsp; uploaded {E(report_meta["uploaded_at"])}</div></td></tr>')
+    # KPIs
+    out.append(f'<tr><td style="padding-top:12px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
+               + kpi("Clinic runs", fmt(clinic["Runs"]), f'/ {fmt(clinic["Runs needed"])}', f'{runs_r:.0%} of the {E(check)} pace', bar(runs_r, SIX, 8))
+               + kpi("Scoring balls", int(clinic["Scoring"]), f'/ {int(clinic["Scoring needed"])}', f'{int(clinic["4s"])} fours · {int(clinic["6s"])} sixes', bar(sc_r, FOUR, 8))
+               + kpi("Balls faced", int(clinic["Balls"]), "", f'{int(clinic["Dots"])} dots · {int(clinic["Referrals"])} referrals')
+               + kpi("Runs per ball", f'{clinic["Runs"] / max(clinic["Balls"], 1):,.0f}', "AED", "Insurance money per patient")
+               + '</tr></table></td></tr>')
     # legend
-    lg = lambda b, t: f'<span style="display:inline-block;margin:0 14px 6px 0;font-size:12px;color:{MUT};">{b} {t}</span>'
-    html.append('<div style="padding:4px 4px 8px;">'
-                + lg(ball({"ball": 0}), "Dot · consultation only") + lg(ball({"ball": 4}), "One lab or procedure")
-                + lg(ball({"ball": 6}), "Two or more") + lg(ball({"ball": 0, "ref": {"external": False}}), "Referred to Family Medicine")
-                + lg(ball({"ball": 0, "ref": {"external": True}}), "Referred outside")
-                + lg(ball({"ball": 0, "ref": {"external": False}, "ref_given": [1]}), "Referred but GP gave a lab or procedure") + '</div>')
-
+    def lg(v, t):
+        return (f'<td style="padding-right:4px;"><table {T}><tr>{ball_cell(v)}</tr></table></td>'
+                f'<td style="font-size:12px;color:{MUT};padding-right:14px;white-space:nowrap;">{t}</td>')
+    out.append(f'<tr><td style="padding:10px 0 4px;"><table {T}><tr>'
+               + lg({"ball": 0}, "Dot · consultation only") + lg({"ball": 4}, "One lab or procedure") + lg({"ball": 6}, "Two or more")
+               + '</tr></table><table ' + T + ' style="margin-top:6px;"><tr>'
+               + lg({"ball": 0, "ref": {"external": False}}, "Referred to Family Medicine") + lg({"ball": 0, "ref": {"external": True}}, "Referred outside")
+               + lg({"ball": 0, "ref": {"external": False}, "ref_given": [1]}, "Referred but GP gave a lab or procedure")
+               + '</tr></table></td></tr>')
     # top 3
-    html.append('<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:6px;"><tr>')
+    out.append(section("Top of the table"))
+    out.append(f'<tr><td><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>')
     for i, d in ranked.head(3).iterrows():
-        html.append(f'<td width="33%" style="padding:5px;"><div style="background:#fff;border:1px solid {LINE};border-radius:14px;padding:12px 14px;">'
-                    f'{rank_badge(i + 1)}<b style="vertical-align:middle;">{E(str(d["Doctor"]).replace(" (FM)", ""))}</b>'
-                    f'<div style="font-size:12px;color:{MUT};margin:4px 0 0 36px;">{fmt(d["Runs"])} runs · {d["% of day"]}% of target · {d["Scoring"]} scoring</div></div></td>')
-    html.append('</tr></table>')
+        out.append(f'<td width="33%" bgcolor="#ffffff" style="background:#ffffff;border:1px solid {EDGE};border-radius:12px;padding:12px;">'
+                   f'<table {T}><tr>{rank_cell(i + 1)}<td style="padding-left:10px;font:bold 14px Arial,sans-serif;">{E(str(d["Doctor"]).replace(" (FM)", ""))}</td></tr></table>'
+                   f'<div style="font-size:12px;color:{MUT};padding-top:6px;">{fmt(d["Runs"])} runs · {d["% of day"]}% of target · {d["Scoring"]} scoring</div></td>')
+    out.append('</tr></table></td></tr>')
 
     # doctor cards
+    out.append(section("Doctor scorecards"))
     for rank, d in ranked.iterrows():
         key = str(d["Doctor"]).replace(" (FM)", "")
         vs = doc_visits.get(key, [])
@@ -698,66 +938,72 @@ def email_dashboard_html():
             ref_line = "Referrals: " + " · ".join(f"<b>{k}</b> to {E(n)}" for n, k in dest.items())
             nw = sum(1 for v in rv if v.get("ref_given"))
             if nw:
-                ref_line += f' · <span style="color:#B3261E"><b>{nw}</b> given a lab or procedure</span>'
+                ref_line += f' · <b style="color:#B3261E">{nw} given a lab or procedure</b>'
         need = int(d["Scoring still needed"]) if d["Scoring still needed"] not in ("", None) else 0
-        need_txt = f"Needs <b>{need} more scoring balls</b> by {E(check)}" if need else f"Scoring on pace for {E(check)}"
-        html.append(
-            f'<div style="background:#fff;border:1px solid {LINE};border-left:5px solid {fg};border-radius:16px;padding:18px 20px;margin:10px 5px 0;">'
-            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td>{rank_badge(rank + 1)}'
-            f'<span style="font:700 21px Arial,sans-serif;vertical-align:middle;">{E(key)}</span>'
-            f'<div style="font-size:12.5px;color:{MUT};margin-top:3px;">{"Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice"} · target {fmt(d["Runs target (day)"])} a day</div></td>'
-            f'<td align="right" style="vertical-align:top;"><span style="display:inline-block;background:{bg};color:{fg};border-radius:999px;padding:5px 12px;font-size:11px;font-weight:700;letter-spacing:.07em;">{lab}</span></td></tr></table>'
-            f'<div style="margin:12px 0 8px;"><span style="font:700 38px/1 Arial,sans-serif;">{fmt(d["Runs"])}</span>'
-            f'<span style="font-size:13px;color:{MUT};margin-left:8px;">runs of {fmt(d["Runs needed"])} needed by {E(check)} · {d["% of day"]}% of day target</span></div>'
-            + bar(ratio, SIX) +
-            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:10px 0 8px;"><tr>'
+        need_txt = f"Needs <b style='color:{INK}'>{need} more scoring balls</b> by {E(check)}" if need else f"<b style='color:{SIX}'>Scoring on pace</b> for {E(check)}"
+        out.append(
+            f'<tr><td style="padding-bottom:14px;"><table {T} width="100%" bgcolor="#ffffff" style="background:#ffffff;border:1px solid {EDGE};border-radius:14px;">'
+            f'<tr><td width="6" bgcolor="{fg}" style="background:{fg};border-radius:14px 0 0 14px;font-size:1px;">&nbsp;</td>'
+            f'<td style="padding:18px 20px;">'
+            # name row
+            f'<table {T} width="100%"><tr><td><table {T}><tr>{rank_cell(rank + 1)}'
+            f'<td style="padding-left:10px;font:bold 22px Arial,sans-serif;color:{INK};">{E(key)}</td></tr></table>'
+            f'<div style="font-size:12.5px;color:{MUT};padding-top:4px;">{"Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice"} · target {fmt(d["Runs target (day)"])} a day</div></td>'
+            f'<td align="right" valign="top"><table {T}><tr><td bgcolor="{bg}" style="background:{bg};color:{fg};border:1px solid {fg};border-radius:14px;'
+            f'padding:5px 12px;font:bold 11px Arial,sans-serif;letter-spacing:1px;">{lab}</td></tr></table></td></tr></table>'
+            # runs
+            f'<table {T} style="margin-top:12px;"><tr><td style="font:bold 40px Arial,sans-serif;color:{INK};padding-right:12px;">{fmt(d["Runs"])}</td>'
+            f'<td valign="bottom" style="font-size:13.5px;color:{MUT};padding-bottom:6px;">runs of <b style="color:{INK}">{fmt(d["Runs needed"])}</b> needed by {E(check)}'
+            f' &nbsp;·&nbsp; <b style="color:{fg}">{d["% of day"]}%</b> of day target</td></tr></table>'
+            f'<div style="padding:8px 0 4px;">{bar(ratio, SIX, 10)}</div>'
+            # stats
+            f'<table {T.replace("cellspacing=\"0\"", "cellspacing=\"6\"")} width="100%" style="margin:6px -6px 4px;"><tr>'
             + stat(d["Balls"], "Balls") + stat(d["Dots"], "Dots") + stat(d["Referrals"], "Referral", GREY)
             + stat(d["4s"], "4s", FOUR) + stat(d["6s"], "6s", SIX)
-            + stat(f'{d["Scoring"]}<span style="font-size:12px;color:{MUT};">/{scn}</span>', "Scoring", INK,
-                   f'<div style="margin:5px 10px 0;">{bar(d["Scoring"] / scn, FOUR, 4)}</div>')
+            + stat(f'{d["Scoring"]}<span style="font-size:13px;color:{MUT};">/{scn}</span>', "Scoring", INK,
+                   f'<div style="padding:5px 8px 0;">{bar(d["Scoring"] / scn, FOUR, 5)}</div>')
             + '</tr></table>'
-            f'<div style="margin:6px 0 8px;line-height:0;">{"".join(ball(v) for v in vs)}</div>'
-            f'<div style="margin:4px 0 4px;">{chip_list(vs)}</div>'
-            + (f'<div style="font-size:13px;color:{MUT};margin-top:6px;">{ref_line}</div>' if ref_line else "")
-            + f'<div style="font-size:13px;color:{MUT};margin-top:8px;">{need_txt} · {fmt(d["Runs"] / max(d["Balls"], 1))} AED per ball</div></div>')
+            f'<div style="padding:8px 0 6px;">{balls(vs)}</div>'
+            f'<div style="border-top:1px solid {LINE};padding-top:8px;">{chips(vs)}</div>'
+            + (f'<div style="font-size:13px;color:{MUT};padding-top:6px;">{ref_line}</div>' if ref_line else "")
+            + f'<div style="font-size:13px;color:{MUT};padding-top:8px;">{need_txt} &nbsp;·&nbsp; {fmt(d["Runs"] / max(d["Balls"], 1))} AED per ball</div>'
+            '</td></tr></table></td></tr>')
 
     # by insurance
-    th = f'style="background:{SOFT};color:{MUT};font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;padding:8px 10px;text-align:right;border-bottom:1px solid {LINE};"'
+    out.append(section("Each doctor by insurance"))
+    th = f'bgcolor="{SOFT}" style="background:{SOFT};color:{MUT};font-size:10.5px;letter-spacing:1px;text-transform:uppercase;padding:9px 10px;text-align:right;border-bottom:2px solid {EDGE};"'
     thl = th.replace("text-align:right", "text-align:left")
-    td = f'style="padding:7px 10px;border-bottom:1px solid {LINE};text-align:right;font-size:13px;"'
+    td = f'style="padding:8px 10px;border-bottom:1px solid {LINE};text-align:right;font-size:13px;"'
     tdl = td.replace("text-align:right", "text-align:left")
-    html.append(f'<div style="font:700 19px Arial,sans-serif;margin:24px 5px 4px;">Each doctor by insurance</div>')
     for doc in sorted(doc_visits):
         vs = doc_visits[doc]
         by = {}
         for v in vs:
             by.setdefault(v["insurance"], []).append(v)
-        rows = ""
+
         def row(name, ivs, tot=False):
             f4 = [v for v in ivs if v["ball"] == 4]; f6 = [v for v in ivs if v["ball"] == 6]
             runs = sum(v["runs"] for v in ivs); nref = sum(1 for v in ivs if v.get("ref"))
-            bgc = f"background:{SOFT};font-weight:700;" if tot else ""
-            return (f'<tr style="{bgc}"><td {tdl}>{E(name)}</td><td {td}>{len(ivs)}</td><td {td}>{sum(1 for v in ivs if v["ball"] == 0)}</td>'
-                    f'<td {td}><span style="color:{GREY};font-weight:700;">{nref if (nref or tot) else "–"}</span></td>'
-                    f'<td {td}><span style="color:{FOUR};font-weight:700;">{len(f4)}</span></td>'
+            tr = f' bgcolor="{SOFT}" style="background:{SOFT};font-weight:bold;"' if tot else ""
+            return (f'<tr{tr}><td {tdl}>{E(name)}</td><td {td}>{len(ivs)}</td><td {td}>{sum(1 for v in ivs if v["ball"] == 0)}</td>'
+                    f'<td {td}><b style="color:{GREY};">{nref if (nref or tot) else "–"}</b></td>'
+                    f'<td {td}><b style="color:{FOUR};">{len(f4)}</b></td>'
                     f'<td {tdl}><span style="font-size:12px;color:{MUT};">{"" if tot else (E(agg_names(f4)) or "–")}</span></td>'
-                    f'<td {td}><span style="color:{SIX};font-weight:700;">{len(f6)}</span></td>'
+                    f'<td {td}><b style="color:{SIX};">{len(f6)}</b></td>'
                     f'<td {tdl}><span style="font-size:12px;color:{MUT};">{"" if tot else (E(agg_names(f6)) or "–")}</span></td>'
                     f'<td {td}>{fmt(runs)}</td><td {td}>{fmt(runs / max(len(ivs), 1))}</td></tr>')
-        for ins, ivs in sorted(by.items(), key=lambda x: -len(x[1])):
-            rows += row(ins, ivs)
-        rows += row("Total", vs, True)
-        html.append(f'<div style="font:700 15px Arial,sans-serif;margin:16px 5px 6px;">{E(doc)}</div>'
-                    f'<div style="background:#fff;border:1px solid {LINE};border-radius:12px;overflow:hidden;margin:0 5px;">'
-                    f'<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">'
-                    f'<tr><th {thl}>Insurance</th><th {th}>Balls</th><th {th}>Dots</th><th {th}>Referral</th><th {th}>4s</th>'
-                    f'<th {thl}>What the 4s were</th><th {th}>6s</th><th {thl}>What the 6s were</th><th {th}>Runs</th><th {th}>Per ball</th></tr>'
-                    f'{rows}</table></div>')
+        rows = "".join(row(ins, ivs) for ins, ivs in sorted(by.items(), key=lambda x: -len(x[1]))) + row("Total", vs, True)
+        out.append(f'<tr><td style="font:bold 15px Arial,sans-serif;padding:14px 0 6px;color:{INK};">{E(doc)}</td></tr>'
+                   f'<tr><td><table {T} width="100%" bgcolor="#ffffff" style="background:#ffffff;border:1px solid {EDGE};border-collapse:collapse;">'
+                   f'<tr><th {thl}>Insurance</th><th {th}>Balls</th><th {th}>Dots</th><th {th}>Referral</th><th {th}>4s</th>'
+                   f'<th {thl}>What the 4s were</th><th {th}>6s</th><th {thl}>What the 6s were</th><th {th}>Runs</th><th {th}>Per ball</th></tr>'
+                   f'{rows}</table></td></tr>')
 
-    html.append(f'<p style="font-size:12px;color:{MUT};margin:18px 5px 0;">Runs = insurance share after copay on corrected prices. '
-                f'{len(logdf)} corrections applied – details in the attached Excel file. Sent from the EMC Revenue Scorecard, {datetime.now(UAE):%d-%m-%Y %I:%M %p}.</p>'
-                '</div></div>')
-    return "".join(html)
+    out.append(f'<tr><td style="font-size:12px;color:{MUT};padding:20px 0 0;">Runs = insurance share after copay on corrected prices. '
+               f'{len(logdf)} corrections applied – details in the attached Excel file. '
+               f'Sent from the EMC Revenue Scorecard, {datetime.now(UAE):%d-%m-%Y %I:%M %p}.</td></tr>')
+    out.append('</table></td></tr></table>')
+    return "".join(out)
 
 
 with tab5:
