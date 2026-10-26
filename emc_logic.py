@@ -17,7 +17,8 @@ CONSULT = {
     "other": {"est": (56.0, "99212"), "new": (98.0, "99202")},    # all other insurers level 2
 }
 STD_CONSULT = {"99212": 56.0, "99213": 95.0, "99202": 98.0, "99203": 142.0, "99214": 142.0, "99204": 190.0}
-CASH_CONSULT = 75.0         # cash: every consultation (new or established) counts 75 in runs
+CASH_CONSULT = 75.0         # cash: consultation price before the package rule below
+CASH_PACKAGE = 80.0         # cash: the whole visit (consultation, labs, procedures, medicine) = 80 AED all included
 CASH_COPAY_MED = 0.30       # cash: medicine copay share taken out
 FOLLOW_UP_BELOW = 30.0      # insurance consult billed under this = free / copay-only follow-up, left as billed
 LAB_COPAY = 0.20            # copay used when a zero-priced lab gets priced
@@ -280,6 +281,17 @@ def correct(lines):
                     note("No price found (left at 0)", l["code"], 0, 0, item_name(l["code"], l["name"]))
             v["lines"].append(c)
 
+        if v["cash"]:
+            # cash package: the whole visit is 80 AED all included, medicine too (services still shown and still score)
+            nonmed = list(v["lines"])
+            if nonmed:
+                for c in nonmed:
+                    c.update(list=c["ins"], ins=0.0, pkg=True)   # 'list' = normal service price, still shown
+                main = next((c for c in nonmed if c["type"] == "CONSULTATION"), nonmed[0])
+                main["ins"] = CASH_PACKAGE
+                if len(nonmed) > 1:
+                    note("Cash visit: 80 AED all included", v.get("emr", ""), 0, CASH_PACKAGE,
+                         " + ".join(item_name(c["code"], c["name"]) for c in nonmed))
         v["items"] = [c for c in v["lines"] if c["type"] in ("LAB", "RADIOLOGY", "PROCEDURE")
                       and c["code"] not in SKIP_SCORING]
         n = len(v["items"])
@@ -326,6 +338,57 @@ def read_referrals(file_bytes, filename=""):
     return out
 
 
+def read_registration(file_bytes, filename=""):
+    """Rows of the HIS Registration List: one per registered visit."""
+    engine = "xlrd" if filename.lower().endswith(".xls") else None
+    raw = pd.read_excel(io.BytesIO(file_bytes), header=None, engine=engine, dtype=object)
+    hdr = None
+    for i in range(min(len(raw), 30)):
+        vals = [_clean(v).upper() for v in raw.iloc[i].tolist()]
+        if "EMR NO" in vals and "VISIT TYPE" in vals:
+            hdr = i
+            break
+    if hdr is None:
+        raise ValueError('This is not a Registration List: no "EMR No" and "Visit Type" columns found.')
+    cols = {}
+    for j, v in enumerate(raw.iloc[hdr].tolist()):
+        v = _clean(v).upper()
+        if v and v not in cols:
+            cols[v] = j
+
+    def g(row, name):
+        return _clean(row[cols[name]]) if name in cols else ""
+    out = []
+    for _, r in raw.iloc[hdr + 1:].iterrows():
+        r = r.tolist()
+        emr = g(r, "EMR NO")
+        if not emr:
+            continue
+        out.append({"emr": emr, "visit_no": g(r, "VISIT NO"), "doctor": doc_name(g(r, "DOCTOR")),
+                    "fm": "FAMILY" in g(r, "DEPARTMENT").upper(), "visit_type": g(r, "VISIT TYPE").upper(),
+                    "insurance": g(r, "INSURANCE NAME"), "cash": g(r, "BILL TYPE").upper() == "CASH",
+                    "date": g(r, "REG:DATE")[:10], "name": g(r, "NAME")})
+    return out
+
+
+def add_free_followups(visits, regs):
+    """Registered FOLLOW UP visits with no billed line are free follow-ups: added as 'F' balls (0 runs, not dots)."""
+    have = {(v.get("emr", ""), v["doctor"], v["date"]) for v in visits}
+    fm_docs = {v["doctor"] for v in visits if v.get("fm")} | {n for n, fm in TEAM if fm}
+    added = 0
+    for r in regs:
+        if "FOLLOW" not in r["visit_type"]:
+            continue
+        if (r["emr"], r["doctor"], r["date"]) in have:
+            continue
+        visits.append({"inv": "REG-" + (r["visit_no"] or r["emr"]), "emr": r["emr"], "date": r["date"], "doctor": r["doctor"],
+                       "fm": r["fm"] or r["doctor"] in fm_docs, "insurance": "Cash" if r["cash"] else ins_name(r["insurance"]),
+                       "cash": r["cash"], "lines": [], "items": [], "ball": 0, "runs": 0.0, "billed_ins": 0.0, "fu": True})
+        have.add((r["emr"], r["doctor"], r["date"]))
+        added += 1
+    return added
+
+
 def apply_referrals(visits, refs):
     """Mark referred patients on the referring doctor's strip. A referred patient is a dot;
     if the GP also gave a lab or procedure it is flagged (ref_given) so the GP can be told."""
@@ -350,14 +413,14 @@ def summarize(visits, pace=1.0):
     """Return (doctors_df, by_insurance_df, items_df, strips) for the given pace (0.25 / 0.5 / 0.75 / 1)."""
     docs, ins, items, strips = {}, {}, {}, {}
     for v in visits:
-        d = docs.setdefault(v["doctor"], {"Doctor": v["doctor"], "FM": False, "Balls": 0, "Dots": 0, "4s": 0, "6s": 0, "Runs": 0.0, "Referrals": 0})
+        d = docs.setdefault(v["doctor"], {"Doctor": v["doctor"], "FM": False, "Balls": 0, "Dots": 0, "4s": 0, "6s": 0, "Runs": 0.0, "Referrals": 0, "Follow-ups": 0})
         d["FM"] = d["FM"] or v["fm"]
         # a referred patient is a Referral, not a Dot
-        key = "Referrals" if v.get("ref") else "Dots" if v["ball"] == 0 else "4s" if v["ball"] == 4 else "6s"
+        key = "Follow-ups" if v.get("fu") else "Referrals" if v.get("ref") else "Dots" if v["ball"] == 0 else "4s" if v["ball"] == 4 else "6s"
         d["Balls"] += 1; d[key] += 1; d["Runs"] += v["runs"]
         strips.setdefault(v["doctor"], []).append(v["ball"])
         i = ins.setdefault((v["doctor"], v["insurance"]), {"Doctor": v["doctor"], "Insurance": v["insurance"],
-                                                           "Balls": 0, "Dots": 0, "Referrals": 0, "4s": 0, "6s": 0, "Runs": 0.0})
+                                                           "Balls": 0, "Dots": 0, "Referrals": 0, "Follow-ups": 0, "4s": 0, "6s": 0, "Runs": 0.0})
         i["Balls"] += 1; i[key] += 1; i["Runs"] += v["runs"]
         for c in v["items"]:
             it = items.setdefault((v["doctor"], c["type"], c["code"]), {"Doctor": v["doctor"], "Item": item_name(c["code"], c["name"]),
@@ -368,7 +431,7 @@ def summarize(visits, pace=1.0):
     ndays = max(1, len({v["date"] for v in visits}))
     team_names = {n for n, _ in TEAM}
     for name, fm in TEAM:
-        docs.setdefault(name, {"Doctor": name, "FM": fm, "Balls": 0, "Dots": 0, "4s": 0, "6s": 0, "Runs": 0.0, "Referrals": 0})
+        docs.setdefault(name, {"Doctor": name, "FM": fm, "Balls": 0, "Dots": 0, "4s": 0, "6s": 0, "Runs": 0.0, "Referrals": 0, "Follow-ups": 0})
 
     rows = []
     for name in sorted(docs):
@@ -380,7 +443,7 @@ def summarize(visits, pace=1.0):
         status = ("ON TRACK" if d["Runs"] >= runs_need and scoring >= score_need
                   else "WATCH" if d["Runs"] >= 0.8 * runs_need else "CHECK")
         rows.append({"Doctor": name + (" (FM)" if d["FM"] else ""), "Balls": d["Balls"], "Balls target": t["balls"],
-                     "Dots": d["Dots"], "Referrals": d["Referrals"], "4s": d["4s"], "6s": d["6s"], "Scoring": scoring, "Scoring needed": score_need,
+                     "Dots": d["Dots"], "Referrals": d["Referrals"], "Follow-ups": d["Follow-ups"], "4s": d["4s"], "6s": d["6s"], "Scoring": scoring, "Scoring needed": score_need,
                      "Runs": round(d["Runs"]), "Runs needed": runs_need, "Runs target (day)": t["runs"],
                      "% of day": round(d["Runs"] / t["runs"] * 100), "Status": status,
                      "Scoring still needed": max(0, score_need - scoring),
@@ -393,7 +456,7 @@ def summarize(visits, pace=1.0):
                "GP visits": int(ddf[~ddf["Doctor"].str.endswith("(FM)")]["Balls"].sum()),
                "GP target": TARGETS["gp"]["balls"] * sum(1 for _, fm in TEAM if not fm) * ndays,
                "Doctors with patients": int((ddf["Balls"] > 0).sum()), "Team size": len(TEAM),
-               "Dots": ddf["Dots"].sum(), "Referrals": ddf["Referrals"].sum(), "4s": ddf["4s"].sum(), "6s": ddf["6s"].sum(), "Scoring": ddf["Scoring"].sum(),
+               "Dots": ddf["Dots"].sum(), "Referrals": ddf["Referrals"].sum(), "Follow-ups": ddf["Follow-ups"].sum(), "4s": ddf["4s"].sum(), "6s": ddf["6s"].sum(), "Scoring": ddf["Scoring"].sum(),
                "Scoring needed": ddf["Scoring needed"].sum(), "Runs": ddf["Runs"].sum(), "Runs needed": ddf["Runs needed"].sum(),
                "Runs target (day)": team["Runs target (day)"].sum(), "Status": "", "Scoring still needed": None,
                "Team": True, "Vacancy": False}
