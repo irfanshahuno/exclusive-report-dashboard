@@ -364,9 +364,7 @@ def summarize(visits, pace=1.0):
         d = docs[name]
         t = TARGETS["fm" if d["FM"] else "gp"]
         scoring = d["4s"] + d["6s"]
-        runs_need = round(t["runs"] * pace)
-        # scoring target follows the patients actually seen: 22 of 34 for GP, 22 of 30 for FM
-        score_need = round(d["Balls"] * t["scoring"] / t["balls"])
+        runs_need, score_need = round(t["runs"] * pace), round(t["scoring"] * pace)
         status = ("ON TRACK" if d["Runs"] >= runs_need and scoring >= score_need
                   else "WATCH" if d["Runs"] >= 0.8 * runs_need else "CHECK")
         rows.append({"Doctor": name + (" (FM)" if d["FM"] else ""), "Balls": d["Balls"], "Balls target": t["balls"],
