@@ -27,6 +27,12 @@ SKIP_SCORING = {"36415"}    # blood collection: part of the lab, not a ball
 # FM: 5 referrals x 75 + 15 Daman x 105.95 + 10 non-Daman x 69.01 = 2,654 + 1,342 = 3,997
 TARGETS = {"gp": {"balls": 34, "scoring": 22, "runs": 3639},
            "fm": {"balls": 30, "scoring": 22, "runs": 3997}}
+# The team the clinic plans for. A doctor with no patients in the report still shows (0 · 34 short).
+# "GP vacancy" = the place left by Dr. Mahedi until a new GP joins.
+TEAM = [("Dr. Sana Ullah Afridi", False), ("Dr. Ershadul Alam", False), ("Dr. Syed Bilal Haider", False),
+        ("Dr. Saad Habib", False), ("GP vacancy", False), ("Dr. Sant Das", True)]
+VACANCY = "GP vacancy"
+# Team target a day: 5 GP x 34 = 170 GP visits + 30 Family Medicine patients who come as GP referrals = 200
 PACE = {"12 PM": 0.25, "4 PM": 0.50, "8 PM": 0.75, "Closing": 1.00}
 
 # Procedure prices billed to insurers (used to price cash visits)
@@ -359,10 +365,16 @@ def summarize(visits, pace=1.0):
             it["Count"] += 1
             it["Runs"] += c["ins"]
 
+    ndays = max(1, len({v["date"] for v in visits}))
+    team_names = {n for n, _ in TEAM}
+    for name, fm in TEAM:
+        docs.setdefault(name, {"Doctor": name, "FM": fm, "Balls": 0, "Dots": 0, "4s": 0, "6s": 0, "Runs": 0.0, "Referrals": 0})
+
     rows = []
     for name in sorted(docs):
         d = docs[name]
-        t = TARGETS["fm" if d["FM"] else "gp"]
+        t0 = TARGETS["fm" if d["FM"] else "gp"]
+        t = {k: val * ndays for k, val in t0.items()}      # a week/month report gets the targets for all its days
         scoring = d["4s"] + d["6s"]
         runs_need, score_need = round(t["runs"] * pace), round(t["scoring"] * pace)
         status = ("ON TRACK" if d["Runs"] >= runs_need and scoring >= score_need
@@ -371,13 +383,20 @@ def summarize(visits, pace=1.0):
                      "Dots": d["Dots"], "Referrals": d["Referrals"], "4s": d["4s"], "6s": d["6s"], "Scoring": scoring, "Scoring needed": score_need,
                      "Runs": round(d["Runs"]), "Runs needed": runs_need, "Runs target (day)": t["runs"],
                      "% of day": round(d["Runs"] / t["runs"] * 100), "Status": status,
-                     "Scoring still needed": max(0, score_need - scoring)})
+                     "Scoring still needed": max(0, score_need - scoring),
+                     "Team": name in team_names, "Vacancy": name == VACANCY})
     ddf = pd.DataFrame(rows)
     if len(ddf):
-        tot = {"Doctor": "Clinic", "Balls": ddf["Balls"].sum(), "Balls target": ddf["Balls target"].sum(),
+        team = ddf[ddf["Team"]]
+        tot = {"Doctor": "Clinic", "Balls": ddf["Balls"].sum(), "Balls target": team["Balls target"].sum(),
+               "Referral allowance": TARGETS["fm"]["balls"] * sum(1 for _, fm in TEAM if fm) * ndays, "Days": ndays,
+               "GP visits": int(ddf[~ddf["Doctor"].str.endswith("(FM)")]["Balls"].sum()),
+               "GP target": TARGETS["gp"]["balls"] * sum(1 for _, fm in TEAM if not fm) * ndays,
+               "Doctors with patients": int((ddf["Balls"] > 0).sum()), "Team size": len(TEAM),
                "Dots": ddf["Dots"].sum(), "Referrals": ddf["Referrals"].sum(), "4s": ddf["4s"].sum(), "6s": ddf["6s"].sum(), "Scoring": ddf["Scoring"].sum(),
                "Scoring needed": ddf["Scoring needed"].sum(), "Runs": ddf["Runs"].sum(), "Runs needed": ddf["Runs needed"].sum(),
-               "Runs target (day)": ddf["Runs target (day)"].sum(), "Status": "", "Scoring still needed": None}
+               "Runs target (day)": team["Runs target (day)"].sum(), "Status": "", "Scoring still needed": None,
+               "Team": True, "Vacancy": False}
         tot["% of day"] = round(tot["Runs"] / tot["Runs target (day)"] * 100)
         ddf = pd.concat([ddf, pd.DataFrame([tot])], ignore_index=True)
 
