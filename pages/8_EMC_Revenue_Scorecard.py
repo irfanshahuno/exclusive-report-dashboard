@@ -71,6 +71,9 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .stat.r b{color:#7D8A83;}
 .gaps{display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:-4px 0 10px;}
 .gaps .stat{display:flex; align-items:center; justify-content:center; gap:10px; padding:9px 6px;}
+.p-VAC,.p-OFF{background:#EEF1EF; color:#5D6A62;} .doc.st-VAC,.doc.st-OFF{border-left:5px solid #9AA79F; background:#FAFBFA;}
+.empty b{display:inline !important; font:inherit !important; font-weight:700 !important; color:#18211C !important;}
+.empty{background:#F2F5F1; border:1px dashed #C9D2CB; border-radius:10px; padding:10px 12px; font-size:13px; color:#5D6A62; margin:4px 0 8px;}
 .stat.gb{background:#FBE4E1; border:1px solid #F1B8B1;} .stat.gb b{color:#B3261E; font-size:16px;} .stat.gb span{color:#B3261E;}
 .stat.gg{background:#E2F3E8; border:1px solid #A9D8B9;} .stat.gg b{color:#1E7A45; font-size:16px;} .stat.gg span{color:#1E7A45;}
 .kpi .gapline{display:inline-block; margin-top:6px; padding:3px 10px; border-radius:999px; font-size:12.5px; font-weight:700;}
@@ -380,6 +383,26 @@ def claims_html(vs):
     return CLAIM_SEP.join(E(s) for s in claim_lines(vs)) or "–"
 
 
+def status_key(d):
+    if d.get("Vacancy"):
+        return "VAC"
+    if int(d["Balls"]) == 0:
+        return "OFF"
+    return str(d["Status"]).split()[0]
+
+
+STATUS_LABEL = {"ON": "ON TRACK", "WATCH": "CLOSE", "CHECK": "BEHIND", "VAC": "VACANCY", "OFF": "NO PATIENTS"}
+
+
+def empty_note(d):
+    if d.get("Vacancy"):
+        return (f'<div class="empty">No doctor in this place yet (Dr. Mahedi left). Each day it stays empty the clinic misses '
+                f'<b>{int(d["Balls target"])} patients</b> and <b>{fmt(d["Runs target (day)"])}</b> revenue.</div>')
+    if int(d["Balls"]) == 0:
+        return '<div class="empty">No patients in this report.</div>'
+    return ""
+
+
 def gap(done, target):
     """(text, good?) e.g. ('22 short', False) or ('+2 over', True)."""
     diff = round(done - target)
@@ -453,7 +476,7 @@ rv_txt, rv_ok = gap(clinic["Runs"], clinic["Runs target (day)"])
 st.markdown(f"""
 <div class="kpis">
  <div class="kpi"><div class="lbl">Patients</div><div class="val">{int(clinic["Balls"])} <small>/ {int(clinic["Balls target"])}</small></div>
-  <div class="sub">{int(clinic["Dots"])} dots · {int(clinic["Referrals"])} referrals</div><span class="gapline {'gg' if pt_ok else 'gb'}">{pt_txt}</span></div>
+  <div class="sub">GP <b>{int(clinic["GP visits"])} / {int(clinic["GP target"])}</b> · referrals <b>{int(clinic["Referrals"])} / {int(clinic["Referral allowance"])}</b> · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen</div><span class="gapline {'gg' if pt_ok else 'gb'}">{pt_txt}</span></div>
  <div class="kpi"><div class="lbl">Revenue (runs)</div><div class="val">{fmt(clinic["Runs"])} <small>/ {fmt(clinic["Runs target (day)"])}</small></div>
   <div class="sub">insurance share, full-day target</div><span class="gapline {'gg' if rv_ok else 'gb'}">{rv_txt}</span></div>
  <div class="kpi"><div class="lbl">Scoring balls</div><div class="val">{int(clinic["Scoring"])}</div>
@@ -474,7 +497,7 @@ with tab1:
                 unsafe_allow_html=True)
     ranked = docs.sort_values(["% of day", "Scoring"], ascending=False).reset_index(drop=True)
     board = ""
-    for i, d in ranked.head(3).iterrows():
+    for i, d in ranked[ranked["Balls"] > 0].head(3).iterrows():
         board += (f'<div class="b"><span class="rank r{i+1}">{i+1}</span><div><div class="nm">{E(str(d["Doctor"]).replace(" (FM)", ""))}</div>'
                   f'<div class="sm">{fmt(d["Runs"])} runs · {d["% of day"]}% of target · {d["Scoring"]} scoring</div></div></div>')
     st.markdown(f'<div class="board">{board}</div>', unsafe_allow_html=True)
@@ -498,16 +521,16 @@ with tab1:
         made = top_chips(vs) or '<span style="color:var(--muted)">No labs or procedures yet</span>'
         sc_need = int(d["Scoring needed"]) or 1
         sc_ratio = min(d["Scoring"] / sc_need, 1)
-        st_cls = str(d["Status"]).split()[0]
+        st_cls = status_key(d)
         need = int(d["Scoring still needed"]) if d["Scoring still needed"] not in ("", None) else 0
         ratio = d["Runs"] / max(d["Runs needed"], 1)
         need_txt = (f"Needs <b>{need} more scoring balls</b> by {E(check)}" if need
                     else f"Scoring on pace for {E(check)}")
         cards += f"""
         <div class="doc st-{st_cls}">
-          <div class="top"><div><div class="name"><span class="rank r{rank+1}">{rank+1}</span>{E(key)}</div>
-            <div class="role">{"Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice"} · target {fmt(d["Runs target (day)"])} a day</div></div>
-            <span class="pill p-{st_cls}" title="ON TRACK = runs and scoring at pace · CLOSE = runs at 80% of pace or more · BEHIND = under 80%">{ {"ON":"ON TRACK","WATCH":"CLOSE","CHECK":"BEHIND"}.get(st_cls, E(str(d["Status"]))) }</span></div>
+          <div class="top"><div><div class="name">{f'<span class="rank r{rank+1}">{rank+1}</span>' if d["Balls"] else '<span class="rank">–</span>'}{E(key)}</div>
+            <div class="role">{"Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice"}{" · new GP needed" if d.get("Vacancy") else ""} · target {fmt(d["Runs target (day)"])}</div></div>
+            <span class="pill p-{st_cls}" title="ON TRACK = runs and scoring at pace · CLOSE = runs at 80% of pace or more · BEHIND = under 80%">{STATUS_LABEL.get(st_cls, E(str(d["Status"])))}</span></div>
           <div class="score"><span class="runs">{fmt(d["Runs"])}</span><span class="of">runs of {fmt(d["Runs needed"])} needed by {E(check)} · {d["% of day"]}% of day target</span></div>
           <div class="bar"><i style="width:{min(ratio,1)*100:.0f}%"></i></div>
           <div class="stats">
@@ -522,10 +545,9 @@ with tab1:
             {gap_box_html(*gap(d["Balls"], d["Balls target"]), f'Patients vs {int(d["Balls target"])}')}
             {gap_box_html(*gap(d["Runs"], d["Runs target (day)"]), f'Revenue vs {fmt(d["Runs target (day)"])}')}
           </div>
-          <div class="strip">{strip}</div>
-          <div class="made chips-row">{made}</div>
+          {empty_note(d) or f'<div class="strip">{strip}</div><div class="made chips-row">{made}</div>'}
           {f'<div class="made">{ref_line}</div>' if ref_line else ""}
-          <div class="need">{fmt(d["Runs"] / max(d["Balls"],1))} AED per ball</div>
+          {f'<div class="need">{fmt(d["Runs"] / max(d["Balls"],1))} AED per ball</div>' if d["Balls"] else ""}
         </div>"""
     cards = "".join(ln.strip() for ln in cards.splitlines())   # no blank/indented lines, or Markdown shows raw HTML
     st.markdown(f'<div class="docs">{cards}</div>', unsafe_allow_html=True)
@@ -729,7 +751,8 @@ def build_excel():
         body_cell(ws, r, 12, float(d["Runs target (day)"]), "#,##0", color="5D6A62", bg=bg)
         gap_cell(r, 13, d["Runs"], d["Runs target (day)"])
         body_cell(ws, r, 14, d["Runs"] / max(d["Balls"], 1), "#,##0", bg=bg)
-        lab, fg, sbg = STF.get(str(d["Status"]).split()[0], (str(d["Status"]), "5D6A62", SOFT))
+        sk = status_key(d)
+        lab, fg, sbg = STF.get(sk, (STATUS_LABEL.get(sk, str(d["Status"])), "5D6A62", "EEF1EF"))
         body_cell(ws, r, 15, lab, color=fg, bold=True, bg=sbg)
         ws.row_dimensions[r].height = 21
         r += 1
@@ -983,7 +1006,7 @@ def email_dashboard_html():
                f'<div style="font-size:12px;color:#BFE0CE;padding-top:8px;">{len(logdf)} corrections applied &nbsp;·&nbsp; uploaded {E(report_meta["uploaded_at"])}</div></td></tr>')
     # KPIs
     out.append(f'<tr><td style="padding-top:12px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
-               + kpi("Patients", int(clinic["Balls"]), f'/ {int(clinic["Balls target"])}', f'{int(clinic["Dots"])} dots · {int(clinic["Referrals"])} referrals',
+               + kpi("Patients", int(clinic["Balls"]), f'/ {int(clinic["Balls target"])}', f'GP {int(clinic["GP visits"])} / {int(clinic["GP target"])} · referrals {int(clinic["Referrals"])} / {int(clinic["Referral allowance"])} · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen',
                      gap_pill(clinic["Balls"], clinic["Balls target"]))
                + kpi("Revenue (runs)", fmt(clinic["Runs"]), f'/ {fmt(clinic["Runs target (day)"])}', "insurance share, full-day target",
                      gap_pill(clinic["Runs"], clinic["Runs target (day)"]))
@@ -1003,7 +1026,7 @@ def email_dashboard_html():
     # top 3
     out.append(section("Top of the table"))
     out.append(f'<tr><td><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>')
-    for i, d in ranked.head(3).iterrows():
+    for i, d in ranked[ranked["Balls"] > 0].head(3).iterrows():
         out.append(f'<td width="33%" bgcolor="#ffffff" style="background:#ffffff;border:1px solid {EDGE};border-radius:12px;padding:12px;">'
                    f'<table {T}><tr>{rank_cell(i + 1)}<td style="padding-left:10px;font:bold 14px Arial,sans-serif;">{E(str(d["Doctor"]).replace(" (FM)", ""))}</td></tr></table>'
                    f'<div style="font-size:12px;color:{MUT};padding-top:6px;">{fmt(d["Runs"])} runs · {d["% of day"]}% of target · {d["Scoring"]} scoring</div></td>')
@@ -1014,7 +1037,8 @@ def email_dashboard_html():
     for rank, d in ranked.iterrows():
         key = str(d["Doctor"]).replace(" (FM)", "")
         vs = doc_visits.get(key, [])
-        lab, fg, bg = ST.get(str(d["Status"]).split()[0], (str(d["Status"]), MUT, SOFT))
+        sk = status_key(d)
+        lab, fg, bg = ST.get(sk, (STATUS_LABEL.get(sk, str(d["Status"])), "#7D8A83", "#EEF1EF"))
         ratio = d["Runs"] / max(d["Runs needed"], 1)
         scn = int(d["Scoring needed"]) or 1
         rv = [v for v in vs if v.get("ref")]
@@ -1035,7 +1059,7 @@ def email_dashboard_html():
             f'<tr><td width="6" bgcolor="{fg}" style="background:{fg};border-radius:14px 0 0 14px;font-size:1px;">&nbsp;</td>'
             f'<td style="padding:18px 20px;">'
             # name row
-            f'<table {T} width="100%"><tr><td><table {T}><tr>{rank_cell(rank + 1)}'
+            f'<table {T} width="100%"><tr><td><table {T}><tr>{rank_cell(rank + 1) if d["Balls"] else rank_cell("–")}'
             f'<td style="padding-left:10px;font:bold 22px Arial,sans-serif;color:{INK};">{E(key)}</td></tr></table>'
             f'<div style="font-size:12.5px;color:{MUT};padding-top:4px;">{"Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice"} · target {fmt(d["Runs target (day)"])} a day</div></td>'
             f'<td align="right" valign="top"><table {T}><tr><td bgcolor="{bg}" style="background:{bg};color:{fg};border:1px solid {fg};border-radius:14px;'
@@ -1055,8 +1079,12 @@ def email_dashboard_html():
             + gap_stat(d["Balls"], d["Balls target"], f'Patients vs {int(d["Balls target"])}')
             + gap_stat(d["Runs"], d["Runs target (day)"], f'Revenue vs {fmt(d["Runs target (day)"])}')
             + '</tr></table>'
-            f'<div style="padding:8px 0 6px;">{balls(vs)}</div>'
-            f'<div style="border-top:1px solid {LINE};padding-top:8px;">{chips(vs)}</div>'
+            + (f'<div style="background:#F2F5F1;border:1px dashed #C9D2CB;border-radius:10px;padding:10px 12px;font-size:13px;color:{MUT};margin-top:6px;">'
+               + (f'No doctor in this place yet (Dr. Mahedi left). Each day it stays empty the clinic misses <b>{int(d["Balls target"])} patients</b> and <b>{fmt(d["Runs target (day)"])}</b> revenue.'
+                  if d.get("Vacancy") else "No patients in this report.") + '</div>'
+               if not vs else
+               f'<div style="padding:8px 0 6px;">{balls(vs)}</div>'
+               f'<div style="border-top:1px solid {LINE};padding-top:8px;">{chips(vs)}</div>')
             + (f'<div style="font-size:13px;color:{MUT};padding-top:6px;">{ref_line}</div>' if ref_line else "")
             + f'<div style="font-size:13px;color:{MUT};padding-top:8px;">{fmt(d["Runs"] / max(d["Balls"], 1))} AED per ball</div>'
             '</td></tr></table></td></tr>')
