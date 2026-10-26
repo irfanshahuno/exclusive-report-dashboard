@@ -292,15 +292,18 @@ with up_col:
             f_rx = st.file_uploader("5 · Pharmacy Rx Match Excel (optional)", type=["xlsx"],
                                     help="Rx_Match_DD-MM-YYYY.xlsx: pharmacy capture by doctor (target 100%).")
             go = st.form_submit_button("Process reports", type="primary")
-        f_refs = [f for f in (f_ref_in, f_ref_out) if f] if go else []
         if go:
-            if not f_proc:
+            if not f_proc and report_bytes is None:
                 st.error("Add the ProcedureDetails report first.")
+            elif not any((f_proc, f_ref_in, f_ref_out, f_reg, f_rx)):
+                st.info("No new file added. The saved reports are already showing.")
             else:
                 try:
-                    L.read_report(f_proc.getvalue(), f_proc.name)
-                    for f in f_refs or []:
-                        L.read_referrals(f.getvalue(), f.name)
+                    if f_proc:
+                        L.read_report(f_proc.getvalue(), f_proc.name)
+                    for f in (f_ref_in, f_ref_out):
+                        if f:
+                            L.read_referrals(f.getvalue(), f.name)
                     if f_reg:
                         L.read_registration(f_reg.getvalue(), f_reg.name)
                     if f_rx:
@@ -308,13 +311,35 @@ with up_col:
                 except Exception as e:  # noqa: BLE001
                     st.error(f"Could not read the files. {e}")
                 else:
-                    refs_in = [(f.getvalue(), f.name) for f in f_refs or []]
-                    reg_in = (f_reg.getvalue(), f_reg.name) if f_reg else None
-                    rx_in = (f_rx.getvalue(), f_rx.name) if f_rx else None
-                    where, meta_new = save_bundle(f_proc.getvalue(), f_proc.name, refs_in, reg_in, rx_in)
-                    st.session_state["bundle"] = (f_proc.getvalue(), meta_new, refs_in, reg_in, rx_in)
-                    st.toast(f"Processed and saved ({where}). Stays on the page until new reports are uploaded.")
+                    # Only the files added now are replaced; everything else stays as saved.
+                    # A new ProcedureDetails report starts a new day, so the old extra files are dropped
+                    # unless they are uploaded again together with it.
+                    new_day = f_proc is not None
+                    old_refs = {} if new_day else {n.split("::", 1)[0]: (d, n) for d, n in (ref_files or [])}
+                    if f_ref_in:
+                        old_refs["in"] = (f_ref_in.getvalue(), "in::" + f_ref_in.name)
+                    if f_ref_out:
+                        old_refs["out"] = (f_ref_out.getvalue(), "out::" + f_ref_out.name)
+                    refs_in = [old_refs[k] for k in ("in", "out") if k in old_refs] + \
+                              [v for k, v in old_refs.items() if k not in ("in", "out")]
+                    reg_in = (f_reg.getvalue(), f_reg.name) if f_reg else (None if new_day else reg_file)
+                    rx_in = (f_rx.getvalue(), f_rx.name) if f_rx else (None if new_day else rx_file)
+                    proc_b = f_proc.getvalue() if f_proc else report_bytes
+                    proc_n = f_proc.name if f_proc else report_meta["name"]
+                    where, meta_new = save_bundle(proc_b, proc_n, refs_in, reg_in, rx_in)
+                    st.session_state["bundle"] = (proc_b, meta_new, refs_in, reg_in, rx_in)
+                    st.toast(f"Saved ({where}). Only the new files were replaced.")
                     st.rerun()
+        if report_bytes is not None:
+            have = [f"ProcedureDetails: {report_meta['name']}"]
+            for d_, n_ in ref_files or []:
+                tag, _, nm = n_.partition("::")
+                have.append(("Referral FM: " if tag == "in" else "Referral outside: " if tag == "out" else "Referral: ") + (nm or n_))
+            if reg_file:
+                have.append(f"Registration List: {reg_file[1]}")
+            if rx_file:
+                have.append(f"Rx Match: {rx_file[1]}")
+            st.caption("Saved now: " + " · ".join(have) + ". Add only what is new; a new ProcedureDetails report starts a new day.")
 with chk_col:
     if hasattr(st, "segmented_control"):
         check = st.segmented_control("Check", list(L.PACE), default="Closing") or "Closing"
