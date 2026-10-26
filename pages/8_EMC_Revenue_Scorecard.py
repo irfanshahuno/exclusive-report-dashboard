@@ -81,6 +81,8 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .hbox b{display:block; font-family:'Barlow Semi Condensed',sans-serif; font-size:20px; color:#18211C; line-height:1.25;}
 .hbox.big{background:#FBEBC8; border-color:#E0A93B;} .hbox.big b{color:#8A5A00; font-size:22px;}
 .hnote{font-size:12.5px; color:#8A5A00;}
+.kpi .hl{background:#E3F1E9; color:#17553A; font-weight:700; padding:1px 7px; border-radius:6px;}
+.kpi .hl.warn{background:#FBE4E1; color:#8E1F18;}
 .rxline{margin:8px 0 2px; padding:7px 10px; border-radius:10px; font-size:12.5px;}
 .rxline.rxbad{background:#FBE4E1; color:#8E1F18;} .rxline.rxok{background:#E2F3E8; color:#17553A;}
 .empty b{display:inline !important; font:inherit !important; font-weight:700 !important; color:#18211C !important;}
@@ -594,7 +596,8 @@ if rx and rx["totals"]["PATIENTS WITH RX"]:
     _given = _t["MEDICINES GIVEN"] / _t["MEDICINES PRESCRIBED"] if _t["MEDICINES PRESCRIBED"] else 0
     rx_kpi = (f'<div class="kpi"><div class="lbl">Pharmacy capture</div><div class="val">{int(_t["FILLED AT PHARMACY"])} '
               f'<small>/ {int(_t["PATIENTS WITH RX"])} · {_fill:.0%}</small></div>'
-              f'<div class="sub">meds given {_given:.0%} · missed ≈ AED {_t["MISSED VALUE"]:,.0f}</div>'
+              f'<div class="sub"><span class="hl">Sold AED {rx["emc_value"]:,.0f}</span> on {rx["emc_rx"]} EMC Rx · insurance AED {rx["emc_payer"]:,.0f}</div>'
+              f'<div class="sub"><span class="hl warn">Meds given {_given:.0%}</span> · missed ≈ AED {_t["MISSED VALUE"]:,.0f}</div>'
               f'<span class="gapline {"gg" if _fill >= RX_TARGET else "gb"}">{_lost} lost · target 100%</span></div>')
 else:
     rx_kpi = ""
@@ -602,7 +605,7 @@ rv_txt, rv_ok = gap(clinic["Runs"], clinic["Runs target (day)"])
 st.markdown(f"""
 <div class="kpis">
  <div class="kpi"><div class="lbl">Patients</div><div class="val">{int(clinic["Balls"])} <small>/ {int(clinic["Balls target"])}</small></div>
-  {f'<div class="sub"><b>{int(clinic["Balls"] - clinic["Follow-ups"])}</b> billed + <b>{int(clinic["Follow-ups"])}</b> free follow-ups (registered, no bill) = {int(clinic["Balls"])} visits, same as reception</div>' if clinic.get("Follow-ups") else ""}
+  {f'<div class="sub"><span class="hl">{int(clinic["Balls"] - clinic["Follow-ups"])} billed patients</span> + {int(clinic["Follow-ups"])} free follow-ups (no bill) = {int(clinic["Balls"])} visits, same as reception</div>' if clinic.get("Follow-ups") else ""}
   <div class="sub">GP <b>{int(clinic["GP visits"])} / {int(clinic["GP target"])}</b> · referrals <b>{int(clinic["Referrals"])} / {int(clinic["Referral allowance"])}</b>  · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen</div><span class="gapline {'gg' if pt_ok else 'gb'}">{pt_txt}</span></div>
  <div class="kpi"><div class="lbl">Revenue (runs)</div><div class="val">{fmt(clinic["Runs"])} <small>/ {fmt(clinic["Runs target (day)"])}</small></div>
   <div class="sub">insurance share, full-day target</div><span class="gapline {'gg' if rv_ok else 'gb'}">{rv_txt}</span></div>
@@ -1199,14 +1202,15 @@ def email_dashboard_html():
                f'<div style="font-size:12px;color:#BFE0CE;padding-top:8px;">{len(logdf)} corrections applied &nbsp;·&nbsp; uploaded {E(report_meta["uploaded_at"])}</div></td></tr>')
     # KPIs
     out.append(f'<tr><td style="padding-top:12px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
-               + kpi("Patients", int(clinic["Balls"]), f'/ {int(clinic["Balls target"])}', (f'{int(clinic["Balls"] - clinic["Follow-ups"])} billed + {int(clinic["Follow-ups"])} free follow-ups (no bill) = {int(clinic["Balls"])} visits, same as reception<br>' if clinic.get("Follow-ups") else "") + f'GP {int(clinic["GP visits"])} / {int(clinic["GP target"])} · referrals {int(clinic["Referrals"])} / {int(clinic["Referral allowance"])} · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen',
+               + kpi("Patients", int(clinic["Balls"]), f'/ {int(clinic["Balls target"])}', (f'<b style="background:#E3F1E9;color:#17553A;">&nbsp;{int(clinic["Balls"] - clinic["Follow-ups"])} billed patients&nbsp;</b> + {int(clinic["Follow-ups"])} free follow-ups (no bill) = {int(clinic["Balls"])} visits, same as reception<br>' if clinic.get("Follow-ups") else "") + f'GP {int(clinic["GP visits"])} / {int(clinic["GP target"])} · referrals {int(clinic["Referrals"])} / {int(clinic["Referral allowance"])} · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen',
                      gap_pill(clinic["Balls"], clinic["Balls target"]))
                + kpi("Revenue (runs)", fmt(clinic["Runs"]), f'/ {fmt(clinic["Runs target (day)"])}', "insurance share, full-day target",
                      gap_pill(clinic["Runs"], clinic["Runs target (day)"]))
                + kpi("Scoring balls", int(clinic["Scoring"]), "", f'{int(clinic["4s"])} fours · {int(clinic["6s"])} sixes')
                + (kpi("Pharmacy capture", int(rx["totals"]["FILLED AT PHARMACY"]),
                       f'/ {int(rx["totals"]["PATIENTS WITH RX"])} · {rx["totals"]["FILLED AT PHARMACY"] / rx["totals"]["PATIENTS WITH RX"]:.0%}',
-                      f'meds given {rx["totals"]["MEDICINES GIVEN"] / max(rx["totals"]["MEDICINES PRESCRIBED"], 1):.0%} · missed ≈ AED {rx["totals"]["MISSED VALUE"]:,.0f}',
+                      f'<b style="background:#E3F1E9;color:#17553A;">&nbsp;Sold AED {rx["emc_value"]:,.0f}&nbsp;</b> on {rx["emc_rx"]} EMC Rx · insurance AED {rx["emc_payer"]:,.0f}<br>'
+                      f'<b style="background:#FBE4E1;color:#8E1F18;">&nbsp;Meds given {rx["totals"]["MEDICINES GIVEN"] / max(rx["totals"]["MEDICINES PRESCRIBED"], 1):.0%}&nbsp;</b> · missed ≈ AED {rx["totals"]["MISSED VALUE"]:,.0f}',
                       gap_pill(rx["totals"]["FILLED AT PHARMACY"], rx["totals"]["PATIENTS WITH RX"]))
                   if rx and rx["totals"]["PATIENTS WITH RX"] else
                   kpi("Runs per ball", f'{clinic["Runs"] / max(clinic["Balls"], 1):,.0f}', "AED", "Insurance money per patient"))
