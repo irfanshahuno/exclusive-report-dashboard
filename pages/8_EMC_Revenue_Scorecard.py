@@ -69,6 +69,12 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .rsub{position:absolute; top:6px; right:6px; font-style:normal; font-size:10.5px; font-weight:700; color:#fff;
       background:#7D8A83; border-radius:999px; padding:1px 6px;}
 .stat.r b{color:#7D8A83;}
+.gaps{display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:-4px 0 10px;}
+.gaps .stat{display:flex; align-items:center; justify-content:center; gap:10px; padding:9px 6px;}
+.stat.gb{background:#FBE4E1; border:1px solid #F1B8B1;} .stat.gb b{color:#B3261E; font-size:16px;} .stat.gb span{color:#B3261E;}
+.stat.gg{background:#E2F3E8; border:1px solid #A9D8B9;} .stat.gg b{color:#1E7A45; font-size:16px;} .stat.gg span{color:#1E7A45;}
+.kpi .gapline{display:inline-block; margin-top:6px; padding:3px 10px; border-radius:999px; font-size:12.5px; font-weight:700;}
+.kpi .gapline.gb{background:#FBE4E1; color:#B3261E;} .kpi .gapline.gg{background:#E2F3E8; color:#1E7A45;}
 .tbl td.cr{color:#7D8A83; font-weight:700;}
 .stat .mini{display:block; height:4px; background:#E4E9E6; border-radius:4px; margin:5px 8px 3px; overflow:hidden;}
 .stat .mini i{display:block; height:100%; background:#2F5FC9; border-radius:4px;}
@@ -374,6 +380,17 @@ def claims_html(vs):
     return CLAIM_SEP.join(E(s) for s in claim_lines(vs)) or "–"
 
 
+def gap(done, target):
+    """(text, good?) e.g. ('22 short', False) or ('+2 over', True)."""
+    diff = round(done - target)
+    return (f"+{diff:,} over" if diff > 0 else "on target" if diff == 0 else f"{-diff:,} short"), diff >= 0
+
+
+def gap_box_html(diff_txt, good, label):
+    cls = "gg" if good else "gb"
+    return f'<div class="stat {cls}"><b>{diff_txt}</b><span>{label}</span></div>'
+
+
 def ball_html(v):
     r = v.get("ref")
     if r:
@@ -431,16 +448,16 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------- KPIs
-runs_ratio = clinic["Runs"] / max(clinic["Runs needed"], 1)
-score_ratio = clinic["Scoring"] / max(clinic["Scoring needed"], 1)
+pt_txt, pt_ok = gap(clinic["Balls"], clinic["Balls target"])
+rv_txt, rv_ok = gap(clinic["Runs"], clinic["Runs target (day)"])
 st.markdown(f"""
 <div class="kpis">
- <div class="kpi"><div class="lbl">Clinic runs</div><div class="val">{fmt(clinic["Runs"])} <small>/ {fmt(clinic["Runs needed"])}</small></div>
-  <div class="sub">{runs_ratio:.0%} of the {E(check)} pace</div><div class="bar"><i style="width:{min(runs_ratio,1)*100:.0f}%"></i></div></div>
- <div class="kpi"><div class="lbl">Scoring balls</div><div class="val">{int(clinic["Scoring"])} <small>/ {int(clinic["Scoring needed"])}</small></div>
-  <div class="sub">{int(clinic["4s"])} fours · {int(clinic["6s"])} sixes</div><div class="bar"><i style="width:{min(score_ratio,1)*100:.0f}%;background:#2F5FC9"></i></div></div>
- <div class="kpi"><div class="lbl">Balls faced</div><div class="val">{int(clinic["Balls"])}</div>
-  <div class="sub">{int(clinic["Dots"])} dots · {int(clinic["Referrals"])} referrals · {clinic["Dots"] / max(clinic["Balls"],1):.0%} consultation only</div></div>
+ <div class="kpi"><div class="lbl">Patients</div><div class="val">{int(clinic["Balls"])} <small>/ {int(clinic["Balls target"])}</small></div>
+  <div class="sub">{int(clinic["Dots"])} dots · {int(clinic["Referrals"])} referrals</div><span class="gapline {'gg' if pt_ok else 'gb'}">{pt_txt}</span></div>
+ <div class="kpi"><div class="lbl">Revenue (runs)</div><div class="val">{fmt(clinic["Runs"])} <small>/ {fmt(clinic["Runs target (day)"])}</small></div>
+  <div class="sub">insurance share, full-day target</div><span class="gapline {'gg' if rv_ok else 'gb'}">{rv_txt}</span></div>
+ <div class="kpi"><div class="lbl">Scoring balls</div><div class="val">{int(clinic["Scoring"])}</div>
+  <div class="sub">{int(clinic["4s"])} fours · {int(clinic["6s"])} sixes</div></div>
  <div class="kpi"><div class="lbl">Runs per ball</div><div class="val">{clinic["Runs"] / max(clinic["Balls"],1):,.0f} <small>AED</small></div>
   <div class="sub">Insurance money per patient</div></div>
 </div>
@@ -499,12 +516,16 @@ with tab1:
             <div class="stat r"><b>{d["Referrals"]}</b><span>Referral</span></div>
             <div class="stat f"><b>{d["4s"]}</b><span>4s</span></div>
             <div class="stat s"><b>{d["6s"]}</b><span>6s</span></div>
-            <div class="stat"><b>{d["Scoring"]}<small>/{int(d["Scoring needed"])}</small></b><i class="mini"><i style="width:{sc_ratio*100:.0f}%"></i></i><span>Scoring</span></div>
+            <div class="stat"><b>{d["Scoring"]}</b><span>Scoring</span></div>
+          </div>
+          <div class="gaps">
+            {gap_box_html(*gap(d["Balls"], d["Balls target"]), f'Patients vs {int(d["Balls target"])}')}
+            {gap_box_html(*gap(d["Runs"], d["Runs target (day)"]), f'Revenue vs {fmt(d["Runs target (day)"])}')}
           </div>
           <div class="strip">{strip}</div>
           <div class="made chips-row">{made}</div>
           {f'<div class="made">{ref_line}</div>' if ref_line else ""}
-          <div class="need">{need_txt} · {fmt(d["Runs"] / max(d["Balls"],1))} AED per ball</div>
+          <div class="need">{fmt(d["Runs"] / max(d["Balls"],1))} AED per ball</div>
         </div>"""
     cards = "".join(ln.strip() for ln in cards.splitlines())   # no blank/indented lines, or Markdown shows raw HTML
     st.markdown(f'<div class="docs">{cards}</div>', unsafe_allow_html=True)
@@ -545,7 +566,7 @@ with tab1:
             st.markdown(f'<div class="sl">{rows}</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sec">Summary</div>', unsafe_allow_html=True)
-    st.markdown(table(ddf, ["Doctor", "Balls", "Referrals", "Dots", "4s", "6s", "Scoring", "Scoring needed", "Runs", "Runs needed",
+    st.markdown(table(ddf, ["Doctor", "Balls", "Referrals", "Dots", "4s", "6s", "Scoring", "Runs", "Runs needed",
                             "% of day", "Status"], money=("Runs", "Runs needed"), total_key="Clinic"),
                 unsafe_allow_html=True)
     st.markdown('<div class="note">Runs = insurance money after copay on corrected prices; cash visits at other-insurer prices. '
@@ -679,8 +700,15 @@ def build_excel():
 
     # ---- Scorecard
     ws = wb.active; ws.title = "Scorecard"; ws.sheet_view.showGridLines = False
-    cols = ["#", "Doctor", "Role", "Balls", "Dots", "Referral", "4s", "6s", "Scoring", "Scoring needed",
-            "Runs", "Runs needed", "% of day target", "Runs per ball", "Status"]
+    cols = ["#", "Doctor", "Role", "Patients", "Dots", "Referral", "4s", "6s", "Scoring", "Patients vs target",
+            "Runs", "Runs target", "Revenue vs target", "Runs per ball", "Status"]
+
+    def gap_cell(r_, c_, done, target, bold_bg=None):
+        t, ok = gap(done, target)
+        fg, bgc = ("1E7A45", "E2F3E8") if ok else ("B3261E", "FBE4E1")
+        if bold_bg:
+            fg, bgc = ("FFFFFF", bold_bg)
+        body_cell(ws, r_, c_, f"{t} ({int(target):,})" if c_ == 10 else t, color=fg, bold=True, bg=bgc)
     banner(ws, 1, "EMC Revenue Scorecard", len(cols), sub)
     header(ws, 4, cols)
     r = 5
@@ -696,10 +724,10 @@ def build_excel():
         body_cell(ws, r, 7, int(d["4s"]), color=BLUE, bold=True, bg=bg)
         body_cell(ws, r, 8, int(d["6s"]), color=G, bold=True, bg=bg)
         body_cell(ws, r, 9, int(d["Scoring"]), bold=True, bg=bg)
-        body_cell(ws, r, 10, int(d["Scoring needed"]), color="5D6A62", bg=bg)
+        gap_cell(r, 10, d["Balls"], d["Balls target"])
         body_cell(ws, r, 11, float(d["Runs"]), "#,##0", bold=True, bg=bg)
-        body_cell(ws, r, 12, float(d["Runs needed"]), "#,##0", color="5D6A62", bg=bg)
-        body_cell(ws, r, 13, d["% of day"] / 100, "0%", bold=True, bg=bg)
+        body_cell(ws, r, 12, float(d["Runs target (day)"]), "#,##0", color="5D6A62", bg=bg)
+        gap_cell(r, 13, d["Runs"], d["Runs target (day)"])
         body_cell(ws, r, 14, d["Runs"] / max(d["Balls"], 1), "#,##0", bg=bg)
         lab, fg, sbg = STF.get(str(d["Status"]).split()[0], (str(d["Status"]), "5D6A62", SOFT))
         body_cell(ws, r, 15, lab, color=fg, bold=True, bg=sbg)
@@ -707,16 +735,14 @@ def build_excel():
         r += 1
     last = r - 1
     vals = ["", "Clinic", "", int(clinic["Balls"]), int(clinic["Dots"]), int(clinic["Referrals"]), int(clinic["4s"]), int(clinic["6s"]),
-            int(clinic["Scoring"]), int(clinic["Scoring needed"]), float(clinic["Runs"]), float(clinic["Runs needed"]),
-            clinic["% of day"] / 100, clinic["Runs"] / max(clinic["Balls"], 1), ""]
-    fmts = {11: "#,##0", 12: "#,##0", 13: "0%", 14: "#,##0"}
+            int(clinic["Scoring"]), f'{gap(clinic["Balls"], clinic["Balls target"])[0]} ({int(clinic["Balls target"])})',
+            float(clinic["Runs"]), float(clinic["Runs target (day)"]),
+            gap(clinic["Runs"], clinic["Runs target (day)"])[0], clinic["Runs"] / max(clinic["Balls"], 1), ""]
+    fmts = {11: "#,##0", 12: "#,##0", 14: "#,##0"}
     for i, v in enumerate(vals, 1):
         c = body_cell(ws, r, i, v, fmts.get(i), color="FFFFFF", bold=True, bg=G_DARK, align=left if i == 2 else center)
     ws.row_dimensions[r].height = 22
-    if last >= 5:
-        ws.conditional_formatting.add(f"M5:M{last}", DataBarRule(start_type="num", start_value=0, end_type="num", end_value=1, color="5FA37F"))
-        ws.conditional_formatting.add(f"I5:I{last}", DataBarRule(start_type="num", start_value=0, end_type="num", end_value=22, color="7B9BE0"))
-    widths = [5, 26, 17, 8, 8, 10, 7, 7, 10, 10, 11, 12, 15, 12, 12]
+    widths = [5, 26, 17, 9, 8, 10, 7, 7, 9, 19, 11, 11, 17, 12, 12]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -934,8 +960,18 @@ def email_dashboard_html():
         return (f'<tr><td style="padding:26px 0 8px;"><table {T} width="100%"><tr>'
                 f'<td style="font:bold 19px Arial,sans-serif;color:{INK};border-bottom:3px solid {SIX};padding-bottom:6px;">{title}</td></tr></table></td></tr>')
 
-    runs_r = clinic["Runs"] / max(clinic["Runs needed"], 1)
-    sc_r = clinic["Scoring"] / max(clinic["Scoring needed"], 1)
+    def gap_pill(done, target):
+        t, ok = gap(done, target)
+        fg, bg = ("#1E7A45", "#E2F3E8") if ok else ("#B3261E", "#FBE4E1")
+        return (f'<table {T}><tr><td bgcolor="{bg}" style="background:{bg};color:{fg};border:1px solid {fg};border-radius:12px;'
+                f'padding:4px 10px;font:bold 12.5px Arial,sans-serif;">{t}</td></tr></table>')
+
+    def gap_stat(done, target, label):
+        t, ok = gap(done, target)
+        fg, bg = ("#1E7A45", "#E2F3E8") if ok else ("#B3261E", "#FBE4E1")
+        return (f'<td width="50%" bgcolor="{bg}" align="center" style="background:{bg};border:1px solid {fg};border-radius:10px;padding:10px 4px;">'
+                f'<div style="font:bold 16px Arial,sans-serif;color:{fg};white-space:nowrap;">{t}</div>'
+                f'<div style="font-size:10px;color:{fg};letter-spacing:1px;text-transform:uppercase;padding-top:4px;">{label}</div></td>')
     out = [f'<table {T} width="100%" bgcolor="#EEF1ED" style="background:#EEF1ED;{F}"><tr><td align="center" style="padding:18px 10px;">'
            f'<table {T} width="{W}" style="width:{W}px;max-width:100%;{F}color:{INK};">']
 
@@ -947,9 +983,11 @@ def email_dashboard_html():
                f'<div style="font-size:12px;color:#BFE0CE;padding-top:8px;">{len(logdf)} corrections applied &nbsp;·&nbsp; uploaded {E(report_meta["uploaded_at"])}</div></td></tr>')
     # KPIs
     out.append(f'<tr><td style="padding-top:12px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
-               + kpi("Clinic runs", fmt(clinic["Runs"]), f'/ {fmt(clinic["Runs needed"])}', f'{runs_r:.0%} of the {E(check)} pace', bar(runs_r, SIX, 8))
-               + kpi("Scoring balls", int(clinic["Scoring"]), f'/ {int(clinic["Scoring needed"])}', f'{int(clinic["4s"])} fours · {int(clinic["6s"])} sixes', bar(sc_r, FOUR, 8))
-               + kpi("Balls faced", int(clinic["Balls"]), "", f'{int(clinic["Dots"])} dots · {int(clinic["Referrals"])} referrals')
+               + kpi("Patients", int(clinic["Balls"]), f'/ {int(clinic["Balls target"])}', f'{int(clinic["Dots"])} dots · {int(clinic["Referrals"])} referrals',
+                     gap_pill(clinic["Balls"], clinic["Balls target"]))
+               + kpi("Revenue (runs)", fmt(clinic["Runs"]), f'/ {fmt(clinic["Runs target (day)"])}', "insurance share, full-day target",
+                     gap_pill(clinic["Runs"], clinic["Runs target (day)"]))
+               + kpi("Scoring balls", int(clinic["Scoring"]), "", f'{int(clinic["4s"])} fours · {int(clinic["6s"])} sixes')
                + kpi("Runs per ball", f'{clinic["Runs"] / max(clinic["Balls"], 1):,.0f}', "AED", "Insurance money per patient")
                + '</tr></table></td></tr>')
     # legend
@@ -1011,13 +1049,16 @@ def email_dashboard_html():
             f'<table {T.replace("cellspacing=\"0\"", "cellspacing=\"6\"")} width="100%" style="margin:6px -6px 4px;"><tr>'
             + stat(f'{d["Balls"]}<span style="font-size:13px;color:{MUT};">/{int(d["Balls target"])}</span>', "Balls") + stat(d["Dots"], "Dots") + stat(d["Referrals"], "Referral", GREY)
             + stat(d["4s"], "4s", FOUR) + stat(d["6s"], "6s", SIX)
-            + stat(f'{d["Scoring"]}<span style="font-size:13px;color:{MUT};">/{scn}</span>', "Scoring", INK,
-                   f'<div style="padding:5px 8px 0;">{bar(d["Scoring"] / scn, FOUR, 5)}</div>')
+            + stat(d["Scoring"], "Scoring")
+            + '</tr></table>'
+            f'<table {T.replace("cellspacing=\"0\"", "cellspacing=\"6\"")} width="100%" style="margin:0 -6px 4px;"><tr>'
+            + gap_stat(d["Balls"], d["Balls target"], f'Patients vs {int(d["Balls target"])}')
+            + gap_stat(d["Runs"], d["Runs target (day)"], f'Revenue vs {fmt(d["Runs target (day)"])}')
             + '</tr></table>'
             f'<div style="padding:8px 0 6px;">{balls(vs)}</div>'
             f'<div style="border-top:1px solid {LINE};padding-top:8px;">{chips(vs)}</div>'
             + (f'<div style="font-size:13px;color:{MUT};padding-top:6px;">{ref_line}</div>' if ref_line else "")
-            + f'<div style="font-size:13px;color:{MUT};padding-top:8px;">{need_txt} &nbsp;·&nbsp; {fmt(d["Runs"] / max(d["Balls"], 1))} AED per ball</div>'
+            + f'<div style="font-size:13px;color:{MUT};padding-top:8px;">{fmt(d["Runs"] / max(d["Balls"], 1))} AED per ball</div>'
             '</td></tr></table></td></tr>')
 
     # by insurance
