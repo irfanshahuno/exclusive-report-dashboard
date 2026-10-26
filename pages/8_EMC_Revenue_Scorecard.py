@@ -61,13 +61,26 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .score{display:flex; align-items:baseline; gap:8px; margin:12px 0 2px;}
 .score .runs{font-family:'Barlow Semi Condensed',sans-serif; font-size:40px; font-weight:700; color:var(--ink); line-height:1;}
 .score .of{font-size:13px; color:var(--muted);}
-.stats{display:grid; grid-template-columns:repeat(5,1fr); gap:6px; margin:14px 0 10px;}
+.stats{display:grid; grid-template-columns:repeat(6,1fr); gap:6px; margin:14px 0 10px;}
 .stat{background:var(--soft); border-radius:10px; padding:8px 6px; text-align:center;}
 .stat b{display:block; font-family:'Barlow Semi Condensed',sans-serif; font-size:21px; color:var(--ink); line-height:1.1;}
 .stat span{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em;}
 .stat{position:relative;}
 .rsub{position:absolute; top:6px; right:6px; font-style:normal; font-size:10.5px; font-weight:700; color:#fff;
       background:#7D8A83; border-radius:999px; padding:1px 6px;}
+.stat.r b{color:#7D8A83;}
+.stat .mini{display:block; height:4px; background:#E4E9E6; border-radius:4px; margin:5px 8px 3px; overflow:hidden;}
+.stat .mini i{display:block; height:100%; background:#2F5FC9; border-radius:4px;}
+.stat b small{font-size:13px; color:var(--muted); font-weight:600;}
+.doc.st-ON{border-left:5px solid #1E6A49;} .doc.st-WATCH{border-left:5px solid #C98A12;} .doc.st-CHECK{border-left:5px solid #B3261E;}
+.rank{display:inline-flex; align-items:center; justify-content:center; width:30px; height:30px; border-radius:50%;
+      background:var(--soft); color:var(--ink); font:700 14px 'Barlow Semi Condensed',sans-serif; margin-right:10px; vertical-align:middle;}
+.rank.r1{background:#E9C46A; color:#4A3A07;} .rank.r2{background:#CFD6DA; color:#33413A;} .rank.r3{background:#D9A47A; color:#4A2A10;}
+.made.chips-row{display:flex; flex-wrap:wrap; gap:6px;}
+.chip-i b{font-weight:700; margin-left:3px; opacity:.7;}
+.board{display:flex; gap:12px; flex-wrap:wrap; margin:4px 0 16px;}
+.board .b{flex:1; min-width:200px; background:var(--card); border:1px solid #E4E9E6; border-radius:14px; padding:12px 16px; display:flex; align-items:center; gap:12px;}
+.board .b .nm{font-weight:700; color:var(--ink);} .board .b .sm{font-size:12.5px; color:var(--muted);}
 .stat.f b{color:var(--four);} .stat.s b{color:var(--pitch);}
 .strip{display:flex; flex-wrap:wrap; gap:3px; margin-top:6px;}
 .ball{width:15px; height:15px; border-radius:50%; font:700 8.5px/15px 'IBM Plex Sans',sans-serif; text-align:center; color:#fff; box-sizing:border-box;}
@@ -341,6 +354,24 @@ def price_groups(vs):
     return g
 
 
+def top_chips(vs, n=8):
+    g = {}
+    for v in vs:
+        for c in v["items"]:
+            nm = L.item_name(c["code"], c["name"])
+            kind = "lab" if c["type"] in ("LAB", "RADIOLOGY") else "proc"
+            e = g.setdefault(nm, {"kind": kind, "prices": set(), "n": 0})
+            e["prices"].add(round(c["ins"], 2)); e["n"] += 1
+    out = []
+    for nm, e in sorted(g.items(), key=lambda x: -x[1]["n"])[:n]:
+        pl = " / ".join(money(pr) for pr in sorted(e["prices"], reverse=True))
+        out.append(f'<span class="chip-i {e["kind"]}">{E(nm)} <em>{pl}</em>' + (f'<b>×{e["n"]}</b>' if e["n"] > 1 else "") + "</span>")
+    more = len(g) - n
+    if more > 0:
+        out.append(f'<span class="chip-i" style="background:#EEF1EF;color:#5D6A62">+{more} more</span>')
+    return "".join(out)
+
+
 def top_items(vs, n=6):
     g = price_groups(vs)
     out = []
@@ -381,8 +412,14 @@ with tab1:
     <span><i class="ball bR">R</i>Referred to Family Medicine</span><span><i class="ball bX">R</i>Referred outside</span>
     <span><i class="ball bR warn">R</i>Referred but GP gave a lab or procedure</span></div>""",
                 unsafe_allow_html=True)
+    ranked = docs.sort_values(["% of day", "Scoring"], ascending=False).reset_index(drop=True)
+    board = ""
+    for i, d in ranked.head(3).iterrows():
+        board += (f'<div class="b"><span class="rank r{i+1}">{i+1}</span><div><div class="nm">{E(str(d["Doctor"]).replace(" (FM)", ""))}</div>'
+                  f'<div class="sm">{fmt(d["Runs"])} runs · {d["% of day"]}% of target · {d["Scoring"]} scoring</div></div></div>')
+    st.markdown(f'<div class="board">{board}</div>', unsafe_allow_html=True)
     cards = ""
-    for _, d in docs.sort_values("% of day", ascending=False).iterrows():
+    for rank, d in ranked.iterrows():
         key = str(d["Doctor"]).replace(" (FM)", "")
         vs = doc_visits.get(key, [])
         strip = "".join(ball_html(v) for v in vs)
@@ -398,29 +435,31 @@ with tab1:
                 ref_line += f' · <span style="color:#B3261E"><b>{nwarn}</b> given a lab or procedure</span>'
         else:
             ref_line = ""
-        tops = top_items(vs)
-        made = " · ".join(f"<b>{E(n)}</b> ×{k}" for n, k in tops) if tops else "No labs or procedures yet"
+        made = top_chips(vs) or '<span style="color:var(--muted)">No labs or procedures yet</span>'
+        sc_need = int(d["Scoring needed"]) or 1
+        sc_ratio = min(d["Scoring"] / sc_need, 1)
         st_cls = str(d["Status"]).split()[0]
         need = int(d["Scoring still needed"]) if d["Scoring still needed"] not in ("", None) else 0
         ratio = d["Runs"] / max(d["Runs needed"], 1)
         need_txt = (f"Needs <b>{need} more scoring balls</b> by {E(check)}" if need
                     else f"Scoring on pace for {E(check)}")
         cards += f"""
-        <div class="doc">
-          <div class="top"><div><div class="name">{E(key)}</div>
+        <div class="doc st-{st_cls}">
+          <div class="top"><div><div class="name"><span class="rank r{rank+1}">{rank+1}</span>{E(key)}</div>
             <div class="role">{"Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice"} · target {fmt(d["Runs target (day)"])} a day</div></div>
-            <span class="pill p-{st_cls}">{E(str(d["Status"]))}</span></div>
-          <div class="score"><span class="runs">{fmt(d["Runs"])}</span><span class="of">runs of {fmt(d["Runs needed"])} needed · {d["% of day"]}% of day</span></div>
+            <span class="pill p-{st_cls}" title="ON TRACK = runs and scoring at pace · CLOSE = runs at 80% of pace or more · BEHIND = under 80%">{ {"ON":"ON TRACK","WATCH":"CLOSE","CHECK":"BEHIND"}.get(st_cls, E(str(d["Status"]))) }</span></div>
+          <div class="score"><span class="runs">{fmt(d["Runs"])}</span><span class="of">runs of {fmt(d["Runs needed"])} needed by {E(check)} · {d["% of day"]}% of day target</span></div>
           <div class="bar"><i style="width:{min(ratio,1)*100:.0f}%"></i></div>
           <div class="stats">
             <div class="stat"><b>{d["Balls"]}</b><span>Balls</span></div>
-            <div class="stat"><b>{d["Dots"]}</b><span>Dots</span>{f'<em class="rsub">{d["Referrals"]} R</em>' if d["Referrals"] else ""}</div>
+            <div class="stat"><b>{d["Dots"]}</b><span>Dots</span></div>
+            <div class="stat r"><b>{d["Referrals"]}</b><span>Referral</span></div>
             <div class="stat f"><b>{d["4s"]}</b><span>4s</span></div>
             <div class="stat s"><b>{d["6s"]}</b><span>6s</span></div>
-            <div class="stat"><b>{d["Scoring"]}</b><span>Scoring</span></div>
+            <div class="stat"><b>{d["Scoring"]}<small>/{int(d["Scoring needed"])}</small></b><i class="mini"><i style="width:{sc_ratio*100:.0f}%"></i></i><span>Scoring</span></div>
           </div>
           <div class="strip">{strip}</div>
-          <div class="made">{made}</div>
+          <div class="made chips-row">{made}</div>
           {f'<div class="made">{ref_line}</div>' if ref_line else ""}
           <div class="need">{need_txt} · {fmt(d["Runs"] / max(d["Balls"],1))} AED per ball</div>
         </div>"""
