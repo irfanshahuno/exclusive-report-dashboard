@@ -81,6 +81,8 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .hbox b{display:block; font-family:'Barlow Semi Condensed',sans-serif; font-size:20px; color:#18211C; line-height:1.25;}
 .hbox.big{background:#FBEBC8; border-color:#E0A93B;} .hbox.big b{color:#8A5A00; font-size:22px;}
 .hnote{font-size:12.5px; color:#8A5A00;}
+.rxline{margin:8px 0 2px; padding:7px 10px; border-radius:10px; font-size:12.5px;}
+.rxline.rxbad{background:#FBE4E1; color:#8E1F18;} .rxline.rxok{background:#E2F3E8; color:#17553A;}
 .empty b{display:inline !important; font:inherit !important; font-weight:700 !important; color:#18211C !important;}
 .empty{background:#F2F5F1; border:1px dashed #C9D2CB; border-radius:10px; padding:10px 12px; font-size:13px; color:#5D6A62; margin:4px 0 8px;}
 .stat.gb{background:#FBE4E1; border:1px solid #F1B8B1;} .stat.gb b{color:#B3261E; font-size:16px;} .stat.gb span{color:#B3261E;}
@@ -111,7 +113,7 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .ball{cursor:default;}
 .tag4{color:var(--four); font-weight:700;} .tag6{color:var(--pitch); font-weight:700;}
 .sl{display:grid; gap:8px; padding:4px 0 6px;}
-.bF{background:#FFFFFF; color:#9A6200; border:1.5px solid #E0A93B;}
+.bF{background:#FFFFFF; color:#9AA79F; border:1.5px dashed #C3CCC5;}
 .bR{background:#7D8A83; color:#fff;} .bX{background:#E07B39; color:#fff;}
 .ball.warn{box-shadow:0 0 0 2px #fff, 0 0 0 4px #D62D20;}
 .bb.bR{background:#7D8A83;} .bb.bX{background:#E07B39;}
@@ -208,17 +210,20 @@ def _s3():
         return None, None
 
 
-def save_bundle(proc, proc_name, refs, reg=None):
+def save_bundle(proc, proc_name, refs, reg=None, rx=None):
     """Save the ProcedureDetails report and any referral reports as the page's current data."""
     now = datetime.now(UAE)
     meta = {"name": proc_name, "uploaded_at": now.strftime("%d-%m-%Y %I:%M %p"),
-            "refs": [n for _, n in refs], "reg": reg[1] if reg else ""}
+            "refs": [n for _, n in refs], "reg": reg[1] if reg else "", "rx": rx[1] if rx else ""}
     s3, bucket = _s3()
     if s3:
         try:
             s3.put_object(Bucket=bucket, Key=S3_PREFIX + "latest/report.xlsx", Body=proc)
             for i, (data, _) in enumerate(refs):
                 s3.put_object(Bucket=bucket, Key=f"{S3_PREFIX}latest/referral_{i}.xlsx", Body=data)
+            if rx:
+                s3.put_object(Bucket=bucket, Key=S3_PREFIX + "latest/rxmatch.xlsx", Body=rx[0])
+                s3.put_object(Bucket=bucket, Key=f"{S3_PREFIX}history/{now:%Y-%m-%d}/{now:%H%M}_rxmatch_{rx[1]}", Body=rx[0])
             if reg:
                 s3.put_object(Bucket=bucket, Key=S3_PREFIX + "latest/registration.xlsx", Body=reg[0])
                 s3.put_object(Bucket=bucket, Key=f"{S3_PREFIX}history/{now:%Y-%m-%d}/{now:%H%M}_registration_{reg[1]}", Body=reg[0])
@@ -235,6 +240,8 @@ def save_bundle(proc, proc_name, refs, reg=None):
         (LOCAL_DIR / f"referral_{i}.xlsx").write_bytes(data)
     if reg:
         (LOCAL_DIR / "registration.xlsx").write_bytes(reg[0])
+    if rx:
+        (LOCAL_DIR / "rxmatch.xlsx").write_bytes(rx[0])
     (LOCAL_DIR / "meta.json").write_text(json.dumps(meta))
     return "server", meta
 
@@ -249,21 +256,24 @@ def load_bundle():
                     for i, n in enumerate(meta.get("refs", []))]
             reg = ((s3.get_object(Bucket=bucket, Key=S3_PREFIX + "latest/registration.xlsx")["Body"].read(), meta["reg"])
                    if meta.get("reg") else None)
-            return proc, meta, refs, reg
+            rx = ((s3.get_object(Bucket=bucket, Key=S3_PREFIX + "latest/rxmatch.xlsx")["Body"].read(), meta["rx"])
+                  if meta.get("rx") else None)
+            return proc, meta, refs, reg, rx
         except Exception:  # noqa: BLE001
             pass
     try:
         meta = json.loads((LOCAL_DIR / "meta.json").read_text())
         refs = [((LOCAL_DIR / f"referral_{i}.xlsx").read_bytes(), n) for i, n in enumerate(meta.get("refs", []))]
         reg = ((LOCAL_DIR / "registration.xlsx").read_bytes(), meta["reg"]) if meta.get("reg") else None
-        return (LOCAL_DIR / "report.xlsx").read_bytes(), meta, refs, reg
+        rx = ((LOCAL_DIR / "rxmatch.xlsx").read_bytes(), meta["rx"]) if meta.get("rx") else None
+        return (LOCAL_DIR / "report.xlsx").read_bytes(), meta, refs, reg, rx
     except Exception:  # noqa: BLE001
-        return None, None, [], None
+        return None, None, [], None, None
 
 
-if "bundle" not in st.session_state or len(st.session_state["bundle"]) != 4:
+if "bundle" not in st.session_state or len(st.session_state["bundle"]) != 5:
     st.session_state["bundle"] = load_bundle()
-report_bytes, report_meta, ref_files, reg_file = st.session_state["bundle"]
+report_bytes, report_meta, ref_files, reg_file, rx_file = st.session_state["bundle"]
 
 # ---------------------------------------------------------------- upload (hidden once processed) + check time
 up_col, chk_col = st.columns([3, 2], vertical_alignment="top")
@@ -279,6 +289,8 @@ with up_col:
                                          help="HIS Referral report for referrals to Lifecare and other hospitals.")
             f_reg = st.file_uploader("4 · Registration List (optional)", type=["xlsx", "xls"],
                                      help="HIS Registration List. Adds free follow-up visits (no bill) as F balls so the patient count matches reception.")
+            f_rx = st.file_uploader("5 · Pharmacy Rx Match Excel (optional)", type=["xlsx"],
+                                    help="Rx_Match_DD-MM-YYYY.xlsx: pharmacy capture by doctor (target 100%).")
             go = st.form_submit_button("Process reports", type="primary")
         f_refs = [f for f in (f_ref_in, f_ref_out) if f] if go else []
         if go:
@@ -291,13 +303,16 @@ with up_col:
                         L.read_referrals(f.getvalue(), f.name)
                     if f_reg:
                         L.read_registration(f_reg.getvalue(), f_reg.name)
+                    if f_rx:
+                        L.read_rxmatch(f_rx.getvalue(), f_rx.name)
                 except Exception as e:  # noqa: BLE001
                     st.error(f"Could not read the files. {e}")
                 else:
                     refs_in = [(f.getvalue(), f.name) for f in f_refs or []]
                     reg_in = (f_reg.getvalue(), f_reg.name) if f_reg else None
-                    where, meta_new = save_bundle(f_proc.getvalue(), f_proc.name, refs_in, reg_in)
-                    st.session_state["bundle"] = (f_proc.getvalue(), meta_new, refs_in, reg_in)
+                    rx_in = (f_rx.getvalue(), f_rx.name) if f_rx else None
+                    where, meta_new = save_bundle(f_proc.getvalue(), f_proc.name, refs_in, reg_in, rx_in)
+                    st.session_state["bundle"] = (f_proc.getvalue(), meta_new, refs_in, reg_in, rx_in)
                     st.toast(f"Processed and saved ({where}). Stays on the page until new reports are uploaded.")
                     st.rerun()
 with chk_col:
@@ -306,7 +321,7 @@ with chk_col:
     else:
         check = st.radio("Check", list(L.PACE), index=3, horizontal=True)
 
-lines, refs, regs = None, [], []
+lines, refs, regs, rx = None, [], [], None
 if report_bytes is not None:
     try:
         lines = L.read_report(report_bytes, report_meta["name"])
@@ -314,6 +329,8 @@ if report_bytes is not None:
             refs += L.read_referrals(data, n)
         if reg_file:
             regs = L.read_registration(reg_file[0], reg_file[1])
+        if rx_file:
+            rx = L.read_rxmatch(rx_file[0], rx_file[1])
     except Exception as e:  # noqa: BLE001
         st.error(f'Could not read the saved reports. {e}')
         lines = None
@@ -437,6 +454,24 @@ def empty_note(d):
 
 
 MONTH_DAYS = 26
+RX_TARGET = 1.0     # pharmacy capture target: every prescription filled at our pharmacy
+
+
+def rx_for(doctor):
+    if not rx:
+        return None
+    return next((r for r in rx["doctors"] if r["doctor"] == doctor), None)
+
+
+def rx_line_html(doctor):
+    r = rx_for(doctor)
+    if not r or not r["patients"]:
+        return ""
+    fill = r["filled"] / r["patients"]
+    given = r["given"] / r["presc"] if r["presc"] else 0
+    cls = "rxok" if fill >= RX_TARGET else "rxbad"
+    return (f'<div class="rxline {cls}">💊 Pharmacy: <b>{int(r["filled"])} / {int(r["patients"])} filled ({fill:.0%})</b>'
+            f' · meds given {given:.0%} · <b>{int(r["missed"])}</b> missed · {int(r["patients"] - r["filled"])} patients lost</div>')
 
 
 def hiring_numbers(d):
@@ -527,21 +562,32 @@ st.markdown(f"""
 
 # ---------------------------------------------------------------- KPIs
 pt_txt, pt_ok = gap(clinic["Balls"], clinic["Balls target"])
+if rx and rx["totals"]["PATIENTS WITH RX"]:
+    _t = rx["totals"]
+    _fill = _t["FILLED AT PHARMACY"] / _t["PATIENTS WITH RX"]
+    _lost = int(_t["PATIENTS WITH RX"] - _t["FILLED AT PHARMACY"])
+    _given = _t["MEDICINES GIVEN"] / _t["MEDICINES PRESCRIBED"] if _t["MEDICINES PRESCRIBED"] else 0
+    rx_kpi = (f'<div class="kpi"><div class="lbl">Pharmacy capture</div><div class="val">{int(_t["FILLED AT PHARMACY"])} '
+              f'<small>/ {int(_t["PATIENTS WITH RX"])} · {_fill:.0%}</small></div>'
+              f'<div class="sub">meds given {_given:.0%} · missed ≈ AED {_t["MISSED VALUE"]:,.0f}</div>'
+              f'<span class="gapline {"gg" if _fill >= RX_TARGET else "gb"}">{_lost} lost · target 100%</span></div>')
+else:
+    rx_kpi = ""
 rv_txt, rv_ok = gap(clinic["Runs"], clinic["Runs target (day)"])
 st.markdown(f"""
 <div class="kpis">
  <div class="kpi"><div class="lbl">Patients</div><div class="val">{int(clinic["Balls"])} <small>/ {int(clinic["Balls target"])}</small></div>
-  <div class="sub">GP <b>{int(clinic["GP visits"])} / {int(clinic["GP target"])}</b> · referrals <b>{int(clinic["Referrals"])} / {int(clinic["Referral allowance"])}</b> {f" · free follow-ups <b>{int(clinic['Follow-ups'])}</b>" if clinic.get("Follow-ups") else ""} · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen</div><span class="gapline {'gg' if pt_ok else 'gb'}">{pt_txt}</span></div>
+  {f'<div class="sub"><b>{int(clinic["Balls"] - clinic["Follow-ups"])}</b> billed + <b>{int(clinic["Follow-ups"])}</b> free follow-ups (registered, no bill) = {int(clinic["Balls"])} visits, same as reception</div>' if clinic.get("Follow-ups") else ""}
+  <div class="sub">GP <b>{int(clinic["GP visits"])} / {int(clinic["GP target"])}</b> · referrals <b>{int(clinic["Referrals"])} / {int(clinic["Referral allowance"])}</b>  · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen</div><span class="gapline {'gg' if pt_ok else 'gb'}">{pt_txt}</span></div>
  <div class="kpi"><div class="lbl">Revenue (runs)</div><div class="val">{fmt(clinic["Runs"])} <small>/ {fmt(clinic["Runs target (day)"])}</small></div>
   <div class="sub">insurance share, full-day target</div><span class="gapline {'gg' if rv_ok else 'gb'}">{rv_txt}</span></div>
  <div class="kpi"><div class="lbl">Scoring balls</div><div class="val">{int(clinic["Scoring"])}</div>
   <div class="sub">{int(clinic["4s"])} fours · {int(clinic["6s"])} sixes</div></div>
- <div class="kpi"><div class="lbl">Runs per ball</div><div class="val">{clinic["Runs"] / max(clinic["Balls"],1):,.0f} <small>AED</small></div>
-  <div class="sub">Insurance money per patient</div></div>
+ {rx_kpi or f'<div class="kpi"><div class="lbl">Runs per ball</div><div class="val">{clinic["Runs"] / max(clinic["Balls"],1):,.0f} <small>AED</small></div><div class="sub">Insurance money per patient</div></div>'}
 </div>
 """, unsafe_allow_html=True)
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Scorecard", "By insurance", "Labs and procedures", "Corrections", "Email"])
+tab1, tab2, tab3, tab_rx, tab4, tab5 = st.tabs(["Scorecard", "By insurance", "Labs and procedures", "Pharmacy", "Corrections", "Email"])
 
 # ---------------------------------------------------------------- scorecard
 with tab1:
@@ -549,7 +595,7 @@ with tab1:
     <span><i class="ball b4">4</i>One lab or procedure</span><span><i class="ball b6">6</i>Two or more</span>
     <span><i class="ball bR">R</i>Referred to Family Medicine</span><span><i class="ball bX">R</i>Referred outside</span>
     <span><i class="ball bR warn">R</i>Referred but GP gave a lab or procedure</span>
-    <span><i class="ball bF">F</i>Free follow-up (no bill)</span></div>""",
+    <span><i class="ball bF">F</i>Dot · free follow-up (no bill)</span></div>""",
                 unsafe_allow_html=True)
     ranked = docs.sort_values(["% of day", "Scoring"], ascending=False)
     ranked = pd.concat([ranked[~ranked["Vacancy"].astype(bool)], ranked[ranked["Vacancy"].astype(bool)]]).reset_index(drop=True)
@@ -607,7 +653,8 @@ with tab1:
           </div>
           {empty_note(d) or f'<div class="strip">{strip}</div><div class="made chips-row">{made}</div>'}
           {f'<div class="made">{ref_line}</div>' if ref_line else ""}
-          {f'<div class="made">Free follow-ups: <b>{int(d["Follow-ups"])}</b> (counted as patients, no runs)</div>' if d.get("Follow-ups") else ""}
+          {f'<div class="made">Free follow-ups: <b>{int(d["Follow-ups"])}</b> (no bill, counted in dots)</div>' if d.get("Follow-ups") else ""}
+          {rx_line_html(key)}
           {f'<div class="need">{fmt(d["Runs"] / max(d["Balls"],1))} AED per ball</div>' if d["Balls"] else ""}
         </div>"""
     cards = "".join(ln.strip() for ln in cards.splitlines())   # no blank/indented lines, or Markdown shows raw HTML
@@ -668,7 +715,7 @@ with tab2:
             f4 = [v for v in ivs if v["ball"] == 4]
             f6 = [v for v in ivs if v["ball"] == 6]
             runs = sum(v["runs"] for v in ivs)
-            rows += (f'<tr><td>{E(ins)}</td><td>{len(ivs)}</td><td>{sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref") and not v.get("fu"))}</td>'
+            rows += (f'<tr><td>{E(ins)}</td><td>{len(ivs)}</td><td>{sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref"))}</td>'
                      f'<td class="cr">{sum(1 for v in ivs if v.get("ref")) or "–"}</td>'
                      f'<td class="c4">{len(f4)}</td><td class="nm">{four_pills(f4)}</td>'
                      f'<td class="c6">{len(f6)}</td><td class="nm">{six_pills(f6)}</td>'
@@ -676,7 +723,7 @@ with tab2:
         f4 = [v for v in vs if v["ball"] == 4]
         f6 = [v for v in vs if v["ball"] == 6]
         runs = sum(v["runs"] for v in vs)
-        rows += (f'<tr class="tot"><td>Total</td><td>{len(vs)}</td><td>{sum(1 for v in vs if v["ball"] == 0 and not v.get("ref") and not v.get("fu"))}</td>'
+        rows += (f'<tr class="tot"><td>Total</td><td>{len(vs)}</td><td>{sum(1 for v in vs if v["ball"] == 0 and not v.get("ref"))}</td>'
                  f'<td class="cr">{sum(1 for v in vs if v.get("ref"))}</td>'
                  f'<td class="c4">{len(f4)}</td><td class="nm"></td><td class="c6">{len(f6)}</td><td class="nm"></td>'
                  f'<td>{fmt(runs)}</td><td>{fmt(runs / max(len(vs), 1))}</td></tr>')
@@ -719,6 +766,37 @@ with tab3:
                     unsafe_allow_html=True)
     if not any_items:
         st.markdown('<div class="empty"><b>No labs or procedures</b>Every patient in this report had a consultation only.</div>',
+                    unsafe_allow_html=True)
+
+# ---------------------------------------------------------------- pharmacy
+with tab_rx:
+    if not rx:
+        st.markdown('<div class="empty"><b>No Rx Match file</b> Upload the pharmacy Rx_Match Excel (file 5) to see how many '
+                    'prescriptions were filled at our pharmacy, by doctor.</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="note">{E(rx["date"])} · EMC Cortex prescriptions vs Excellent Pharmacy dispensing · '
+                    'target: every prescription filled at our pharmacy (100%).</div>', unsafe_allow_html=True)
+
+        def rx_rows(rows, label):
+            body = ""
+            for r in sorted(rows, key=lambda r: r["filled"] / r["patients"] if r["patients"] else 0):
+                fill = r["filled"] / r["patients"] if r["patients"] else 0
+                given = r["given"] / r["presc"] if r["presc"] else 0
+                col = "#1E7A45" if fill >= RX_TARGET else "#B3261E"
+                body += (f'<tr><td>{E(r.get("doctor") or r["name"])}</td><td>{int(r["patients"])}</td><td>{int(r["filled"])}</td>'
+                         f'<td><b style="color:{col}">{fill:.0%}</b></td><td>{int(r["patients"] - r["filled"])}</td>'
+                         f'<td>{int(r["presc"])}</td><td>{int(r["given"])}</td><td>{given:.0%}</td><td><b>{int(r["missed"])}</b></td></tr>')
+            return (f'<table class="tbl"><thead><tr><th>{label}</th><th>Patients with Rx</th><th>Filled</th><th>Fill %</th>'
+                    f'<th>Lost</th><th>Meds prescribed</th><th>Meds given</th><th>Given %</th><th>Missed lines</th></tr></thead><tbody>{body}</tbody></table>')
+        st.markdown('<div class="sec">By doctor</div>' + rx_rows(rx["doctors"], "Doctor"), unsafe_allow_html=True)
+        st.markdown('<div class="sec">By insurer</div>' + rx_rows(rx["insurers"], "Insurer"), unsafe_allow_html=True)
+        never = [m for m in rx["top_presc"] if m["times"] and not m["given"]]
+        if never:
+            st.markdown('<div class="sec">Never given today – check stock</div>'
+                        + "".join(_pill(f'{E(m["name"])} <b>{int(m["times"])}×</b> <span style="opacity:.7">{E(m["use"])}</span>',
+                                        "#FBE4E1", "#8E1F18", "#F1B8B1") for m in never), unsafe_allow_html=True)
+        st.markdown('<div class="sec">Most missed medicines</div>'
+                    + "".join(_pill(f'{E(m["name"])} <b>{int(m["times"])}×</b>', "#FBF0D9", "#7A4E00", "#EBCF96") for m in rx["top_missed"]),
                     unsafe_allow_html=True)
 
 # ---------------------------------------------------------------- corrections
@@ -909,7 +987,7 @@ def build_excel():
             runs = sum(v["runs"] for v in ivs)
             body_cell(wi, r, 1, ins, color=fc, bold=True, bg=bg, align=left)
             body_cell(wi, r, 2, len(ivs), color=fc, bold=tot, bg=bg)
-            body_cell(wi, r, 3, sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref") and not v.get("fu")), color=fc, bold=tot, bg=bg)
+            body_cell(wi, r, 3, sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref")), color=fc, bold=tot, bg=bg)
             body_cell(wi, r, 4, sum(1 for v in ivs if v.get("ref")), color=fc or GREY, bold=True, bg=bg)
             body_cell(wi, r, 5, len(f4), color=fc or BLUE, bold=True, bg=bg)
             body_cell(wi, r, 6, "" if tot else (agg_names(f4) or "–"), color=fc or "2546A0", bg=bg if tot else (BLUE_SOFT if f4 else bg), align=left)
@@ -954,8 +1032,30 @@ def build_excel():
         wl.column_dimensions[get_column_letter(i)].width = w
 
     del wb["Balls"]   # not wanted in the Excel
+    if rx:
+        wp = wb.create_sheet("Pharmacy"); wp.sheet_view.showGridLines = False
+        pcols = ["Doctor / insurer", "Patients with Rx", "Filled", "Fill %", "Lost", "Meds prescribed", "Meds given", "Given %", "Missed lines"]
+        banner(wp, 1, "Pharmacy capture (target 100%)", len(pcols), f"{rx['date']}  ·  EMC Cortex prescriptions vs Excellent Pharmacy")
+        r = 4
+        for title, rows in (("By doctor", rx["doctors"]), ("By insurer", rx["insurers"])):
+            wp.cell(r, 1, title).font = Font(bold=True, size=12, color=G_DARK); r += 1
+            header(wp, r, pcols); r += 1
+            for row in rows:
+                fpct = row["filled"] / row["patients"] if row["patients"] else 0
+                ok = fpct >= 1
+                body_cell(wp, r, 1, row.get("doctor") or row["name"], bold=True, align=left)
+                body_cell(wp, r, 2, int(row["patients"])); body_cell(wp, r, 3, int(row["filled"]))
+                body_cell(wp, r, 4, fpct, "0%", bold=True, color="1E7A45" if ok else "B3261E", bg="E2F3E8" if ok else "FBE4E1")
+                body_cell(wp, r, 5, int(row["patients"] - row["filled"]), color="B3261E")
+                body_cell(wp, r, 6, int(row["presc"])); body_cell(wp, r, 7, int(row["given"]))
+                body_cell(wp, r, 8, row["given"] / row["presc"] if row["presc"] else 0, "0%")
+                body_cell(wp, r, 9, int(row["missed"]), bold=True)
+                r += 1
+            r += 1
+        for i, w in enumerate([26, 15, 9, 9, 8, 15, 12, 10, 12], 1):
+            wp.column_dimensions[get_column_letter(i)].width = w
     for s in wb.worksheets:
-        s.sheet_properties.tabColor = {"Scorecard": G, "Balls": GREY, "By insurance": BLUE, "Labs and procedures": ORNG}[s.title]
+        s.sheet_properties.tabColor = {"Scorecard": G, "Balls": GREY, "By insurance": BLUE, "Labs and procedures": ORNG, "Pharmacy": "8E1F18"}[s.title]
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -989,7 +1089,7 @@ def email_dashboard_html():
     def ball_cell(v):
         if v.get("fu"):
             return ('<td width="18" height="18" bgcolor="#ffffff" style="width:18px;height:18px;border-radius:50%;text-align:center;'
-                    'font:bold 10px Arial,sans-serif;color:#9A6200;background:#ffffff;border:2px solid #E0A93B;line-height:18px;">F</td>')
+                    'font:bold 10px Arial,sans-serif;color:#9AA79F;background:#ffffff;border:2px dashed #C3CCC5;line-height:18px;">F</td>')
         base = (f"width:18px;height:18px;border-radius:50%;text-align:center;vertical-align:middle;"
                 f"font:bold 10px Arial,sans-serif;color:#ffffff;mso-line-height-rule:exactly;line-height:18px;")
         r = v.get("ref")
@@ -1074,12 +1174,17 @@ def email_dashboard_html():
                f'<div style="font-size:12px;color:#BFE0CE;padding-top:8px;">{len(logdf)} corrections applied &nbsp;·&nbsp; uploaded {E(report_meta["uploaded_at"])}</div></td></tr>')
     # KPIs
     out.append(f'<tr><td style="padding-top:12px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
-               + kpi("Patients", int(clinic["Balls"]), f'/ {int(clinic["Balls target"])}', f'GP {int(clinic["GP visits"])} / {int(clinic["GP target"])} · referrals {int(clinic["Referrals"])} / {int(clinic["Referral allowance"])}' + (f' · free follow-ups {int(clinic["Follow-ups"])}' if clinic.get("Follow-ups") else "") + f' · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen',
+               + kpi("Patients", int(clinic["Balls"]), f'/ {int(clinic["Balls target"])}', (f'{int(clinic["Balls"] - clinic["Follow-ups"])} billed + {int(clinic["Follow-ups"])} free follow-ups (no bill) = {int(clinic["Balls"])} visits, same as reception<br>' if clinic.get("Follow-ups") else "") + f'GP {int(clinic["GP visits"])} / {int(clinic["GP target"])} · referrals {int(clinic["Referrals"])} / {int(clinic["Referral allowance"])} · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen',
                      gap_pill(clinic["Balls"], clinic["Balls target"]))
                + kpi("Revenue (runs)", fmt(clinic["Runs"]), f'/ {fmt(clinic["Runs target (day)"])}', "insurance share, full-day target",
                      gap_pill(clinic["Runs"], clinic["Runs target (day)"]))
                + kpi("Scoring balls", int(clinic["Scoring"]), "", f'{int(clinic["4s"])} fours · {int(clinic["6s"])} sixes')
-               + kpi("Runs per ball", f'{clinic["Runs"] / max(clinic["Balls"], 1):,.0f}', "AED", "Insurance money per patient")
+               + (kpi("Pharmacy capture", int(rx["totals"]["FILLED AT PHARMACY"]),
+                      f'/ {int(rx["totals"]["PATIENTS WITH RX"])} · {rx["totals"]["FILLED AT PHARMACY"] / rx["totals"]["PATIENTS WITH RX"]:.0%}',
+                      f'meds given {rx["totals"]["MEDICINES GIVEN"] / max(rx["totals"]["MEDICINES PRESCRIBED"], 1):.0%} · missed ≈ AED {rx["totals"]["MISSED VALUE"]:,.0f}',
+                      gap_pill(rx["totals"]["FILLED AT PHARMACY"], rx["totals"]["PATIENTS WITH RX"]))
+                  if rx and rx["totals"]["PATIENTS WITH RX"] else
+                  kpi("Runs per ball", f'{clinic["Runs"] / max(clinic["Balls"], 1):,.0f}', "AED", "Insurance money per patient"))
                + '</tr></table></td></tr>')
     # legend
     def lg(v, t):
@@ -1090,7 +1195,7 @@ def email_dashboard_html():
                + '</tr></table><table ' + T + ' style="margin-top:6px;"><tr>'
                + lg({"ball": 0, "ref": {"external": False}}, "Referred to Family Medicine") + lg({"ball": 0, "ref": {"external": True}}, "Referred outside")
                + lg({"ball": 0, "ref": {"external": False}, "ref_given": [1]}, "Referred but GP gave a lab or procedure")
-               + lg({"ball": 0, "fu": True}, "Free follow-up")
+               + lg({"ball": 0, "fu": True}, "Dot · free follow-up (no bill)")
                + '</tr></table></td></tr>')
     # top 3
     out.append(section("Top of the table"))
@@ -1175,7 +1280,12 @@ def email_dashboard_html():
                f'<div style="padding:8px 0 6px;">{balls(vs)}</div>'
                f'<div style="border-top:1px solid {LINE};padding-top:8px;">{chips(vs)}</div>')
             + (f'<div style="font-size:13px;color:{MUT};padding-top:6px;">{ref_line}</div>' if ref_line else "")
-            + (f'<div style="font-size:13px;color:{MUT};padding-top:6px;">Free follow-ups: <b>{int(d["Follow-ups"])}</b> (counted as patients, no runs)</div>' if d.get("Follow-ups") else "")
+            + (f'<div style="font-size:13px;color:{MUT};padding-top:6px;">Free follow-ups: <b>{int(d["Follow-ups"])}</b> (no bill, counted in dots)</div>' if d.get("Follow-ups") else "")
+            + ((lambda r: (f'<table {T} width="100%" style="margin-top:8px;"><tr><td bgcolor="{"#E2F3E8" if r["filled"] >= r["patients"] else "#FBE4E1"}" '
+                           f'style="background:{"#E2F3E8" if r["filled"] >= r["patients"] else "#FBE4E1"};color:{"#17553A" if r["filled"] >= r["patients"] else "#8E1F18"};'
+                           f'border-radius:10px;padding:8px 10px;font-size:12.5px;">Pharmacy: <b>{int(r["filled"])} / {int(r["patients"])} filled '
+                           f'({r["filled"] / r["patients"]:.0%})</b> · meds given {r["given"] / max(r["presc"], 1):.0%} · <b>{int(r["missed"])}</b> missed · '
+                           f'{int(r["patients"] - r["filled"])} patients lost</td></tr></table>') if r and r["patients"] else "")(rx_for(key)))
             + f'<div style="font-size:13px;color:{MUT};padding-top:8px;">{fmt(d["Runs"] / max(d["Balls"], 1))} AED per ball</div>'
             '</td></tr></table></td></tr>')
 
@@ -1195,7 +1305,7 @@ def email_dashboard_html():
             f4 = [v for v in ivs if v["ball"] == 4]; f6 = [v for v in ivs if v["ball"] == 6]
             runs = sum(v["runs"] for v in ivs); nref = sum(1 for v in ivs if v.get("ref"))
             tr = f' bgcolor="{SOFT}" style="background:{SOFT};font-weight:bold;"' if tot else ""
-            return (f'<tr{tr}><td {tdl}>{E(name)}</td><td {td}>{len(ivs)}</td><td {td}>{sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref") and not v.get("fu"))}</td>'
+            return (f'<tr{tr}><td {tdl}>{E(name)}</td><td {td}>{len(ivs)}</td><td {td}>{sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref"))}</td>'
                     f'<td {td}><b style="color:{GREY};">{nref if (nref or tot) else "–"}</b></td>'
                     f'<td {td}><b style="color:{FOUR};">{len(f4)}</b></td>'
                     f'<td {tdl} width="24%">{"" if tot else four_pills(f4).replace("white-space:nowrap;", "white-space:normal;")}</td>'
