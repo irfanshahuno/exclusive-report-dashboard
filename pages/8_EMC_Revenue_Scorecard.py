@@ -494,7 +494,7 @@ with tab1:
           <div class="score"><span class="runs">{fmt(d["Runs"])}</span><span class="of">runs of {fmt(d["Runs needed"])} needed by {E(check)} · {d["% of day"]}% of day target</span></div>
           <div class="bar"><i style="width:{min(ratio,1)*100:.0f}%"></i></div>
           <div class="stats">
-            <div class="stat"><b>{d["Balls"]}</b><span>Balls</span></div>
+            <div class="stat"><b>{d["Balls"]}<small>/{int(d["Balls target"])}</small></b><span>Balls</span></div>
             <div class="stat"><b>{d["Dots"]}</b><span>Dots</span></div>
             <div class="stat r"><b>{d["Referrals"]}</b><span>Referral</span></div>
             <div class="stat f"><b>{d["4s"]}</b><span>4s</span></div>
@@ -1009,7 +1009,7 @@ def email_dashboard_html():
             f'<div style="padding:8px 0 4px;">{bar(ratio, SIX, 10)}</div>'
             # stats
             f'<table {T.replace("cellspacing=\"0\"", "cellspacing=\"6\"")} width="100%" style="margin:6px -6px 4px;"><tr>'
-            + stat(d["Balls"], "Balls") + stat(d["Dots"], "Dots") + stat(d["Referrals"], "Referral", GREY)
+            + stat(f'{d["Balls"]}<span style="font-size:13px;color:{MUT};">/{int(d["Balls target"])}</span>', "Balls") + stat(d["Dots"], "Dots") + stat(d["Referrals"], "Referral", GREY)
             + stat(d["4s"], "4s", FOUR) + stat(d["6s"], "6s", SIX)
             + stat(f'{d["Scoring"]}<span style="font-size:13px;color:{MUT};">/{scn}</span>', "Scoring", INK,
                    f'<div style="padding:5px 8px 0;">{bar(d["Scoring"] / scn, FOUR, 5)}</div>')
