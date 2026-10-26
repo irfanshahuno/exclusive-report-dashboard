@@ -345,13 +345,13 @@ def summarize(visits, pace=1.0):
     docs, ins, items, strips = {}, {}, {}, {}
     for v in visits:
         d = docs.setdefault(v["doctor"], {"Doctor": v["doctor"], "FM": False, "Balls": 0, "Dots": 0, "4s": 0, "6s": 0, "Runs": 0.0, "Referrals": 0})
-        d["Referrals"] += 1 if v.get("ref") else 0
         d["FM"] = d["FM"] or v["fm"]
-        key = "Dots" if v["ball"] == 0 else "4s" if v["ball"] == 4 else "6s"
+        # a referred patient is a Referral, not a Dot
+        key = "Referrals" if v.get("ref") else "Dots" if v["ball"] == 0 else "4s" if v["ball"] == 4 else "6s"
         d["Balls"] += 1; d[key] += 1; d["Runs"] += v["runs"]
         strips.setdefault(v["doctor"], []).append(v["ball"])
         i = ins.setdefault((v["doctor"], v["insurance"]), {"Doctor": v["doctor"], "Insurance": v["insurance"],
-                                                           "Balls": 0, "Dots": 0, "4s": 0, "6s": 0, "Runs": 0.0})
+                                                           "Balls": 0, "Dots": 0, "Referrals": 0, "4s": 0, "6s": 0, "Runs": 0.0})
         i["Balls"] += 1; i[key] += 1; i["Runs"] += v["runs"]
         for c in v["items"]:
             it = items.setdefault((v["doctor"], c["type"], c["code"]), {"Doctor": v["doctor"], "Item": item_name(c["code"], c["name"]),
