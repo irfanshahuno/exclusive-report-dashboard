@@ -63,8 +63,8 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .score .of{font-size:13px; color:var(--muted);}
 .stats{display:grid; grid-template-columns:repeat(6,1fr); gap:6px; margin:14px 0 10px;}
 .stat{background:var(--soft); border-radius:10px; padding:8px 6px; text-align:center;}
-.stat b{display:block; font-family:'Barlow Semi Condensed',sans-serif; font-size:21px; color:var(--ink); line-height:1.1;}
-.stat span{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em;}
+.stat b{display:block; font-family:'Barlow Semi Condensed',sans-serif; font-size:19px; white-space:nowrap; color:var(--ink); line-height:1.1;}
+.stat span{font-size:9.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em;}
 .stat{position:relative;}
 .rsub{position:absolute; top:6px; right:6px; font-style:normal; font-size:10.5px; font-weight:700; color:#fff;
       background:#7D8A83; border-radius:999px; padding:1px 6px;}
