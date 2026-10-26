@@ -332,6 +332,18 @@ def agg_names(vs):
                      for (n, pr), k in sorted(cnt.items(), key=lambda x: (-x[1], x[0][0])))
 
 
+def claim_lines(vs):
+    """One entry per claim: 'CBC (22.4) + CRP (15.2)'."""
+    return [" + ".join(f'{L.item_name(c["code"], c["name"])} ({money(c["ins"])})' for c in v["items"]) for v in vs]
+
+
+CLAIM_SEP = '<b style="color:#1E6A49;font-size:15px;padding:0 7px;">|</b>'
+
+
+def claims_html(vs):
+    return CLAIM_SEP.join(E(s) for s in claim_lines(vs)) or "–"
+
+
 def ball_html(v):
     r = v.get("ref")
     if r:
@@ -398,7 +410,7 @@ st.markdown(f"""
  <div class="kpi"><div class="lbl">Scoring balls</div><div class="val">{int(clinic["Scoring"])} <small>/ {int(clinic["Scoring needed"])}</small></div>
   <div class="sub">{int(clinic["4s"])} fours · {int(clinic["6s"])} sixes</div><div class="bar"><i style="width:{min(score_ratio,1)*100:.0f}%;background:#2F5FC9"></i></div></div>
  <div class="kpi"><div class="lbl">Balls faced</div><div class="val">{int(clinic["Balls"])}</div>
-  <div class="sub">{int(clinic["Dots"])} dots · {clinic["Dots"] / max(clinic["Balls"],1):.0%} consultation only</div></div>
+  <div class="sub">{int(clinic["Dots"])} dots · {int(clinic["Referrals"])} referrals · {clinic["Dots"] / max(clinic["Balls"],1):.0%} consultation only</div></div>
  <div class="kpi"><div class="lbl">Runs per ball</div><div class="val">{clinic["Runs"] / max(clinic["Balls"],1):,.0f} <small>AED</small></div>
   <div class="sub">Insurance money per patient</div></div>
 </div>
@@ -522,15 +534,15 @@ with tab2:
             f4 = [v for v in ivs if v["ball"] == 4]
             f6 = [v for v in ivs if v["ball"] == 6]
             runs = sum(v["runs"] for v in ivs)
-            rows += (f'<tr><td>{E(ins)}</td><td>{len(ivs)}</td><td>{sum(1 for v in ivs if v["ball"] == 0)}</td>'
+            rows += (f'<tr><td>{E(ins)}</td><td>{len(ivs)}</td><td>{sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref"))}</td>'
                      f'<td class="cr">{sum(1 for v in ivs if v.get("ref")) or "–"}</td>'
                      f'<td class="c4">{len(f4)}</td><td class="nm">{E(agg_names(f4)) or "–"}</td>'
-                     f'<td class="c6">{len(f6)}</td><td class="nm">{E(agg_names(f6)) or "–"}</td>'
+                     f'<td class="c6">{len(f6)}</td><td class="nm">{claims_html(f6)}</td>'
                      f'<td>{fmt(runs)}</td><td>{fmt(runs / len(ivs))}</td></tr>')
         f4 = [v for v in vs if v["ball"] == 4]
         f6 = [v for v in vs if v["ball"] == 6]
         runs = sum(v["runs"] for v in vs)
-        rows += (f'<tr class="tot"><td>Total</td><td>{len(vs)}</td><td>{sum(1 for v in vs if v["ball"] == 0)}</td>'
+        rows += (f'<tr class="tot"><td>Total</td><td>{len(vs)}</td><td>{sum(1 for v in vs if v["ball"] == 0 and not v.get("ref"))}</td>'
                  f'<td class="cr">{sum(1 for v in vs if v.get("ref"))}</td>'
                  f'<td class="c4">{len(f4)}</td><td class="nm"></td><td class="c6">{len(f6)}</td><td class="nm"></td>'
                  f'<td>{fmt(runs)}</td><td>{fmt(runs / max(len(vs), 1))}</td></tr>')
@@ -755,12 +767,12 @@ def build_excel():
             runs = sum(v["runs"] for v in ivs)
             body_cell(wi, r, 1, ins, color=fc, bold=True, bg=bg, align=left)
             body_cell(wi, r, 2, len(ivs), color=fc, bold=tot, bg=bg)
-            body_cell(wi, r, 3, sum(1 for v in ivs if v["ball"] == 0), color=fc, bold=tot, bg=bg)
+            body_cell(wi, r, 3, sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref")), color=fc, bold=tot, bg=bg)
             body_cell(wi, r, 4, sum(1 for v in ivs if v.get("ref")), color=fc or GREY, bold=True, bg=bg)
             body_cell(wi, r, 5, len(f4), color=fc or BLUE, bold=True, bg=bg)
             body_cell(wi, r, 6, "" if tot else (agg_names(f4) or "–"), color=fc or "2546A0", bg=bg if tot else (BLUE_SOFT if f4 else bg), align=left)
             body_cell(wi, r, 7, len(f6), color=fc or G, bold=True, bg=bg)
-            body_cell(wi, r, 8, "" if tot else (agg_names(f6) or "–"), color=fc or "17553A", bg=bg if tot else (G_SOFT if f6 else bg), align=left)
+            body_cell(wi, r, 8, "" if tot else ("  |  ".join(claim_lines(f6)) or "–"), color=fc or "17553A", bg=bg if tot else (G_SOFT if f6 else bg), align=left)
             body_cell(wi, r, 9, runs, "#,##0", color=fc, bold=True, bg=bg)
             body_cell(wi, r, 10, runs / max(len(ivs), 1), "#,##0", color=fc, bg=bg)
             r += 1
@@ -994,12 +1006,12 @@ def email_dashboard_html():
             f4 = [v for v in ivs if v["ball"] == 4]; f6 = [v for v in ivs if v["ball"] == 6]
             runs = sum(v["runs"] for v in ivs); nref = sum(1 for v in ivs if v.get("ref"))
             tr = f' bgcolor="{SOFT}" style="background:{SOFT};font-weight:bold;"' if tot else ""
-            return (f'<tr{tr}><td {tdl}>{E(name)}</td><td {td}>{len(ivs)}</td><td {td}>{sum(1 for v in ivs if v["ball"] == 0)}</td>'
+            return (f'<tr{tr}><td {tdl}>{E(name)}</td><td {td}>{len(ivs)}</td><td {td}>{sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref"))}</td>'
                     f'<td {td}><b style="color:{GREY};">{nref if (nref or tot) else "–"}</b></td>'
                     f'<td {td}><b style="color:{FOUR};">{len(f4)}</b></td>'
                     f'<td {tdl}><span style="font-size:12px;color:{MUT};">{"" if tot else (E(agg_names(f4)) or "–")}</span></td>'
                     f'<td {td}><b style="color:{SIX};">{len(f6)}</b></td>'
-                    f'<td {tdl}><span style="font-size:12px;color:{MUT};">{"" if tot else (E(agg_names(f6)) or "–")}</span></td>'
+                    f'<td {tdl}><span style="font-size:12px;color:{MUT};">{"" if tot else (CLAIM_SEP.join(E(s) for s in claim_lines(f6)) or "–")}</span></td>'
                     f'<td {td}>{fmt(runs)}</td><td {td}>{fmt(runs / max(len(ivs), 1))}</td></tr>')
         rows = "".join(row(ins, ivs) for ins, ivs in sorted(by.items(), key=lambda x: -len(x[1]))) + row("Total", vs, True)
         out.append(f'<tr><td style="font:bold 15px Arial,sans-serif;padding:14px 0 6px;color:{INK};">{E(doc)}</td></tr>'
