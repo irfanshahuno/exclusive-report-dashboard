@@ -65,6 +65,9 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .stat{background:var(--soft); border-radius:10px; padding:8px 6px; text-align:center;}
 .stat b{display:block; font-family:'Barlow Semi Condensed',sans-serif; font-size:21px; color:var(--ink); line-height:1.1;}
 .stat span{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em;}
+.stat{position:relative;}
+.rsub{position:absolute; top:6px; right:6px; font-style:normal; font-size:10.5px; font-weight:700; color:#fff;
+      background:#7D8A83; border-radius:999px; padding:1px 6px;}
 .stat.f b{color:var(--four);} .stat.s b{color:var(--pitch);}
 .strip{display:flex; flex-wrap:wrap; gap:3px; margin-top:6px;}
 .ball{width:15px; height:15px; border-radius:50%; font:700 8.5px/15px 'IBM Plex Sans',sans-serif; text-align:center; color:#fff; box-sizing:border-box;}
@@ -411,7 +414,7 @@ with tab1:
           <div class="bar"><i style="width:{min(ratio,1)*100:.0f}%"></i></div>
           <div class="stats">
             <div class="stat"><b>{d["Balls"]}</b><span>Balls</span></div>
-            <div class="stat"><b>{d["Dots"]}</b><span>Dots</span></div>
+            <div class="stat"><b>{d["Dots"]}</b><span>Dots</span>{f'<em class="rsub">{d["Referrals"]} R</em>' if d["Referrals"] else ""}</div>
             <div class="stat f"><b>{d["4s"]}</b><span>4s</span></div>
             <div class="stat s"><b>{d["6s"]}</b><span>6s</span></div>
             <div class="stat"><b>{d["Scoring"]}</b><span>Scoring</span></div>
