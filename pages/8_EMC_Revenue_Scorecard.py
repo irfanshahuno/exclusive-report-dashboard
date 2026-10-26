@@ -69,6 +69,7 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .rsub{position:absolute; top:6px; right:6px; font-style:normal; font-size:10.5px; font-weight:700; color:#fff;
       background:#7D8A83; border-radius:999px; padding:1px 6px;}
 .stat.r b{color:#7D8A83;}
+.tbl td.cr{color:#7D8A83; font-weight:700;}
 .stat .mini{display:block; height:4px; background:#E4E9E6; border-radius:4px; margin:5px 8px 3px; overflow:hidden;}
 .stat .mini i{display:block; height:100%; background:#2F5FC9; border-radius:4px;}
 .stat b small{font-size:13px; color:var(--muted); font-weight:600;}
@@ -522,6 +523,7 @@ with tab2:
             f6 = [v for v in ivs if v["ball"] == 6]
             runs = sum(v["runs"] for v in ivs)
             rows += (f'<tr><td>{E(ins)}</td><td>{len(ivs)}</td><td>{sum(1 for v in ivs if v["ball"] == 0)}</td>'
+                     f'<td class="cr">{sum(1 for v in ivs if v.get("ref")) or "–"}</td>'
                      f'<td class="c4">{len(f4)}</td><td class="nm">{E(agg_names(f4)) or "–"}</td>'
                      f'<td class="c6">{len(f6)}</td><td class="nm">{E(agg_names(f6)) or "–"}</td>'
                      f'<td>{fmt(runs)}</td><td>{fmt(runs / len(ivs))}</td></tr>')
@@ -529,11 +531,12 @@ with tab2:
         f6 = [v for v in vs if v["ball"] == 6]
         runs = sum(v["runs"] for v in vs)
         rows += (f'<tr class="tot"><td>Total</td><td>{len(vs)}</td><td>{sum(1 for v in vs if v["ball"] == 0)}</td>'
+                 f'<td class="cr">{sum(1 for v in vs if v.get("ref"))}</td>'
                  f'<td class="c4">{len(f4)}</td><td class="nm"></td><td class="c6">{len(f6)}</td><td class="nm"></td>'
                  f'<td>{fmt(runs)}</td><td>{fmt(runs / max(len(vs), 1))}</td></tr>')
         st.markdown(f'<div class="sec">{E(doc)}</div>', unsafe_allow_html=True)
         st.markdown('<table class="tbl ins"><thead><tr><th>Insurance</th><th>Balls</th><th>Dots</th>'
-                    '<th>4s</th><th class="nm">What the 4s were</th><th>6s</th><th class="nm">What the 6s were</th>'
+                    '<th>Referral</th><th>4s</th><th class="nm">What the 4s were</th><th>6s</th><th class="nm">What the 6s were</th>'
                     f'<th>Runs</th><th>Runs per ball</th></tr></thead><tbody>{rows}</tbody></table>',
                     unsafe_allow_html=True)
 
