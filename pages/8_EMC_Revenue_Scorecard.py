@@ -145,12 +145,92 @@ with chk_col:
     else:
         check = st.radio("Check", list(L.PACE), index=3, horizontal=True)
 
-lines = None
-if up:
+def _secret(name, default=""):
     try:
-        lines = L.read_report(up.getvalue(), up.name)
+        if name in st.secrets:
+            return str(st.secrets[name])
+    except Exception:  # no secrets file
+        pass
+    return os.environ.get(name, default)
+
+
+# ---------------------------------------------------------------- keep the last report (S3, else a local file)
+import hashlib  # noqa: E402
+import json  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+UAE = timezone(timedelta(hours=4))
+S3_PREFIX = (_secret("S3_BASE_PREFIX").strip("/") + "/" if _secret("S3_BASE_PREFIX") else "") + "emc_scorecard/"
+LOCAL_DIR = Path(__file__).resolve().parent / ".emc_last_report"
+
+
+def _s3():
+    bucket = _secret("S3_BUCKET_NAME")
+    if not bucket:
+        return None, None
+    try:
+        import boto3
+        kw = {"region_name": _secret("AWS_REGION") or None}
+        if _secret("AWS_ACCESS_KEY_ID"):
+            kw.update(aws_access_key_id=_secret("AWS_ACCESS_KEY_ID"), aws_secret_access_key=_secret("AWS_SECRET_ACCESS_KEY"))
+        return boto3.client("s3", **kw), bucket
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def save_report(data, name):
+    now = datetime.now(UAE)
+    meta = {"name": name, "uploaded_at": now.strftime("%d-%m-%Y %I:%M %p"), "sha": hashlib.sha1(data).hexdigest()}
+    s3, bucket = _s3()
+    if s3:
+        try:
+            s3.put_object(Bucket=bucket, Key=S3_PREFIX + "latest/report.xlsx", Body=data)
+            s3.put_object(Bucket=bucket, Key=S3_PREFIX + "latest/meta.json", Body=json.dumps(meta).encode())
+            s3.put_object(Bucket=bucket, Key=f"{S3_PREFIX}history/{now:%Y-%m-%d}/{now:%H%M}_{name}", Body=data)
+            return "S3"
+        except Exception as e:  # noqa: BLE001
+            st.warning(f"Could not save the report to S3 ({e}). Saved on the app server instead.")
+    LOCAL_DIR.mkdir(exist_ok=True)
+    (LOCAL_DIR / "report.xlsx").write_bytes(data)
+    (LOCAL_DIR / "meta.json").write_text(json.dumps(meta))
+    return "server"
+
+
+def load_report():
+    s3, bucket = _s3()
+    if s3:
+        try:
+            meta = json.loads(s3.get_object(Bucket=bucket, Key=S3_PREFIX + "latest/meta.json")["Body"].read())
+            data = s3.get_object(Bucket=bucket, Key=S3_PREFIX + "latest/report.xlsx")["Body"].read()
+            return data, meta
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        return (LOCAL_DIR / "report.xlsx").read_bytes(), json.loads((LOCAL_DIR / "meta.json").read_text())
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+lines = None
+report_bytes, report_meta = None, None
+if up:
+    report_bytes = up.getvalue()
+    report_meta = {"name": up.name, "uploaded_at": datetime.now(UAE).strftime("%d-%m-%Y %I:%M %p")}
+else:
+    report_bytes, report_meta = load_report()
+
+if report_bytes is not None:
+    try:
+        lines = L.read_report(report_bytes, report_meta["name"])
     except Exception as e:  # noqa: BLE001
-        st.error(f'Could not read "{up.name}". {e}')
+        st.error(f'Could not read "{report_meta["name"]}". {e}')
+        lines = None
+    if up and lines is not None:
+        sha = hashlib.sha1(report_bytes).hexdigest()
+        if st.session_state.get("saved_sha") != sha:
+            where = save_report(report_bytes, up.name)
+            st.session_state["saved_sha"] = sha
+            st.toast(f"Report saved ({where}). It stays on the page until a different report is uploaded.")
 
 if lines is None:
     st.markdown("""
@@ -164,7 +244,7 @@ if lines is None:
 
 visits, logdf, dates = L.correct(lines)
 ddf, idf, itdf, strips = L.summarize(visits, L.PACE[check])
-meta = f"Date {', '.join(dates)} · {len(visits)} patients · file {up.name}"
+meta = f"Date {', '.join(dates)} · {len(visits)} patients · file {report_meta['name']} · uploaded {report_meta['uploaded_at']}"
 clinic = ddf[ddf["Doctor"] == "Clinic"].iloc[0]
 docs = ddf[ddf["Doctor"] != "Clinic"]
 doc_visits = {}
@@ -222,7 +302,7 @@ def top_items(vs, n=6):
 st.markdown(f"""
 <div class="hero"><div><h1>EMC Revenue Scorecard</h1>
 <p>{E(', '.join(dates))} &nbsp;·&nbsp; {len(visits)} patients &nbsp;·&nbsp; {len(docs)} doctors &nbsp;·&nbsp; {E(check)} check</p></div>
-<div class="chips"><span class="chip">{len(logdf)} corrections applied</span><span class="chip">{E(up.name)}</span></div></div>
+<div class="chips"><span class="chip">{len(logdf)} corrections applied</span><span class="chip">{E(report_meta["name"])}</span><span class="chip">Uploaded {E(report_meta["uploaded_at"])}</span></div></div>
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------- KPIs
@@ -388,14 +468,6 @@ fname = f"EMC_Scorecard_{dates[0] if dates else ''}_{check.replace(' ', '')}.xls
 
 # ---------------------------------------------------------------- email
 with tab5:
-    def _secret(name, default=""):
-        try:
-            if name in st.secrets:
-                return str(st.secrets[name])
-        except Exception:  # no secrets file
-            pass
-        return os.environ.get(name, default)
-
     smtp = {"host": _secret("SMTP_HOST"), "port": _secret("SMTP_PORT", "465"),
             "user": _secret("SMTP_USER"), "password": _secret("SMTP_PASS")}
     if not (smtp["host"] and smtp["user"] and smtp["password"]):
