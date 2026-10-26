@@ -111,6 +111,7 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .ball{cursor:default;}
 .tag4{color:var(--four); font-weight:700;} .tag6{color:var(--pitch); font-weight:700;}
 .sl{display:grid; gap:8px; padding:4px 0 6px;}
+.bF{background:#FFFFFF; color:#9A6200; border:1.5px solid #E0A93B;}
 .bR{background:#7D8A83; color:#fff;} .bX{background:#E07B39; color:#fff;}
 .ball.warn{box-shadow:0 0 0 2px #fff, 0 0 0 4px #D62D20;}
 .bb.bR{background:#7D8A83;} .bb.bX{background:#E07B39;}
@@ -207,17 +208,20 @@ def _s3():
         return None, None
 
 
-def save_bundle(proc, proc_name, refs):
+def save_bundle(proc, proc_name, refs, reg=None):
     """Save the ProcedureDetails report and any referral reports as the page's current data."""
     now = datetime.now(UAE)
     meta = {"name": proc_name, "uploaded_at": now.strftime("%d-%m-%Y %I:%M %p"),
-            "refs": [n for _, n in refs]}
+            "refs": [n for _, n in refs], "reg": reg[1] if reg else ""}
     s3, bucket = _s3()
     if s3:
         try:
             s3.put_object(Bucket=bucket, Key=S3_PREFIX + "latest/report.xlsx", Body=proc)
             for i, (data, _) in enumerate(refs):
                 s3.put_object(Bucket=bucket, Key=f"{S3_PREFIX}latest/referral_{i}.xlsx", Body=data)
+            if reg:
+                s3.put_object(Bucket=bucket, Key=S3_PREFIX + "latest/registration.xlsx", Body=reg[0])
+                s3.put_object(Bucket=bucket, Key=f"{S3_PREFIX}history/{now:%Y-%m-%d}/{now:%H%M}_registration_{reg[1]}", Body=reg[0])
             s3.put_object(Bucket=bucket, Key=S3_PREFIX + "latest/meta.json", Body=json.dumps(meta).encode())
             s3.put_object(Bucket=bucket, Key=f"{S3_PREFIX}history/{now:%Y-%m-%d}/{now:%H%M}_{proc_name}", Body=proc)
             for data, n in refs:
@@ -229,6 +233,8 @@ def save_bundle(proc, proc_name, refs):
     (LOCAL_DIR / "report.xlsx").write_bytes(proc)
     for i, (data, _) in enumerate(refs):
         (LOCAL_DIR / f"referral_{i}.xlsx").write_bytes(data)
+    if reg:
+        (LOCAL_DIR / "registration.xlsx").write_bytes(reg[0])
     (LOCAL_DIR / "meta.json").write_text(json.dumps(meta))
     return "server", meta
 
@@ -241,20 +247,23 @@ def load_bundle():
             proc = s3.get_object(Bucket=bucket, Key=S3_PREFIX + "latest/report.xlsx")["Body"].read()
             refs = [(s3.get_object(Bucket=bucket, Key=f"{S3_PREFIX}latest/referral_{i}.xlsx")["Body"].read(), n)
                     for i, n in enumerate(meta.get("refs", []))]
-            return proc, meta, refs
+            reg = ((s3.get_object(Bucket=bucket, Key=S3_PREFIX + "latest/registration.xlsx")["Body"].read(), meta["reg"])
+                   if meta.get("reg") else None)
+            return proc, meta, refs, reg
         except Exception:  # noqa: BLE001
             pass
     try:
         meta = json.loads((LOCAL_DIR / "meta.json").read_text())
         refs = [((LOCAL_DIR / f"referral_{i}.xlsx").read_bytes(), n) for i, n in enumerate(meta.get("refs", []))]
-        return (LOCAL_DIR / "report.xlsx").read_bytes(), meta, refs
+        reg = ((LOCAL_DIR / "registration.xlsx").read_bytes(), meta["reg"]) if meta.get("reg") else None
+        return (LOCAL_DIR / "report.xlsx").read_bytes(), meta, refs, reg
     except Exception:  # noqa: BLE001
-        return None, None, []
+        return None, None, [], None
 
 
-if "bundle" not in st.session_state:
+if "bundle" not in st.session_state or len(st.session_state["bundle"]) != 4:
     st.session_state["bundle"] = load_bundle()
-report_bytes, report_meta, ref_files = st.session_state["bundle"]
+report_bytes, report_meta, ref_files, reg_file = st.session_state["bundle"]
 
 # ---------------------------------------------------------------- upload (hidden once processed) + check time
 up_col, chk_col = st.columns([3, 2], vertical_alignment="top")
@@ -268,6 +277,8 @@ with up_col:
                                         help="HIS Referral report for referrals to Family Medicine.")
             f_ref_out = st.file_uploader("3 · Referral report: outside hospitals (optional)", type=["xlsx", "xls"],
                                          help="HIS Referral report for referrals to Lifecare and other hospitals.")
+            f_reg = st.file_uploader("4 · Registration List (optional)", type=["xlsx", "xls"],
+                                     help="HIS Registration List. Adds free follow-up visits (no bill) as F balls so the patient count matches reception.")
             go = st.form_submit_button("Process reports", type="primary")
         f_refs = [f for f in (f_ref_in, f_ref_out) if f] if go else []
         if go:
@@ -278,12 +289,15 @@ with up_col:
                     L.read_report(f_proc.getvalue(), f_proc.name)
                     for f in f_refs or []:
                         L.read_referrals(f.getvalue(), f.name)
+                    if f_reg:
+                        L.read_registration(f_reg.getvalue(), f_reg.name)
                 except Exception as e:  # noqa: BLE001
                     st.error(f"Could not read the files. {e}")
                 else:
                     refs_in = [(f.getvalue(), f.name) for f in f_refs or []]
-                    where, meta_new = save_bundle(f_proc.getvalue(), f_proc.name, refs_in)
-                    st.session_state["bundle"] = (f_proc.getvalue(), meta_new, refs_in)
+                    reg_in = (f_reg.getvalue(), f_reg.name) if f_reg else None
+                    where, meta_new = save_bundle(f_proc.getvalue(), f_proc.name, refs_in, reg_in)
+                    st.session_state["bundle"] = (f_proc.getvalue(), meta_new, refs_in, reg_in)
                     st.toast(f"Processed and saved ({where}). Stays on the page until new reports are uploaded.")
                     st.rerun()
 with chk_col:
@@ -292,12 +306,14 @@ with chk_col:
     else:
         check = st.radio("Check", list(L.PACE), index=3, horizontal=True)
 
-lines, refs = None, []
+lines, refs, regs = None, [], []
 if report_bytes is not None:
     try:
         lines = L.read_report(report_bytes, report_meta["name"])
         for data, n in ref_files:
             refs += L.read_referrals(data, n)
+        if reg_file:
+            regs = L.read_registration(reg_file[0], reg_file[1])
     except Exception as e:  # noqa: BLE001
         st.error(f'Could not read the saved reports. {e}')
         lines = None
@@ -313,6 +329,7 @@ if lines is None:
     st.stop()
 
 visits, logdf, dates = L.correct(lines)
+fu_added = L.add_free_followups(visits, regs) if regs else 0
 ref_matched = L.apply_referrals(visits, refs) if refs else 0
 ddf, idf, itdf, strips = L.summarize(visits, L.PACE[check])
 meta = f"Date {', '.join(dates)} · {len(visits)} patients · file {report_meta['name']} · uploaded {report_meta['uploaded_at']}"
@@ -324,10 +341,17 @@ for _v in visits:
 
 
 def items_text(v):
-    return " + ".join(f'{L.item_name(c["code"], c["name"])} ({round(c["ins"], 2):g})' for c in v["items"])
+    return " + ".join(f'{L.item_name(c["code"], c["name"])} ({money(PR(c))})' for c in v["items"])
+
+
+def PR(c):
+    """Price shown for an item (cash items show their normal price; the visit itself counts 80)."""
+    return round(c.get("list", c["ins"]), 2)
 
 
 def money(x):
+    if x == -1:
+        return "cash pkg"
     x = round(float(x), 2)
     return f"{x:,.0f}" if x == int(x) else f"{x:,.2f}".rstrip("0").rstrip(".")
 
@@ -336,7 +360,7 @@ def chips(v):
     out = []
     for c in v["items"]:
         kind = "lab" if c["type"] in ("LAB", "RADIOLOGY") else "proc"
-        out.append(f'<span class="chip-i {kind}">{E(L.item_name(c["code"], c["name"]))} <em>{money(c["ins"])}</em></span>')
+        out.append(f'<span class="chip-i {kind}">{E(L.item_name(c["code"], c["name"]))} <em>{money(PR(c))}</em></span>')
     return "".join(out)
 
 
@@ -344,7 +368,7 @@ def agg_names(vs):
     cnt = {}
     for v in vs:
         for c in v["items"]:
-            key = (L.item_name(c["code"], c["name"]), round(c["ins"], 2))
+            key = (L.item_name(c["code"], c["name"]), PR(c))
             cnt[key] = cnt.get(key, 0) + 1
     return ", ".join(f"{n} ({money(pr)})" + (f" ×{k}" if k > 1 else "")
                      for (n, pr), k in sorted(cnt.items(), key=lambda x: (-x[1], x[0][0])))
@@ -352,7 +376,7 @@ def agg_names(vs):
 
 def claim_lines(vs):
     """One entry per claim: 'CBC (22.4) + CRP (15.2)'."""
-    return [" + ".join(f'{L.item_name(c["code"], c["name"])} ({money(c["ins"])})' for c in v["items"]) for v in vs]
+    return [" + ".join(f'{L.item_name(c["code"], c["name"])} ({money(PR(c))})' for c in v["items"]) for v in vs]
 
 
 CLAIM_SEP = '<b style="color:#1E6A49;font-size:15px;padding:0 7px;">|</b>'
@@ -368,7 +392,7 @@ def four_pills(vs):
     cnt = {}
     for v in vs:
         for c in v["items"]:
-            k = (L.item_name(c["code"], c["name"]), round(c["ins"], 2))
+            k = (L.item_name(c["code"], c["name"]), PR(c))
             cnt[k] = cnt.get(k, 0) + 1
     if not cnt:
         return "–"
@@ -383,7 +407,7 @@ def six_pills(vs):
         return "–"
     out = []
     for v in vs:
-        parts = " <b style=\"color:#1E6A49\">+</b> ".join(f'{E(L.item_name(c["code"], c["name"]))} <b>{money(c["ins"])}</b>' for c in v["items"])
+        parts = " <b style=\"color:#1E6A49\">+</b> ".join(f'{E(L.item_name(c["code"], c["name"]))} <b>{money(PR(c))}</b>' for c in v["items"])
         out.append(_pill(parts, "#E3F1E9", "#17553A", "#BFDCCB").replace("white-space:nowrap;", "white-space:normal;"))
     return "".join(out)
 
@@ -444,6 +468,8 @@ def gap_box_html(diff_txt, good, label):
 
 
 def ball_html(v):
+    if v.get("fu"):
+        return f'<i class="ball bF" title="{E("Free follow-up (no bill) · " + v["insurance"] + " · EMR " + str(v.get("emr")))}">F</i>'
     r = v.get("ref")
     if r:
         cls = ("bX" if r["external"] else "bR") + (" warn" if v.get("ref_given") else "")
@@ -460,7 +486,7 @@ def price_groups(vs):
     for v in vs:
         for c in v["items"]:
             nm = L.item_name(c["code"], c["name"])
-            pr = round(c["ins"], 2)
+            pr = PR(c)
             g.setdefault(nm, {})
             g[nm][pr] = g[nm].get(pr, 0) + 1
     return g
@@ -473,7 +499,7 @@ def top_chips(vs, n=8):
             nm = L.item_name(c["code"], c["name"])
             kind = "lab" if c["type"] in ("LAB", "RADIOLOGY") else "proc"
             e = g.setdefault(nm, {"kind": kind, "prices": set(), "n": 0})
-            e["prices"].add(round(c["ins"], 2)); e["n"] += 1
+            e["prices"].add(PR(c)); e["n"] += 1
     out = []
     for nm, e in sorted(g.items(), key=lambda x: -x[1]["n"])[:n]:
         pl = " / ".join(money(pr) for pr in sorted(e["prices"], reverse=True))
@@ -505,7 +531,7 @@ rv_txt, rv_ok = gap(clinic["Runs"], clinic["Runs target (day)"])
 st.markdown(f"""
 <div class="kpis">
  <div class="kpi"><div class="lbl">Patients</div><div class="val">{int(clinic["Balls"])} <small>/ {int(clinic["Balls target"])}</small></div>
-  <div class="sub">GP <b>{int(clinic["GP visits"])} / {int(clinic["GP target"])}</b> · referrals <b>{int(clinic["Referrals"])} / {int(clinic["Referral allowance"])}</b> · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen</div><span class="gapline {'gg' if pt_ok else 'gb'}">{pt_txt}</span></div>
+  <div class="sub">GP <b>{int(clinic["GP visits"])} / {int(clinic["GP target"])}</b> · referrals <b>{int(clinic["Referrals"])} / {int(clinic["Referral allowance"])}</b> {f" · free follow-ups <b>{int(clinic['Follow-ups'])}</b>" if clinic.get("Follow-ups") else ""} · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen</div><span class="gapline {'gg' if pt_ok else 'gb'}">{pt_txt}</span></div>
  <div class="kpi"><div class="lbl">Revenue (runs)</div><div class="val">{fmt(clinic["Runs"])} <small>/ {fmt(clinic["Runs target (day)"])}</small></div>
   <div class="sub">insurance share, full-day target</div><span class="gapline {'gg' if rv_ok else 'gb'}">{rv_txt}</span></div>
  <div class="kpi"><div class="lbl">Scoring balls</div><div class="val">{int(clinic["Scoring"])}</div>
@@ -522,7 +548,8 @@ with tab1:
     st.markdown("""<div class="legend"><span><i class="ball b0"></i>Dot · consultation only</span>
     <span><i class="ball b4">4</i>One lab or procedure</span><span><i class="ball b6">6</i>Two or more</span>
     <span><i class="ball bR">R</i>Referred to Family Medicine</span><span><i class="ball bX">R</i>Referred outside</span>
-    <span><i class="ball bR warn">R</i>Referred but GP gave a lab or procedure</span></div>""",
+    <span><i class="ball bR warn">R</i>Referred but GP gave a lab or procedure</span>
+    <span><i class="ball bF">F</i>Free follow-up (no bill)</span></div>""",
                 unsafe_allow_html=True)
     ranked = docs.sort_values(["% of day", "Scoring"], ascending=False)
     ranked = pd.concat([ranked[~ranked["Vacancy"].astype(bool)], ranked[ranked["Vacancy"].astype(bool)]]).reset_index(drop=True)
@@ -580,6 +607,7 @@ with tab1:
           </div>
           {empty_note(d) or f'<div class="strip">{strip}</div><div class="made chips-row">{made}</div>'}
           {f'<div class="made">{ref_line}</div>' if ref_line else ""}
+          {f'<div class="made">Free follow-ups: <b>{int(d["Follow-ups"])}</b> (counted as patients, no runs)</div>' if d.get("Follow-ups") else ""}
           {f'<div class="need">{fmt(d["Runs"] / max(d["Balls"],1))} AED per ball</div>' if d["Balls"] else ""}
         </div>"""
     cards = "".join(ln.strip() for ln in cards.splitlines())   # no blank/indented lines, or Markdown shows raw HTML
@@ -640,7 +668,7 @@ with tab2:
             f4 = [v for v in ivs if v["ball"] == 4]
             f6 = [v for v in ivs if v["ball"] == 6]
             runs = sum(v["runs"] for v in ivs)
-            rows += (f'<tr><td>{E(ins)}</td><td>{len(ivs)}</td><td>{sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref"))}</td>'
+            rows += (f'<tr><td>{E(ins)}</td><td>{len(ivs)}</td><td>{sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref") and not v.get("fu"))}</td>'
                      f'<td class="cr">{sum(1 for v in ivs if v.get("ref")) or "–"}</td>'
                      f'<td class="c4">{len(f4)}</td><td class="nm">{four_pills(f4)}</td>'
                      f'<td class="c6">{len(f6)}</td><td class="nm">{six_pills(f6)}</td>'
@@ -648,7 +676,7 @@ with tab2:
         f4 = [v for v in vs if v["ball"] == 4]
         f6 = [v for v in vs if v["ball"] == 6]
         runs = sum(v["runs"] for v in vs)
-        rows += (f'<tr class="tot"><td>Total</td><td>{len(vs)}</td><td>{sum(1 for v in vs if v["ball"] == 0 and not v.get("ref"))}</td>'
+        rows += (f'<tr class="tot"><td>Total</td><td>{len(vs)}</td><td>{sum(1 for v in vs if v["ball"] == 0 and not v.get("ref") and not v.get("fu"))}</td>'
                  f'<td class="cr">{sum(1 for v in vs if v.get("ref"))}</td>'
                  f'<td class="c4">{len(f4)}</td><td class="nm"></td><td class="c6">{len(f6)}</td><td class="nm"></td>'
                  f'<td>{fmt(runs)}</td><td>{fmt(runs / max(len(vs), 1))}</td></tr>')
@@ -662,16 +690,17 @@ with tab2:
 with tab3:
     st.markdown('<div class="note">Blood collection (36415) is part of the lab and is not counted as a ball. '
                 'Price = insurance share per item (copay out). The same item paid at a different price '
-                '(e.g. Almadallah tariff) shows on its own line.</div>', unsafe_allow_html=True)
+                '(e.g. Almadallah tariff) shows on its own line. Cash patients count 80 AED for the whole visit, so their items add 0 runs here.</div>', unsafe_allow_html=True)
     any_items = False
     for doc in sorted(doc_visits):
         rowsd = {}
         for v in doc_visits[doc]:
             for c in v["items"]:
                 key = (L.item_name(c["code"], c["name"]), "Lab" if c["type"] in ("LAB", "RADIOLOGY") else "Procedure",
-                       c["code"], round(c["ins"], 2))
-                r = rowsd.setdefault(key, {"n": 0, "ins": set()})
+                       c["code"], PR(c))
+                r = rowsd.setdefault(key, {"n": 0, "ins": set(), "runs": 0.0})
                 r["n"] += 1
+                r["runs"] += c["ins"]
                 r["ins"].add(v["insurance"])
         if not rowsd:
             continue
@@ -680,9 +709,9 @@ with tab3:
         tot_n = tot_r = 0
         for (nm, typ, code, pr), r in sorted(rowsd.items(), key=lambda x: (x[0][1], -x[1]["n"], x[0][0])):
             tot_n += r["n"]
-            tot_r += pr * r["n"]
+            tot_r += r["runs"]
             body += (f'<tr><td>{E(nm)}</td><td>{typ}</td><td>{E(code)}</td><td class="nm">{E(", ".join(sorted(r["ins"])))}</td>'
-                     f'<td><b>{money(pr)}</b></td><td>{r["n"]}</td><td>{fmt(pr * r["n"])}</td></tr>')
+                     f'<td><b>{money(pr)}</b></td><td>{r["n"]}</td><td>{fmt(r["runs"])}</td></tr>')
         body += f'<tr class="tot"><td>Total</td><td></td><td></td><td class="nm"></td><td></td><td>{tot_n}</td><td>{fmt(tot_r)}</td></tr>'
         st.markdown(f'<div class="sec">{E(doc)}</div>', unsafe_allow_html=True)
         st.markdown('<table class="tbl"><thead><tr><th>Item</th><th>Type</th><th>Code</th><th class="nm">Insurance</th>'
@@ -880,7 +909,7 @@ def build_excel():
             runs = sum(v["runs"] for v in ivs)
             body_cell(wi, r, 1, ins, color=fc, bold=True, bg=bg, align=left)
             body_cell(wi, r, 2, len(ivs), color=fc, bold=tot, bg=bg)
-            body_cell(wi, r, 3, sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref")), color=fc, bold=tot, bg=bg)
+            body_cell(wi, r, 3, sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref") and not v.get("fu")), color=fc, bold=tot, bg=bg)
             body_cell(wi, r, 4, sum(1 for v in ivs if v.get("ref")), color=fc or GREY, bold=True, bg=bg)
             body_cell(wi, r, 5, len(f4), color=fc or BLUE, bold=True, bg=bg)
             body_cell(wi, r, 6, "" if tot else (agg_names(f4) or "–"), color=fc or "2546A0", bg=bg if tot else (BLUE_SOFT if f4 else bg), align=left)
@@ -898,13 +927,15 @@ def build_excel():
     lcols = ["Doctor", "Item", "Type", "Code", "Price (insurance share)", "Count", "Runs"]
     banner(wl, 1, "Labs and procedures", len(lcols), sub)
     header(wl, 4, lcols)
-    agg = {}
+    agg, agg_runs = {}, {}
     for v in visits:
         for c in v["items"]:
-            k = (v["doctor"], L.item_name(c["code"], c["name"]), "Lab" if c["type"] in ("LAB", "RADIOLOGY") else "Procedure", c["code"], round(c["ins"], 2))
+            k = (v["doctor"], L.item_name(c["code"], c["name"]), "Lab" if c["type"] in ("LAB", "RADIOLOGY") else "Procedure", c["code"], PR(c))
             agg[k] = agg.get(k, 0) + 1
+            agg_runs[k] = agg_runs.get(k, 0.0) + c["ins"]
     r = 5
     for (doc, item, typ, code, pr), n in sorted(agg.items(), key=lambda x: (x[0][0], x[0][2], -x[1])):
+        runs_k = agg_runs[(doc, item, typ, code, pr)]
         lab = typ == "Lab"
         bg = BLUE_SOFT if lab else G_SOFT
         fc = "2546A0" if lab else "17553A"
@@ -914,7 +945,7 @@ def build_excel():
         body_cell(wl, r, 4, code, color="5D6A62")
         body_cell(wl, r, 5, pr, "#,##0.00")
         body_cell(wl, r, 6, n, bold=True)
-        body_cell(wl, r, 7, pr * n, "#,##0", bold=True)
+        body_cell(wl, r, 7, runs_k, "#,##0", bold=True)
         r += 1
     if r > 5:
         wl.conditional_formatting.add(f"G5:G{r - 1}", DataBarRule(start_type="min", end_type="max", color="5FA37F"))
@@ -956,6 +987,9 @@ def email_dashboard_html():
         return f'<table {T} width="100%"><tr>{cells}</tr></table>'
 
     def ball_cell(v):
+        if v.get("fu"):
+            return ('<td width="18" height="18" bgcolor="#ffffff" style="width:18px;height:18px;border-radius:50%;text-align:center;'
+                    'font:bold 10px Arial,sans-serif;color:#9A6200;background:#ffffff;border:2px solid #E0A93B;line-height:18px;">F</td>')
         base = (f"width:18px;height:18px;border-radius:50%;text-align:center;vertical-align:middle;"
                 f"font:bold 10px Arial,sans-serif;color:#ffffff;mso-line-height-rule:exactly;line-height:18px;")
         r = v.get("ref")
@@ -987,7 +1021,7 @@ def email_dashboard_html():
             for c in v["items"]:
                 nm = L.item_name(c["code"], c["name"])
                 e = g.setdefault(nm, {"lab": c["type"] in ("LAB", "RADIOLOGY"), "p": set(), "n": 0})
-                e["p"].add(round(c["ins"], 2)); e["n"] += 1
+                e["p"].add(PR(c)); e["n"] += 1
         if not g:
             return f'<span style="color:{MUT};font-size:13px;">No labs or procedures yet</span>'
         cells = []
@@ -1040,7 +1074,7 @@ def email_dashboard_html():
                f'<div style="font-size:12px;color:#BFE0CE;padding-top:8px;">{len(logdf)} corrections applied &nbsp;·&nbsp; uploaded {E(report_meta["uploaded_at"])}</div></td></tr>')
     # KPIs
     out.append(f'<tr><td style="padding-top:12px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
-               + kpi("Patients", int(clinic["Balls"]), f'/ {int(clinic["Balls target"])}', f'GP {int(clinic["GP visits"])} / {int(clinic["GP target"])} · referrals {int(clinic["Referrals"])} / {int(clinic["Referral allowance"])} · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen',
+               + kpi("Patients", int(clinic["Balls"]), f'/ {int(clinic["Balls target"])}', f'GP {int(clinic["GP visits"])} / {int(clinic["GP target"])} · referrals {int(clinic["Referrals"])} / {int(clinic["Referral allowance"])}' + (f' · free follow-ups {int(clinic["Follow-ups"])}' if clinic.get("Follow-ups") else "") + f' · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen',
                      gap_pill(clinic["Balls"], clinic["Balls target"]))
                + kpi("Revenue (runs)", fmt(clinic["Runs"]), f'/ {fmt(clinic["Runs target (day)"])}', "insurance share, full-day target",
                      gap_pill(clinic["Runs"], clinic["Runs target (day)"]))
@@ -1056,6 +1090,7 @@ def email_dashboard_html():
                + '</tr></table><table ' + T + ' style="margin-top:6px;"><tr>'
                + lg({"ball": 0, "ref": {"external": False}}, "Referred to Family Medicine") + lg({"ball": 0, "ref": {"external": True}}, "Referred outside")
                + lg({"ball": 0, "ref": {"external": False}, "ref_given": [1]}, "Referred but GP gave a lab or procedure")
+               + lg({"ball": 0, "fu": True}, "Free follow-up")
                + '</tr></table></td></tr>')
     # top 3
     out.append(section("Top of the table"))
@@ -1140,6 +1175,7 @@ def email_dashboard_html():
                f'<div style="padding:8px 0 6px;">{balls(vs)}</div>'
                f'<div style="border-top:1px solid {LINE};padding-top:8px;">{chips(vs)}</div>')
             + (f'<div style="font-size:13px;color:{MUT};padding-top:6px;">{ref_line}</div>' if ref_line else "")
+            + (f'<div style="font-size:13px;color:{MUT};padding-top:6px;">Free follow-ups: <b>{int(d["Follow-ups"])}</b> (counted as patients, no runs)</div>' if d.get("Follow-ups") else "")
             + f'<div style="font-size:13px;color:{MUT};padding-top:8px;">{fmt(d["Runs"] / max(d["Balls"], 1))} AED per ball</div>'
             '</td></tr></table></td></tr>')
 
@@ -1159,7 +1195,7 @@ def email_dashboard_html():
             f4 = [v for v in ivs if v["ball"] == 4]; f6 = [v for v in ivs if v["ball"] == 6]
             runs = sum(v["runs"] for v in ivs); nref = sum(1 for v in ivs if v.get("ref"))
             tr = f' bgcolor="{SOFT}" style="background:{SOFT};font-weight:bold;"' if tot else ""
-            return (f'<tr{tr}><td {tdl}>{E(name)}</td><td {td}>{len(ivs)}</td><td {td}>{sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref"))}</td>'
+            return (f'<tr{tr}><td {tdl}>{E(name)}</td><td {td}>{len(ivs)}</td><td {td}>{sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref") and not v.get("fu"))}</td>'
                     f'<td {td}><b style="color:{GREY};">{nref if (nref or tot) else "–"}</b></td>'
                     f'<td {td}><b style="color:{FOUR};">{len(f4)}</b></td>'
                     f'<td {tdl} width="24%">{"" if tot else four_pills(f4).replace("white-space:nowrap;", "white-space:normal;")}</td>'
