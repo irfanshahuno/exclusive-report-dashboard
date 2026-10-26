@@ -110,7 +110,7 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .sr-runs{text-align:right; font-family:'Barlow Semi Condensed',sans-serif; font-size:20px; font-weight:700; color:var(--ink); line-height:1;}
 .sr-runs span{display:block; font-family:'IBM Plex Sans',sans-serif; font-size:10.5px; font-weight:500; color:var(--muted); text-transform:uppercase; letter-spacing:.06em;}
 .tbl td.nm,.tbl th.nm{text-align:left; color:var(--muted); font-size:12.5px; white-space:normal; min-width:180px;}
-.tbl.ins td.nm{color:#33413A;}
+.tbl.ins td.nm{color:#33413A; min-width:220px;}
 
 /* tables */
 .tbl{width:100%; border-collapse:separate; border-spacing:0; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; font-size:13.5px; margin-bottom:18px;}
@@ -340,6 +340,36 @@ def claim_lines(vs):
 CLAIM_SEP = '<b style="color:#1E6A49;font-size:15px;padding:0 7px;">|</b>'
 
 
+def _pill(text, bg, fg, bd):
+    return (f'<span style="display:inline-block;background:{bg};color:{fg};border:1px solid {bd};border-radius:12px;'
+            f'padding:3px 9px;margin:2px 4px 2px 0;font-size:12px;line-height:18px;white-space:nowrap;">{text}</span>')
+
+
+def four_pills(vs):
+    """Each different single item once, with price and how many times."""
+    cnt = {}
+    for v in vs:
+        for c in v["items"]:
+            k = (L.item_name(c["code"], c["name"]), round(c["ins"], 2))
+            cnt[k] = cnt.get(k, 0) + 1
+    if not cnt:
+        return "–"
+    return "".join(_pill(f'{E(n)} <b>{money(pr)}</b>' + (f' <span style="opacity:.7">×{k}</span>' if k > 1 else ""),
+                         "#E8EEFB", "#2546A0", "#C5D3F3")
+                   for (n, pr), k in sorted(cnt.items(), key=lambda x: (-x[1], x[0][0])))
+
+
+def six_pills(vs):
+    """One pill per claim, so you can see which services were on the same patient."""
+    if not vs:
+        return "–"
+    out = []
+    for v in vs:
+        parts = " <b style=\"color:#1E6A49\">+</b> ".join(f'{E(L.item_name(c["code"], c["name"]))} <b>{money(c["ins"])}</b>' for c in v["items"])
+        out.append(_pill(parts, "#E3F1E9", "#17553A", "#BFDCCB").replace("white-space:nowrap;", "white-space:normal;"))
+    return "".join(out)
+
+
 def claims_html(vs):
     return CLAIM_SEP.join(E(s) for s in claim_lines(vs)) or "–"
 
@@ -536,8 +566,8 @@ with tab2:
             runs = sum(v["runs"] for v in ivs)
             rows += (f'<tr><td>{E(ins)}</td><td>{len(ivs)}</td><td>{sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref"))}</td>'
                      f'<td class="cr">{sum(1 for v in ivs if v.get("ref")) or "–"}</td>'
-                     f'<td class="c4">{len(f4)}</td><td class="nm">{E(agg_names(f4)) or "–"}</td>'
-                     f'<td class="c6">{len(f6)}</td><td class="nm">{claims_html(f6)}</td>'
+                     f'<td class="c4">{len(f4)}</td><td class="nm">{four_pills(f4)}</td>'
+                     f'<td class="c6">{len(f6)}</td><td class="nm">{six_pills(f6)}</td>'
                      f'<td>{fmt(runs)}</td><td>{fmt(runs / len(ivs))}</td></tr>')
         f4 = [v for v in vs if v["ball"] == 4]
         f6 = [v for v in vs if v["ball"] == 6]
@@ -1009,9 +1039,9 @@ def email_dashboard_html():
             return (f'<tr{tr}><td {tdl}>{E(name)}</td><td {td}>{len(ivs)}</td><td {td}>{sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref"))}</td>'
                     f'<td {td}><b style="color:{GREY};">{nref if (nref or tot) else "–"}</b></td>'
                     f'<td {td}><b style="color:{FOUR};">{len(f4)}</b></td>'
-                    f'<td {tdl}><span style="font-size:12px;color:{MUT};">{"" if tot else (E(agg_names(f4)) or "–")}</span></td>'
+                    f'<td {tdl} width="24%">{"" if tot else four_pills(f4).replace("white-space:nowrap;", "white-space:normal;")}</td>'
                     f'<td {td}><b style="color:{SIX};">{len(f6)}</b></td>'
-                    f'<td {tdl}><span style="font-size:12px;color:{MUT};">{"" if tot else (CLAIM_SEP.join(E(s) for s in claim_lines(f6)) or "–")}</span></td>'
+                    f'<td {tdl} width="34%">{"" if tot else six_pills(f6)}</td>'
                     f'<td {td}>{fmt(runs)}</td><td {td}>{fmt(runs / max(len(ivs), 1))}</td></tr>')
         rows = "".join(row(ins, ivs) for ins, ivs in sorted(by.items(), key=lambda x: -len(x[1]))) + row("Total", vs, True)
         out.append(f'<tr><td style="font:bold 15px Arial,sans-serif;padding:14px 0 6px;color:{INK};">{E(doc)}</td></tr>'
