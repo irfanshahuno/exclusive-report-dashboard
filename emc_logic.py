@@ -286,11 +286,64 @@ def correct(lines):
 
 
 # ---------------- Score ----------------
+# ---------------- Referrals ----------------
+def read_referrals(file_bytes, filename=""):
+    """Rows of the HIS Referral report: date, referred to, referred by, EMR, notes."""
+    engine = "xlrd" if filename.lower().endswith(".xls") else None
+    raw = pd.read_excel(io.BytesIO(file_bytes), header=None, engine=engine, dtype=object)
+    hdr = None
+    for i in range(min(len(raw), 30)):
+        vals = [_clean(v).upper() for v in raw.iloc[i].tolist()]
+        if "EMRNO" in vals and "REFERRED BY" in vals:
+            hdr = i
+            break
+    if hdr is None:
+        raise ValueError('This is not a Referral report: no "EMRNO" and "Referred By" columns found.')
+    cols = {}
+    for j, v in enumerate(raw.iloc[hdr].tolist()):
+        v = _clean(v).upper()
+        if v and v not in cols:
+            cols[v] = j
+
+    def g(row, name):
+        return _clean(row[cols[name]]) if name in cols else ""
+    out = []
+    for _, r in raw.iloc[hdr + 1:].iterrows():
+        r = r.tolist()
+        emr = g(r, "EMRNO")
+        if not emr:
+            continue
+        to = g(r, "REFERRED TO")
+        out.append({"date": g(r, "REFERRED DATE"), "to": to, "by": doc_name(g(r, "REFERRED BY")), "emr": emr,
+                    "dept": g(r, "DEPARTMENT NAME"), "notes": g(r, "NOTES"),
+                    "external": "FAMILY MEDICINE" not in to.upper() and "EXCELLENT" not in to.upper()})
+    return out
+
+
+def apply_referrals(visits, refs):
+    """Mark referred patients on the referring doctor's strip. A referred patient is a dot;
+    if the GP also gave a lab or procedure it is flagged (ref_given) so the GP can be told."""
+    idx = {}
+    for r in refs:
+        idx.setdefault((r["emr"], r["date"]), []).append(r)
+    matched = 0
+    for v in visits:
+        cand = idx.get((v.get("emr", ""), v["date"]), [])
+        hit = next((r for r in cand if r["by"] == v["doctor"]), cand[0] if cand else None)
+        if hit:
+            v["ref"] = hit
+            v["ref_given"] = list(v["items"])
+            v["ball"] = 0
+            matched += 1
+    return matched
+
+
 def summarize(visits, pace=1.0):
     """Return (doctors_df, by_insurance_df, items_df, strips) for the given pace (0.25 / 0.5 / 0.75 / 1)."""
     docs, ins, items, strips = {}, {}, {}, {}
     for v in visits:
-        d = docs.setdefault(v["doctor"], {"Doctor": v["doctor"], "FM": False, "Balls": 0, "Dots": 0, "4s": 0, "6s": 0, "Runs": 0.0})
+        d = docs.setdefault(v["doctor"], {"Doctor": v["doctor"], "FM": False, "Balls": 0, "Dots": 0, "4s": 0, "6s": 0, "Runs": 0.0, "Referrals": 0})
+        d["Referrals"] += 1 if v.get("ref") else 0
         d["FM"] = d["FM"] or v["fm"]
         key = "Dots" if v["ball"] == 0 else "4s" if v["ball"] == 4 else "6s"
         d["Balls"] += 1; d[key] += 1; d["Runs"] += v["runs"]
@@ -313,14 +366,14 @@ def summarize(visits, pace=1.0):
         status = ("ON TRACK" if d["Runs"] >= runs_need and scoring >= score_need
                   else "WATCH" if d["Runs"] >= 0.8 * runs_need else "CHECK")
         rows.append({"Doctor": name + (" (FM)" if d["FM"] else ""), "Balls": d["Balls"], "Balls target": t["balls"],
-                     "Dots": d["Dots"], "4s": d["4s"], "6s": d["6s"], "Scoring": scoring, "Scoring needed": score_need,
+                     "Dots": d["Dots"], "Referrals": d["Referrals"], "4s": d["4s"], "6s": d["6s"], "Scoring": scoring, "Scoring needed": score_need,
                      "Runs": round(d["Runs"]), "Runs needed": runs_need, "Runs target (day)": t["runs"],
                      "% of day": round(d["Runs"] / t["runs"] * 100), "Status": status,
                      "Scoring still needed": max(0, score_need - scoring)})
     ddf = pd.DataFrame(rows)
     if len(ddf):
         tot = {"Doctor": "Clinic", "Balls": ddf["Balls"].sum(), "Balls target": ddf["Balls target"].sum(),
-               "Dots": ddf["Dots"].sum(), "4s": ddf["4s"].sum(), "6s": ddf["6s"].sum(), "Scoring": ddf["Scoring"].sum(),
+               "Dots": ddf["Dots"].sum(), "Referrals": ddf["Referrals"].sum(), "4s": ddf["4s"].sum(), "6s": ddf["6s"].sum(), "Scoring": ddf["Scoring"].sum(),
                "Scoring needed": ddf["Scoring needed"].sum(), "Runs": ddf["Runs"].sum(), "Runs needed": ddf["Runs needed"].sum(),
                "Runs target (day)": ddf["Runs target (day)"].sum(), "Status": "", "Scoring still needed": None}
         tot["% of day"] = round(tot["Runs"] / tot["Runs target (day)"] * 100)
