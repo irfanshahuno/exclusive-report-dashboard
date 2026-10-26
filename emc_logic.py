@@ -422,6 +422,19 @@ def read_rxmatch(file_bytes, filename=""):
             rows.append({"name": name.strip(), "patients": g("PATIENTS"), "filled": g("FILLED"),
                          "presc": g("MEDS PRESCRIBED"), "given": g("MEDS GIVEN"), "missed": g("MISSED")})
         return rows
+    # money the pharmacy took on EMC prescriptions (Pharmacy Rx sheet: one row per Rx)
+    out["emc_value"] = out["emc_payer"] = 0.0
+    out["emc_rx"] = 0
+    if "Pharmacy Rx" in wb.sheetnames:
+        ws2 = wb["Pharmacy Rx"]
+        hdr = [str(c.value or "").strip() for c in next(ws2.iter_rows(min_row=1, max_row=1))]
+        if "Net AED" in hdr and "Payer share" in hdr and "Rx no" in hdr:
+            iv, ip, ir = hdr.index("Net AED"), hdr.index("Payer share"), hdr.index("Rx no")
+            for row in ws2.iter_rows(min_row=2, values_only=True):
+                if row[ir]:
+                    out["emc_rx"] += 1
+                    out["emc_value"] += num(row[iv])
+                    out["emc_payer"] += num(row[ip])
     out["doctors"] = table("Capture by doctor", "Doctor")
     for d in out["doctors"]:
         d["doctor"] = doc_name(d["name"].upper())
