@@ -76,6 +76,10 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .ball{cursor:default;}
 .tag4{color:var(--four); font-weight:700;} .tag6{color:var(--pitch); font-weight:700;}
 .sl{display:grid; gap:8px; padding:4px 0 6px;}
+.bR{background:#7D8A83; color:#fff;} .bX{background:#E07B39; color:#fff;}
+.ball.warn{box-shadow:0 0 0 2px #fff, 0 0 0 4px #D62D20;}
+.bb.bR{background:#7D8A83;} .bb.bX{background:#E07B39;}
+.chip-i.ref{background:#FDEBDD; color:#9A4A14;}
 .sr{display:grid; grid-template-columns:34px 150px 1fr 70px; gap:14px; align-items:center; background:var(--card);
     border:1px solid var(--line); border-radius:12px; padding:10px 14px;}
 .bb{width:30px; height:30px; border-radius:50%; color:#fff; font:700 14px/30px 'Barlow Semi Condensed',sans-serif; text-align:center;}
@@ -135,16 +139,6 @@ def table(df, cols, money=(), four="4s", six="6s", total_key=None):
 
 
 # ---------------------------------------------------------------- header + controls
-up_col, chk_col = st.columns([3, 2], vertical_alignment="bottom")
-with up_col:
-    up = st.file_uploader("HIS ProcedureDetails report", type=["xlsx", "xls"],
-                          help="Coded or not coded. The file is corrected automatically.")
-with chk_col:
-    if hasattr(st, "segmented_control"):
-        check = st.segmented_control("Check", list(L.PACE), default="Closing") or "Closing"
-    else:
-        check = st.radio("Check", list(L.PACE), index=3, horizontal=True)
-
 def _secret(name, default=""):
     try:
         if name in st.secrets:
@@ -178,71 +172,111 @@ def _s3():
         return None, None
 
 
-def save_report(data, name):
+def save_bundle(proc, proc_name, refs):
+    """Save the ProcedureDetails report and any referral reports as the page's current data."""
     now = datetime.now(UAE)
-    meta = {"name": name, "uploaded_at": now.strftime("%d-%m-%Y %I:%M %p"), "sha": hashlib.sha1(data).hexdigest()}
+    meta = {"name": proc_name, "uploaded_at": now.strftime("%d-%m-%Y %I:%M %p"),
+            "refs": [n for _, n in refs]}
     s3, bucket = _s3()
     if s3:
         try:
-            s3.put_object(Bucket=bucket, Key=S3_PREFIX + "latest/report.xlsx", Body=data)
+            s3.put_object(Bucket=bucket, Key=S3_PREFIX + "latest/report.xlsx", Body=proc)
+            for i, (data, _) in enumerate(refs):
+                s3.put_object(Bucket=bucket, Key=f"{S3_PREFIX}latest/referral_{i}.xlsx", Body=data)
             s3.put_object(Bucket=bucket, Key=S3_PREFIX + "latest/meta.json", Body=json.dumps(meta).encode())
-            s3.put_object(Bucket=bucket, Key=f"{S3_PREFIX}history/{now:%Y-%m-%d}/{now:%H%M}_{name}", Body=data)
-            return "S3"
+            s3.put_object(Bucket=bucket, Key=f"{S3_PREFIX}history/{now:%Y-%m-%d}/{now:%H%M}_{proc_name}", Body=proc)
+            for data, n in refs:
+                s3.put_object(Bucket=bucket, Key=f"{S3_PREFIX}history/{now:%Y-%m-%d}/{now:%H%M}_referral_{n}", Body=data)
+            return "S3", meta
         except Exception as e:  # noqa: BLE001
-            st.warning(f"Could not save the report to S3 ({e}). Saved on the app server instead.")
+            st.warning(f"Could not save to S3 ({e}). Saved on the app server instead.")
     LOCAL_DIR.mkdir(exist_ok=True)
-    (LOCAL_DIR / "report.xlsx").write_bytes(data)
+    (LOCAL_DIR / "report.xlsx").write_bytes(proc)
+    for i, (data, _) in enumerate(refs):
+        (LOCAL_DIR / f"referral_{i}.xlsx").write_bytes(data)
     (LOCAL_DIR / "meta.json").write_text(json.dumps(meta))
-    return "server"
+    return "server", meta
 
 
-def load_report():
+def load_bundle():
     s3, bucket = _s3()
     if s3:
         try:
             meta = json.loads(s3.get_object(Bucket=bucket, Key=S3_PREFIX + "latest/meta.json")["Body"].read())
-            data = s3.get_object(Bucket=bucket, Key=S3_PREFIX + "latest/report.xlsx")["Body"].read()
-            return data, meta
+            proc = s3.get_object(Bucket=bucket, Key=S3_PREFIX + "latest/report.xlsx")["Body"].read()
+            refs = [(s3.get_object(Bucket=bucket, Key=f"{S3_PREFIX}latest/referral_{i}.xlsx")["Body"].read(), n)
+                    for i, n in enumerate(meta.get("refs", []))]
+            return proc, meta, refs
         except Exception:  # noqa: BLE001
             pass
     try:
-        return (LOCAL_DIR / "report.xlsx").read_bytes(), json.loads((LOCAL_DIR / "meta.json").read_text())
+        meta = json.loads((LOCAL_DIR / "meta.json").read_text())
+        refs = [((LOCAL_DIR / f"referral_{i}.xlsx").read_bytes(), n) for i, n in enumerate(meta.get("refs", []))]
+        return (LOCAL_DIR / "report.xlsx").read_bytes(), meta, refs
     except Exception:  # noqa: BLE001
-        return None, None
+        return None, None, []
 
 
-lines = None
-report_bytes, report_meta = None, None
-if up:
-    report_bytes = up.getvalue()
-    report_meta = {"name": up.name, "uploaded_at": datetime.now(UAE).strftime("%d-%m-%Y %I:%M %p")}
-else:
-    report_bytes, report_meta = load_report()
+if "bundle" not in st.session_state:
+    st.session_state["bundle"] = load_bundle()
+report_bytes, report_meta, ref_files = st.session_state["bundle"]
 
+# ---------------------------------------------------------------- upload (hidden once processed) + check time
+up_col, chk_col = st.columns([3, 2], vertical_alignment="top")
+with up_col:
+    with st.expander("Upload reports" if report_bytes is None else "Upload new reports",
+                     expanded=report_bytes is None):
+        with st.form("upload_form", clear_on_submit=True, border=False):
+            f_proc = st.file_uploader("1 · HIS ProcedureDetails report", type=["xlsx", "xls"],
+                                      help="Coded or not coded. The file is corrected automatically.")
+            f_refs = st.file_uploader("2 · Referral reports (optional, one or more)", type=["xlsx", "xls"],
+                                      accept_multiple_files=True,
+                                      help="Internal (Family Medicine) and external (hospital) referral reports.")
+            go = st.form_submit_button("Process reports", type="primary")
+        if go:
+            if not f_proc:
+                st.error("Add the ProcedureDetails report first.")
+            else:
+                try:
+                    L.read_report(f_proc.getvalue(), f_proc.name)
+                    for f in f_refs or []:
+                        L.read_referrals(f.getvalue(), f.name)
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"Could not read the files. {e}")
+                else:
+                    refs_in = [(f.getvalue(), f.name) for f in f_refs or []]
+                    where, meta_new = save_bundle(f_proc.getvalue(), f_proc.name, refs_in)
+                    st.session_state["bundle"] = (f_proc.getvalue(), meta_new, refs_in)
+                    st.toast(f"Processed and saved ({where}). Stays on the page until new reports are uploaded.")
+                    st.rerun()
+with chk_col:
+    if hasattr(st, "segmented_control"):
+        check = st.segmented_control("Check", list(L.PACE), default="Closing") or "Closing"
+    else:
+        check = st.radio("Check", list(L.PACE), index=3, horizontal=True)
+
+lines, refs = None, []
 if report_bytes is not None:
     try:
         lines = L.read_report(report_bytes, report_meta["name"])
+        for data, n in ref_files:
+            refs += L.read_referrals(data, n)
     except Exception as e:  # noqa: BLE001
-        st.error(f'Could not read "{report_meta["name"]}". {e}')
+        st.error(f'Could not read the saved reports. {e}')
         lines = None
-    if up and lines is not None:
-        sha = hashlib.sha1(report_bytes).hexdigest()
-        if st.session_state.get("saved_sha") != sha:
-            where = save_report(report_bytes, up.name)
-            st.session_state["saved_sha"] = sha
-            st.toast(f"Report saved ({where}). It stays on the page until a different report is uploaded.")
 
 if lines is None:
     st.markdown("""
     <div class="hero"><div><h1>EMC Revenue Scorecard</h1>
     <p>Every patient is a ball. Dot = consultation only · 4 = one lab or procedure · 6 = two or more.</p></div>
     <div class="chips"><span class="chip">Daman level 3</span><span class="chip">Others level 2</span><span class="chip">Insurance money after copay</span></div></div>
-    <div class="empty"><b>Upload today's ProcedureDetails report</b>
-    Export it from Cortex, drop it above and pick the check time. The scorecard, insurance view, labs and procedures and the email are built from it.</div>
+    <div class="empty"><b>Upload today's reports</b>
+    Add the ProcedureDetails report (and the referral reports if you have them) above, then press Process reports.</div>
     """, unsafe_allow_html=True)
     st.stop()
 
 visits, logdf, dates = L.correct(lines)
+ref_matched = L.apply_referrals(visits, refs) if refs else 0
 ddf, idf, itdf, strips = L.summarize(visits, L.PACE[check])
 meta = f"Date {', '.join(dates)} · {len(visits)} patients · file {report_meta['name']} · uploaded {report_meta['uploaded_at']}"
 clinic = ddf[ddf["Doctor"] == "Clinic"].iloc[0]
@@ -277,6 +311,18 @@ def agg_names(vs):
             cnt[key] = cnt.get(key, 0) + 1
     return ", ".join(f"{n} ({money(pr)})" + (f" ×{k}" if k > 1 else "")
                      for (n, pr), k in sorted(cnt.items(), key=lambda x: (-x[1], x[0][0])))
+
+
+def ball_html(v):
+    r = v.get("ref")
+    if r:
+        cls = ("bX" if r["external"] else "bR") + (" warn" if v.get("ref_given") else "")
+        given = items_text({"items": v.get("ref_given", [])})
+        tip = (f'Referred to {r["to"]}{" (" + r["dept"] + ")" if r["dept"] else ""} · EMR {v.get("emr")} · {v["insurance"]}'
+               + (f' · GP gave: {given}' if given else "") + (f' · {r["notes"][:120]}' if r["notes"] else ""))
+        return f'<i class="ball {cls}" title="{E(tip)}">R</i>'
+    tip = f'{v["insurance"]} · EMR {v.get("emr") or v["inv"]} · {items_text(v) or "consultation only"} · {fmt(v["runs"])} AED'
+    return f'<i class="ball b{v["ball"]}" title="{E(tip)}">{v["ball"] if v["ball"] else ""}</i>'
 
 
 def price_groups(vs):
@@ -326,16 +372,27 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["Scorecard", "By insurance", "Labs and p
 # ---------------------------------------------------------------- scorecard
 with tab1:
     st.markdown("""<div class="legend"><span><i class="ball b0"></i>Dot · consultation only</span>
-    <span><i class="ball b4">4</i>One lab or procedure</span><span><i class="ball b6">6</i>Two or more</span></div>""",
+    <span><i class="ball b4">4</i>One lab or procedure</span><span><i class="ball b6">6</i>Two or more</span>
+    <span><i class="ball bR">R</i>Referred to Family Medicine</span><span><i class="ball bX">R</i>Referred outside</span>
+    <span><i class="ball bR warn">R</i>Referred but GP gave a lab or procedure</span></div>""",
                 unsafe_allow_html=True)
     cards = ""
     for _, d in docs.sort_values("% of day", ascending=False).iterrows():
         key = str(d["Doctor"]).replace(" (FM)", "")
         vs = doc_visits.get(key, [])
-        strip = "".join(
-            f'<i class="ball b{v["ball"]}" title="{E(v["insurance"])} · EMR {E(v.get("emr") or v["inv"])} · '
-            f'{E(items_text(v) or "consultation only")} · {fmt(v["runs"])} AED">{v["ball"] if v["ball"] else ""}</i>'
-            for v in vs)
+        strip = "".join(ball_html(v) for v in vs)
+        rv = [v for v in vs if v.get("ref")]
+        if rv:
+            dest = {}
+            for v in rv:
+                nm = "Family Medicine" if not v["ref"]["external"] else (v["ref"]["to"].title() + (f' ({v["ref"]["dept"]})' if v["ref"]["dept"] else ""))
+                dest[nm] = dest.get(nm, 0) + 1
+            ref_line = "Referrals: " + " · ".join(f"<b>{k}</b> to {E(n)}" for n, k in dest.items())
+            nwarn = sum(1 for v in rv if v["ref_given"])
+            if nwarn:
+                ref_line += f' · <span style="color:#B3261E"><b>{nwarn}</b> given a lab or procedure</span>'
+        else:
+            ref_line = ""
         tops = top_items(vs)
         made = " · ".join(f"<b>{E(n)}</b> ×{k}" for n, k in tops) if tops else "No labs or procedures yet"
         st_cls = str(d["Status"]).split()[0]
@@ -359,11 +416,30 @@ with tab1:
           </div>
           <div class="strip">{strip}</div>
           <div class="made">{made}</div>
+          {f'<div class="made">{ref_line}</div>' if ref_line else ""}
           <div class="need">{need_txt} · {fmt(d["Runs"] / max(d["Balls"],1))} AED per ball</div>
         </div>"""
+    cards = "".join(ln.strip() for ln in cards.splitlines())   # no blank/indented lines, or Markdown shows raw HTML
     st.markdown(f'<div class="docs">{cards}</div>', unsafe_allow_html=True)
     st.markdown('<div class="note" style="margin-top:8px">Hover a ball to see the insurance, EMR number, items and runs.</div>',
                 unsafe_allow_html=True)
+
+    warn = [v for v in visits if v.get("ref") and v.get("ref_given")]
+    if refs:
+        st.markdown(f'<div class="note" style="margin-top:6px">{len(refs)} referrals in the referral reports · '
+                    f'{ref_matched} matched to a patient in this report (by EMR number and date).</div>', unsafe_allow_html=True)
+    if warn:
+        st.markdown(f'<div class="sec" style="color:#B3261E">Referred patients given a lab or procedure ({len(warn)})</div>'
+                    '<div class="note">Tell the GP: when the patient is referred, leave the tests and treatment to the specialist.</div>',
+                    unsafe_allow_html=True)
+        rows = ""
+        for v in sorted(warn, key=lambda x: x["doctor"]):
+            r = v["ref"]
+            rows += (f'<div class="sr"><span class="bb {"bX" if r["external"] else "bR"}">R</span>'
+                     f'<div class="sr-id"><b>EMR {E(v.get("emr") or "–")}</b><span>{E(v["doctor"])} · {E(v["insurance"])}</span></div>'
+                     f'<div class="sr-items"><span class="chip-i ref">to {E(r["to"].title())}</span>{chips({"items": v["ref_given"]})}</div>'
+                     f'<div class="sr-runs">{fmt(v["runs"])}<span>runs</span></div></div>')
+        st.markdown(f'<div class="sl">{rows}</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sec">What made the 4s and 6s</div>', unsafe_allow_html=True)
     for key in sorted(doc_visits):
@@ -382,7 +458,7 @@ with tab1:
             st.markdown(f'<div class="sl">{rows}</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sec">Summary</div>', unsafe_allow_html=True)
-    st.markdown(table(ddf, ["Doctor", "Balls", "Dots", "4s", "6s", "Scoring", "Scoring needed", "Runs", "Runs needed",
+    st.markdown(table(ddf, ["Doctor", "Balls", "Referrals", "Dots", "4s", "6s", "Scoring", "Scoring needed", "Runs", "Runs needed",
                             "% of day", "Status"], money=("Runs", "Runs needed"), total_key="Clinic"),
                 unsafe_allow_html=True)
     st.markdown('<div class="note">Runs = insurance money after copay on corrected prices; cash visits at other-insurer prices. '
