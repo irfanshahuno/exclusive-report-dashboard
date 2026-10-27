@@ -426,6 +426,9 @@ def claim_lines(vs):
 CLAIM_SEP = '<b style="color:#1E6A49;font-size:15px;padding:0 7px;">|</b>'
 
 
+HIDE_PRICES = False   # True while building the doctor email (no prices for doctors)
+
+
 def _pill(text, bg, fg, bd):
     return (f'<span style="display:inline-block;background:{bg};color:{fg};border:1px solid {bd};border-radius:12px;'
             f'padding:3px 9px;margin:2px 4px 2px 0;font-size:12px;line-height:18px;white-space:nowrap;">{text}</span>')
@@ -440,7 +443,7 @@ def four_pills(vs):
             cnt[k] = cnt.get(k, 0) + 1
     if not cnt:
         return "–"
-    return "".join(_pill(f'{E(n)} <b>{money(pr)}</b>' + (f' <span style="opacity:.7">×{k}</span>' if k > 1 else ""),
+    return "".join(_pill(f'{E(n)}' + ("" if HIDE_PRICES else f' <b>{money(pr)}</b>') + (f' <span style="opacity:.7">×{k}</span>' if k > 1 else ""),
                          "#E8EEFB", "#2546A0", "#C5D3F3")
                    for (n, pr), k in sorted(cnt.items(), key=lambda x: (-x[1], x[0][0])))
 
@@ -451,7 +454,7 @@ def six_pills(vs):
         return "–"
     out = []
     for v in vs:
-        parts = " <b style=\"color:#1E6A49\">+</b> ".join(f'{E(L.item_name(c["code"], c["name"]))} <b>{money(PR(c))}</b>' for c in v["items"])
+        parts = " <b style=\"color:#1E6A49\">+</b> ".join(f'{E(L.item_name(c["code"], c["name"]))}' + ("" if HIDE_PRICES else f' <b>{money(PR(c))}</b>') for c in v["items"])
         out.append(_pill(parts, "#E3F1E9", "#17553A", "#BFDCCB").replace("white-space:nowrap;", "white-space:normal;"))
     return "".join(out)
 
@@ -1109,7 +1112,17 @@ fname = f"EMC_Scorecard_{dates[0] if dates else ''}_{check.replace(' ', '')}.xls
 # ---------------------------------------------------------------- email
 
 # ---------------------------------------------------------------- email (same look as the dashboard, inline styles for mail apps)
-def email_dashboard_html(only=None):
+def email_dashboard_html(only=None, safe=False):
+    """safe=True: the doctor version - same layout, without revenue, targets in money, prices, pharmacy or ranking."""
+    global HIDE_PRICES
+    HIDE_PRICES = safe
+    try:
+        return _email_html(only, safe)
+    finally:
+        HIDE_PRICES = False
+
+
+def _email_html(only=None, safe=False):
     ranked, doc_visits, visits = scope(only)
     """Outlook-safe email: tables + bgcolor everywhere (Outlook desktop ignores div backgrounds, % widths on divs, margins on spans)."""
     F = "font-family:Segoe UI,Arial,Helvetica,sans-serif;"
@@ -1145,12 +1158,20 @@ def email_dashboard_html(only=None):
         bg = FOUR if v["ball"] == 4 else SIX
         return f'<td width="18" height="18" bgcolor="{bg}" style="{base}background:{bg};">{v["ball"]}</td>'
 
+    def neutral_cell(v):
+        if v.get("ref") or v.get("fu"):
+            return ball_cell(v)
+        return ('<td width="18" height="18" bgcolor="#DCE7F7" style="width:18px;height:18px;border-radius:50%;text-align:center;'
+                'font:bold 9px Arial,sans-serif;color:#22488F;background:#DCE7F7;line-height:18px;">&#9679;</td>')
+
+    cell = ball_cell
+
     def balls(vs, per_row=26):
         if not vs:
             return ""
         rows = ""
         for i in range(0, len(vs), per_row):
-            rows += "<tr>" + "".join(ball_cell(v) for v in vs[i:i + per_row]) + "</tr>"
+            rows += "<tr>" + "".join(cell(v) for v in vs[i:i + per_row]) + "</tr>"
         return f'<table {T.replace("cellspacing=\"0\"", "cellspacing=\"4\"")}>{rows}</table>'
 
     def rank_cell(n, size=30):
@@ -1172,7 +1193,7 @@ def email_dashboard_html(only=None):
             bg, fg, bd = ("#E8EEFB", "#2546A0", "#C5D3F3") if e["lab"] else ("#E3F1E9", "#17553A", "#BFDCCB")
             pl = " / ".join(money(x) for x in sorted(e["p"], reverse=True))
             cells.append(f'<td bgcolor="{bg}" style="background:{bg};color:{fg};border:1px solid {bd};border-radius:14px;padding:5px 11px;'
-                         f'font-size:12.5px;white-space:nowrap;">{E(nm)} <b>{pl}</b>' + (f' &times;{e["n"]}' if e["n"] > 1 else "") + "</td>")
+                         f'font-size:12.5px;white-space:nowrap;">{E(nm)}' + ("" if HIDE_PRICES else f' <b>{pl}</b>') + (f' &times;{e["n"]}' if e["n"] > 1 else "") + "</td>")
         if len(g) > n:
             cells.append(f'<td style="color:{MUT};font-size:12.5px;padding:5px 8px;">+{len(g) - n} more</td>')
         rows = "".join(f"<tr>{''.join(cells[i:i + 3])}</tr>" for i in range(0, len(cells), 3))
@@ -1235,7 +1256,16 @@ def email_dashboard_html(only=None):
     def lg(v, t):
         return (f'<td style="padding-right:4px;"><table {T}><tr>{ball_cell(v)}</tr></table></td>'
                 f'<td style="font-size:12px;color:{MUT};padding-right:14px;white-space:nowrap;">{t}</td>')
-    out.append(f'<tr><td style="padding:10px 0 4px;"><table {T}><tr>'
+    if safe:
+      out.append(f'<tr><td style="padding:10px 0 4px;"><table {T}><tr>'
+               + lg({"ball": 0}, "Consultation only") + lg({"ball": 4}, "One service (lab or procedure)") + lg({"ball": 6}, "Two or more services")
+               + '</tr></table><table ' + T + ' style="margin-top:6px;"><tr>'
+               + lg({"ball": 0, "ref": {"external": False}}, "Referred to Family Medicine") + lg({"ball": 0, "ref": {"external": True}}, "Referred outside")
+               + lg({"ball": 0, "ref": {"external": False}, "ref_given": [1]}, "Referred and also tested here")
+               + lg({"ball": 0, "fu": True}, "Free follow-up")
+               + '</tr></table></td></tr>')
+    else:
+      out.append(f'<tr><td style="padding:10px 0 4px;"><table {T}><tr>'
                + lg({"ball": 0}, "Dot · consultation only") + lg({"ball": 4}, "One lab or procedure") + lg({"ball": 6}, "Two or more")
                + '</tr></table><table ' + T + ' style="margin-top:6px;"><tr>'
                + lg({"ball": 0, "ref": {"external": False}}, "Referred to Family Medicine") + lg({"ball": 0, "ref": {"external": True}}, "Referred outside")
@@ -1279,6 +1309,8 @@ def email_dashboard_html(only=None):
         vs = doc_visits.get(key, [])
         sk = status_key(d)
         lab, fg, bg = ST.get(sk, (STATUS_LABEL.get(sk, str(d["Status"])), "#7D8A83", "#EEF1EF"))
+        if safe:
+            fg, bg = "#1E6A49", "#E3F1E9"      # no revenue-based colour for doctors
         ratio = d["Runs"] / max(d["Runs needed"], 1)
         scn = int(d["Scoring needed"]) or 1
         rv = [v for v in vs if v.get("ref")]
@@ -1292,6 +1324,7 @@ def email_dashboard_html(only=None):
             nw = sum(1 for v in rv if v.get("ref_given"))
             if nw:
                 ref_line += f' · <b style="color:#B3261E">{nw} given a lab or procedure</b>'
+        role_extra = "" if safe else " · target " + fmt(d["Runs target (day)"]) + " a day"
         need = int(d["Scoring still needed"]) if d["Scoring still needed"] not in ("", None) else 0
         need_txt = f"Needs <b style='color:{INK}'>{need} more scoring balls</b> by {E(check)}" if need else f"<b style='color:{SIX}'>Scoring on pace</b> for {E(check)}"
         out.append(
@@ -1301,24 +1334,31 @@ def email_dashboard_html(only=None):
             # name row
             f'<table {T} width="100%"><tr><td><table {T}><tr>{"" if only else (rank_cell(rank + 1) if d["Balls"] else rank_cell("–"))}'
             f'<td style="padding-left:10px;font:bold 22px Arial,sans-serif;color:{INK};">{E(key)}</td></tr></table>'
-            f'<div style="font-size:12.5px;color:{MUT};padding-top:4px;">{"Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice"} · target {fmt(d["Runs target (day)"])} a day</div></td>'
-            f'<td align="right" valign="top"><table {T}><tr><td bgcolor="{bg}" style="background:{bg};color:{fg};border:1px solid {fg};border-radius:14px;'
-            f'padding:5px 12px;font:bold 11px Arial,sans-serif;letter-spacing:1px;">{lab}</td></tr></table></td></tr></table>'
-            # runs
-            f'<table {T} style="margin-top:12px;"><tr><td style="font:bold 40px Arial,sans-serif;color:{INK};padding-right:12px;">{fmt(d["Runs"])}</td>'
-            f'<td valign="bottom" style="font-size:13.5px;color:{MUT};padding-bottom:6px;">runs of <b style="color:{INK}">{fmt(d["Runs needed"])}</b> needed by {E(check)}'
-            f' &nbsp;·&nbsp; <b style="color:{fg}">{d["% of day"]}%</b> of day target</td></tr></table>'
-            f'<div style="padding:8px 0 4px;">{bar(ratio, SIX, 10)}</div>'
+            f'<div style="font-size:12.5px;color:{MUT};padding-top:4px;">{"Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice"} {role_extra}</div></td>'
+            + (f'<td align="right" valign="top"><table {T}><tr><td bgcolor="{bg}" style="background:{bg};color:{fg};border:1px solid {fg};border-radius:14px;'
+             f'padding:5px 12px;font:bold 11px Arial,sans-serif;letter-spacing:1px;">{lab}</td></tr></table></td>' if not safe else "")
+            + '</tr></table>'
+            # runs (management only)
+            + ((f'<table {T} style="margin-top:12px;"><tr><td style="font:bold 40px Arial,sans-serif;color:{INK};padding-right:12px;">{fmt(d["Runs"])}</td>'
+                f'<td valign="bottom" style="font-size:13.5px;color:{MUT};padding-bottom:6px;">runs of <b style="color:{INK}">{fmt(d["Runs needed"])}</b> needed by {E(check)}'
+                f' &nbsp;·&nbsp; <b style="color:{fg}">{d["% of day"]}%</b> of day target</td></tr></table>'
+                f'<div style="padding:8px 0 4px;">{bar(ratio, SIX, 10)}</div>') if not safe else
+               (f'<table {T} style="margin-top:12px;"><tr><td style="font:bold 40px Arial,sans-serif;color:{INK};padding-right:12px;">{int(d["Balls"])}</td>'
+                f'<td valign="bottom" style="font-size:13.5px;color:{MUT};padding-bottom:6px;">patients seen · {E(", ".join(dates))}</td></tr></table>'))
             # stats
-            f'<table {T.replace("cellspacing=\"0\"", "cellspacing=\"6\"")} width="100%" style="margin:6px -6px 4px;"><tr>'
-            + stat(f'{d["Balls"]}<span style="font-size:13px;color:{MUT};">/{int(d["Balls target"])}</span>', "Balls") + stat(d["Dots"], "Dots") + stat(d["Referrals"], "Referral", GREY)
-            + stat(d["4s"], "4s", FOUR) + stat(d["6s"], "6s", SIX)
-            + stat(d["Scoring"], "Scoring")
+            + f'<table {T.replace("cellspacing=\"0\"", "cellspacing=\"6\"")} width="100%" style="margin:6px -6px 4px;"><tr>'
+            + ((stat(int(d["Balls"]), "Patients seen") + stat(int(d["Dots"] - d["Follow-ups"]), "Consultation only")
+                + stat(int(d["4s"]), "4 · one service", FOUR) + stat(int(d["6s"]), "6 · two or more", SIX)
+                + stat(int(d["Referrals"]), "Referrals", GREY)
+                + stat(int(d["Follow-ups"]), "Free follow-ups")) if safe else
+               (stat(f'{d["Balls"]}<span style="font-size:13px;color:{MUT};">/{int(d["Balls target"])}</span>', "Balls") + stat(d["Dots"], "Dots") + stat(d["Referrals"], "Referral", GREY)
+                + stat(d["4s"], "4s", FOUR) + stat(d["6s"], "6s", SIX) + stat(d["Scoring"], "Scoring")))
             + '</tr></table>'
-            f'<table {T.replace("cellspacing=\"0\"", "cellspacing=\"6\"")} width="100%" style="margin:0 -6px 4px;"><tr>'
-            + gap_stat(d["Balls"], d["Balls target"], f'Patients vs {int(d["Balls target"])}')
-            + gap_stat(d["Runs"], d["Runs target (day)"], f'Revenue vs {fmt(d["Runs target (day)"])}')
-            + '</tr></table>'
+            + ("" if safe else
+               f'<table {T.replace("cellspacing=\"0\"", "cellspacing=\"6\"")} width="100%" style="margin:0 -6px 4px;"><tr>'
+               + gap_stat(d["Balls"], d["Balls target"], f'Patients vs {int(d["Balls target"])}')
+               + gap_stat(d["Runs"], d["Runs target (day)"], f'Revenue vs {fmt(d["Runs target (day)"])}')
+               + '</tr></table>')
             + (f'<div style="background:#F2F5F1;border:1px dashed #C9D2CB;border-radius:10px;padding:10px 12px;font-size:13px;color:{MUT};margin-top:6px;">'
                + (f'No doctor in this place yet (Dr. Mahedi left). Each day it stays empty the clinic misses <b>{int(d["Balls target"])} patients</b> and <b>{fmt(d["Runs target (day)"])}</b> revenue.'
                   if d.get("Vacancy") else "No patients in this report.") + '</div>'
@@ -1326,14 +1366,14 @@ def email_dashboard_html(only=None):
                f'<div style="padding:8px 0 6px;">{balls(vs)}</div>'
                f'<div style="border-top:1px solid {LINE};padding-top:8px;">{chips(vs)}</div>')
             + (f'<div style="font-size:13px;color:{MUT};padding-top:6px;">{ref_line}</div>' if ref_line else "")
-            + (f'<div style="font-size:13px;color:{MUT};padding-top:6px;">Free follow-ups: <b>{int(d["Follow-ups"])}</b> (no bill, counted in dots)</div>' if d.get("Follow-ups") else "")
+            + (f'<div style="font-size:13px;color:{MUT};padding-top:6px;">Free follow-ups: <b>{int(d["Follow-ups"])}</b> (no bill, counted in dots)</div>' if d.get("Follow-ups") and not safe else "")
             + ((lambda r: (f'<table {T} width="100%" style="margin-top:8px;"><tr><td bgcolor="{"#E2F3E8" if r["filled"] >= r["patients"] else "#FBE4E1"}" '
                            f'style="background:{"#E2F3E8" if r["filled"] >= r["patients"] else "#FBE4E1"};color:{"#17553A" if r["filled"] >= r["patients"] else "#8E1F18"};'
                            f'border-radius:10px;padding:8px 10px;font-size:12.5px;">Pharmacy: <b>{int(r["filled"])} / {int(r["patients"])} filled '
                            f'({r["filled"] / r["patients"]:.0%})</b> · meds given {r["given"] / max(r["presc"], 1):.0%} · <b>{int(r["missed"])}</b> missed · '
-                           f'{int(r["patients"] - r["filled"])} patients lost</td></tr></table>') if r and r["patients"] else "")(rx_for(key)))
-            + f'<div style="font-size:13px;color:{MUT};padding-top:8px;">{fmt(d["Runs"] / max(d["Balls"], 1))} AED per ball</div>'
-            '</td></tr></table></td></tr>')
+                           f'{int(r["patients"] - r["filled"])} patients lost</td></tr></table>') if r and r["patients"] and not safe else "")(rx_for(key)))
+            + ("" if safe else f'<div style="font-size:13px;color:{MUT};padding-top:8px;">{fmt(d["Runs"] / max(d["Balls"], 1))} AED per ball</div>')
+            + '</td></tr></table></td></tr>')
 
     # by insurance
     out.append(section("Your patients by insurance" if only else "Each doctor by insurance"))
@@ -1347,6 +1387,18 @@ def email_dashboard_html(only=None):
         for v in vs:
             by.setdefault(v["insurance"], []).append(v)
 
+        def row_safe(name, ivs, tot=False):
+            f4 = [v for v in ivs if v["ball"] == 4]; f6 = [v for v in ivs if v["ball"] == 6]
+            nref = sum(1 for v in ivs if v.get("ref"))
+            tr = f' bgcolor="{SOFT}" style="background:{SOFT};font-weight:bold;"' if tot else ""
+            return (f'<tr{tr}><td {tdl}>{E(name)}</td><td {td}>{len(ivs)}</td>'
+                    f'<td {td}>{sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref") and not v.get("fu"))}</td>'
+                    f'<td {td}><b style="color:{GREY};">{nref if (nref or tot) else "–"}</b></td>'
+                    f'<td {td}><b style="color:{FOUR};">{len(f4)}</b></td>'
+                    f'<td {tdl} width="24%">{"" if tot else four_pills(f4).replace("white-space:nowrap;", "white-space:normal;")}</td>'
+                    f'<td {td}><b style="color:{SIX};">{len(f6)}</b></td>'
+                    f'<td {tdl} width="30%">{"" if tot else six_pills(f6)}</td></tr>')
+
         def row(name, ivs, tot=False):
             f4 = [v for v in ivs if v["ball"] == 4]; f6 = [v for v in ivs if v["ball"] == 6]
             runs = sum(v["runs"] for v in ivs); nref = sum(1 for v in ivs if v.get("ref"))
@@ -1357,19 +1409,39 @@ def email_dashboard_html(only=None):
                     f'<td {tdl} width="24%">{"" if tot else four_pills(f4).replace("white-space:nowrap;", "white-space:normal;")}</td>'
                     f'<td {td}><b style="color:{SIX};">{len(f6)}</b></td>'
                     f'<td {tdl} width="34%">{"" if tot else six_pills(f6)}</td>'
-                    f'<td {td}>{fmt(runs)}</td><td {td}>{fmt(runs / max(len(ivs), 1))}</td></tr>')
-        rows = "".join(row(ins, ivs) for ins, ivs in sorted(by.items(), key=lambda x: -len(x[1]))) + row("Total", vs, True)
+                    + ("" if safe else f'<td {td}>{fmt(runs)}</td><td {td}>{fmt(runs / max(len(ivs), 1))}</td>') + '</tr>')
+        rf = row_safe if safe else row
+        rows = "".join(rf(ins, ivs) for ins, ivs in sorted(by.items(), key=lambda x: -len(x[1]))) + rf("Total", vs, True)
         out.append(f'<tr><td style="font:bold 15px Arial,sans-serif;padding:14px 0 6px;color:{INK};">{E(doc)}</td></tr>'
                    f'<tr><td><table {T} width="100%" bgcolor="#ffffff" style="background:#ffffff;border:1px solid {EDGE};border-collapse:collapse;">'
-                   f'<tr><th {thl}>Insurance</th><th {th}>Balls</th><th {th}>Dots</th><th {th}>Referral</th><th {th}>4s</th>'
-                   f'<th {thl}>What the 4s were</th><th {th}>6s</th><th {thl}>What the 6s were</th><th {th}>Runs</th><th {th}>Per ball</th></tr>'
-                   f'{rows}</table></td></tr>')
+                   + (f'<tr><th {thl}>Insurance</th><th {th}>Patients</th><th {th}>Consultation only</th><th {th}>Referrals</th>'
+                      f'<th {th}>4</th><th {thl}>One service</th><th {th}>6</th><th {thl}>Two or more services</th></tr>' if safe else
+                      f'<tr><th {thl}>Insurance</th><th {th}>Balls</th><th {th}>Dots</th><th {th}>Referral</th><th {th}>4s</th>'
+                      f'<th {thl}>What the 4s were</th><th {th}>6s</th><th {thl}>What the 6s were</th><th {th}>Runs</th><th {th}>Per ball</th></tr>')
+                   + f'{rows}</table></td></tr>')
 
-    out.append(f'<tr><td style="font-size:12px;color:{MUT};padding:20px 0 0;">Runs = insurance share after copay on corrected prices. '
+    out.append(f'<tr><td style="font-size:12px;color:{MUT};padding:20px 0 0;">'
+               + ("This scorecard shows your visits and documentation only. All clinical decisions must be based solely on medical "
+                  "necessity. No compensation is linked to services ordered. " if safe else "Runs = insurance share after copay on corrected prices. ")
                + ("" if only else f'{len(logdf)} corrections applied – details in the attached Excel file. ')
                + f'Sent from the EMC Revenue Scorecard, {datetime.now(UAE):%d-%m-%Y %I:%M %p}.</td></tr>')
     out.append('</table></td></tr></table>')
     return "".join(out)
+
+
+# ---------------------------------------------------------------- doctor email (legal-safe: no money, no targets, no prices, no ordering score)
+def doctor_issues(v):
+    """Documentation points the doctor can act on (these are the wickets)."""
+    out = []
+    if v.get("ref") and v.get("ref_given"):
+        names = ", ".join(L.item_name(c["code"], c["name"]) for c in v["ref_given"]) or "a test"
+        out.append(f"referred to Family Medicine and also given {names} here")
+    return out
+
+
+def doctor_email_html(dname):
+    """Doctor version: exactly the management card for that doctor, with the legally risky parts removed."""
+    return email_dashboard_html(dname, safe=True)
 
 
 with tab5:
@@ -1381,28 +1453,32 @@ with tab5:
     doc_emails = {doc_name: em for doc_name, em in
                   ((m.group(1).strip(), m.group(2).strip()) for m in _re.finditer(r"([^:,;]+):\s*([^,;\s]+@[^,;\s]+)", _secret("DOCTOR_EMAILS")))}
     docs_with_pts = [str(d["Doctor"]).replace(" (FM)", "") for _, d in ranked.iterrows() if d["Balls"] > 0 and not d.get("Vacancy")]
-    who = st.selectbox("Send for", ["All doctors (management)"] + docs_with_pts,
-                       help="Pick one doctor to send only their own performance (no clinic totals, no other doctors).")
-    only = None if who.startswith("All doctors") else who
+    MGMT = "Management – full report with prices"
+    who = st.selectbox("Send for", [MGMT] + [f"{n} – doctor version" for n in docs_with_pts],
+                       help="Pick one doctor to send the doctor version: visits and documentation only (no revenue, targets or prices).")
+    only = None if who == MGMT else who.replace(" – doctor version", "")
     c1, c2 = st.columns(2)
     to = c1.text_input("Send to (comma separated)", key=f"to_{who}",
                        value=_secret("EMAIL_TO") if not only else doc_emails.get(only, ""))
     cc = c2.text_input("CC (comma separated)", key=f"cc_{who}", value=_secret("EMAIL_CC") if not only else "")
     subject = st.text_input("Subject", key=f"sub_{who}",
-                            value=(f"Your performance - {only} - {', '.join(dates)}" if only
+                            value=(f"Your scorecard - {only} - {', '.join(dates)}" if only
                                    else f"EMC Revenue Scorecard - {', '.join(dates)} - {check} check"))
-    html = email_dashboard_html(only)
-    x_bytes = build_excel(only) if only else xlsx
+    html = doctor_email_html(only) if only else email_dashboard_html()
+    x_bytes = None if only else xlsx      # doctors get no attachment (it would carry revenue figures)
     x_name = (f"Scorecard_{only.replace('Dr. ', '').replace(' ', '_')}_{dates[0] if dates else ''}.xlsx" if only else fname)
     with st.expander("Preview email"):
         st.html(html)
     b1, b2, b3 = st.columns([1.2, 1.4, 2])
-    b3.download_button("Download Excel", x_bytes, file_name=x_name, key=f"dl_{who}",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    if x_bytes:
+        b3.download_button("Download Excel", x_bytes, file_name=x_name, key=f"dl_{who}",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    else:
+        b3.caption("Doctor version: visits and documentation only. No revenue, targets, prices or attachment.")
     if not smtp:
         st.warning("Email is not set up yet. Add SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and EMAIL_TO in the app's Settings → Secrets.")
     else:
-        if b1.button("Send" if only else "Send to management", type="primary"):
+        if b1.button(f"Send to {only}" if only else "Send to management", type="primary"):
             recipients = [x.strip() for x in to.split(",") if x.strip()]
             if not recipients:
                 st.error("Add at least one email address.")
@@ -1413,7 +1489,7 @@ with tab5:
                     st.success(f"Sent to {', '.join(recipients)}.")
                 except Exception as e:  # noqa: BLE001
                     st.error(f"Email not sent: {e}")
-        if b2.button("Send to each doctor", help="Every doctor gets only their own scorecard, to the address in DOCTOR_EMAILS."):
+        if b2.button("Send doctor version to each doctor", help="Every doctor gets only their own doctor version (no prices, revenue or targets), to the address in DOCTOR_EMAILS."):
             sent, missing = [], []
             for dname in docs_with_pts:
                 em = doc_emails.get(dname)
@@ -1421,8 +1497,7 @@ with tab5:
                     missing.append(dname)
                     continue
                 try:
-                    L.send_email(smtp, [em], f"Your performance - {dname} - {', '.join(dates)}", email_dashboard_html(dname),
-                                 build_excel(dname), f"Scorecard_{dname.replace('Dr. ', '').replace(' ', '_')}_{dates[0] if dates else ''}.xlsx")
+                    L.send_email(smtp, [em], f"Your scorecard - {dname} - {', '.join(dates)}", doctor_email_html(dname), None)
                     sent.append(dname)
                 except Exception as e:  # noqa: BLE001
                     st.error(f"{dname}: not sent ({e})")
