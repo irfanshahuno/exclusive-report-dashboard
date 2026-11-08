@@ -510,11 +510,7 @@ def summarize(visits, pace=1.0):
             it["Count"] += 1
             it["Runs"] += c["ins"]
 
-    _ds = sorted({datetime.strptime(v["date"], "%d-%m-%Y") for v in visits}) if visits else []
-    ndays = max(1, (_ds[-1] - _ds[0]).days + 1) if _ds else 1      # clinic is open every day: count calendar days
-    worked = {}
-    for v in visits:
-        worked.setdefault(v["doctor"], set()).add(v["date"])
+    ndays = max(1, len({v["date"] for v in visits}))
     team_names = {n for n, _ in TEAM}
     for name, fm in TEAM:
         docs.setdefault(name, {"Doctor": name, "FM": fm, "Balls": 0, "Dots": 0, "4s": 0, "6s": 0, "Runs": 0.0, "Referrals": 0, "Follow-ups": 0})
@@ -523,9 +519,7 @@ def summarize(visits, pace=1.0):
     for name in sorted(docs):
         d = docs[name]
         t0 = TARGETS["fm" if d["FM"] else "gp"]
-        # target = days the doctor actually worked (the vacant GP place counts every day of the report)
-        nd = ndays if name == VACANCY else len(worked.get(name, ()))
-        t = {k: val * nd for k, val in t0.items()}
+        t = {k: val * ndays for k, val in t0.items()}      # a week/month report gets the targets for all its days
         scoring = d["4s"] + d["6s"]
         runs_need, score_need = round(t["runs"] * pace), round(t["scoring"] * pace)
         status = ("ON TRACK" if d["Runs"] >= runs_need and scoring >= score_need
@@ -533,22 +527,20 @@ def summarize(visits, pace=1.0):
         rows.append({"Doctor": name + (" (FM)" if d["FM"] else ""), "Balls": d["Balls"], "Balls target": t["balls"],
                      "Dots": d["Dots"], "Referrals": d["Referrals"], "Follow-ups": d["Follow-ups"], "4s": d["4s"], "6s": d["6s"], "Scoring": scoring, "Scoring needed": score_need,
                      "Runs": round(d["Runs"]), "Runs needed": runs_need, "Runs target (day)": t["runs"],
-                     "% of day": round(d["Runs"] / t["runs"] * 100) if t["runs"] else 0, "Status": status, "Days worked": nd,
+                     "% of day": round(d["Runs"] / t["runs"] * 100), "Status": status,
                      "Scoring still needed": max(0, score_need - scoring),
                      "Team": name in team_names, "Vacancy": name == VACANCY})
     ddf = pd.DataFrame(rows)
     if len(ddf):
         team = ddf[ddf["Team"]]
-        team_pt = sum(TARGETS["fm" if fm else "gp"]["balls"] for _, fm in TEAM) * ndays
-        team_rv = sum(TARGETS["fm" if fm else "gp"]["runs"] for _, fm in TEAM) * ndays
-        tot = {"Doctor": "Clinic", "Balls": ddf["Balls"].sum(), "Balls target": team_pt, "Days worked": ndays,
+        tot = {"Doctor": "Clinic", "Balls": ddf["Balls"].sum(), "Balls target": team["Balls target"].sum(),
                "Referral allowance": TARGETS["fm"]["balls"] * sum(1 for _, fm in TEAM if fm) * ndays, "Days": ndays,
                "GP visits": int(ddf[~ddf["Doctor"].str.endswith("(FM)")]["Balls"].sum()),
                "GP target": TARGETS["gp"]["balls"] * sum(1 for _, fm in TEAM if not fm) * ndays,
                "Doctors with patients": int((ddf["Balls"] > 0).sum()), "Team size": len(TEAM),
                "Dots": ddf["Dots"].sum(), "Referrals": ddf["Referrals"].sum(), "Follow-ups": ddf["Follow-ups"].sum(), "4s": ddf["4s"].sum(), "6s": ddf["6s"].sum(), "Scoring": ddf["Scoring"].sum(),
-               "Scoring needed": ddf["Scoring needed"].sum(), "Runs": ddf["Runs"].sum(), "Runs needed": round(team_rv * pace),
-               "Runs target (day)": team_rv, "Status": "", "Scoring still needed": None,
+               "Scoring needed": ddf["Scoring needed"].sum(), "Runs": ddf["Runs"].sum(), "Runs needed": ddf["Runs needed"].sum(),
+               "Runs target (day)": team["Runs target (day)"].sum(), "Status": "", "Scoring still needed": None,
                "Team": True, "Vacancy": False}
         tot["% of day"] = round(tot["Runs"] / tot["Runs target (day)"] * 100)
         ddf = pd.concat([ddf, pd.DataFrame([tot])], ignore_index=True)
@@ -665,120 +657,3 @@ def send_email(smtp_cfg, to_list, subject, html, attachment=None, attachment_nam
             s.starttls(context=ctx)
             s.login(smtp_cfg["user"], smtp_cfg["password"])
             s.send_message(msg)
-
-
-# ---------------------------------------------------------------- month to date (accumulation + forecast)
-def month_to_date(visits):
-    """Daily patients and revenue per doctor for a 1st-to-today report, with targets, balance, forecast and rankings.
-    The clinic is open every day: the month target uses all calendar days. A doctor's target counts only the days they worked."""
-    import calendar
-    from datetime import datetime as _dt, timedelta as _td
-    if not visits:
-        return None
-    pd_ = lambda s: _dt.strptime(s, "%d-%m-%Y")
-    days = sorted({pd_(v["date"]) for v in visits})
-    first, last = days[0], days[-1]
-    all_days = [first + _td(n) for n in range((last - first).days + 1)]
-    month_days = calendar.monthrange(last.year, last.month)[1]
-    remaining = month_days - last.day
-    fm_of = {n: fm for n, fm in TEAM}
-    docs = {}
-    for v in visits:
-        d = docs.setdefault(v["doctor"], {"fm": v.get("fm") or fm_of.get(v["doctor"], False), "pts": {}, "rev": {}})
-        k = pd_(v["date"])
-        d["pts"][k] = d["pts"].get(k, 0) + 1
-        d["rev"][k] = d["rev"].get(k, 0.0) + v["runs"]
-    for n, fm in TEAM:
-        if n != VACANCY:
-            docs.setdefault(n, {"fm": fm, "pts": {}, "rev": {}})
-
-    # Monday-Sunday weeks
-    weeks = []
-    for dday in all_days:
-        wk = dday - _td(dday.weekday())
-        if not weeks or weeks[-1]["start"] != wk:
-            weeks.append({"start": wk, "days": []})
-        weeks[-1]["days"].append(dday)
-    for i, w in enumerate(weeks, 1):
-        w["label"] = f"Week {i} ({w['days'][0]:%d}-{w['days'][-1]:%d %b})"
-    this_week = weeks[-1]["days"]
-
-    rows = []
-    for name, d in docs.items():
-        t = TARGETS["fm" if d["fm"] else "gp"]
-        worked = sorted(d["pts"])
-        n_w = len(worked)
-        pts, rev = sum(d["pts"].values()), sum(d["rev"].values())
-        pt_target, rv_target = t["balls"] * n_w, t["runs"] * n_w
-        avg_p = pts / n_w if n_w else 0
-        avg_r = rev / n_w if n_w else 0
-        month_rv_target = t["runs"] * (n_w + remaining)
-        month_pt_target = t["balls"] * (n_w + remaining)
-        fc_r, fc_p = rev + avg_r * remaining, pts + avg_p * remaining
-        need_r = (month_rv_target - rev) / remaining if remaining else 0
-        need_p = (month_pt_target - pts) / remaining if remaining else 0
-        last7 = [x for x in worked if x > last - _td(7)]
-        prev7 = [x for x in worked if last - _td(14) < x <= last - _td(7)]
-        a7 = sum(d["rev"][x] for x in last7) / len(last7) if last7 else 0
-        p7 = sum(d["rev"][x] for x in prev7) / len(prev7) if prev7 else 0
-        trend = "" if not (last7 and prev7) else ("↑" if a7 > p7 * 1.03 else "↓" if a7 < p7 * 0.97 else "→")
-        wk_worked = [x for x in this_week if x in d["pts"]]
-        rows.append({"doctor": name, "fm": d["fm"], "daily_pts": d["pts"], "daily_rev": d["rev"], "days_worked": n_w,
-                     "pts": pts, "pt_target": pt_target, "pt_bal": pts - pt_target,
-                     "rev": rev, "rv_target": rv_target, "rv_bal": rev - rv_target,
-                     "pt_pct": pts / pt_target if pt_target else 0, "rv_pct": rev / rv_target if rv_target else 0,
-                     "fc_rev": fc_r, "fc_pts": fc_p, "month_rv_target": month_rv_target, "month_pt_target": month_pt_target,
-                     "need_rev": need_r, "need_pts": need_p, "trend": trend,
-                     "wk_pts": sum(d["pts"][x] for x in wk_worked), "wk_rev": sum(d["rev"][x] for x in wk_worked),
-                     "wk_pt_target": t["balls"] * len(wk_worked), "wk_rv_target": t["runs"] * len(wk_worked),
-                     "daily_rv_target": t["runs"], "daily_pt_target": t["balls"]})
-    rows.sort(key=lambda r: -r["rv_pct"])
-
-    team_rv = sum(TARGETS["fm" if fm else "gp"]["runs"] for _, fm in TEAM)
-    team_pt = sum(TARGETS["fm" if fm else "gp"]["balls"] for _, fm in TEAM)
-    elapsed = len(all_days)
-    c_pts = {dd: sum(r["daily_pts"].get(dd, 0) for r in rows) for dd in all_days}
-    c_rev = {dd: sum(r["daily_rev"].get(dd, 0.0) for r in rows) for dd in all_days}
-    tot_p, tot_r = sum(c_pts.values()), sum(c_rev.values())
-    gp_t = TARGETS["gp"]
-    # the vacant GP place is empty on days when no GP outside the planned team (e.g. the doctor who left) saw patients
-    team_names = {n for n, _ in TEAM}
-    extra_gp = [r for r in rows if r["doctor"] not in team_names and not r["fm"]]
-    vac_days = 0
-    if VACANCY in team_names:
-        vac_days = sum(1 for dd in all_days if not any(dd in r["daily_pts"] for r in extra_gp))
-    clinic = {"pts": tot_p, "rev": tot_r, "pt_target": team_pt * elapsed, "rv_target": team_rv * elapsed,
-              "month_pt_target": team_pt * month_days, "month_rv_target": team_rv * month_days,
-              "fc_pts": tot_p / elapsed * month_days, "fc_rev": tot_r / elapsed * month_days,
-              "need_rev": (team_rv * month_days - tot_r) / remaining if remaining else 0,
-              "need_pts": (team_pt * month_days - tot_p) / remaining if remaining else 0,
-              "daily_pts": c_pts, "daily_rev": c_rev, "team_rv": team_rv, "team_pt": team_pt,
-              "vacancy_pts": gp_t["balls"] * vac_days, "vacancy_rev": gp_t["runs"] * vac_days, "vacancy_days": vac_days}
-
-    def best_worst(keys, field):
-        ks = [k for k in keys if k in c_pts]
-        if not ks:
-            return None
-        src = c_pts if field == "pts" else c_rev
-        return max(ks, key=lambda k: src[k]), min(ks, key=lambda k: src[k])
-
-    def rank(field_done, field_target, scope):
-        out = []
-        for r in rows:
-            if scope == "month":
-                done, tgt = r[field_done], r[field_target]
-            else:
-                done, tgt = r["wk_" + field_done], r["wk_" + field_target]
-            if tgt:
-                out.append((r["doctor"], done, done / tgt))
-        if not out:
-            return None
-        out.sort(key=lambda x: -x[2])
-        return out[0], out[-1]
-
-    return {"days": all_days, "first": first, "last": last, "month_days": month_days, "remaining": remaining,
-            "elapsed": elapsed, "weeks": weeks, "this_week": this_week, "rows": rows, "clinic": clinic,
-            "rank": {"month": {"pts": rank("pts", "pt_target", "month"), "rev": rank("rev", "rv_target", "month")},
-                     "week": {"pts": rank("pts", "pt_target", "week"), "rev": rank("rev", "rv_target", "week")}},
-            "best_day": {"month": {"pts": best_worst(all_days, "pts"), "rev": best_worst(all_days, "rev")},
-                         "week": {"pts": best_worst(this_week, "pts"), "rev": best_worst(this_week, "rev")}}}
