@@ -415,6 +415,14 @@ if open_regs:
 else:
     open_txt = ""
 ref_matched = L.apply_referrals(visits, refs) if refs else 0
+all_visits, all_dates = visits, dates
+if len(dates) > 1:
+    _dk = lambda d_: d_[6:10] + d_[3:5] + d_[:2]
+    _opts = ["All days"] + sorted(dates, key=_dk)
+    day_pick = st.selectbox("Day", _opts, index=0, help="The report covers several days. Pick one day to see it on its own.")
+    if day_pick != "All days":
+        visits = [v for v in visits if v["date"] == day_pick]
+        dates = [day_pick]
 ddf, idf, itdf, strips = L.summarize(visits, L.PACE[check])
 meta = f"Date {', '.join(dates)} · {len(visits)} patients · file {report_meta['name']} · uploaded {report_meta['uploaded_at']}"
 clinic = ddf[ddf["Doctor"] == "Clinic"].iloc[0]
@@ -506,7 +514,7 @@ def month_summary(last_date):
 
 
 try:
-    update_ledger(visits)
+    update_ledger(all_visits)
     MONTH = month_summary(datetime.strptime(dates[-1], "%d-%m-%Y")) if dates else None
 except Exception:  # noqa: BLE001
     MONTH = None
@@ -844,7 +852,29 @@ if MONTH and not MULTI:
   <span class="gapline {"gg" if _fo else "gb"}">{_fr}</span></div>
 </div>""", unsafe_allow_html=True)
 
-mtd = L.month_to_date(visits) if len(dates) > 1 else None
+def ledger_visits(last_date):
+    """Rebuild simple day/doctor rows from the month ledger so a one-day upload still fills the Month to date tab."""
+    led = load_ledger(f"{last_date:%Y-%m}")
+    out = []
+    for day, per in led.items():
+        dd = datetime.strptime(day, "%Y-%m-%d")
+        if dd > last_date:
+            continue
+        for name, e in per.items():
+            n = int(e.get("pts", 0))
+            for _ in range(n):
+                out.append({"date": f"{dd:%d-%m-%Y}", "doctor": name, "fm": e.get("fm", False), "runs": e.get("rev", 0.0) / n})
+    return out
+
+
+if len(all_dates) > 1:
+    mtd = L.month_to_date(all_visits)
+else:
+    try:
+        _lv = ledger_visits(datetime.strptime(dates[-1], "%d-%m-%Y")) if dates else []
+        mtd = L.month_to_date(_lv) if len({x["date"] for x in _lv}) > 1 else None
+    except Exception:  # noqa: BLE001
+        mtd = None
 tab1, tab_mtd, tab2, tab3, tab_rx, tab4, tab5 = st.tabs(["Scorecard", "Month to date", "By insurance", "Labs and procedures",
                                                          "Pharmacy", "Corrections", "Email"])
 
@@ -1039,7 +1069,7 @@ with tab3:
 with tab_mtd:
     if not mtd:
         st.markdown('<div class="empty"><b>Month to date</b> Upload a ProcedureDetails report from the 1st of the month to today '
-                    '(it must cover more than one day). This tab then shows every day, the running balance and the forecast.</div>',
+                    'or upload daily reports for at least two days of this month. This tab then shows every day, the running balance and the forecast.</div>',
                     unsafe_allow_html=True)
     else:
         C = mtd["clinic"]
