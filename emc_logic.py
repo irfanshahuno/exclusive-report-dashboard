@@ -372,8 +372,9 @@ def read_registration(file_bytes, filename=""):
 
 
 def open_files(regs):
-    """Registered visits whose file is not closed yet (Status column of the Registration List)."""
-    return [r for r in regs if r.get("status") and "CLOS" not in r["status"]]
+    """Registered visits the clinic has not closed yet. HIS Status: Nurse = with nurse, Doctor = doctor to close,
+    Bill = reception to bill. Cash / Open / Closed come after billing, so they are done for the clinic."""
+    return [r for r in regs if r.get("status") in ("BILL", "NURSE", "DOCTOR")]
 
 
 def read_rxmatch(file_bytes, filename=""):
@@ -462,7 +463,7 @@ def add_free_followups(visits, regs):
     fm_docs = {v["doctor"] for v in visits if v.get("fm")} | {n for n, fm in TEAM if fm}
     added = 0
     for r in regs:
-        if "FOLLOW" not in r["visit_type"]:
+        if "FOLLOW" not in r["visit_type"] or "CANCEL" in r.get("status", ""):
             continue
         if (r["emr"], r["doctor"], r["date"]) in have:
             continue
