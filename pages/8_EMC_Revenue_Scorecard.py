@@ -83,25 +83,6 @@ h1,h2,h3{font-family:'Barlow Semi Condensed', 'Arial Narrow', sans-serif !import
 .hnote{font-size:12.5px; color:#8A5A00;}
 .kpi .hl{background:#E3F1E9; color:#17553A; font-weight:700; padding:1px 7px; border-radius:6px;}
 .kpi .hl.warn{background:#FBE4E1; color:#8E1F18;}
-.mtdwrap{overflow-x:auto; margin-bottom:18px; border:1px solid var(--line); border-radius:12px;}
-.mtd{border-collapse:separate; border-spacing:0; font-size:12.5px; background:var(--card); min-width:100%;}
-.mtd th{background:var(--soft); color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; padding:7px 8px;
-        text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; position:sticky; top:0;}
-.mtd td{padding:6px 8px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; font-variant-numeric:tabular-nums;}
-.mtd th:first-child,.mtd td:first-child{text-align:left; position:sticky; left:0; background:var(--card); z-index:1; font-weight:600;}
-.mtd th:first-child{background:var(--soft);}
-.mtd td.ok{background:#E2F3E8; color:#17553A;} .mtd td.bad{background:#FBE4E1; color:#8E1F18;} .mtd td.off{color:#B5BDB8;}
-.mtd td.wk,.mtd th.wk{background:#EEF3FB; font-weight:700;} .mtd td.big{font-weight:700;}
-.mtd td.pos{color:#1E7A45; font-weight:700;} .mtd td.neg{color:#B3261E; font-weight:700;}
-.mtd tr.tot td{background:var(--soft); font-weight:700;}
-.rk{display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:6px 0 16px;}
-.rk .c{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px 12px;}
-.rk .c .h{font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--muted); font-weight:600; margin-bottom:6px;}
-.rk .c .t{font-size:13px; padding:2px 0;} .rk .c .t b{font-weight:700;}
-.mbox{display:grid; grid-template-columns:1.6fr 1fr; gap:14px; margin:-6px 0 18px;}
-.kpi.month{border:1.5px solid #1E6A49; background:#FBFDFB;}
-.mrow{display:flex; gap:28px; flex-wrap:wrap;} .warnmiss{color:#9A6200 !important; font-weight:600;}
-.monthline{margin:6px 0 2px; font-size:12.5px; color:var(--muted);}
 .rxline{margin:8px 0 2px; padding:7px 10px; border-radius:10px; font-size:12.5px;}
 .rxline.rxbad{background:#FBE4E1; color:#8E1F18;} .rxline.rxok{background:#E2F3E8; color:#17553A;}
 .empty b{display:inline !important; font:inherit !important; font-weight:700 !important; color:#18211C !important;}
@@ -403,112 +384,6 @@ for _v in visits:
     doc_visits.setdefault(_v["doctor"], []).append(_v)
 
 
-# ---------------------------------------------------------------- month ledger (daily totals kept across uploads)
-def _ledger_key(ym):
-    return f"{S3_PREFIX}ledger/{ym}.json"
-
-
-def load_ledger(ym):
-    s3, bucket = _s3()
-    if s3:
-        try:
-            return json.loads(s3.get_object(Bucket=bucket, Key=_ledger_key(ym))["Body"].read())
-        except Exception:  # noqa: BLE001
-            pass
-    f = LOCAL_DIR / f"ledger_{ym}.json"
-    try:
-        return json.loads(f.read_text()) if f.exists() else {}
-    except Exception:  # noqa: BLE001
-        return {}
-
-
-def save_ledger(ym, data):
-    body = json.dumps(data, sort_keys=True)
-    s3, bucket = _s3()
-    if s3:
-        try:
-            s3.put_object(Bucket=bucket, Key=_ledger_key(ym), Body=body.encode())
-            return
-        except Exception:  # noqa: BLE001
-            pass
-    LOCAL_DIR.mkdir(exist_ok=True)
-    (LOCAL_DIR / f"ledger_{ym}.json").write_text(body)
-
-
-def update_ledger(visits):
-    """Store each day's totals per doctor. A re-uploaded day replaces the old one, so nothing is counted twice."""
-    per = {}
-    for v in visits:
-        dd = datetime.strptime(v["date"], "%d-%m-%Y")
-        e = per.setdefault(f"{dd:%Y-%m}", {}).setdefault(f"{dd:%Y-%m-%d}", {}).setdefault(
-            v["doctor"], {"pts": 0, "rev": 0.0, "fm": bool(v.get("fm"))})
-        e["pts"] += 1
-        e["rev"] = round(e["rev"] + v["runs"], 2)
-    for ym, days in per.items():
-        led = load_ledger(ym)
-        new = dict(led)
-        new.update(days)
-        if new != led:
-            save_ledger(ym, new)
-
-
-def month_summary(last_date):
-    """Month-to-date totals from the ledger, up to the report's last date."""
-    import calendar as _c
-    ym = f"{last_date:%Y-%m}"
-    led = load_ledger(ym)
-    mdays = _c.monthrange(last_date.year, last_date.month)[1]
-    span = [last_date.replace(day=i) for i in range(1, last_date.day + 1)]
-    have = [d_ for d_ in span if f"{d_:%Y-%m-%d}" in led]
-    missing = [d_ for d_ in span if f"{d_:%Y-%m-%d}" not in led]
-    team_rv = sum(L.TARGETS["fm" if fm else "gp"]["runs"] for _, fm in L.TEAM)
-    team_pt = sum(L.TARGETS["fm" if fm else "gp"]["balls"] for _, fm in L.TEAM)
-    doc = {}
-    for d_ in have:
-        for name, e in led[f"{d_:%Y-%m-%d}"].items():
-            x = doc.setdefault(name, {"pts": 0, "rev": 0.0, "days": 0, "fm": e.get("fm", False)})
-            x["pts"] += e["pts"]; x["rev"] += e["rev"]; x["days"] += 1
-    for x in doc.values():
-        t = L.TARGETS["fm" if x["fm"] else "gp"]
-        x["rv_target"], x["pt_target"] = t["runs"] * x["days"], t["balls"] * x["days"]
-    pts = sum(x["pts"] for x in doc.values()); rev = sum(x["rev"] for x in doc.values())
-    elapsed = len(span); remaining = mdays - last_date.day
-    avg_r = rev / len(have) if have else 0
-    avg_p = pts / len(have) if have else 0
-    return {"label": f"1–{last_date:%d %b}", "month": f"{last_date:%B}", "elapsed": elapsed, "have": len(have), "missing": missing,
-            "pts": pts, "rev": rev, "pt_target": team_pt * elapsed, "rv_target": team_rv * elapsed,
-            "fc_rev": rev + avg_r * remaining, "fc_pts": pts + avg_p * remaining,
-            "month_rv_target": team_rv * mdays, "month_pt_target": team_pt * mdays, "remaining": remaining,
-            "need_rev": (team_rv * mdays - rev) / remaining if remaining else 0,
-            "need_pts": (team_pt * mdays - pts) / remaining if remaining else 0,
-            "team_rv": team_rv, "team_pt": team_pt, "doc": doc}
-
-
-try:
-    update_ledger(visits)
-    MONTH = month_summary(datetime.strptime(dates[-1], "%d-%m-%Y")) if dates else None
-except Exception:  # noqa: BLE001
-    MONTH = None
-
-
-def month_missing_txt():
-    if not MONTH or not MONTH["missing"]:
-        return ""
-    m = MONTH["missing"]
-    shown = ", ".join(f"{d_:%a %d}" for d_ in m[:6]) + (f" +{len(m) - 6} more" if len(m) > 6 else "")
-    return f"data for {MONTH['have']} of {MONTH['elapsed']} days · missing: {shown}"
-
-
-def month_doc_line(name):
-    if not MONTH or name not in MONTH["doc"]:
-        return ""
-    x = MONTH["doc"][name]
-    bal = x["rev"] - x["rv_target"]
-    return (f"Month {MONTH['label']}: <b>{fmt(x['rev'])}</b> / {fmt(x['rv_target'])} · "
-            f"<b style='color:{'#1E7A45' if bal >= 0 else '#B3261E'}'>{'+' if bal >= 0 else '−'}{fmt(abs(bal))}</b>"
-            f" · {x['pts']} / {x['pt_target']} patients · {x['days']} days")
-
-
 def items_text(v):
     return " + ".join(f'{L.item_name(c["code"], c["name"])} ({money(PR(c))})' for c in v["items"])
 
@@ -573,55 +448,8 @@ def four_pills(vs):
                    for (n, pr), k in sorted(cnt.items(), key=lambda x: (-x[1], x[0][0])))
 
 
-def day_chips_html(vs, fm=False, money_=True, email=False):
-    """One chip per day for multi-day reports (replaces the long ball strip)."""
-    if not MULTI:
-        return ""
-    t = L.TARGETS["fm" if fm else "gp"]
-    per = {}
-    for v in vs:
-        e = per.setdefault(v["date"], [0, 0.0]); e[0] += 1; e[1] += v["runs"]
-    out = []
-    for s in dates:
-        if s not in per:
-            bg, fg, bd, txt = "#F2F5F1", "#9AA79F", "#E1E6E0", "off"
-        else:
-            pts, rv = per[s]
-            ok = (rv >= t["runs"]) if money_ else (pts >= t["balls"])
-            bg, fg, bd = ("#E2F3E8", "#17553A", "#A9D8B9") if (ok and money_) else (("#FBE4E1", "#8E1F18", "#F1B8B1") if money_ else ("#E8F0FB", "#22488F", "#C5D3F3"))
-            txt = f"{pts} pts · {fmt(rv)}" if money_ else f"{pts} patients"
-        lab = _d(s).strftime("%a %d")
-        tag = "td" if email else "span"
-        style = (f"background:{bg};color:{fg};border:1px solid {bd};border-radius:10px;padding:5px 9px;font-size:12px;"
-                 "text-align:center;line-height:1.35;white-space:nowrap;")
-        out.append(f'<{tag} style="{style}{"" if email else "display:inline-block;margin:0 6px 6px 0;"}"><b>{lab}</b><br>{txt}</{tag}>')
-    if email:
-        rows = "".join("<tr>" + "".join(out[i:i + 7]) + "</tr>" for i in range(0, len(out), 7))
-        return f'<table role="presentation" cellpadding="0" cellspacing="5" border="0" style="margin-left:-5px;">{rows}</table>'
-    return "".join(out)
-
-
-def six_pills_grouped(vs):
-    """Multi-day: same combination of services counted once with ×N (instead of one pill per claim)."""
-    if not vs:
-        return "–"
-    cnt = {}
-    for v in vs:
-        k = tuple(sorted(L.item_name(c["code"], c["name"]) for c in v["items"]))
-        cnt[k] = cnt.get(k, 0) + 1
-    out = []
-    for k, n in sorted(cnt.items(), key=lambda x: -x[1])[:10]:
-        txt = " <b style=\"color:#1E6A49\">+</b> ".join(E(x) for x in k) + (f' <b>×{n}</b>' if n > 1 else "")
-        out.append(_pill(txt, "#E3F1E9", "#17553A", "#BFDCCB").replace("white-space:nowrap;", "white-space:normal;"))
-    if len(cnt) > 10:
-        out.append(_pill(f"+{len(cnt) - 10} more combinations", "#EEF1EF", "#5D6A62", "#E1E6E0"))
-    return "".join(out)
-
-
 def six_pills(vs):
     """One pill per claim, so you can see which services were on the same patient."""
-    if MULTI:
-        return six_pills_grouped(vs)
     if not vs:
         return "–"
     out = []
@@ -655,9 +483,7 @@ def empty_note(d):
     return ""
 
 
-import calendar as _cal
-_last = datetime.strptime(dates[-1], "%d-%m-%Y") if dates else datetime.now()
-MONTH_DAYS = _cal.monthrange(_last.year, _last.month)[1]   # clinic open every day
+MONTH_DAYS = 26
 RX_TARGET = 1.0     # pharmacy capture target: every prescription filled at our pharmacy
 
 
@@ -691,7 +517,7 @@ def hiring_card_html(d):
     return (f'<div class="doc hire"><div class="top"><div><div class="name"><span class="hico">+</span>New GP needed</div>'
             f'<div class="role">Replacing Dr. Mahedi · General Practice</div></div><span class="pill p-HIRE">HIRING</span></div>'
             f'<div class="hrow"><div class="hbox"><span>{period}</span><b>{int(d["Balls target"]):,} patients</b><b>{fmt(d["Runs target (day)"])} AED</b></div>'
-            f'<div class="hbox big"><span>Missing a month ({MONTH_DAYS} days)</span><b>{pts * MONTH_DAYS:,} patients</b><b>{fmt(rev * MONTH_DAYS)} AED</b></div></div>'
+            f'<div class="hbox big"><span>Missing a month ({MONTH_DAYS} working days)</span><b>{pts * MONTH_DAYS:,} patients</b><b>{fmt(rev * MONTH_DAYS)} AED</b></div></div>'
             f'<div class="hnote">The clinic target of 200 patients and 22,192 a day includes this place.</div></div>')
 
 
@@ -758,21 +584,9 @@ def top_items(vs, n=6):
     return out
 
 
-def _d(s):
-    return datetime.strptime(s, "%d-%m-%Y")
-
-
-MULTI = len(dates) > 1
-if MULTI:
-    _a, _b = _d(dates[0]), _d(dates[-1])
-    PERIOD = (f"{_a:%a %d} – {_b:%a %d %b %Y}" if (_a.month, _a.year) == (_b.month, _b.year)
-              else f"{_a:%a %d %b} – {_b:%a %d %b %Y}") + f" · {(_b - _a).days + 1} days"
-else:
-    PERIOD = f"{_d(dates[0]):%a %d %b %Y}" if dates else ""
-
 st.markdown(f"""
 <div class="hero"><div><h1>EMC Revenue Scorecard</h1>
-<p>{E(PERIOD)} &nbsp;·&nbsp; {len(visits)} patients &nbsp;·&nbsp; {len(docs)} doctors &nbsp;·&nbsp; {E(check)} check</p></div>
+<p>{E(', '.join(dates))} &nbsp;·&nbsp; {len(visits)} patients &nbsp;·&nbsp; {len(docs)} doctors &nbsp;·&nbsp; {E(check)} check</p></div>
 <div class="chips"><span class="chip">{len(logdf)} corrections applied</span><span class="chip">{E(report_meta["name"])}</span><span class="chip">Uploaded {E(report_meta["uploaded_at"])}</span></div></div>
 """, unsafe_allow_html=True)
 
@@ -804,27 +618,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-if MONTH and not MULTI:
-    _M = MONTH
-    _mr, _mo = gap(_M["rev"], _M["rv_target"])
-    _pr, _po = gap(_M["pts"], _M["pt_target"])
-    _fr, _fo = gap(_M["fc_rev"], _M["month_rv_target"])
-    _miss = month_missing_txt()
-    st.markdown(f"""
-<div class="mbox">
- <div class="kpi month"><div class="lbl">Month so far · {_M["label"]}</div>
-  <div class="mrow"><div><div class="val">{fmt(_M["rev"])} <small>/ {fmt(_M["rv_target"])} revenue</small></div><span class="gapline {"gg" if _mo else "gb"}">{_mr}</span></div>
-  <div><div class="val">{int(_M["pts"]):,} <small>/ {int(_M["pt_target"]):,} patients</small></div><span class="gapline {"gg" if _po else "gb"}">{_pr}</span></div></div>
-  {f'<div class="sub warnmiss">⚠ {_miss}</div>' if _miss else ""}</div>
- <div class="kpi month"><div class="lbl">Forecast · {_M["month"]}</div>
-  <div class="val">{fmt(_M["fc_rev"])} <small>/ {fmt(_M["month_rv_target"])}</small></div>
-  <div class="sub">needed <b>{fmt(max(_M["need_rev"], 0))} a day</b> for the last {_M["remaining"]} days (normal {fmt(_M["team_rv"])})</div>
-  <span class="gapline {"gg" if _fo else "gb"}">{_fr}</span></div>
-</div>""", unsafe_allow_html=True)
-
-mtd = L.month_to_date(visits) if len(dates) > 1 else None
-tab1, tab_mtd, tab2, tab3, tab_rx, tab4, tab5 = st.tabs(["Scorecard", "Month to date", "By insurance", "Labs and procedures",
-                                                         "Pharmacy", "Corrections", "Email"])
+tab1, tab2, tab3, tab_rx, tab4, tab5 = st.tabs(["Scorecard", "By insurance", "Labs and procedures", "Pharmacy", "Corrections", "Email"])
 
 # ---------------------------------------------------------------- scorecard
 with tab1:
@@ -842,17 +636,13 @@ with tab1:
                   f'<div class="sm">{fmt(d["Runs"])} runs · {d["% of day"]}% of target · {d["Scoring"]} scoring</div></div></div>')
     st.markdown(f'<div class="board">{board}</div>', unsafe_allow_html=True)
     cards = ""
-    absent = []
     for rank, d in ranked.iterrows():
         if d.get("Vacancy"):
             cards += hiring_card_html(d)
             continue
         key = str(d["Doctor"]).replace(" (FM)", "")
-        if not d["Balls"]:
-            absent.append(key)
-            continue
         vs = doc_visits.get(key, [])
-        strip = day_chips_html(vs, "(FM)" in str(d["Doctor"])) if MULTI else "".join(ball_html(v) for v in vs)
+        strip = "".join(ball_html(v) for v in vs)
         rv = [v for v in vs if v.get("ref")]
         if rv:
             dest = {}
@@ -876,9 +666,9 @@ with tab1:
         cards += f"""
         <div class="doc st-{st_cls}">
           <div class="top"><div><div class="name">{f'<span class="rank r{rank+1}">{rank+1}</span>' if d["Balls"] else '<span class="rank">–</span>'}{E(key)}</div>
-            <div class="role">{"Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice"}{" · new GP needed" if d.get("Vacancy") else ""} · target {fmt(d["Runs target (day)"])}{f" for {int(d['Days worked'])} days worked" if MULTI else ""}</div></div>
+            <div class="role">{"Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice"}{" · new GP needed" if d.get("Vacancy") else ""} · target {fmt(d["Runs target (day)"])}</div></div>
             <span class="pill p-{st_cls}" title="ON TRACK = runs and scoring at pace · CLOSE = runs at 80% of pace or more · BEHIND = under 80%">{STATUS_LABEL.get(st_cls, E(str(d["Status"])))}</span></div>
-          <div class="score"><span class="runs">{fmt(d["Runs"])}</span><span class="of">runs of {fmt(d["Runs needed"])} needed by {E(check)} · {d["% of day"]}% of {"target" if MULTI else "day target"}</span></div>
+          <div class="score"><span class="runs">{fmt(d["Runs"])}</span><span class="of">runs of {fmt(d["Runs needed"])} needed by {E(check)} · {d["% of day"]}% of day target</span></div>
           <div class="bar"><i style="width:{min(ratio,1)*100:.0f}%"></i></div>
           <div class="stats">
             <div class="stat"><b>{d["Balls"]}<small>/{int(d["Balls target"])}</small></b><span>Balls</span></div>
@@ -895,15 +685,11 @@ with tab1:
           {empty_note(d) or f'<div class="strip">{strip}</div><div class="made chips-row">{made}</div>'}
           {f'<div class="made">{ref_line}</div>' if ref_line else ""}
           {f'<div class="made">Free follow-ups: <b>{int(d["Follow-ups"])}</b> (no bill, counted in dots)</div>' if d.get("Follow-ups") else ""}
-          {f'<div class="monthline">{month_doc_line(key)}</div>' if (MONTH and not MULTI and month_doc_line(key)) else ""}
           {rx_line_html(key)}
           {f'<div class="need">{fmt(d["Runs"] / max(d["Balls"],1))} AED per ball</div>' if d["Balls"] else ""}
         </div>"""
     cards = "".join(ln.strip() for ln in cards.splitlines())   # no blank/indented lines, or Markdown shows raw HTML
     st.markdown(f'<div class="docs">{cards}</div>', unsafe_allow_html=True)
-    if absent:
-        st.markdown(f'<div class="empty" style="margin-top:10px">Not working {"in this period" if MULTI else "today"}: '
-                    + " · ".join(f"<b>{E(a)}</b>" for a in absent) + '</div>', unsafe_allow_html=True)
     st.markdown('<div class="note" style="margin-top:8px">Hover a ball to see the insurance, EMR number, items and runs.</div>',
                 unsafe_allow_html=True)
 
@@ -1012,129 +798,6 @@ with tab3:
     if not any_items:
         st.markdown('<div class="empty"><b>No labs or procedures</b>Every patient in this report had a consultation only.</div>',
                     unsafe_allow_html=True)
-
-# ---------------------------------------------------------------- month to date
-with tab_mtd:
-    if not mtd:
-        st.markdown('<div class="empty"><b>Month to date</b> Upload a ProcedureDetails report from the 1st of the month to today '
-                    '(it must cover more than one day). This tab then shows every day, the running balance and the forecast.</div>',
-                    unsafe_allow_html=True)
-    else:
-        C = mtd["clinic"]
-        dts = mtd["days"]
-        rem = mtd["remaining"]
-        mname = f'{mtd["last"]:%B %Y}'
-
-        def g(done, tgt):
-            t, ok = gap(done, tgt)
-            return f'<span class="gapline {"gg" if ok else "gb"}">{t}</span>'
-        st.markdown(f"""
-<div class="kpis">
- <div class="kpi"><div class="lbl">Patients · 1–{mtd["last"]:%d %b}</div><div class="val">{int(C["pts"]):,} <small>/ {int(C["pt_target"]):,}</small></div>
-  <div class="sub">{mtd["elapsed"]} days × {C["team_pt"]} a day</div>{g(C["pts"], C["pt_target"])}</div>
- <div class="kpi"><div class="lbl">Revenue · 1–{mtd["last"]:%d %b}</div><div class="val">{fmt(C["rev"])} <small>/ {fmt(C["rv_target"])}</small></div>
-  <div class="sub">{mtd["elapsed"]} days × {fmt(C["team_rv"])} a day</div>{g(C["rev"], C["rv_target"])}</div>
- <div class="kpi"><div class="lbl">Forecast · {mname}</div><div class="val">{fmt(C["fc_rev"])} <small>/ {fmt(C["month_rv_target"])}</small></div>
-  <div class="sub">patients ≈ {int(C["fc_pts"]):,} / {int(C["month_pt_target"]):,} at today's pace</div>{g(C["fc_rev"], C["month_rv_target"])}</div>
- <div class="kpi"><div class="lbl">To reach the month target</div><div class="val">{fmt(max(C["need_rev"],0))} <small>/ day</small></div>
-  <div class="sub">for the last {rem} days (normal {fmt(C["team_rv"])}) · {max(int(round(C["need_pts"])),0)} patients / day</div>
-  {f'<span class="gapline gb">New GP needed: {fmt(C["vacancy_rev"])} AED · {int(C["vacancy_pts"])} patients missed ({C["vacancy_days"]} days)</span>' if C["vacancy_rev"] else ""}</div>
-</div>""", unsafe_allow_html=True)
-
-        # cumulative chart
-        import itertools
-        cum_a = list(itertools.accumulate(C["daily_rev"][d] for d in dts))
-        chart = pd.DataFrame({"Actual (cumulative)": cum_a,
-                              "Target (cumulative)": [C["team_rv"] * (i + 1) for i in range(len(dts))]},
-                             index=[d.strftime("%d %b") for d in dts])
-        st.markdown('<div class="sec">Running revenue vs target</div>', unsafe_allow_html=True)
-        st.line_chart(chart, height=240, color=["#1E6A49", "#C3CCC5"])
-
-        # rankings
-        def rk_cell(title, pair, money_=False):
-            if not pair:
-                return f'<div class="c"><div class="h">{title}</div><div class="t">–</div></div>'
-            (tn, tv, tp), (ln, lv, lp) = pair
-            f_ = (lambda x: fmt(x)) if money_ else (lambda x: f"{int(x):,}")
-            return (f'<div class="c"><div class="h">{title}</div>'
-                    f'<div class="t">🏆 <b>{E(tn)}</b> · {f_(tv)} ({tp:.0%})</div>'
-                    f'<div class="t">🔻 <b>{E(ln)}</b> · {f_(lv)} ({lp:.0%})</div></div>')
-
-        def day_cell(title, pair, money_=False):
-            if not pair:
-                return f'<div class="c"><div class="h">{title}</div><div class="t">–</div></div>'
-            b, w = pair
-            src = C["daily_rev"] if money_ else C["daily_pts"]
-            f_ = (lambda x: fmt(x)) if money_ else (lambda x: f"{int(x):,}")
-            return (f'<div class="c"><div class="h">{title}</div>'
-                    f'<div class="t">🏆 Best <b>{b:%a %d %b}</b> · {f_(src[b])}</div>'
-                    f'<div class="t">🔻 Worst <b>{w:%a %d %b}</b> · {f_(src[w])}</div></div>')
-        R, B = mtd["rank"], mtd["best_day"]
-        st.markdown('<div class="sec">Top and lowest doctors (by % of target, days worked only)</div><div class="rk">'
-                    + rk_cell("Month · patients", R["month"]["pts"]) + rk_cell("Month · revenue", R["month"]["rev"], True)
-                    + rk_cell("This week · patients", R["week"]["pts"]) + rk_cell("This week · revenue", R["week"]["rev"], True)
-                    + '</div><div class="sec">Whole clinic · best and worst day</div><div class="rk">'
-                    + day_cell("Month · patients", B["month"]["pts"]) + day_cell("Month · revenue", B["month"]["rev"], True)
-                    + day_cell("This week · patients", B["week"]["pts"]) + day_cell("This week · revenue", B["week"]["rev"], True)
-                    + '</div>', unsafe_allow_html=True)
-
-        def mtd_table(kind):
-            money_ = kind == "rev"
-            f_ = (lambda x: fmt(x)) if money_ else (lambda x: f"{int(round(x)):,}")
-            head = "<tr><th>Doctor</th>"
-            for w in mtd["weeks"]:
-                for d in w["days"]:
-                    head += f"<th>{d:%a}<br>{d:%d}</th>"
-                head += f'<th class="wk">{E(w["label"].split(" (")[0])}</th>'
-            head += ("<th>Days</th><th>Total</th><th>Target</th><th>Balance</th>"
-                     f"<th>Forecast {mtd['last']:%b}</th><th>Month target</th><th>Needed / day</th><th>Trend</th></tr>")
-            body = ""
-            for r in mtd["rows"]:
-                daily = r["daily_rev" if money_ else "daily_pts"]
-                tgt_day = r["daily_rv_target" if money_ else "daily_pt_target"]
-                tr = f'<tr><td>{E(r["doctor"])}</td>'
-                for w in mtd["weeks"]:
-                    wsum = 0
-                    for d in w["days"]:
-                        if d in daily:
-                            val = daily[d]; wsum += val
-                            tr += f'<td class="{"ok" if val >= tgt_day else "bad"}">{f_(val)}</td>'
-                        else:
-                            tr += '<td class="off">–</td>'
-                    tr += f'<td class="wk">{f_(wsum)}</td>'
-                tot = r["rev" if money_ else "pts"]; tg = r["rv_target" if money_ else "pt_target"]
-                bal = tot - tg
-                need = r["need_rev" if money_ else "need_pts"]
-                tr += (f'<td>{r["days_worked"]}</td><td class="big">{f_(tot)}</td><td>{f_(tg)}</td>'
-                       f'<td class="{"pos" if bal >= 0 else "neg"}">{"+" if bal >= 0 else ""}{f_(bal)}</td>'
-                       f'<td class="big">{f_(r["fc_rev" if money_ else "fc_pts"])}</td><td>{f_(r["month_rv_target" if money_ else "month_pt_target"])}</td>'
-                       f'<td class="{"neg" if need > tgt_day else ""}">{f_(max(need, 0)) if rem else "–"}</td>'
-                       f'<td>{r["trend"]}</td></tr>')
-                body += tr
-            daily = C["daily_rev" if money_ else "daily_pts"]
-            tgt_day = C["team_rv" if money_ else "team_pt"]
-            tr = '<tr class="tot"><td>Clinic</td>'
-            for w in mtd["weeks"]:
-                wsum = 0
-                for d in w["days"]:
-                    val = daily[d]; wsum += val
-                    tr += f'<td class="{"ok" if val >= tgt_day else "bad"}">{f_(val)}</td>'
-                tr += f'<td class="wk">{f_(wsum)}</td>'
-            tot = C["rev" if money_ else "pts"]; tg = C["rv_target" if money_ else "pt_target"]; bal = tot - tg
-            need = C["need_rev" if money_ else "need_pts"]
-            tr += (f'<td>{mtd["elapsed"]}</td><td>{f_(tot)}</td><td>{f_(tg)}</td>'
-                   f'<td class="{"pos" if bal >= 0 else "neg"}">{"+" if bal >= 0 else ""}{f_(bal)}</td>'
-                   f'<td>{f_(C["fc_rev" if money_ else "fc_pts"])}</td><td>{f_(C["month_rv_target" if money_ else "month_pt_target"])}</td>'
-                   f'<td>{f_(max(need, 0)) if rem else "–"}</td><td></td></tr>')
-            return f'<div class="mtdwrap"><table class="mtd"><thead>{head}</thead><tbody>{body}{tr}</tbody></table></div>'
-
-        st.markdown('<div class="sec">Revenue by day (insurance share)</div>' + mtd_table("rev"), unsafe_allow_html=True)
-        st.markdown('<div class="sec">Patients by day</div>' + mtd_table("pts"), unsafe_allow_html=True)
-        st.markdown('<div class="note">Green day = target met (3,639 / 34 for GP, 3,997 / 30 for FM, 22,192 / 200 for the clinic) · red = short · '
-                    '– = not working that day. A doctor\'s target counts only the days they worked. Forecast = average per day so far × days in the month. '
-                    'Trend compares the last 7 days with the 7 days before. The clinic target includes the new GP place.</div>',
-                    unsafe_allow_html=True)
-
 
 # ---------------------------------------------------------------- pharmacy
 with tab_rx:
@@ -1412,71 +1075,6 @@ def build_excel(only=None):
         wl.column_dimensions[get_column_letter(i)].width = w
 
     del wb["Balls"]   # not wanted in the Excel
-    if mtd and not only:
-        wm = wb.create_sheet("Month to date"); wm.sheet_view.showGridLines = False
-        C = mtd["clinic"]
-        ncols = 2 + sum(len(w["days"]) + 1 for w in mtd["weeks"]) + 8
-        banner(wm, 1, f"Month to date · 1–{mtd['last']:%d %b %Y}", min(ncols, 20),
-               f"Forecast for {mtd['last']:%B}: {fmt(C['fc_rev'])} of {fmt(C['month_rv_target'])} · needed {fmt(max(C['need_rev'], 0))} a day for the last {mtd['remaining']} days")
-        r = 4
-        summary = [("Patients", C["pts"], C["pt_target"], C["fc_pts"], C["month_pt_target"], "#,##0"),
-                   ("Revenue", C["rev"], C["rv_target"], C["fc_rev"], C["month_rv_target"], "#,##0")]
-        header(wm, r, ["", "Done", "Target so far", "Balance", "Forecast month", "Month target", "Forecast gap"]); r += 1
-        for nm, done, tg, fc, mt, nf in summary:
-            body_cell(wm, r, 1, nm, bold=True, align=left); body_cell(wm, r, 2, done, nf, bold=True); body_cell(wm, r, 3, tg, nf)
-            for col, val in ((4, done - tg), (7, fc - mt)):
-                ok = val >= 0
-                body_cell(wm, r, col, val, nf, bold=True, color="1E7A45" if ok else "B3261E", bg="E2F3E8" if ok else "FBE4E1")
-            body_cell(wm, r, 5, fc, nf, bold=True); body_cell(wm, r, 6, mt, nf)
-            r += 1
-        if C["vacancy_rev"]:
-            body_cell(wm, r, 1, f"New GP needed: {fmt(C['vacancy_rev'])} AED · {int(C['vacancy_pts'])} patients missed ({C['vacancy_days']} days)",
-                      bold=True, color="8A5A00", bg="FBEBC8", align=Alignment(horizontal="left", vertical="center", wrap_text=False))
-            r += 1
-        r += 1
-        for kind, title in (("rev", "Revenue by day (insurance share)"), ("pts", "Patients by day")):
-            money_ = kind == "rev"
-            wm.cell(r, 1, title).font = Font(bold=True, size=12, color=G_DARK); r += 1
-            heads = ["Doctor"]
-            for w in mtd["weeks"]:
-                heads += [f"{d:%a %d}" for d in w["days"]] + [w["label"].split(" (")[0]]
-            heads += ["Days", "Total", "Target", "Balance", "Forecast", "Month target", "Needed / day", "Trend"]
-            header(wm, r, heads); r += 1
-            nf = "#,##0"
-            allrows = mtd["rows"] + [None]
-            for row in allrows:
-                if row is None:
-                    name, daily, tday = "Clinic", C["daily_rev" if money_ else "daily_pts"], C["team_rv" if money_ else "team_pt"]
-                    tot, tg = C["rev" if money_ else "pts"], C["rv_target" if money_ else "pt_target"]
-                    fc, mt, need, days_w, trend = C["fc_rev" if money_ else "fc_pts"], C["month_rv_target" if money_ else "month_pt_target"], C["need_rev" if money_ else "need_pts"], mtd["elapsed"], ""
-                else:
-                    name, daily, tday = row["doctor"], row["daily_rev" if money_ else "daily_pts"], row["daily_rv_target" if money_ else "daily_pt_target"]
-                    tot, tg = row["rev" if money_ else "pts"], row["rv_target" if money_ else "pt_target"]
-                    fc, mt, need, days_w, trend = row["fc_rev" if money_ else "fc_pts"], row["month_rv_target" if money_ else "month_pt_target"], row["need_rev" if money_ else "need_pts"], row["days_worked"], row["trend"]
-                c = 1
-                body_cell(wm, r, c, name, bold=True, align=left, bg=SOFT if row is None else None); c += 1
-                for w in mtd["weeks"]:
-                    ws_ = 0
-                    for d in w["days"]:
-                        if d in daily:
-                            val = daily[d]; ws_ += val
-                            ok = val >= tday
-                            body_cell(wm, r, c, val, nf, color="17553A" if ok else "8E1F18", bg="E2F3E8" if ok else "FBE4E1")
-                        else:
-                            body_cell(wm, r, c, "–", color="B5BDB8")
-                        c += 1
-                    body_cell(wm, r, c, ws_, nf, bold=True, bg="EEF3FB"); c += 1
-                bal = tot - tg
-                for val, fmt_, kw in ((days_w, None, {}), (tot, nf, {"bold": True}), (tg, nf, {}),
-                                      (bal, nf, {"bold": True, "color": "1E7A45" if bal >= 0 else "B3261E"}),
-                                      (fc, nf, {"bold": True}), (mt, nf, {}), (max(need, 0), nf, {}), (trend, None, {})):
-                    body_cell(wm, r, c, val, fmt_, bg=SOFT if row is None else None, **kw); c += 1
-                r += 1
-            r += 1
-        wm.column_dimensions["A"].width = 30
-        for i in range(2, ncols + 1):
-            wm.column_dimensions[get_column_letter(i)].width = 9
-        wm.freeze_panes = "B6"
     if rx and (not only or rx_for(only)):
         wp = wb.create_sheet("Pharmacy"); wp.sheet_view.showGridLines = False
         pcols = ["Doctor / insurer", "Patients with Rx", "Filled", "Fill %", "Lost", "Meds prescribed", "Meds given", "Given %", "Missed lines"]
@@ -1502,7 +1100,7 @@ def build_excel(only=None):
         for i, w in enumerate([26, 15, 9, 9, 8, 15, 12, 10, 12], 1):
             wp.column_dimensions[get_column_letter(i)].width = w
     for s in wb.worksheets:
-        s.sheet_properties.tabColor = {"Scorecard": G, "Balls": GREY, "By insurance": BLUE, "Labs and procedures": ORNG, "Pharmacy": "8E1F18", "Month to date": "2F5FC9"}[s.title]
+        s.sheet_properties.tabColor = {"Scorecard": G, "Balls": GREY, "By insurance": BLUE, "Labs and procedures": ORNG, "Pharmacy": "8E1F18"}[s.title]
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -1636,40 +1234,8 @@ def _email_html(only=None, safe=False):
     out.append(f'<tr><td bgcolor="#1E6A49" style="background:#1E6A49;background-image:linear-gradient(135deg,#16492F,#1E6A49 60%,#2A8A5E);'
                f'border-radius:16px;padding:22px 26px;color:#ffffff;">'
                f'<div style="font:bold 26px Arial,sans-serif;color:#ffffff;">{("Your scorecard · " + E(only)) if only else "EMC Revenue Scorecard"}</div>'
-               f'<div style="font-size:14px;color:#DDEFE5;padding-top:6px;">{E(PERIOD)} &nbsp;·&nbsp; {len(visits)} patients{"" if only else f" &nbsp;·&nbsp; {len(docs)} doctors"} &nbsp;·&nbsp; <b style="color:#ffffff;">{E(check)} check</b></div>'
+               f'<div style="font-size:14px;color:#DDEFE5;padding-top:6px;">{E(", ".join(dates))} &nbsp;·&nbsp; {len(visits)} patients{"" if only else f" &nbsp;·&nbsp; {len(docs)} doctors"} &nbsp;·&nbsp; <b style="color:#ffffff;">{E(check)} check</b></div>'
                f'<div style="font-size:12px;color:#BFE0CE;padding-top:8px;">{"" if only else f"{len(logdf)} corrections applied &nbsp;·&nbsp; "}uploaded {E(report_meta["uploaded_at"])}</div></td></tr>')
-    # TODAY box (management email, multi-day report)
-    if MULTI and mtd and not only and not safe:
-        C = mtd["clinic"]; dl = mtd["days"]
-        td_ = dl[-1]
-        yd = next((x for x in reversed(dl[:-1]) if C["daily_pts"].get(x)), None)   # last earlier day with patients
-        tr_, tp_ = C["daily_rev"][td_], C["daily_pts"][td_]
-
-        def vs_y(now, prev, money_):
-            if prev is None:
-                return ""
-            dlt = now - prev
-            col = "#1E7A45" if dlt >= 0 else "#B3261E"
-            return (f'<span style="color:{col};font-size:12.5px;font-weight:bold;">&nbsp;{"&#9650;" if dlt >= 0 else "&#9660;"} '
-                    f'{fmt(abs(dlt)) if money_ else int(abs(dlt))} vs {"yesterday" if (td_ - yd).days == 1 else f"{yd:%a %d}"}</span>')
-        working = [(r_["doctor"], r_["daily_rev"][td_], r_["daily_rev"][td_] / r_["daily_rv_target"]) for r_ in mtd["rows"] if td_ in r_["daily_rev"]]
-        off = [r_["doctor"] for r_ in mtd["rows"] if td_ not in r_["daily_rev"] and r_["doctor"] in {n for n, _ in L.TEAM}]
-        out.append(f'<tr><td style="padding-top:12px;"><table {T} width="100%" bgcolor="#ffffff" style="background:#ffffff;border:2px solid #1E6A49;border-radius:14px;">'
-                   f'<tr><td style="padding:16px 20px;">'
-                   f'<div style="font-size:11px;letter-spacing:1px;text-transform:uppercase;color:#1E6A49;font-weight:bold;">Today · {td_:%a %d %b}</div>'
-                   f'<table {T} style="margin-top:6px;"><tr>'
-                   f'<td style="padding-right:26px;"><span style="font:bold 30px Arial,sans-serif;color:{INK};">{fmt(tr_)}</span>'
-                   f'<span style="color:{MUT};font-size:14px;"> / {fmt(C["team_rv"])} revenue</span>{vs_y(tr_, C["daily_rev"][yd] if yd else None, True)}'
-                   f'<div style="padding-top:4px;">{gap_pill(tr_, C["team_rv"])}</div></td>'
-                   f'<td><span style="font:bold 30px Arial,sans-serif;color:{INK};">{int(tp_)}</span>'
-                   f'<span style="color:{MUT};font-size:14px;"> / {C["team_pt"]} patients</span>{vs_y(tp_, C["daily_pts"][yd] if yd else None, False)}'
-                   f'<div style="padding-top:4px;">{gap_pill(tp_, C["team_pt"])}</div></td></tr></table>'
-                   f'<div style="font-size:12.5px;color:{MUT};padding-top:8px;">Working today: '
-                   + " · ".join(f'{E(n)} <b>{fmt(v)}</b> ({pc:.0%})' for n, v, pc in sorted(working, key=lambda x: -x[2]))
-                   + (f' &nbsp;|&nbsp; Off: {", ".join(E(n) for n in off)}' if off else "") + '</div>'
-                   '</td></tr></table></td></tr>'
-                   f'<tr><td style="font-size:11px;letter-spacing:1px;text-transform:uppercase;color:{MUT};font-weight:bold;padding:16px 0 0;">'
-                   f'Whole period · {E(PERIOD)}</td></tr>')
     # KPIs (management email only)
     if not only:
       out.append(f'<tr><td style="padding-top:12px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
@@ -1686,119 +1252,28 @@ def _email_html(only=None, safe=False):
                   if rx and rx["totals"]["PATIENTS WITH RX"] else
                   kpi("Runs per ball", f'{clinic["Runs"] / max(clinic["Balls"], 1):,.0f}', "AED", "Insurance money per patient"))
                + '</tr></table></td></tr>')
-    # month so far (management email, daily report)
-    if MONTH and not MULTI and not only and not safe:
-        M = MONTH
-        miss = month_missing_txt()
-        out.append(f'<tr><td style="padding-top:4px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
-                   f'<td width="60%" valign="top" bgcolor="#FBFDFB" style="background:#FBFDFB;border:2px solid #1E6A49;border-radius:12px;padding:14px;">'
-                   f'<div style="font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:#1E6A49;font-weight:bold;">Month so far · {M["label"]}</div>'
-                   f'<table {T} style="margin-top:6px;"><tr>'
-                   f'<td style="padding-right:22px;"><span style="font:bold 24px Arial,sans-serif;color:{INK};">{fmt(M["rev"])}</span>'
-                   f'<span style="font-size:12.5px;color:{MUT};"> / {fmt(M["rv_target"])} revenue</span><div style="padding-top:4px;">{gap_pill(M["rev"], M["rv_target"])}</div></td>'
-                   f'<td><span style="font:bold 24px Arial,sans-serif;color:{INK};">{int(M["pts"]):,}</span>'
-                   f'<span style="font-size:12.5px;color:{MUT};"> / {int(M["pt_target"]):,} patients</span><div style="padding-top:4px;">{gap_pill(M["pts"], M["pt_target"])}</div></td></tr></table>'
-                   + (f'<div style="font-size:12px;color:#9A6200;font-weight:bold;padding-top:6px;">&#9888; {E(miss)}</div>' if miss else "")
-                   + '</td>'
-                   + kpi(f'Forecast {M["month"]}', fmt(M["fc_rev"]), f'/ {fmt(M["month_rv_target"])}',
-                         f'needed <b>{fmt(max(M["need_rev"], 0))} a day</b> for the last {M["remaining"]} days (normal {fmt(M["team_rv"])})',
-                         gap_pill(M["fc_rev"], M["month_rv_target"])).replace('width="25%"', 'width="40%"')
-                   + '</tr></table></td></tr>')
-    # whole period: forecast + day-by-day tables (management email, multi-day report)
-    if MULTI and mtd and not only and not safe:
-        C = mtd["clinic"]
-        same_month = mtd["first"].month == mtd["last"].month
-        if same_month:
-            out.append(f'<tr><td style="padding-top:4px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
-                       + kpi(f"Forecast {mtd['last']:%B}", fmt(C["fc_rev"]), f'/ {fmt(C["month_rv_target"])}',
-                             f'at today\'s pace · patients ≈ {int(C["fc_pts"]):,} / {int(C["month_pt_target"]):,}', gap_pill(C["fc_rev"], C["month_rv_target"]))
-                       + kpi("Needed per day from now", fmt(max(C["need_rev"], 0)), f'/ {fmt(C["team_rv"])} normal',
-                             f'for the last {mtd["remaining"]} days of {mtd["last"]:%B} · {max(int(round(C["need_pts"])), 0)} patients a day')
-                       + (kpi("New GP needed", fmt(C["vacancy_rev"]), "AED", f'missed so far · {int(C["vacancy_pts"])} patients ({C["vacancy_days"]} days)')
-                          if C["vacancy_rev"] else "")
-                       + '</tr></table></td></tr>')
-
-        def day_table(kind):
-            money_ = kind == "rev"
-            f_ = fmt if money_ else (lambda x: f"{int(round(x)):,}")
-            dl = mtd["days"]; td_ = dl[-1]
-            daily_mode = len(dl) <= 10
-            # columns: every day (short period) or each week + today (long period)
-            cols = [("d", d_) for d_ in dl] if daily_mode else \
-                   [("w", w) for w in mtd["weeks"]] + [("d", td_)]
-            HS = f'background:{SOFT};color:{MUT};font-size:10px;letter-spacing:.6px;text-transform:uppercase;padding:7px 6px;text-align:right;border-bottom:2px solid {EDGE};'
-            TODAY_H = 'background:#1E6A49;color:#ffffff;font-size:10px;letter-spacing:.6px;text-transform:uppercase;padding:7px 6px;text-align:right;'
-            head = f'<tr><th style="{HS}text-align:left;">Doctor</th>'
-            for k, c in cols:
-                if k == "d":
-                    is_t = c == td_
-                    head += f'<th style="{TODAY_H if is_t else HS}">{"Today<br>" if is_t else ""}{c:%a %d}</th>'
-                else:
-                    head += f'<th style="{HS}">{E(c["label"].split(" (")[0])}<br><span style="font-weight:normal">{c["days"][0]:%d}–{c["days"][-1]:%d %b}</span></th>'
-            head += f'<th style="{HS}">Total</th><th style="{HS}">Target</th><th style="{HS}">Balance</th></tr>'
-
-            def cell(val, tgt, is_today, off=False):
-                bt = "border-left:2px solid #1E6A49;border-right:2px solid #1E6A49;font-weight:bold;" if is_today else ""
-                if off:
-                    return f'<td style="padding:6px;text-align:right;border-bottom:1px solid {LINE};color:#B5BDB8;font-size:11px;{bt}">off</td>'
-                ok = val >= tgt
-                bg, fg = ("#E2F3E8", "#17553A") if ok else ("#FBE4E1", "#8E1F18")
-                return f'<td bgcolor="{bg}" style="background:{bg};color:{fg};padding:6px;text-align:right;border-bottom:1px solid {LINE};font-size:12.5px;{bt}">{f_(val)}</td>'
-            body_ = ""
-            team_names = {n for n, _ in L.TEAM}
-            for r_ in mtd["rows"] + [None]:
-                if r_ is None:
-                    name, daily, tday = "Clinic", C["daily_rev" if money_ else "daily_pts"], C["team_rv" if money_ else "team_pt"]
-                    tot, tg = C["rev" if money_ else "pts"], C["rv_target" if money_ else "pt_target"]
-                    tr_st = f'background:{SOFT};font-weight:bold;'
-                else:
-                    if not r_["days_worked"]:
-                        continue
-                    name, daily, tday = r_["doctor"], r_["daily_rev" if money_ else "daily_pts"], r_["daily_rv_target" if money_ else "daily_pt_target"]
-                    tot, tg = r_["rev" if money_ else "pts"], r_["rv_target" if money_ else "pt_target"]
-                    tr_st = ""
-                row = f'<tr style="{tr_st}"><td style="padding:6px 8px;border-bottom:1px solid {LINE};font-size:12.5px;font-weight:bold;white-space:nowrap;">{E(name)}</td>'
-                for k, c in cols:
-                    if k == "d":
-                        row += cell(daily.get(c, 0), tday, c == td_, off=(r_ is not None and c not in daily))
-                    else:
-                        wd = [d_ for d_ in c["days"] if d_ in daily]
-                        if not wd:
-                            row += cell(0, 0, False, off=True)
-                        else:
-                            row += cell(sum(daily[d_] for d_ in wd), tday * len(wd), False)
-                bal = tot - tg
-                row += (f'<td style="padding:6px;text-align:right;border-bottom:1px solid {LINE};font-weight:bold;font-size:12.5px;">{f_(tot)}</td>'
-                        f'<td style="padding:6px;text-align:right;border-bottom:1px solid {LINE};color:{MUT};font-size:12.5px;">{f_(tg)}</td>'
-                        f'<td style="padding:6px;text-align:right;border-bottom:1px solid {LINE};font-weight:bold;font-size:12.5px;color:{"#1E7A45" if bal >= 0 else "#B3261E"};">'
-                        f'{"+" if bal >= 0 else "&minus;"}{f_(abs(bal))}</td></tr>')
-                body_ += row
-            return (f'<table {T} width="100%" bgcolor="#ffffff" style="background:#ffffff;border:1px solid {EDGE};border-collapse:collapse;">'
-                    f'{head}{body_}</table>')
-        out.append(section("Day by day · revenue"))
-        out.append(f'<tr><td>{day_table("rev")}</td></tr>')
-        out.append(f'<tr><td style="font-size:11.5px;color:{MUT};padding-top:6px;">Green = day target met (3,639 GP · 3,997 FM · '
-                   f'{fmt(C["team_rv"])} clinic) · red = short · off = not working · '
-                   + ("one column per week, today shown on its own. Every day is in the attached Excel. " if len(mtd["days"]) > 10 else "")
-                   + 'A doctor\'s target counts only the days they worked.</td></tr>')
-        out.append(section("Day by day · patients"))
-        out.append(f'<tr><td>{day_table("pts")}</td></tr>')
-        # rankings
-        rk = []
-        for scope_, lbl in (("month", "Whole period"), ("week", "This week")):
-            for k, kl, mon in (("pts", "patients", False), ("rev", "revenue", True)):
-                pr = mtd["rank"][scope_][k]
-                if pr:
-                    (tn, tv, tp), (ln, lv, lp) = pr
-                    f_ = fmt if mon else (lambda x: f"{int(x):,}")
-                    rk.append(f'<tr><td style="padding:6px 10px;font-size:13px;color:{MUT};border-bottom:1px solid {LINE};">{lbl} · {kl}</td>'
-                              f'<td style="padding:6px 10px;font-size:13px;border-bottom:1px solid {LINE};">&#127942; <b>{E(tn)}</b> {f_(tv)} ({tp:.0%})</td>'
-                              f'<td style="padding:6px 10px;font-size:13px;border-bottom:1px solid {LINE};color:#B3261E;">&#128315; <b>{E(ln)}</b> {f_(lv)} ({lp:.0%})</td></tr>')
-        if rk:
-            out.append(section("Top and lowest (by % of target)"))
-            out.append(f'<tr><td><table {T} width="100%" bgcolor="#ffffff" style="background:#ffffff;border:1px solid {EDGE};">' + "".join(rk) + '</table></td></tr>')
-    # top 3 (management email only; the multi-day report has its own ranking table)
-    if not only and not MULTI:
+    # legend
+    def lg(v, t):
+        return (f'<td style="padding-right:4px;"><table {T}><tr>{ball_cell(v)}</tr></table></td>'
+                f'<td style="font-size:12px;color:{MUT};padding-right:14px;white-space:nowrap;">{t}</td>')
+    if safe:
+      out.append(f'<tr><td style="padding:10px 0 4px;"><table {T}><tr>'
+               + lg({"ball": 0}, "Consultation only") + lg({"ball": 4}, "One service (lab or procedure)") + lg({"ball": 6}, "Two or more services")
+               + '</tr></table><table ' + T + ' style="margin-top:6px;"><tr>'
+               + lg({"ball": 0, "ref": {"external": False}}, "Referred to Family Medicine") + lg({"ball": 0, "ref": {"external": True}}, "Referred outside")
+               + lg({"ball": 0, "ref": {"external": False}, "ref_given": [1]}, "Referred and also tested here")
+               + lg({"ball": 0, "fu": True}, "Free follow-up")
+               + '</tr></table></td></tr>')
+    else:
+      out.append(f'<tr><td style="padding:10px 0 4px;"><table {T}><tr>'
+               + lg({"ball": 0}, "Dot · consultation only") + lg({"ball": 4}, "One lab or procedure") + lg({"ball": 6}, "Two or more")
+               + '</tr></table><table ' + T + ' style="margin-top:6px;"><tr>'
+               + lg({"ball": 0, "ref": {"external": False}}, "Referred to Family Medicine") + lg({"ball": 0, "ref": {"external": True}}, "Referred outside")
+               + lg({"ball": 0, "ref": {"external": False}, "ref_given": [1]}, "Referred but GP gave a lab or procedure")
+               + lg({"ball": 0, "fu": True}, "Dot · free follow-up (no bill)")
+               + '</tr></table></td></tr>')
+    # top 3 (management email only)
+    if not only:
       out.append(section("Top of the table"))
       out.append(f'<tr><td><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>')
       for i, d in ranked[ranked["Balls"] > 0].head(3).iterrows():
@@ -1809,29 +1284,6 @@ def _email_html(only=None, safe=False):
 
     # doctor cards
     out.append(section("Your scorecard" if only else "Doctor scorecards"))
-    legend_rows = []
-    # legend
-    def lg(v, t):
-        return (f'<td style="padding-right:4px;"><table {T}><tr>{ball_cell(v)}</tr></table></td>'
-                f'<td style="font-size:12px;color:{MUT};padding-right:14px;white-space:nowrap;">{t}</td>')
-    if safe:
-      legend_rows.append(f'<tr><td style="padding:10px 0 4px;"><table {T}><tr>'
-               + lg({"ball": 0}, "Consultation only") + lg({"ball": 4}, "One service (lab or procedure)") + lg({"ball": 6}, "Two or more services")
-               + '</tr></table><table ' + T + ' style="margin-top:6px;"><tr>'
-               + lg({"ball": 0, "ref": {"external": False}}, "Referred to Family Medicine") + lg({"ball": 0, "ref": {"external": True}}, "Referred outside")
-               + lg({"ball": 0, "ref": {"external": False}, "ref_given": [1]}, "Referred and also tested here")
-               + lg({"ball": 0, "fu": True}, "Free follow-up")
-               + '</tr></table></td></tr>')
-    else:
-      legend_rows.append(f'<tr><td style="padding:10px 0 4px;"><table {T}><tr>'
-               + lg({"ball": 0}, "Dot · consultation only") + lg({"ball": 4}, "One lab or procedure") + lg({"ball": 6}, "Two or more")
-               + '</tr></table><table ' + T + ' style="margin-top:6px;"><tr>'
-               + lg({"ball": 0, "ref": {"external": False}}, "Referred to Family Medicine") + lg({"ball": 0, "ref": {"external": True}}, "Referred outside")
-               + lg({"ball": 0, "ref": {"external": False}, "ref_given": [1]}, "Referred but GP gave a lab or procedure")
-               + lg({"ball": 0, "fu": True}, "Dot · free follow-up (no bill)")
-               + '</tr></table></td></tr>')
-    out.extend(legend_rows)
-    absent_e = []
     for rank, d in ranked.iterrows():
         if d.get("Vacancy"):
             days, pts, rev = hiring_numbers(d)
@@ -1849,14 +1301,11 @@ def _email_html(only=None, safe=False):
                 f'<td align="right" valign="top"><table {T}><tr><td bgcolor="#FBEBC8" style="background:#FBEBC8;color:#8A5A00;border:1px solid #E0A93B;border-radius:14px;padding:5px 12px;font:bold 11px Arial,sans-serif;letter-spacing:1px;">HIRING</td></tr></table></td></tr></table>'
                 f'<table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:10px -8px 4px;"><tr>'
                 + hb(period, f'{int(d["Balls target"]):,} patients', f'{fmt(d["Runs target (day)"])} AED')
-                + hb(f"Missing a month ({MONTH_DAYS} days)", f"{pts * MONTH_DAYS:,} patients", f"{fmt(rev * MONTH_DAYS)} AED", True)
+                + hb(f"Missing a month ({MONTH_DAYS} working days)", f"{pts * MONTH_DAYS:,} patients", f"{fmt(rev * MONTH_DAYS)} AED", True)
                 + f'</tr></table><div style="font-size:12.5px;color:#8A5A00;">The clinic target of 200 patients and 22,192 a day includes this place.</div>'
                 '</td></tr></table></td></tr>')
             continue
         key = str(d["Doctor"]).replace(" (FM)", "")
-        if not d["Balls"]:
-            absent_e.append(key)
-            continue
         vs = doc_visits.get(key, [])
         sk = status_key(d)
         lab, fg, bg = ST.get(sk, (STATUS_LABEL.get(sk, str(d["Status"])), "#7D8A83", "#EEF1EF"))
@@ -1875,8 +1324,7 @@ def _email_html(only=None, safe=False):
             nw = sum(1 for v in rv if v.get("ref_given"))
             if nw:
                 ref_line += f' · <b style="color:#B3261E">{nw} given a lab or procedure</b>'
-        role_extra = "" if safe else (" · target " + fmt(d["Runs target (day)"])
-                                      + (f" for {int(d['Days worked'])} days worked" if MULTI else " a day"))
+        role_extra = "" if safe else " · target " + fmt(d["Runs target (day)"]) + " a day"
         need = int(d["Scoring still needed"]) if d["Scoring still needed"] not in ("", None) else 0
         need_txt = f"Needs <b style='color:{INK}'>{need} more scoring balls</b> by {E(check)}" if need else f"<b style='color:{SIX}'>Scoring on pace</b> for {E(check)}"
         out.append(
@@ -1893,10 +1341,10 @@ def _email_html(only=None, safe=False):
             # runs (management only)
             + ((f'<table {T} style="margin-top:12px;"><tr><td style="font:bold 40px Arial,sans-serif;color:{INK};padding-right:12px;">{fmt(d["Runs"])}</td>'
                 f'<td valign="bottom" style="font-size:13.5px;color:{MUT};padding-bottom:6px;">runs of <b style="color:{INK}">{fmt(d["Runs needed"])}</b> needed by {E(check)}'
-                f' &nbsp;·&nbsp; <b style="color:{fg}">{d["% of day"]}%</b> of {"target" if MULTI else "day target"}</td></tr></table>'
+                f' &nbsp;·&nbsp; <b style="color:{fg}">{d["% of day"]}%</b> of day target</td></tr></table>'
                 f'<div style="padding:8px 0 4px;">{bar(ratio, SIX, 10)}</div>') if not safe else
                (f'<table {T} style="margin-top:12px;"><tr><td style="font:bold 40px Arial,sans-serif;color:{INK};padding-right:12px;">{int(d["Balls"])}</td>'
-                f'<td valign="bottom" style="font-size:13.5px;color:{MUT};padding-bottom:6px;">patients seen · {E(PERIOD)}</td></tr></table>'))
+                f'<td valign="bottom" style="font-size:13.5px;color:{MUT};padding-bottom:6px;">patients seen · {E(", ".join(dates))}</td></tr></table>'))
             # stats
             + f'<table {T.replace("cellspacing=\"0\"", "cellspacing=\"6\"")} width="100%" style="margin:6px -6px 4px;"><tr>'
             + ((stat(int(d["Balls"]), "Patients seen") + stat(int(d["Dots"] - d["Follow-ups"]), "Consultation only")
@@ -1915,7 +1363,7 @@ def _email_html(only=None, safe=False):
                + (f'No doctor in this place yet (Dr. Mahedi left). Each day it stays empty the clinic misses <b>{int(d["Balls target"])} patients</b> and <b>{fmt(d["Runs target (day)"])}</b> revenue.'
                   if d.get("Vacancy") else "No patients in this report.") + '</div>'
                if not vs else
-               f'<div style="padding:8px 0 6px;">{day_chips_html(vs, "(FM)" in str(d["Doctor"]), money_=not safe, email=True) if MULTI else balls(vs)}</div>'
+               f'<div style="padding:8px 0 6px;">{balls(vs)}</div>'
                f'<div style="border-top:1px solid {LINE};padding-top:8px;">{chips(vs)}</div>')
             + (f'<div style="font-size:13px;color:{MUT};padding-top:6px;">{ref_line}</div>' if ref_line else "")
             + (f'<div style="font-size:13px;color:{MUT};padding-top:6px;">Free follow-ups: <b>{int(d["Follow-ups"])}</b> (no bill, counted in dots)</div>' if d.get("Follow-ups") and not safe else "")
@@ -1924,14 +1372,9 @@ def _email_html(only=None, safe=False):
                            f'border-radius:10px;padding:8px 10px;font-size:12.5px;">Pharmacy: <b>{int(r["filled"])} / {int(r["patients"])} filled '
                            f'({r["filled"] / r["patients"]:.0%})</b> · meds given {r["given"] / max(r["presc"], 1):.0%} · <b>{int(r["missed"])}</b> missed · '
                            f'{int(r["patients"] - r["filled"])} patients lost</td></tr></table>') if r and r["patients"] and not safe else "")(rx_for(key)))
-            + (f'<div style="font-size:12.5px;color:{MUT};padding-top:6px;">{month_doc_line(key)}</div>' if (MONTH and not MULTI and not safe and month_doc_line(key)) else "")
             + ("" if safe else f'<div style="font-size:13px;color:{MUT};padding-top:8px;">{fmt(d["Runs"] / max(d["Balls"], 1))} AED per ball</div>')
             + '</td></tr></table></td></tr>')
 
-    if absent_e:
-        out.append(f'<tr><td style="padding:0 0 14px;"><table {T} width="100%"><tr><td bgcolor="#ffffff" style="background:#ffffff;border:1px dashed {EDGE};'
-                   f'border-radius:12px;padding:12px 16px;font-size:13.5px;color:{MUT};">Not working {"in this period" if MULTI else "today"}: '
-                   + " · ".join(f"<b>{E(a_)}</b>" for a_ in absent_e) + '</td></tr></table></td></tr>')
     # by insurance
     out.append(section("Your patients by insurance" if only else "Each doctor by insurance"))
     th = f'bgcolor="{SOFT}" style="background:{SOFT};color:{MUT};font-size:10.5px;letter-spacing:1px;text-transform:uppercase;padding:9px 10px;text-align:right;border-bottom:2px solid {EDGE};"'
