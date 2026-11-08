@@ -395,11 +395,23 @@ visits, logdf, dates = L.correct(lines)
 fu_added = L.add_free_followups(visits, regs) if regs else 0
 open_regs = L.open_files(regs) if regs else []
 if open_regs:
+    _who = {"BILL": "Reception", "NURSE": "Nurse", "DOCTOR": "Doctor"}
     _od = {}
     for r_ in open_regs:
-        _od[r_["doctor"] or "No doctor"] = _od.get(r_["doctor"] or "No doctor", 0) + 1
-    open_txt = (f'{len(open_regs)} files not closed yet</b> (Registration List) · '
-                + " · ".join(f"{k} {n}" for k, n in sorted(_od.items(), key=lambda x: -x[1])))
+        k_ = _who.get(r_["status"], r_["status"].title())
+        _od[k_] = _od.get(k_, 0) + 1
+    _docs = {}
+    for r_ in open_regs:
+        if r_["status"] == "DOCTOR":
+            _docs[r_["doctor"] or "No doctor"] = _docs.get(r_["doctor"] or "No doctor", 0) + 1
+    open_txt = (f'{len(open_regs)} files not closed yet</b> · to close: '
+                + " · ".join(f"{k} {n}" for k, n in sorted(_od.items(), key=lambda x: -x[1]))
+                + (" (" + ", ".join(f"{k} {n}" for k, n in _docs.items()) + ")" if _docs else ""))
+    _last = max((r_["date"] for r_ in regs), key=lambda d_: d_[6:10] + d_[3:5] + d_[:2], default="")
+    _old = [r_ for r_ in open_regs if r_["date"] != _last]
+    if _old:
+        open_txt += " · <b>" + str(len(_old)) + " from earlier days</b>: " + ", ".join(
+            f'{r_["date"][:5]} {_who.get(r_["status"], r_["status"].title())} ({r_["doctor"]}, EMR {r_["emr"]})' for r_ in _old)
 else:
     open_txt = ""
 ref_matched = L.apply_referrals(visits, refs) if refs else 0
