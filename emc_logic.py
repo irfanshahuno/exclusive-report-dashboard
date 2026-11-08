@@ -367,8 +367,13 @@ def read_registration(file_bytes, filename=""):
         out.append({"emr": emr, "visit_no": g(r, "VISIT NO"), "doctor": doc_name(g(r, "DOCTOR")),
                     "fm": "FAMILY" in g(r, "DEPARTMENT").upper(), "visit_type": g(r, "VISIT TYPE").upper(),
                     "insurance": g(r, "INSURANCE NAME"), "cash": g(r, "BILL TYPE").upper() == "CASH",
-                    "date": g(r, "REG:DATE")[:10], "name": g(r, "NAME")})
+                    "date": g(r, "REG:DATE")[:10], "name": g(r, "NAME"), "status": g(r, "STATUS").upper()})
     return out
+
+
+def open_files(regs):
+    """Registered visits whose file is not closed yet (Status column of the Registration List)."""
+    return [r for r in regs if r.get("status") and "CLOS" not in r["status"]]
 
 
 def read_rxmatch(file_bytes, filename=""):
