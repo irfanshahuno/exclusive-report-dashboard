@@ -393,6 +393,15 @@ if lines is None:
 
 visits, logdf, dates = L.correct(lines)
 fu_added = L.add_free_followups(visits, regs) if regs else 0
+open_regs = L.open_files(regs) if regs else []
+if open_regs:
+    _od = {}
+    for r_ in open_regs:
+        _od[r_["doctor"] or "No doctor"] = _od.get(r_["doctor"] or "No doctor", 0) + 1
+    open_txt = (f'{len(open_regs)} files not closed yet</b> (Registration List) · '
+                + " · ".join(f"{k} {n}" for k, n in sorted(_od.items(), key=lambda x: -x[1])))
+else:
+    open_txt = ""
 ref_matched = L.apply_referrals(visits, refs) if refs else 0
 ddf, idf, itdf, strips = L.summarize(visits, L.PACE[check])
 meta = f"Date {', '.join(dates)} · {len(visits)} patients · file {report_meta['name']} · uploaded {report_meta['uploaded_at']}"
@@ -795,6 +804,7 @@ st.markdown(f"""
 <div class="kpis">
  <div class="kpi"><div class="lbl">Patients</div><div class="val">{int(clinic["Balls"])} <small>/ {int(clinic["Balls target"])}</small></div>
   {f'<div class="sub"><span class="hl">{int(clinic["Balls"] - clinic["Follow-ups"])} billed patients</span> + {int(clinic["Follow-ups"])} free follow-ups (no bill) = {int(clinic["Balls"])} visits, same as reception</div>' if clinic.get("Follow-ups") else ""}
+  {f'<div class="sub"><b style="color:#B3261E;">{open_txt}</div>' if open_txt else ""}
   <div class="sub">GP <b>{int(clinic["GP visits"])} / {int(clinic["GP target"])}</b> · referrals <b>{int(clinic["Referrals"])} / {int(clinic["Referral allowance"])}</b>  · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen</div><span class="gapline {'gg' if pt_ok else 'gb'}">{pt_txt}</span></div>
  <div class="kpi"><div class="lbl">Revenue (runs)</div><div class="val">{fmt(clinic["Runs"])} <small>/ {fmt(clinic["Runs target (day)"])}</small></div>
   <div class="sub">insurance share, full-day target</div><span class="gapline {'gg' if rv_ok else 'gb'}">{rv_txt}</span></div>
@@ -1673,7 +1683,7 @@ def _email_html(only=None, safe=False):
     # KPIs (management email only)
     if not only:
       out.append(f'<tr><td style="padding-top:12px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
-               + kpi("Patients", int(clinic["Balls"]), f'/ {int(clinic["Balls target"])}', (f'<b style="background:#E3F1E9;color:#17553A;">&nbsp;{int(clinic["Balls"] - clinic["Follow-ups"])} billed patients&nbsp;</b> + {int(clinic["Follow-ups"])} free follow-ups (no bill) = {int(clinic["Balls"])} visits, same as reception<br>' if clinic.get("Follow-ups") else "") + f'GP {int(clinic["GP visits"])} / {int(clinic["GP target"])} · referrals {int(clinic["Referrals"])} / {int(clinic["Referral allowance"])} · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen',
+               + kpi("Patients", int(clinic["Balls"]), f'/ {int(clinic["Balls target"])}', (f'<b style="background:#E3F1E9;color:#17553A;">&nbsp;{int(clinic["Balls"] - clinic["Follow-ups"])} billed patients&nbsp;</b> + {int(clinic["Follow-ups"])} free follow-ups (no bill) = {int(clinic["Balls"])} visits, same as reception<br>' if clinic.get("Follow-ups") else "") + (f'<b style="color:#B3261E;">{open_txt}<br>' if open_txt else "") + f'GP {int(clinic["GP visits"])} / {int(clinic["GP target"])} · referrals {int(clinic["Referrals"])} / {int(clinic["Referral allowance"])} · {int(clinic["Doctors with patients"])} of {int(clinic["Team size"])} doctors seen',
                      gap_pill(clinic["Balls"], clinic["Balls target"]))
                + kpi("Revenue (runs)", fmt(clinic["Runs"]), f'/ {fmt(clinic["Runs target (day)"])}', "insurance share, full-day target",
                      gap_pill(clinic["Runs"], clinic["Runs target (day)"]))
