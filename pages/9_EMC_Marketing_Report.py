@@ -145,6 +145,9 @@ def _clean(v):
     return re.sub(r"\s+", " ", str(v).replace("\t", " ")).strip()
 
 
+FM_DOCTORS = ("SANTDAS",)                  # Family Medicine: referred patients are not new patients
+
+
 def read_registration(data, name=""):
     engine = "xlrd" if name.lower().endswith(".xls") else None
     raw = pd.read_excel(io.BytesIO(data), header=None, engine=engine, dtype=object)
@@ -176,7 +179,8 @@ def read_registration(data, name=""):
         rows.append({"emr": emr, "date": dt, "employer": g(r, "EMPLOYER NAME"),
                      "camp": g(r, "ADDRESS 1") or g(r, "ADDRESS 2"), "nat": g(r, "NATIONALITY").title() or "Unknown",
                      "new": g(r, "PATIENT TYPE").upper().startswith("NEW"), "fu": "FOLLOW" in g(r, "VISIT TYPE").upper(),
-                     "user": g(r, "REG:USER").upper() or "–"})
+                     "user": g(r, "REG:USER").upper() or "–",
+                     "fm": any(x in re.sub(r"[^A-Z]", "", g(r, "DOCTOR").upper()) for x in FM_DOCTORS)})
     if not rows:
         raise ValueError("No visits found in the Registration List.")
     return rows
@@ -291,9 +295,18 @@ def build_names(raws, keyfn, aliases, threshold=0.84):
 # ---------------------------------------------------------------- daily ledger (per day, per company: counts and revenue)
 def day_totals(rows, rev):
     days = {}
-    for r in rows:
+    seen = set()
+    for r in sorted(rows, key=lambda x: x["fm"]):     # GP visit first, so a referred patient is counted once
         d = days.setdefault(r["date"], {"co": {}, "camp": {}, "nat": {}, "users": {}, "n": 0, "new": 0, "fu": 0,
-                                        "blank": 0, "rev": 0.0, "has_rev": rev is not None})
+                                        "blank": 0, "rev": 0.0, "has_rev": rev is not None, "fm": 0, "fm_ref": 0})
+        if r["fm"]:
+            d["fm"] += 1
+            fe = r["employer"] if company_key(r["employer"]) else "(not filled)"
+            d.setdefault("co_fm", {})[fe] = d.setdefault("co_fm", {}).get(fe, 0) + 1
+        if (r["emr"], r["date"]) in seen:              # same patient again that day (e.g. referred to Family Medicine)
+            d["fm_ref"] += r["fm"]
+            continue
+        seen.add((r["emr"], r["date"]))
         runs = (rev or {}).pop((r["emr"], r["date"]), 0.0)      # each bill counted once, even if registered twice
         d["n"] += 1; d["new"] += r["new"]; d["fu"] += r["fu"]; d["rev"] += runs
         emp = r["employer"] if company_key(r["employer"]) else ""
@@ -331,7 +344,8 @@ def update_ledger(days):
 
 
 def sum_days(led, keys):
-    tot = {"co": {}, "camp": {}, "nat": {}, "users": {}, "n": 0, "new": 0, "fu": 0, "blank": 0, "rev": 0.0, "days": 0, "rev_days": 0}
+    tot = {"co": {}, "camp": {}, "nat": {}, "users": {}, "n": 0, "new": 0, "fu": 0, "blank": 0, "rev": 0.0, "days": 0, "rev_days": 0,
+           "fm": 0, "fm_ref": 0, "co_fm": {}}
     for k in keys:
         d = led.get(k)
         if not d:
@@ -339,6 +353,10 @@ def sum_days(led, keys):
         tot["days"] += 1; tot["rev_days"] += bool(d.get("has_rev"))
         for f in ("n", "new", "fu", "blank", "rev"):
             tot[f] += d[f]
+        for f in ("fm", "fm_ref"):
+            tot[f] += d.get(f, 0)
+        for name, n in d.get("co_fm", {}).items():
+            tot["co_fm"][name] = tot["co_fm"].get(name, 0) + n
         for name, c in d["co"].items():
             t = tot["co"].setdefault(name, [0, 0, 0, 0.0])
             for i in range(4):
@@ -492,6 +510,7 @@ def group(src, mapping, field="co"):
 
 
 co_today, co_month = group(today, CO), group(month, CO)
+fm_today, fm_month = group(today, CO, "co_fm"), group(month, CO, "co_fm")
 co_prev, co_prevfull = group(prev_part, CO), group(prev_full, CO)
 camp_today, camp_month = group(today, CAMP, "camp"), group(month, CAMP, "camp")
 camp_prev = group(prev_part, CAMP, "camp")
@@ -549,7 +568,8 @@ named_month = len([n for n in co_month if n != "(not filled)"])
 st.markdown(f"""
 <div class="kpis">
  <div class="kpi"><div class="lbl">Patients · {E(LBL)}</div><div class="val">{today['n']}</div>
-  <div class="sub">{today['new']} new · {today['n'] - today['new']} returning · {today['fu']} follow-ups</div></div>
+  <div class="sub">{today['new']} new · {today['n'] - today['new']} returning · {today['fu']} follow-ups</div>
+  <div class="sub">Family Medicine (Dr. Sant Das): {today['fm']} seen · {today['fm_ref']} referred by GP, counted once</div></div>
  <div class="kpi"><div class="lbl">Companies · {E(LBL)}</div><div class="val">{named_today}</div>
   <div class="sub">employer filled for {pct(today['n'] - today['blank'], today['n'])} of patients</div></div>
  <div class="kpi m"><div class="lbl">Month so far · {E(PERIOD)}</div><div class="val">{month['n']:,}</div>
@@ -565,7 +585,7 @@ def company_table(n=None):
     if n:
         items = items[:n]
     top = max([v[0] for k, v in items if k != "(not filled)"] or [1])
-    head = (f"<tr><th>#</th><th class='l'>Company</th><th>{E(LBL)}</th><th>Month</th><th>New</th><th>Follow-ups</th>"
+    head = (f"<tr><th>#</th><th class='l'>Company</th><th>{E(LBL)}</th><th>Month</th><th>New</th><th>Follow-ups</th><th>Family Medicine</th>"
             + ("<th>vs last month</th>" if has_prev else "")
             + ("<th>Revenue today</th><th>Revenue month</th><th>Per patient</th>" if MGMT and REV_OK else "") + "</tr>")
     body = ""
@@ -573,7 +593,7 @@ def company_table(n=None):
         t = co_today.get(name, [0, 0, 0, 0.0])
         bar = f'<span class="barc" style="width:{int(60 * v[0] / top)}px"></span>' if name != "(not filled)" else ""
         body += (f'<tr><td class="rank">{i}</td><td class="nm">{E(name)}</td><td>{t[0] or "–"}</td><td>{bar}<b>{v[0]}</b></td>'
-                 f'<td>{v[1] or "–"}</td><td>{v[2] or "–"}</td>'
+                 f'<td>{v[1] or "–"}</td><td>{v[2] or "–"}</td><td>{fm_month.get(name, 0) or "–"}</td>'
                  + (f'<td>{trend(v[0], co_prev.get(name, [0])[0])}</td>' if has_prev else "")
                  + (f'<td>{fmt(t[3]) if t[0] else "–"}</td><td><b>{fmt(v[3])}</b></td><td>{fmt(v[3] / max(v[0], 1))}</td>' if MGMT and REV_OK else "")
                  + "</tr>")
@@ -685,6 +705,9 @@ with t7:
     nd = max(len(dkeys), 1)
     body = (f'<tr class="tot"><td class="nm">All patients</td>{cells(day_n)}<td>{sum(day_n.values()):,}</td><td>{sum(day_n.values()) / nd:.0f}</td></tr>'
             f'<tr class="tot"><td class="nm">New patients</td>{cells(day_new)}<td>{sum(day_new.values()):,}</td><td>{sum(day_new.values()) / nd:.0f}</td></tr>')
+    day_fm = {k: led[k].get("fm", 0) for k in dkeys}
+    body += (f'<tr class="tot"><td class="nm">Family Medicine (Dr. Sant Das)</td>{cells(day_fm)}<td>{sum(day_fm.values()):,}</td>'
+             f'<td>{sum(day_fm.values()) / nd:.0f}</td></tr>')
     for n in names:
         d = per[n]
         best = max(d.values()) if d else 0
@@ -797,7 +820,8 @@ def email_html(mgmt):
            f'<div style="font:bold 26px Arial,sans-serif;color:#ffffff;">EMC Marketing Report{" · Management" if mgmt else ""}</div>'
            f'<div style="font-size:14px;color:#D6E2F3;padding-top:6px;">{E(DAY)} &nbsp;·&nbsp; month so far {E(PERIOD)}</div></td></tr>'
            f'<tr><td style="padding-top:12px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
-           + box(f"Patients · {LBL}", today["n"], f'{today["new"]} new · {today["fu"]} follow-ups')
+           + box(f"Patients · {LBL}", today["n"], f'{today["new"]} new · {today["fu"]} follow-ups<br>Family Medicine {today["fm"]} '
+                 f'({today["fm_ref"]} referred by GP, counted once)')
            + box(f"Companies · {LBL}", named_today, f'employer filled {pct(today["n"] - today["blank"], today["n"])}')
            + box(f"Month so far · {PERIOD}", f'{month["n"]:,}',
                  f'{month["new"]} new · {named_month} companies' + (f' · last month same days {prev_part["n"]:,}' if has_prev else "")
@@ -809,13 +833,13 @@ def email_html(mgmt):
     # companies
     out.append(section("Top companies"))
     items = sorted(((k, v) for k, v in co_month.items() if k != "(not filled)"), key=lambda x: -x[1][0])[:25]
-    head = (f'<tr><th {thl}>Company</th><th {th}>{E(LBL)}</th><th {th}>Month</th><th {th}>New</th>'
+    head = (f'<tr><th {thl}>Company</th><th {th}>{E(LBL)}</th><th {th}>Month</th><th {th}>New</th><th {th}>Family Med.</th>'
             + (f'<th {th}>vs last month</th>' if has_prev else "")
             + (f'<th {th}>Revenue month</th><th {th}>Per patient</th>' if show_rev else "") + '</tr>')
     body = ""
     for name, v in items:
         t = co_today.get(name, [0])
-        body += (f'<tr><td {tdl}><b>{E(name)}</b></td><td {td}>{t[0] or "–"}</td><td {td}><b>{v[0]}</b></td><td {td}>{v[1] or "–"}</td>'
+        body += (f'<tr><td {tdl}><b>{E(name)}</b></td><td {td}>{t[0] or "–"}</td><td {td}><b>{v[0]}</b></td><td {td}>{v[1] or "–"}</td><td {td}>{fm_month.get(name, 0) or "–"}</td>'
                  + (f'<td {td}>{trend_e(v[0], co_prev.get(name, [0])[0])}</td>' if has_prev else "")
                  + (f'<td {td}><b>{fmt(v[3])}</b></td><td {td}>{fmt(v[3] / max(v[0], 1))}</td>' if show_rev else "") + '</tr>')
     nf = co_month.get("(not filled)", [0])[0]
@@ -880,16 +904,16 @@ def build_excel(mgmt):
         ws.freeze_panes = "A4"
 
     ws = wb.active; ws.title = "Companies"
-    hdr = ["Company", LBL, f"Month {PERIOD}", "New", "Follow-ups"] + (["Last month same days"] if has_prev else []) \
+    hdr = ["Company", LBL, f"Month {PERIOD}", "New", "Follow-ups", "Family Medicine"] + (["Last month same days"] if has_prev else []) \
         + (["Revenue today", "Revenue month", "Per patient"] if show_rev else [])
     rows_ = []
     for name, v in sorted(co_month.items(), key=lambda x: (x[0] == "(not filled)", -x[1][0])):
         t = co_today.get(name, [0, 0, 0, 0.0])
-        r = [name, t[0], v[0], v[1], v[2]] + ([co_prev.get(name, [0])[0]] if has_prev else [])
+        r = [name, t[0], v[0], v[1], v[2], fm_month.get(name, 0)] + ([co_prev.get(name, [0])[0]] if has_prev else [])
         if show_rev:
             r += [float(round(t[3])), float(round(v[3])), float(round(v[3] / max(v[0], 1)))]
         rows_.append(r)
-    sheet(ws, f"Companies · {PERIOD}", hdr, rows_, [48, 9, 14, 8, 11] + ([16] if has_prev else []) + ([14, 15, 12] if show_rev else []))
+    sheet(ws, f"Companies · {PERIOD}", hdr, rows_, [48, 9, 14, 8, 11, 15] + ([16] if has_prev else []) + ([14, 15, 12] if show_rev else []))
     ws2 = wb.create_sheet("Camps and areas")
     sheet(ws2, f"Camps and areas · {PERIOD}", ["Camp / area", LBL, "Month"] + (["Last month same days"] if has_prev else []),
           [[k, camp_today.get(k, 0), v] + ([camp_prev.get(k, 0)] if has_prev else [])
@@ -904,7 +928,8 @@ def build_excel(mgmt):
             per.setdefault(name, {})[k] = v[0]
     ws5 = wb.create_sheet("Day by day")
     hdr5 = ["Company"] + [f"{datetime.strptime(k, '%Y-%m-%d'):%d %b}" for k in dk] + ["Total"]
-    rows5 = [["All patients"] + [led[k]["n"] for k in dk] + [sum(led[k]["n"] for k in dk)]]
+    rows5 = [["All patients"] + [led[k]["n"] for k in dk] + [sum(led[k]["n"] for k in dk)],
+             ["Family Medicine (Dr. Sant Das)"] + [led[k].get("fm", 0) for k in dk] + [sum(led[k].get("fm", 0) for k in dk)]]
     for n in sorted(per, key=lambda n: (n == "(not filled)", -sum(per[n].values()))):
         rows5.append([n] + [per[n].get(k, 0) for k in dk] + [sum(per[n].values())])
     sheet(ws5, f"Day by day · {PERIOD}", hdr5, rows5, [44] + [8] * len(dk) + [9])
