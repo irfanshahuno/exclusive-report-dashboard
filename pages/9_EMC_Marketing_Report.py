@@ -70,6 +70,9 @@ h1,h2,h3{font-family:'Barlow Semi Condensed','Arial Narrow',sans-serif !importan
 .tbl th{background:var(--soft); color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; text-align:right; padding:9px 12px; border-bottom:1px solid var(--line);}
 .tbl td{padding:8px 12px; border-bottom:1px solid var(--line); text-align:right; font-variant-numeric:tabular-nums;}
 .tbl th:first-child,.tbl td:first-child{text-align:left;} .tbl tr:last-child td{border-bottom:0;}
+.fmline{margin-top:10px; background:#FBF0D9; border-left:4px solid #9A6200; border-radius:8px; padding:8px 10px; color:#5A3A00; font-size:13px; font-weight:600;}
+.fmline b{font-size:17px; color:#9A6200;}
+.tbl tr.total td{background:#E8EEF8; font-weight:700; border-top:2px solid #1F4E8C;}
 .tbl td.nm{font-weight:600; color:var(--ink); text-align:left;} .tbl th.l{text-align:left;}
 .dwrap{overflow-x:auto; border-radius:12px;} .dd td,.dd th{padding:7px 8px; white-space:nowrap;} .dd td.nm{position:sticky; left:0; background:#fff; z-index:1; min-width:220px; white-space:normal;}
 .dd th:first-child{position:sticky; left:0; z-index:2;} .dd tr.tot td{background:var(--brand-soft); font-weight:700;} .dd td.z{color:#C9D2CB;} .dd td.hi{background:#E8EEF8; font-weight:700;} .tbl .rank{color:var(--muted); width:28px;}
@@ -580,7 +583,7 @@ st.markdown(f"""
 <div class="kpis">
  <div class="kpi"><div class="lbl">Patients · {E(LBL)}</div><div class="val">{today['n']}</div>
   <div class="sub">{today['new']} new · {today['n'] - today['new']} returning · {today['fu']} follow-ups</div>
-  <div class="sub">Family Medicine (Dr. Sant Das): {today['fm']} seen · {today['fm_ref']} referred by GP, counted once</div></div>
+  <div class="fmline">Family Medicine (Dr. Sant Das): <b>{today['fm']}</b> seen · <b>{today['fm_ref']}</b> referred by GP, counted once</div></div>
  <div class="kpi"><div class="lbl">Companies · {E(LBL)}</div><div class="val">{named_today}</div>
   <div class="sub">employer filled for {pct(today['n'] - today['blank'], today['n'])} of patients</div></div>
  <div class="kpi m"><div class="lbl">Month so far · {E(PERIOD)}</div><div class="val">{month['n']:,}</div>
@@ -596,18 +599,25 @@ def company_table(n=None):
     if n:
         items = items[:n]
     top = max([v[0] for k, v in items if k != "(not filled)"] or [1])
-    head = (f"<tr><th>#</th><th class='l'>Company</th><th>{E(LBL)}</th><th>Month</th><th>New</th><th>Follow-ups</th><th>Family Medicine</th>"
+    head = (f"<tr><th>#</th><th class='l'>Company</th><th>{E(LBL)}</th><th>Family Med. · {E(LBL)}</th><th>Patients · month</th><th>New · month</th><th>Follow-ups · month</th><th>Family Med. · month</th>"
             + ("<th>vs last month</th>" if has_prev else "")
             + ("<th>Revenue today</th><th>Revenue month</th><th>Per patient</th>" if MGMT and REV_OK else "") + "</tr>")
     body = ""
     for i, (name, v) in enumerate(items, 1):
         t = co_today.get(name, [0, 0, 0, 0.0])
         bar = f'<span class="barc" style="width:{int(60 * v[0] / top)}px"></span>' if name != "(not filled)" else ""
-        body += (f'<tr><td class="rank">{i}</td><td class="nm">{E(name)}</td><td>{t[0] or "–"}</td><td>{bar}<b>{v[0]}</b></td>'
+        body += (f'<tr><td class="rank">{i}</td><td class="nm">{E(name)}</td><td>{t[0] or "–"}</td><td>{fm_today.get(name, 0) or "–"}</td><td>{bar}<b>{v[0]}</b></td>'
                  f'<td>{v[1] or "–"}</td><td>{v[2] or "–"}</td><td>{fm_month.get(name, 0) or "–"}</td>'
                  + (f'<td>{trend(v[0], co_prev.get(name, [0])[0])}</td>' if has_prev else "")
                  + (f'<td>{fmt(t[3]) if t[0] else "–"}</td><td><b>{fmt(v[3])}</b></td><td>{fmt(v[3] / max(v[0], 1))}</td>' if MGMT and REV_OK else "")
                  + "</tr>")
+    tt = [sum(co_today.get(k, [0])[0] for k, _ in items), sum(v[0] for _, v in items), sum(v[1] for _, v in items),
+          sum(v[2] for _, v in items), sum(fm_month.get(k, 0) for k, _ in items),
+          sum(co_today.get(k, [0, 0, 0, 0.0])[3] for k, _ in items), sum(v[3] for _, v in items)]
+    body += (f'<tr class="total"><td></td><td class="nm">Total · {len([k for k, _ in items if k != "(not filled)"])} companies</td>'
+             f'<td>{tt[0]:,}</td><td>{sum(fm_today.get(k, 0) for k, _ in items):,}</td><td>{tt[1]:,}</td><td>{tt[2]:,}</td><td>{tt[3]:,}</td><td>{tt[4]:,}</td>'
+             + ('<td></td>' if has_prev else "")
+             + (f'<td>{fmt(tt[5])}</td><td>{fmt(tt[6])}</td><td>{fmt(tt[6] / max(tt[1], 1))}</td>' if MGMT and REV_OK else "") + '</tr>')
     return f'<table class="tbl">{head}{body}</table>'
 
 
@@ -831,8 +841,10 @@ def email_html(mgmt):
            f'<div style="font:bold 26px Arial,sans-serif;color:#ffffff;">EMC Marketing Report{" · Management" if mgmt else ""}</div>'
            f'<div style="font-size:14px;color:#D6E2F3;padding-top:6px;">{E(DAY)} &nbsp;·&nbsp; month so far {E(PERIOD)}</div></td></tr>'
            f'<tr><td style="padding-top:12px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
-           + box(f"Patients · {LBL}", today["n"], f'{today["new"]} new · {today["fu"]} follow-ups<br>Family Medicine {today["fm"]} '
-                 f'({today["fm_ref"]} referred by GP, counted once)')
+           + box(f"Patients · {LBL}", today["n"], f'{today["new"]} new · {today["fu"]} follow-ups'
+                 f'<div style="margin-top:8px;background:#FBF0D9;border-left:4px solid #9A6200;padding:6px 8px;color:#5A3A00;font-weight:bold;">'
+                 f'Family Medicine (Dr. Sant Das): <span style="font-size:16px;color:#9A6200;">{today["fm"]}</span> seen &middot; '
+                 f'<span style="font-size:16px;color:#9A6200;">{today["fm_ref"]}</span> referred by GP, counted once</div>')
            + box(f"Companies · {LBL}", named_today, f'employer filled {pct(today["n"] - today["blank"], today["n"])}')
            + box(f"Month so far · {PERIOD}", f'{month["n"]:,}',
                  f'{month["new"]} new · {named_month} companies' + (f' · last month same days {prev_part["n"]:,}' if has_prev else "")
@@ -844,7 +856,7 @@ def email_html(mgmt):
     # companies
     out.append(section("Top companies"))
     items = sorted(((k, v) for k, v in co_month.items() if k != "(not filled)"), key=lambda x: -x[1][0])[:25]
-    head = (f'<tr><th {thl}>Company</th><th {th}>{E(LBL)}</th><th {th}>Month</th><th {th}>New</th><th {th}>Family Med.</th>'
+    head = (f'<tr><th {thl}>Company</th><th {th}>{E(LBL)}</th><th {th}>Patients · month</th><th {th}>New · month</th><th {th}>Family Med. · month</th>'
             + (f'<th {th}>vs last month</th>' if has_prev else "")
             + (f'<th {th}>Revenue month</th><th {th}>Per patient</th>' if show_rev else "") + '</tr>')
     body = ""
@@ -853,6 +865,15 @@ def email_html(mgmt):
         body += (f'<tr><td {tdl}><b>{E(name)}</b></td><td {td}>{t[0] or "–"}</td><td {td}><b>{v[0]}</b></td><td {td}>{v[1] or "–"}</td><td {td}>{fm_month.get(name, 0) or "–"}</td>'
                  + (f'<td {td}>{trend_e(v[0], co_prev.get(name, [0])[0])}</td>' if has_prev else "")
                  + (f'<td {td}><b>{fmt(v[3])}</b></td><td {td}>{fmt(v[3] / max(v[0], 1))}</td>' if show_rev else "") + '</tr>')
+    allc = list(co_month.items())
+    T0 = sum(co_today.get(k, [0])[0] for k, _ in allc)
+    T1, T2 = sum(v[0] for _, v in allc), sum(v[1] for _, v in allc)
+    TF, TR = sum(fm_month.values()), sum(v[3] for _, v in allc)
+    tds = f'style="padding:8px 10px;text-align:right;font-size:13px;font-weight:bold;background:#E8EEF8;border-top:2px solid {BR};"'
+    body += (f'<tr><td {tds.replace("text-align:right", "text-align:left")}>Total · all {len([k for k, _ in allc if k != "(not filled)"])} companies'
+             f'{" (top 25 shown)" if len(allc) > 25 else ""}</td><td {tds}>{T0:,}</td><td {tds}>{T1:,}</td><td {tds}>{T2:,}</td><td {tds}>{TF:,}</td>'
+             + (f'<td {tds}></td>' if has_prev else "")
+             + (f'<td {tds}>{fmt(TR)}</td><td {tds}>{fmt(TR / max(T1, 1))}</td>' if show_rev else "") + '</tr>')
     nf = co_month.get("(not filled)", [0])[0]
     out.append(f'<tr><td><table {T} width="100%" bgcolor="#ffffff" style="background:#ffffff;border:1px solid {EDGE};border-collapse:collapse;">'
                f'{head}{body}</table>'
@@ -913,9 +934,12 @@ def build_excel(mgmt):
         for j, w in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(j)].width = w
         ws.freeze_panes = "A4"
+        if rows and rows[-1][0] == "TOTAL":
+            for j in range(1, len(headers) + 1):
+                c = ws.cell(len(rows) + 3, j); c.font = Font(bold=True); c.fill = fill("E8EEF8")
 
     ws = wb.active; ws.title = "Companies"
-    hdr = ["Company", LBL, f"Month {PERIOD}", "New", "Follow-ups", "Family Medicine"] + (["Last month same days"] if has_prev else []) \
+    hdr = ["Company", LBL, f"Patients · month {PERIOD}", "New · month", "Follow-ups · month", "Family Med. · month"] + (["Last month same days"] if has_prev else []) \
         + (["Revenue today", "Revenue month", "Per patient"] if show_rev else [])
     rows_ = []
     for name, v in sorted(co_month.items(), key=lambda x: (x[0] == "(not filled)", -x[1][0])):
@@ -924,6 +948,12 @@ def build_excel(mgmt):
         if show_rev:
             r += [float(round(t[3])), float(round(v[3])), float(round(v[3] / max(v[0], 1)))]
         rows_.append(r)
+    tot_r = ["TOTAL"] + [sum(r[j] for r in rows_) for j in range(1, len(hdr))]
+    if show_rev:
+        tot_r[-1] = float(round(tot_r[-2] / max(tot_r[2], 1)))
+    if has_prev:
+        tot_r[6] = sum(r[6] for r in rows_)
+    rows_.append(tot_r)
     sheet(ws, f"Companies · {PERIOD}", hdr, rows_, [48, 9, 14, 8, 11, 15] + ([16] if has_prev else []) + ([14, 15, 12] if show_rev else []))
     ws2 = wb.create_sheet("Camps and areas")
     sheet(ws2, f"Camps and areas · {PERIOD}", ["Camp / area", LBL, "Month"] + (["Last month same days"] if has_prev else []),
