@@ -81,6 +81,11 @@ h1,h2,h3{font-family:'Barlow Semi Condensed','Arial Narrow',sans-serif !importan
 </style>
 """, unsafe_allow_html=True)
 
+# ---------------------------------------------------------------- company baseline
+# Saved from the full Registration List 1 Jan 2024 – 11 Nov 2026 (unique patients by EMR No, company spellings merged).
+# rows: [company, unique patients, unique last 12 months, avg patients a month (last 12 months), visits, last visit]
+BASE = json.loads('{"from":"2024-01-01","asof":"2026-11-11","tot":30532,"tot12":15915,"companies":1208,"ones":608,"top10":15085,"bands":[["1",608,608],["2–9",363,1282],["10–49",154,3234],["50–199",58,5902],["200–999",19,7794],["1,000+",6,12048]],"rows":[["Arco Electromechanical",2611,2066,623,20933,"2026-11-11"],["Exceed Precast",2604,1993,492,13824,"2026-11-11"],["Hilal Bil Badi and Partners Cont Co Hilalco",2478,1562,313,17763,"2026-11-11"],["Tirhal Employment",1780,1385,225,2923,"2026-11-11"],["Sawaeed",1437,6,1,3210,"2026-11-02"],["Qamra Transport and Gen. Cont. Est",1138,746,166,7604,"2026-11-11"],["China State Construction",981,19,4,2523,"2026-06-07"],["Efs Facilities Management Services",743,200,35,2739,"2026-11-11"],["Agility Engineering and Contracting Company",677,273,32,3172,"2026-11-11"],["Professional Security Systems",636,329,25,903,"2026-11-11"],["Gulf Industrial Services Company - Gisco",552,250,47,2097,"2026-11-11"],["G 4S Secure Solutions",455,37,4,628,"2026-11-03"],["Alryum Contracting General Transport",406,234,48,2605,"2026-11-11"],["M4 Contracting S A R I Abu Dhabi",394,183,36,1873,"2026-11-09"],["Arco General Contracting",349,199,39,2144,"2026-11-10"],["Emirates Gateway Security Services",343,248,35,1080,"2026-11-06"],["Fibrex Branch 1",336,18,4,924,"2026-10-18"],["Profile Recruitment",321,110,16,856,"2026-11-11"],["Voltas Limited",252,155,27,1705,"2026-08-04"],["Asgc Construction",250,8,1,624,"2026-10-05"],["Nmdc Energy",237,237,27,375,"2026-11-11"],["Innovo Build",237,137,18,528,"2026-11-11"],["Alkaline Electromechanical",212,196,33,715,"2026-11-11"],["Tecton Engineeing & Construction",207,62,9,459,"2026-11-09"],["A D C Energy Systems",206,74,11,710,"2026-11-07"],["Al Geemi Contracting Company",184,146,25,520,"2026-11-11"],["Innovo Mep Electromechanical Works",180,71,10,367,"2026-11-10"],["Arabian Gulf Steel Industries",177,95,13,712,"2026-11-11"],["A G Facilities Solutions For Building",170,39,6,621,"2026-11-08"],["Sawaeed Employment",167,3,1,271,"2026-10-24"],["Gulf Contractors Co",166,123,23,663,"2026-11-11"],["Alshafar United For Electromechanical Engineering",162,4,1,281,"2026-08-11"],["Emirates Electrical and Instrumentation",156,116,16,361,"2026-11-11"],["Almuthalath Alsharqi Security Guard Services",155,102,8,161,"2026-10-27"],["Tanzifco Emirates",154,101,13,352,"2026-11-10"],["Alba Tec Employment",152,75,10,443,"2026-10-10"],["Al Geemi & Partners Contracting Company",147,50,8,531,"2026-11-08"],["National Catering Company",143,79,14,499,"2026-11-11"],["Okool Manpower Recruitment Service",140,82,12,300,"2026-11-11"],["Mfour Building Contracting",137,78,17,596,"2026-11-05"],["Emarat Aloula Contracting Co",133,12,3,250,"2026-09-30"],["Arco Intl Contracting Company",127,59,11,861,"2026-11-09"],["Arabian Construction Co",125,125,42,136,"2026-11-11"],["Oil and Gas Construction",124,51,8,665,"2026-11-09"],["Sbk Holding ( )",120,59,9,358,"2026-11-07"],["Power Recruitment",119,6,2,216,"2026-11-01"],["Combined Group Contracting Emirates",116,17,2,272,"2026-11-01"],["International Decor Co",115,24,4,473,"2026-11-11"],["Noor Al Sahara Gen Contracting",108,82,11,260,"2026-11-10"],["Cylingas Company",105,39,7,429,"2026-11-11"],["Six Sigma Middle East Constructions",102,48,11,426,"2026-11-11"],["Shapoorji Pallonji Mideast",102,102,52,108,"2026-11-10"],["Alba Tec",96,31,7,588,"2026-11-03"],["Emirates Landscape",96,5,1,201,"2026-10-29"],["Space Age Switchgear Elect Co",91,29,5,331,"2026-10-02"],["Star Services",84,17,3,225,"2026-11-01"],["Ali and Sons Contracting Company",83,2,2,126,"2026-01-31"],["Hassan Allam Construction",82,76,10,190,"2026-11-10"],["Construction General Contracting House Ltd",80,11,2,172,"2026-11-08"],["Danway Electrical &Mechanical Engineering",79,79,14,228,"2026-11-09"],["Noor Alsahraa International General",79,65,10,193,"2026-11-08"],["Al Bayader Irrigation and Contracting",75,38,6,411,"2026-11-09"],["Albatec Const and Development",71,50,15,649,"2026-11-10"],["Census International Company",71,14,3,296,"2026-10-23"],["Dolphin Oilfield Equipment Services Co",69,64,15,309,"2026-11-11"],["Gulf Eagle Contracting Company",69,29,5,281,"2026-11-07"],["Mosayed Bin Hafeez Cont Gen Transport",69,1,1,197,"2026-02-03"],["Mq Peael Engineering",67,67,23,310,"2026-11-09"],["Gulf Tunneling Company",65,62,14,286,"2026-11-11"],["Efs Investment",65,49,8,225,"2026-11-03"],["Qamara Carpentry",64,38,8,482,"2026-11-10"],["Pivot Engineering and General Contracting Co",59,24,3,134,"2026-11-05"],["National Innovative General Maintnance",59,45,7,169,"2026-10-31"],["Sibca Electronic Equipment Company Limited",58,58,13,228,"2026-11-07"],["Hafilat General Transport",58,56,20,344,"2026-11-11"],["Al Bahiya Trading and Services",57,25,3,145,"2026-11-03"],["Elite Star Catering",56,7,2,154,"2026-08-04"],["Noor Al Sahara General Transportation",56,50,7,125,"2026-11-10"],["Shj Environment Co Beeah Br Abu Dhabi",54,15,2,100,"2026-09-28"],["Verger Delporte Uae Ltd Co",52,5,1,116,"2026-10-02"],["Qamra Aluminium Works Est",51,28,6,322,"2026-11-07"],["Qamara Electromechanicla Contractin Est",51,37,8,353,"2026-11-09"],["Marina Facilities Management",50,9,2,79,"2026-10-04"],["Ag Facilities Solutions Buildings Maintenance",48,26,4,182,"2026-11-04"],["Emirates Link Maltauro Company",48,8,1,117,"2026-08-25"],["Paragon Employment Services",48,2,1,111,"2026-11-08"],["Pioneer Precast Concrete",48,40,11,468,"2026-11-09"],["Focus Security Services",47,41,6,147,"2026-09-29"],["Hyssna International",46,33,6,246,"2026-11-07"],["Abudhabi Berkeley Services",45,17,3,170,"2026-10-05"],["M 4 Contrcting Abu Dhabi",44,20,3,205,"2026-11-06"],["Western Bainoona Group",43,9,2,78,"2026-08-08"],["Express Facilities Mangment",42,10,2,115,"2026-11-10"],["Tecton Engineering",42,7,2,130,"2026-08-14"],["Al Masood National General Contracting",41,2,2,141,"2026-10-05"],["Potential Contracting",41,0,0,124,"2025-03-14"],["E L M C Contracting",41,21,4,139,"2026-11-02"],["Gulf Star Cooling Services",41,13,2,195,"2026-10-26"],["Star Security Services Ll",40,8,1,70,"2026-11-03"],["Combined Group Contracting Co Ksc Abudhabi",39,3,1,95,"2026-10-28"],["Falcon Zinc Metal Industries",39,26,4,187,"2026-11-08"],["Al Rawai Contracting & General Maint. Est",39,22,4,210,"2026-10-09"],["Gift Action Trading",38,32,5,224,"2026-11-10"],["We One Fze",38,3,1,51,"2026-11-05"],["Wade Adams Contracting",37,32,4,94,"2026-11-09"],["Nazim Maintenanc General Contracting",35,21,6,250,"2026-11-11"],["Excellent Medical Centerq",35,20,6,386,"2026-11-10"],["Optimum Engineering Sal Abu Dhabi",35,14,5,221,"2026-11-09"],["Promang Technical Services",35,19,4,113,"2026-09-19"],["Seven Days Manpower Supply",32,13,3,74,"2026-10-26"],["Tools Man General Maintenance",31,12,2,129,"2026-10-27"],["Al Matooq Building Insulation Works",30,28,7,134,"2026-11-11"],["Al Saif Graphics",30,30,6,106,"2026-11-10"],["Musaied Bin Hafeedh For Cont.& Gen. Transportation",30,2,2,66,"2025-12-30"],["Mas Geotechnical & Material Testing Laboratory",30,30,8,110,"2026-10-20"],["International Foundation Group",30,0,0,40,"2025-09-08"],["Exeed National General Contracting",29,29,5,71,"2026-11-11"],["Al Shoumokh Manpower",29,27,6,96,"2026-10-22"],["United Mazaya General Contracting",28,17,5,171,"2026-11-10"],["Howdra Employment Services Owned",28,0,0,65,"2025-03-24"],["Bilfinger Deutsche Babcock Emirates",28,17,2,95,"2026-11-08"],["Qumra For Decoration and Interior Design",28,18,4,189,"2026-11-10"],["Mohammed Abdulmohsin Al Kharafi & Sons ( .) Dubai Branch",27,16,3,65,"2026-11-01"],["Control and Application Emirates",27,7,2,76,"2026-10-17"],["Gulf Contracting & Landscaping",26,26,6,67,"2026-10-30"],["Great Mart General Trading",26,18,2,72,"2026-11-03"],["House Engineering Contracting",26,3,1,81,"2026-11-11"],["Indman Recruitment",26,0,0,51,"2025-07-27"],["Soundlines Skilled Manpower",26,2,2,41,"2026-04-21"],["The Designer Advertsing and Publishing",26,26,6,94,"2026-09-28"],["Tamouh Employment",25,21,5,83,"2026-10-08"],["Optimum Services Decor",25,10,3,91,"2026-11-05"],["Guard Fire Fighting Equipment Manufacturers - - O.P.C",25,25,4,54,"2026-11-07"],["Seattle International Services",24,9,2,39,"2026-10-14"],["A.M.C Protection ( )",24,5,3,70,"2026-11-02"],["Qurma Transport and General",24,16,4,73,"2026-09-20"],["Electra Power Electromechanical Contracting",23,5,1,73,"2026-10-05"],["Adeeb Electrical and Electronics Services",23,8,2,98,"2026-11-09"],["Gisco",23,2,1,91,"2026-09-09"],["Amana Contracting Steel Building Company",23,0,0,34,"2025-10-26"],["Ishtar Decor Factor",22,12,2,101,"2026-08-20"],["Exeed Litecrete",22,21,4,133,"2026-11-02"],["Zublin Construction",22,17,3,72,"2026-11-11"],["Spaceage Gen Contracting",21,9,2,35,"2026-10-05"],["Alsarh Recruitment",21,0,0,30,"2025-08-09"],["Perfect Step General Contracting & Maintenance",20,14,3,113,"2026-11-02"],["Modern Building General Contracting",20,19,4,102,"2026-11-01"],["National Projects Services-Ll",19,19,5,62,"2026-10-15"],["Abu Dhabi Berkeley Services",19,8,2,59,"2026-10-27"],["Alryum",19,9,3,184,"2026-11-05"],["Gulf Snipe Engineering Constructions",18,12,2,43,"2026-11-10"],["Polensky & Zoellner Company Abu Dhabi",18,18,5,76,"2026-10-31"],["Exeed Aswar",18,13,3,63,"2026-11-06"],["Engie Cofely Energy Services -Dubai Branch (Lsb)",18,1,1,62,"2025-12-27"],["Dhafir Development and Contracting",18,18,3,28,"2026-11-05"],["Securiguard Middle East",17,8,2,73,"2026-11-05"],["Albarrak Electrical Contracting Company",17,8,2,107,"2026-10-27"],["Maplin For Agricultural Projects",17,1,1,137,"2026-10-11"],["Bgc International General Contracting",17,16,3,31,"2026-10-12"],["Almco Engineering Construction",17,14,5,78,"2026-11-11"],["World Security Fze",17,2,1,60,"2026-09-10"],["Emirates Link Contracting",17,3,1,45,"2026-09-14"],["Alkaline General Maintanance",17,11,3,209,"2026-11-11"],["Granite Construction Company",17,0,0,25,"2025-10-18"],["Optimum Decore Gen Cont Maint",16,4,2,94,"2026-11-05"],["Ducast Factory",16,2,1,35,"2026-09-20"],["Ohana Real Estate Development and Construction",16,16,3,59,"2026-11-11"],["Mazrui and Hawi Painting Company",16,16,3,42,"2026-11-11"],["Alba Tec Modern Construction",15,7,2,134,"2026-11-05"],["Aleshoush Real Estate Investment",15,13,3,61,"2026-11-06"],["United Security Group",15,8,2,58,"2026-11-01"],["Amana Steel Building Contracting Co",15,1,1,30,"2026-09-26"],["Snipe Oil and Gas Equipment",15,10,2,42,"2026-10-26"],["Galaxy Universal General Contracting",15,4,2,49,"2026-10-19"],["Alba Tec Modern Consturction and Development",15,10,2,83,"2026-10-26"],["National Food Products Company (Nfpc)",14,8,3,89,"2026-11-04"],["Al Jazeera Factory For Const Materials",14,8,2,115,"2026-10-25"],["Infotech For Employment",14,2,1,23,"2026-08-10"],["Ezz El Arab Recruitment",14,14,2,16,"2026-11-11"],["Switchgear Electro Mechanical",13,3,1,53,"2026-05-10"],["West Coast Saubermacher Environmental",13,0,0,19,"2024-12-15"],["Royal Gardens Agricultural Contracting",13,3,2,35,"2026-10-20"],["Asgc Contracting Collc",13,0,0,23,"2025-11-01"],["Khidmah",13,0,0,16,"2025-11-02"],["Injaz National General Enterprises",13,8,2,43,"2026-10-24"],["Snipe Instrumentation Control",13,9,2,34,"2026-08-24"],["Tamas Projects Company",13,2,2,26,"2025-12-29"],["The Designer Advert.& Publishing Prod.Factory",13,13,3,35,"2026-09-29"],["Ag Facilities Solutions For Contracting and General Maintenance",13,10,1,19,"2026-11-07"],["Alwathba Cement Industries",12,6,2,45,"2026-09-06"],["Gulf Preacast Concrate",12,2,1,22,"2026-04-24"],["Elite Village Real Estate",12,1,1,28,"2026-07-29"],["Bloom Landscape",12,2,1,32,"2026-11-05"],["Shaw Emirates Pipes Manufacturing",12,7,2,19,"2026-08-25"],["Alkaline Saintary Work",12,7,2,96,"2026-10-28"],["Power Spray Electromechanical",12,6,2,13,"2026-10-12"],["Igg For Military and Formal Garments",12,9,3,40,"2026-08-19"],["Knights Bridge Global Security",12,4,1,14,"2026-10-14"],["Kayan Almostqbal Contracting and Gen Maintenance",12,12,2,37,"2026-10-04"],["Sky Promoters Maintenace and General",12,12,4,57,"2026-09-23"],["Career Line For Employment",12,0,0,26,"2024-10-26"],["M L Manpower -O.P.C",12,12,4,30,"2026-08-18"],["Reliable Employment Services",12,5,1,23,"2026-10-19"],["Delmon Autoclaved Aerated Concrete",12,9,2,73,"2026-10-31"],["G S C Employees Provision Services",11,10,2,22,"2026-10-21"],["Blue Line Establishment",11,4,2,45,"2026-02-27"],["Saif Bin Darwish",11,3,1,35,"2026-10-18"],["A D C Contracting",11,8,2,59,"2026-11-07"],["Al Melehy Human Resource Services - - S.P.C",11,9,2,38,"2026-10-30"],["International Development Company Metal",11,8,1,20,"2026-11-02"],["Johnson Arabia",11,2,1,25,"2026-11-02"],["Alruym Contracting",11,6,1,69,"2026-10-31"],["Eden Gardens",11,6,2,24,"2026-11-11"],["Timishuara Electrical & Mech. Cont. Co. . Temco",11,10,3,47,"2026-11-08"],["Green Ston Landscaping - .-Opc",11,4,1,17,"2026-04-23"],["National Projects and Constructions",11,7,2,16,"2026-10-02"],["Al Nasr Contracting Co",11,4,1,25,"2026-08-21"],["Exeed Precast",11,11,3,17,"2026-11-11"],["Waves Power",10,1,1,22,"2025-12-26"],["Al Shoumoukh Manpower Recruitment",10,10,3,28,"2026-11-11"],["Burtplace General Contracting S.P",10,10,3,21,"2026-10-01"],["Cleanpro Cleaning Services",10,1,1,25,"2026-09-14"],["Cat International Limited Abu Dhabi",10,8,2,20,"2026-11-09"],["Crown Decor Factory",10,8,2,41,"2026-11-06"],["Timishu Ara Electrical and Mechanical",10,7,2,23,"2026-09-18"],["Al Diera Constructions",10,1,1,42,"2026-01-30"],["Macro Vantage Levant Dmcc",10,10,3,25,"2026-08-22"],["Al Ain General Contracting Company Abu Dahbi",10,0,0,16,"2025-03-19"],["Exceed Premium Dry Mortar",10,4,1,35,"2026-10-30"],["Sawaeed Invenstment",10,2,1,14,"2026-05-06"],["Ibuild Construction",10,2,1,28,"2026-11-10"],["Lahori Chaska Restaurant",10,5,1,58,"2026-10-27"],["Modern Plastic Co",10,4,1,36,"2026-10-29"],["Arco",10,4,1,17,"2026-08-24"],["Al Geemi Partners",10,3,1,40,"2026-09-23"],["M 4 Fm Facilities Management - O.P.C",10,9,2,29,"2026-10-29"],["Al Mumayyaz Engineering and Contracting",10,0,0,26,"2024-12-13"],["Al Geemi",9,3,1,25,"2026-11-09"],["Sagarmatha Restaurant",9,6,2,30,"2026-08-23"],["Your Tapioca Restaurant",9,4,1,12,"2026-10-09"],["Silver Coast Construction (Br Of Silver Coast Construction & Boring ) (Dubai Branch)",9,1,1,30,"2026-11-09"],["Universal Voltas",9,8,2,21,"2026-08-24"],["Al Ryum Contracting (Br Of Al Ryum)",8,6,2,64,"2026-11-04"],["Grand Nawab Restaurant",8,6,2,44,"2026-11-03"],["Emirates Code Contracting Co.( )",8,0,0,11,"2025-02-12"],["Asasat Al Dhafra Apcc Building",8,2,1,16,"2026-08-05"],["Dp World",8,0,0,12,"2024-07-28"],["Six Construct Ltd Co",8,6,1,13,"2026-06-12"],["United Mazaya General Maintenance",8,8,3,62,"2026-11-02"],["Transguard Group",8,2,1,16,"2026-10-18"],["Map Vision General Contracting",8,2,2,10,"2026-01-31"],["Aqua Engineering",8,2,1,23,"2026-05-30"],["Golden Stitch Tailoring",8,0,0,10,"2024-06-14"],["Fibrex Contracting",8,1,1,31,"2026-04-19"],["Azam Recruitment",8,8,2,15,"2026-09-10"],["Emirates General and Transport Service",8,5,1,10,"2026-07-22"],["Ethpe Contracting",8,0,0,28,"2024-08-19"],["Mountain Gate Proprty Investement",7,6,2,49,"2026-07-30"],["Lahoud Engineering Co",7,7,4,8,"2026-11-10"],["Jeet Construction",7,2,1,27,"2026-02-13"],["Silver Screen General Contracting",7,7,2,40,"2026-10-04"],["Skill Force Security Services",7,1,1,7,"2025-12-17"],["Technical Solutions International Recruitment",7,2,2,26,"2025-12-23"],["Infinity Infra Energy General Contracting",7,7,4,11,"2026-10-17"],["Discovery Employment",7,0,0,13,"2024-11-05"],["Your Tapioca Cafeteria",7,0,0,27,"2025-09-18"],["Bms General Contracting",7,1,1,16,"2026-09-21"],["China Railway Construction Corp",7,1,1,14,"2026-10-20"],["Mace Mech and Civil Engg Contractors Co",7,0,0,8,"2025-04-14"],["Great Right Angle Manpower Supply",7,7,1,9,"2026-09-03"],["Jazal Engineering",7,3,1,20,"2026-08-05"],["Al Namous General Transport Company",7,7,2,23,"2026-09-13"],["Green Housekeeping Co",7,1,1,13,"2026-01-16"],["Exceed Geotexttile",7,4,1,19,"2026-08-14"],["Fibrex Col Lc",7,0,0,9,"2025-03-11"],["Exeed Precast Owned",7,6,1,31,"2026-11-04"],["Nael and Bin Harmal Hydro Export Establishment",7,1,1,16,"2026-10-02"],["La Mer Decor and Maintenance",6,6,2,22,"2026-10-06"],["Business Management Of His Highness Sheikh",6,1,1,11,"2026-07-16"],["Up Star Restaurent",6,3,2,8,"2025-12-31"],["Barkely",6,2,1,17,"2026-09-28"],["Top West General Contracting",6,5,2,35,"2026-10-15"],["I Zone Electromecanical",6,6,3,7,"2026-06-24"],["Intergulf General Contracting",6,6,2,15,"2026-07-24"],["One Place Restaurant",6,2,1,18,"2026-09-18"],["Al Fursan Recruttment",6,0,0,10,"2025-09-03"],["Arabian Company",6,4,2,22,"2026-09-10"],["Horizon International Recruitment Services",6,0,0,13,"2024-10-29"],["Laundristic",6,0,0,9,"2025-05-11"],["Al Nasiya General Contracting Co",6,3,1,24,"2026-08-09"],["Modern Building Maintenance Co",6,0,0,17,"2025-06-13"],["Manaret Aljazeera For Contracting & General Maint",6,4,1,49,"2026-10-01"],["Royal Falcon Security",6,1,1,18,"2026-08-16"],["Solv Building Cleaning Services",6,0,0,12,"2025-02-07"],["Explorer For Employment Services",6,5,2,9,"2026-10-30"],["Solution Investments Services",6,6,1,6,"2026-10-31"],["Falcon Zinc Steel Works",6,4,1,17,"2026-11-02"],["Emirates Link Nitco",6,2,1,28,"2026-02-19"],["Dar Alahd General Contracting Mainteance",6,5,3,8,"2026-10-06"],["Easy Health Medical Clinic - - S.P.C",6,4,1,22,"2026-08-23"],["Khansaheb Civil Engineering ( )",5,2,2,5,"2026-10-09"],["Hemaya Security",5,3,2,16,"2026-01-28"],["Larsen and Toubro Limited Ecc Construction",5,5,1,8,"2026-11-09"],["Professional Fix Facilities Management",5,0,0,20,"2025-10-23"],["Point Blank Interiors",5,5,1,8,"2026-11-08"],["Bhatti Gents Saloon",5,5,1,29,"2026-10-18"],["Al Jazeera Fact Const",5,3,1,22,"2026-11-07"],["Albario Engineering",5,2,1,11,"2026-10-23"],["Falcon Eye Technology Company",5,4,1,9,"2026-08-11"],["Masri Engineering & Contracting - Mec Sal",5,3,1,10,"2026-06-04"],["Sabah Al Shams Bakery",5,4,2,51,"2026-10-30"],["Solv Enviormental Services",5,0,0,16,"2025-04-06"],["Malabar Dawath Reasturant and Grill",5,5,2,28,"2026-10-28"],["First For Security and Safety",5,5,2,8,"2026-10-06"],["Silvana Cleaning Services",5,0,0,5,"2025-06-29"],["China Cilvil Engineering Construction",5,5,2,6,"2026-11-04"],["The Benz Contracting",5,0,0,9,"2025-05-27"],["Me Fitout Industries",5,5,2,5,"2026-07-27"],["Adeeb Facilities Manage Ment",5,1,1,14,"2026-08-05"],["Strabag Dubai",5,2,2,7,"2026-11-11"],["Emirates Steel Wool Manufacturing Establishment",5,0,0,13,"2024-10-28"],["Advanced Pipeline Services Limited",5,0,0,8,"2025-05-19"],["Basatin Landscaping",5,1,1,17,"2026-11-02"],["United Mazaya Blacksmith& Reinfornce Carpentry",5,4,2,18,"2026-10-14"],["Taj Al Warda Cleaning Services",5,0,0,5,"2025-06-29"],["Bin Jamal Recruitment Services",5,1,1,7,"2026-04-08"],["Golden Dynamic Technical Services",5,5,2,9,"2026-11-04"]]}')
+
 # ---------------------------------------------------------------- storage (own folder, separate from the revenue scorecard)
 PREFIX = (_secret("S3_BASE_PREFIX").strip("/") + "/" if _secret("S3_BASE_PREFIX") else "") + "emc_marketing/"
 LOCAL = Path(__file__).resolve().parent / ".emc_marketing"
@@ -252,8 +257,13 @@ def build_names(raws, keyfn, aliases, threshold=0.84):
             ck = c[0]
             if ck.startswith("CANON:"):
                 continue
-            ratio = difflib.SequenceMatcher(None, k, ck).ratio()
-            if ratio >= threshold or (min(len(k), len(ck)) >= 8 and (k.startswith(ck) or ck.startswith(k))):
+            if min(len(k), len(ck)) >= 8 and (k.startswith(ck) or ck.startswith(k)):
+                best = c
+                break
+            if 2 * min(len(k), len(ck)) / (len(k) + len(ck)) < threshold:
+                continue
+            sm = difflib.SequenceMatcher(None, k, ck)
+            if sm.real_quick_ratio() >= threshold and sm.quick_ratio() >= threshold and sm.ratio() >= threshold:
                 best = c
                 break
         if best:
@@ -341,6 +351,21 @@ def sum_days(led, keys):
     return tot
 
 
+# ---------------------------------------------------------------- helpers
+@st.cache_data(show_spinner=False)
+def cached_names(items, kind, alias_items):
+    return build_names(dict(items), company_key if kind == "co" else camp_key, dict(alias_items),
+                       threshold=0.84 if kind == "co" else 0.72)
+
+
+def process(reg, reg_name, proc, proc_name):
+    rows_ = read_registration(reg, reg_name)
+    rev_ = revenue_map(proc, proc_name) if proc else None
+    days_ = day_totals(rows_, dict(rev_) if rev_ else None)
+    update_ledger(days_)
+    return sorted(days_, key=lambda x: datetime.strptime(x, "%d-%m-%Y"))
+
+
 # ---------------------------------------------------------------- upload
 if "mk" not in st.session_state:
     st.session_state["mk"] = (get("latest/registration.xlsx"), get_json("latest/meta.json", {}), get("latest/procedure.xlsx"))
@@ -358,15 +383,18 @@ with st.expander("Upload new reports", expanded=reg_bytes is None):
             st.info("No new file added. The saved reports are already showing.")
         else:
             try:
-                if f_reg:
-                    read_registration(f_reg.getvalue(), f_reg.name)
-                if f_proc:
-                    revenue_map(f_proc.getvalue(), f_proc.name)
+                with st.spinner("Reading and saving…"):
+                    rb = f_reg.getvalue() if f_reg else reg_bytes
+                    rn = f_reg.name if f_reg else meta.get("reg", "x.xlsx")
+                    pb = f_proc.getvalue() if f_proc else (None if f_reg else proc_bytes)
+                    pn = f_proc.name if f_proc else meta.get("proc", "x.xlsx")
+                    dts = process(rb, rn, pb, pn)
             except Exception as e:  # noqa: BLE001
                 st.error(f"Could not read the files. {e}")
             else:
                 now = datetime.now(UAE)
                 new_meta = dict(meta)
+                new_meta["dates"] = dts
                 if f_reg:
                     put("latest/registration.xlsx", f_reg.getvalue())
                     new_meta.update(reg=f_reg.name, uploaded_at=now.strftime("%d-%m-%Y %I:%M %p"))
@@ -389,19 +417,24 @@ if reg_bytes is None:
                 unsafe_allow_html=True)
     st.stop()
 
-try:
-    rows = read_registration(reg_bytes, meta.get("reg", "x.xlsx"))
-    rev = revenue_map(proc_bytes, meta.get("proc", "x.xlsx")) if proc_bytes else None
-except Exception as e:  # noqa: BLE001
-    st.error(f"Could not read the saved reports. {e}")
-    st.stop()
-
-days = day_totals(rows, dict(rev) if rev else None)
-try:
-    update_ledger(days)
-except Exception:  # noqa: BLE001
-    pass
-dates = sorted(days, key=lambda s: datetime.strptime(s, "%d-%m-%Y"))
+days = {}
+if meta.get("dates"):
+    dates = meta["dates"]
+else:                                              # older saved report: process it once
+    try:
+        rows = read_registration(reg_bytes, meta.get("reg", "x.xlsx"))
+        rev = revenue_map(proc_bytes, meta.get("proc", "x.xlsx")) if proc_bytes else None
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Could not read the saved reports. {e}")
+        st.stop()
+    days = day_totals(rows, dict(rev) if rev else None)
+    dates = sorted(days, key=lambda s: datetime.strptime(s, "%d-%m-%Y"))
+    try:
+        update_ledger(days)
+        meta["dates"] = dates
+        put("latest/meta.json", json.dumps(meta).encode())
+    except Exception:  # noqa: BLE001
+        pass
 last = datetime.strptime(dates[-1], "%d-%m-%Y")
 ym = f"{last:%Y-%m}"
 led = get_json(f"ledger/{ym}.json", {})
@@ -436,13 +469,13 @@ for src in (month, prev_full):
     for name, c in src["co"].items():
         all_co[name] = all_co.get(name, 0) + c[0]
 all_co.pop("(not filled)", None)
-CO = build_names(all_co, company_key, aliases)
+CO = cached_names(tuple(sorted(all_co.items())), "co", tuple(sorted(aliases.items())))
 all_camp = {}
 for src in (month, prev_full):
     for name, n in src["camp"].items():
         all_camp[name] = all_camp.get(name, 0) + n
 all_camp.pop("(not filled)", None)
-CAMP = build_names(all_camp, camp_key, {}, threshold=0.72)
+CAMP = cached_names(tuple(sorted(all_camp.items())), "camp", ())
 
 
 def group(src, mapping, field="co"):
@@ -557,12 +590,69 @@ def camp_table():
             f'{body}</table>')
 
 
-t1, t7, t2, t3, t4, t5, t6 = st.tabs(["Companies", "Day by day", "Camps and areas", "Growing · dropping · lost", "Nationality", "Data quality", "Email"])
+t1, t8, t7, t2, t3, t4, t5, t6 = st.tabs(["Companies", "Company profile", "Day by day", "Camps and areas", "Growing · dropping · lost", "Nationality", "Data quality", "Email"])
 with t1:
     st.markdown(f'<div class="note">Month so far {E(PERIOD)}, biggest first. "New" = new patients registered. '
                 + ("Trend compares with the same days of last month. " if has_prev else "Trend starts once last month's data is saved. ")
                 + 'Different spellings of the same company are merged (fix any in Data quality).</div>' + company_table(),
                 unsafe_allow_html=True)
+with t8:
+    asof = datetime.strptime(BASE["asof"], "%Y-%m-%d")
+    st.markdown(f"""<div class="kpis">
+ <div class="kpi m"><div class="lbl">Unique patients · Jan 2024–{asof:%d %b %Y}</div><div class="val">{BASE['tot']:,}</div>
+  <div class="sub">{BASE['tot12']:,} in the last 12 months · each patient counted once</div></div>
+ <div class="kpi"><div class="lbl">Companies</div><div class="val">{BASE['companies']:,}</div>
+  <div class="sub">average {BASE['tot'] / BASE['companies']:.0f} patients each · {BASE['ones']} sent only 1</div></div>
+ <div class="kpi"><div class="lbl">Top 10 companies</div><div class="val">{BASE['top10'] / BASE['tot']:.0%}</div>
+  <div class="sub">of all patients ({BASE['top10']:,})</div></div></div>""", unsafe_allow_html=True)
+    brow = "".join(f'<tr><td class="nm">{b[0]}</td><td>{b[1]}</td><td>{b[2]:,}</td><td>{pct(b[2], BASE["tot"])}</td></tr>' for b in BASE["bands"])
+    st.markdown('<div class="sec">Company size bands</div><table class="tbl"><tr><th class="l">Unique patients</th><th>Companies</th>'
+                f'<th>Patients from them</th><th>Share</th></tr>{brow}</table>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sec">Companies – unique patients and likely workforce</div>'
+                f'<div class="note">Saved from the full Registration List, Jan 2024 to {asof:%d %b %Y} (companies with 5+ patients). '
+                f'"This month" comes from your daily uploads. Likely workers near us = unique patients in the last 12 months '
+                f'÷ 60% to ÷ 40% (about 40–60% of camp workers visit a nearby clinic in a year – an assumption, not data). '
+                f'Type the real headcount from HR in the last column and press Save.</div>', unsafe_allow_html=True)
+    keys = {company_key(n): n for n in co_month if n != "(not filled)"}
+    heads = get_json("headcount.json", {})
+    recs = []
+    for name, u, u12, avgm, vis, lv in BASE["rows"]:
+        k = company_key(name)
+        live = keys.get(k)
+        if live is None:
+            m_ = difflib.get_close_matches(k, list(keys), n=1, cutoff=0.84)
+            live = keys[m_[0]] if m_ else None
+        now_m = co_month.get(live, [0])[0] if live else 0
+        lvd = datetime.strptime(lv, "%Y-%m-%d")
+        if now_m:
+            status = "Active"
+        else:
+            gap = (last - lvd).days
+            status = "Active" if gap <= 90 else "Quiet 3–6 months" if gap <= 180 else "Lost 6+ months"
+        hc = heads.get(name)
+        recs.append({"Company": name, "Unique patients": u, "Last 12 months": u12, "Avg / month": avgm,
+                     f"This month ({PERIOD})": now_m, "Visits per patient": round(vis / u, 1),
+                     "Likely workers near us": f"{round(u12 / 0.6, -1):,.0f}–{round(u12 / 0.4, -1):,.0f}" if u12 >= 10 else "–",
+                     "Last visit": lvd.strftime("%d %b %Y") if not now_m else "this month", "Status": status,
+                     "Headcount (from HR)": int(hc) if hc else None, "We serve": f"{u12 / hc:.0%}" if hc else ""})
+    dfp = pd.DataFrame(recs)
+    flt = st.radio("Show", ["All", "Active", "Quiet 3–6 months", "Lost 6+ months"], horizontal=True, key="mk_prof_f")
+    if flt != "All":
+        dfp = dfp[dfp["Status"] == flt]
+    edited = st.data_editor(dfp, hide_index=True, key=f"mk_prof_ed_{flt}",
+                            disabled=[c for c in dfp.columns if c != "Headcount (from HR)"],
+                            column_config={"Headcount (from HR)": st.column_config.NumberColumn(min_value=0, step=1)})
+    if st.button("Save headcounts"):
+        new = dict(heads)
+        for _, r in edited.iterrows():
+            v = r["Headcount (from HR)"]
+            if pd.notna(v) and v:
+                new[r["Company"]] = int(v)
+            else:
+                new.pop(r["Company"], None)
+        put("headcount.json", json.dumps(new).encode())
+        st.success("Headcounts saved.")
+        st.rerun()
 with t7:
     dkeys = [k for k in span if k in led]
     what = st.radio("Show", ["Companies", "Camps and areas"], horizontal=True, key="mk_dd")
