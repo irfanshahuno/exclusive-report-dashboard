@@ -70,7 +70,9 @@ h1,h2,h3{font-family:'Barlow Semi Condensed','Arial Narrow',sans-serif !importan
 .tbl th{background:var(--soft); color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; text-align:right; padding:9px 12px; border-bottom:1px solid var(--line);}
 .tbl td{padding:8px 12px; border-bottom:1px solid var(--line); text-align:right; font-variant-numeric:tabular-nums;}
 .tbl th:first-child,.tbl td:first-child{text-align:left;} .tbl tr:last-child td{border-bottom:0;}
-.tbl td.nm{font-weight:600; color:var(--ink);} .tbl .rank{color:var(--muted); width:28px;}
+.tbl td.nm{font-weight:600; color:var(--ink); text-align:left;} .tbl th.l{text-align:left;}
+.dwrap{overflow-x:auto; border-radius:12px;} .dd td,.dd th{padding:7px 8px; white-space:nowrap;} .dd td.nm{position:sticky; left:0; background:#fff; z-index:1; min-width:220px; white-space:normal;}
+.dd th:first-child{position:sticky; left:0; z-index:2;} .dd tr.tot td{background:var(--brand-soft); font-weight:700;} .dd td.z{color:#C9D2CB;} .dd td.hi{background:#E8EEF8; font-weight:700;} .tbl .rank{color:var(--muted); width:28px;}
 .up{color:var(--ok); font-weight:700;} .down{color:var(--bad); font-weight:700;} .flat{color:var(--muted);}
 .barc{display:inline-block; height:8px; background:var(--brand); border-radius:4px; vertical-align:middle; margin-right:6px;}
 .empty{background:var(--soft); border:1px dashed #C9D2CB; border-radius:12px; padding:14px 16px; color:var(--muted); font-size:13.5px;}
@@ -513,7 +515,7 @@ def company_table(n=None):
     if n:
         items = items[:n]
     top = max([v[0] for k, v in items if k != "(not filled)"] or [1])
-    head = ("<tr><th>#</th><th>Company</th><th>Today</th><th>Month</th><th>New</th><th>Follow-ups</th>"
+    head = ("<tr><th>#</th><th class='l'>Company</th><th>Today</th><th>Month</th><th>New</th><th>Follow-ups</th>"
             + ("<th>vs last month</th>" if has_prev else "")
             + ("<th>Revenue today</th><th>Revenue month</th><th>Per patient</th>" if MGMT and REV_OK else "") + "</tr>")
     body = ""
@@ -534,15 +536,61 @@ def camp_table():
     body = "".join(f'<tr><td class="nm">{E(k)}</td><td>{camp_today.get(k, 0) or "–"}</td>'
                    f'<td><span class="barc" style="width:{int(80 * v / top) if k != "(not filled)" else 0}px"></span><b>{v}</b></td>'
                    + (f'<td>{trend(v, camp_prev.get(k, 0))}</td>' if has_prev else "") + "</tr>" for k, v in items)
-    return (f'<table class="tbl"><tr><th>Camp / area</th><th>Today</th><th>Month</th>{"<th>vs last month</th>" if has_prev else ""}</tr>'
+    return (f'<table class="tbl"><tr><th class="l">Camp / area</th><th>Today</th><th>Month</th>{"<th>vs last month</th>" if has_prev else ""}</tr>'
             f'{body}</table>')
 
 
-t1, t2, t3, t4, t5, t6 = st.tabs(["Companies", "Camps and areas", "Growing · dropping · lost", "Nationality", "Data quality", "Email"])
+t1, t7, t2, t3, t4, t5, t6 = st.tabs(["Companies", "Day by day", "Camps and areas", "Growing · dropping · lost", "Nationality", "Data quality", "Email"])
 with t1:
     st.markdown(f'<div class="note">Month so far {E(PERIOD)}, biggest first. "New" = new patients registered. '
                 + ("Trend compares with the same days of last month. " if has_prev else "Trend starts once last month's data is saved. ")
                 + 'Different spellings of the same company are merged (fix any in Data quality).</div>' + company_table(),
+                unsafe_allow_html=True)
+with t7:
+    dkeys = [k for k in span if k in led]
+    what = st.radio("Show", ["Companies", "Camps and areas"], horizontal=True, key="mk_dd")
+    top_n = st.select_slider("Rows", options=[10, 25, 50, 100, "All"], value=25, key="mk_ddn")
+    per = {}
+    for k in dkeys:
+        one = sum_days(led, [k])
+        g = group(one, CO) if what == "Companies" else group(one, CAMP, "camp")
+        for name, v in g.items():
+            per.setdefault(name, {})[k] = v[0] if what == "Companies" else v
+    tot = {n: sum(d.values()) for n, d in per.items()}
+    names = sorted(tot, key=lambda n: (n == "(not filled)", -tot[n]))
+    if top_n != "All":
+        names = names[:top_n]
+    day_n = {k: led[k]["n"] for k in dkeys}
+    day_new = {k: led[k]["new"] for k in dkeys}
+    cols = "".join(f'<th>{datetime.strptime(k, "%Y-%m-%d"):%a}<br>{datetime.strptime(k, "%Y-%m-%d").day}</th>' for k in span)
+    head = f'<tr><th class="l">{"Company" if what == "Companies" else "Camp / area"}</th>{cols}<th>Total</th><th>Avg / day</th></tr>'
+
+    def cells(d):
+        out = ""
+        for k in span:
+            if k not in led:
+                out += '<td class="z" title="no data">·</td>'
+            else:
+                v = d.get(k, 0)
+                out += f'<td class="{"z" if not v else ""}">{v or "–"}</td>'
+        return out
+
+    nd = max(len(dkeys), 1)
+    body = (f'<tr class="tot"><td class="nm">All patients</td>{cells(day_n)}<td>{sum(day_n.values()):,}</td><td>{sum(day_n.values()) / nd:.0f}</td></tr>'
+            f'<tr class="tot"><td class="nm">New patients</td>{cells(day_new)}<td>{sum(day_new.values()):,}</td><td>{sum(day_new.values()) / nd:.0f}</td></tr>')
+    for n in names:
+        d = per[n]
+        best = max(d.values()) if d else 0
+        row = ""
+        for k in span:
+            if k not in led:
+                row += '<td class="z">·</td>'
+            else:
+                v = d.get(k, 0)
+                row += f'<td class="{"z" if not v else "hi" if v == best and best >= 3 else ""}">{v or "–"}</td>'
+        body += f'<tr><td class="nm">{E(n)}</td>{row}<td><b>{tot[n]}</b></td><td>{tot[n] / nd:.1f}</td></tr>'
+    st.markdown(f'<div class="note">Every day of {E(PERIOD)}. · = no report for that day. Shaded = that row\'s best day. '
+                f'Sorted by month total.</div><div class="dwrap"><table class="tbl dd">{head}{body}</table></div>',
                 unsafe_allow_html=True)
 with t2:
     st.markdown('<div class="note">From the patient address (Address 1). Spellings like "Al Naser / Al Nasser / Alnasir" are merged.</div>'
@@ -696,6 +744,7 @@ def email_html(mgmt):
 def build_excel(mgmt):
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
     show_rev = mgmt and REV_OK
     wb = Workbook()
     thin = Side(style="thin", color="D5DCD6")
@@ -720,7 +769,7 @@ def build_excel(mgmt):
                 if isinstance(v, float):
                     c.number_format = "#,##0"
         for j, w in enumerate(widths, 1):
-            ws.column_dimensions[chr(64 + j)].width = w
+            ws.column_dimensions[get_column_letter(j)].width = w
         ws.freeze_panes = "A4"
 
     ws = wb.active; ws.title = "Companies"
@@ -741,6 +790,17 @@ def build_excel(mgmt):
     if has_prev:
         ws3 = wb.create_sheet("Lost companies")
         sheet(ws3, "Lost companies – follow up", ["Company", "Patients last month", "This month"], [[n, c, 0] for n, c in lost], [48, 18, 12])
+    dk = [k for k in span if k in led]
+    per = {}
+    for k in dk:
+        for name, v in group(sum_days(led, [k]), CO).items():
+            per.setdefault(name, {})[k] = v[0]
+    ws5 = wb.create_sheet("Day by day")
+    hdr5 = ["Company"] + [f"{datetime.strptime(k, '%Y-%m-%d'):%d %b}" for k in dk] + ["Total"]
+    rows5 = [["All patients"] + [led[k]["n"] for k in dk] + [sum(led[k]["n"] for k in dk)]]
+    for n in sorted(per, key=lambda n: (n == "(not filled)", -sum(per[n].values()))):
+        rows5.append([n] + [per[n].get(k, 0) for k in dk] + [sum(per[n].values())])
+    sheet(ws5, f"Day by day · {PERIOD}", hdr5, rows5, [44] + [8] * len(dk) + [9])
     ws4 = wb.create_sheet("Nationality")
     sheet(ws4, f"Nationality · {PERIOD}", ["Nationality", "Today", "Month"],
           [[k, today["nat"].get(k, 0), v] for k, v in sorted(month["nat"].items(), key=lambda x: -x[1])], [24, 9, 10])
