@@ -436,9 +436,20 @@ if reg_bytes is None:
     st.stop()
 
 days = {}
-if meta.get("dates"):
+
+
+def _old_saved(m):
+    """True when the saved days were counted before 'one patient a day + Family Medicine' (no 'fm' field)."""
+    try:
+        d_ = datetime.strptime(m["dates"][-1], "%d-%m-%Y")
+        return "fm" not in get_json(f"ledger/{d_:%Y-%m}.json", {}).get(f"{d_:%Y-%m-%d}", {})
+    except Exception:  # noqa: BLE001
+        return True
+
+
+if meta.get("dates") and not _old_saved(meta):
     dates = meta["dates"]
-else:                                              # older saved report: process it once
+else:                                              # older saved report: count it again once
     try:
         rows = read_registration(reg_bytes, meta.get("reg", "x.xlsx"))
         rev = revenue_map(proc_bytes, meta.get("proc", "x.xlsx")) if proc_bytes else None
