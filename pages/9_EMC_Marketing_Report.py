@@ -410,8 +410,19 @@ for k, v in days.items():                         # make sure today is in, even 
 prev_last = last.replace(day=1) - timedelta(days=1)
 led_prev = get_json(f"ledger/{prev_last:%Y-%m}.json", {})
 
-today = sum_days(led, [f"{last:%Y-%m-%d}"])
 span = [f"{last.replace(day=i):%Y-%m-%d}" for i in range(1, last.day + 1)]
+DAY_OPTS = ["ALL"] + [k for k in reversed(span) if k in led]
+_pick = st.session_state.get("mk_day", DAY_OPTS[1] if len(DAY_OPTS) > 1 else "ALL")
+if _pick not in DAY_OPTS:
+    _pick = DAY_OPTS[1] if len(DAY_OPTS) > 1 else "ALL"
+st.session_state["mk_day"] = _pick
+if _pick == "ALL":
+    today = sum_days(led, span)
+    LBL, SEL = "All days", None
+else:
+    today = sum_days(led, [_pick])
+    SEL = datetime.strptime(_pick, "%Y-%m-%d")
+    LBL = "Today" if SEL.date() == last.date() else f"{SEL:%a %d %b}"
 month = sum_days(led, span)
 missing = [datetime.strptime(k, "%Y-%m-%d") for k in span if k not in led]
 same_prev = [f"{prev_last.replace(day=i):%Y-%m-%d}" for i in range(1, min(last.day, prev_last.day) + 1)]
@@ -453,7 +464,7 @@ camp_today, camp_month = group(today, CAMP, "camp"), group(month, CAMP, "camp")
 camp_prev = group(prev_part, CAMP, "camp")
 REV_OK = month["rev_days"] > 0
 PERIOD = f"1–{last:%d %b %Y}"
-DAY = f"{last:%a %d %b %Y}"
+DAY = f"All days 1–{last:%d %b %Y}" if SEL is None else f"{SEL:%a %d %b %Y}"
 
 
 def trend(now, before):
@@ -479,8 +490,14 @@ st.markdown(f"""
 <div style="display:flex;gap:8px;flex-wrap:wrap"><span class="chip">{E(meta.get('reg', ''))}</span>
 <span class="chip">Uploaded {E(meta.get('uploaded_at', ''))}</span></div></div>""", unsafe_allow_html=True)
 
-view = st.segmented_control("View", ["Marketing (patient counts)", "Management (with revenue)"],
-                            default="Marketing (patient counts)", key="mk_view") or "Marketing (patient counts)"
+_c1, _c2 = st.columns([3, 2])
+with _c1:
+    view = st.segmented_control("View", ["Marketing (patient counts)", "Management (with revenue)"],
+                                default="Marketing (patient counts)", key="mk_view") or "Marketing (patient counts)"
+with _c2:
+    st.selectbox("Day", DAY_OPTS, key="mk_day",
+                 format_func=lambda k: f"All days · 1–{last:%d %b}" if k == "ALL" else
+                 f"{datetime.strptime(k, '%Y-%m-%d'):%a %d %b}" + (f" · {led[k]['n']} patients"))
 MGMT = view.startswith("Management")
 if MGMT and not REV_OK:
     st.info("Revenue needs the ProcedureDetails report for the same day. Upload it as file 2 to see revenue here.")
@@ -498,14 +515,14 @@ named_today = len([n for n in co_today if n != "(not filled)"])
 named_month = len([n for n in co_month if n != "(not filled)"])
 st.markdown(f"""
 <div class="kpis">
- <div class="kpi"><div class="lbl">Patients today</div><div class="val">{today['n']}</div>
+ <div class="kpi"><div class="lbl">Patients · {E(LBL)}</div><div class="val">{today['n']}</div>
   <div class="sub">{today['new']} new · {today['n'] - today['new']} returning · {today['fu']} follow-ups</div></div>
- <div class="kpi"><div class="lbl">Companies today</div><div class="val">{named_today}</div>
+ <div class="kpi"><div class="lbl">Companies · {E(LBL)}</div><div class="val">{named_today}</div>
   <div class="sub">employer filled for {pct(today['n'] - today['blank'], today['n'])} of patients</div></div>
  <div class="kpi m"><div class="lbl">Month so far · {E(PERIOD)}</div><div class="val">{month['n']:,}</div>
   <div class="sub">{month['new']} new · {named_month} companies{f" · last month same days {prev_part['n']:,}" if has_prev else ""}</div>
   {f'<div class="warnline">⚠ {E(miss_txt)}</div>' if miss_txt else ""}</div>
- {f'<div class="kpi m"><div class="lbl">Revenue · month so far</div><div class="val">{fmt(month["rev"])} <small>AED</small></div><div class="sub">today {fmt(today["rev"])} · {fmt(month["rev"] / max(month["n"], 1))} per patient</div></div>' if MGMT and REV_OK else ""}
+ {f'<div class="kpi m"><div class="lbl">Revenue · month so far</div><div class="val">{fmt(month["rev"])} <small>AED</small></div><div class="sub">{E(LBL.lower())} {fmt(today["rev"])} · {fmt(month["rev"] / max(month["n"], 1))} per patient</div></div>' if MGMT and REV_OK else ""}
  {f'<div class="kpi"><div class="lbl">Companies lost</div><div class="val" style="color:#B3261E">{len(lost)}</div><div class="sub">came last month (2+ patients), none this month</div></div>' if has_prev else ""}
 </div>""", unsafe_allow_html=True)
 
@@ -515,7 +532,7 @@ def company_table(n=None):
     if n:
         items = items[:n]
     top = max([v[0] for k, v in items if k != "(not filled)"] or [1])
-    head = ("<tr><th>#</th><th class='l'>Company</th><th>Today</th><th>Month</th><th>New</th><th>Follow-ups</th>"
+    head = (f"<tr><th>#</th><th class='l'>Company</th><th>{E(LBL)}</th><th>Month</th><th>New</th><th>Follow-ups</th>"
             + ("<th>vs last month</th>" if has_prev else "")
             + ("<th>Revenue today</th><th>Revenue month</th><th>Per patient</th>" if MGMT and REV_OK else "") + "</tr>")
     body = ""
@@ -536,7 +553,7 @@ def camp_table():
     body = "".join(f'<tr><td class="nm">{E(k)}</td><td>{camp_today.get(k, 0) or "–"}</td>'
                    f'<td><span class="barc" style="width:{int(80 * v / top) if k != "(not filled)" else 0}px"></span><b>{v}</b></td>'
                    + (f'<td>{trend(v, camp_prev.get(k, 0))}</td>' if has_prev else "") + "</tr>" for k, v in items)
-    return (f'<table class="tbl"><tr><th class="l">Camp / area</th><th>Today</th><th>Month</th>{"<th>vs last month</th>" if has_prev else ""}</tr>'
+    return (f'<table class="tbl"><tr><th class="l">Camp / area</th><th>{E(LBL)}</th><th>Month</th>{"<th>vs last month</th>" if has_prev else ""}</tr>'
             f'{body}</table>')
 
 
@@ -619,7 +636,7 @@ with t4:
     nat = sorted(month["nat"].items(), key=lambda x: -x[1])
     top = max([v for _, v in nat] or [1])
     st.markdown('<div class="note">Useful for the language of flyers and WhatsApp messages.</div><table class="tbl">'
-                '<tr><th>Nationality</th><th>Today</th><th>Month</th><th>Share</th></tr>'
+                f'<tr><th>Nationality</th><th>{E(LBL)}</th><th>Month</th><th>Share</th></tr>'
                 + "".join(f'<tr><td class="nm">{E(k)}</td><td>{today["nat"].get(k, 0) or "–"}</td>'
                           f'<td><span class="barc" style="width:{int(80 * v / top)}px"></span><b>{v}</b></td><td>{pct(v, month["n"])}</td></tr>'
                           for k, v in nat) + '</table>', unsafe_allow_html=True)
@@ -690,8 +707,8 @@ def email_html(mgmt):
            f'<div style="font:bold 26px Arial,sans-serif;color:#ffffff;">EMC Marketing Report{" · Management" if mgmt else ""}</div>'
            f'<div style="font-size:14px;color:#D6E2F3;padding-top:6px;">{E(DAY)} &nbsp;·&nbsp; month so far {E(PERIOD)}</div></td></tr>'
            f'<tr><td style="padding-top:12px;"><table {T.replace("cellspacing=\"0\"", "cellspacing=\"8\"")} width="100%" style="margin:0 -8px;"><tr>'
-           + box("Patients today", today["n"], f'{today["new"]} new · {today["fu"]} follow-ups')
-           + box("Companies today", named_today, f'employer filled {pct(today["n"] - today["blank"], today["n"])}')
+           + box(f"Patients · {LBL}", today["n"], f'{today["new"]} new · {today["fu"]} follow-ups')
+           + box(f"Companies · {LBL}", named_today, f'employer filled {pct(today["n"] - today["blank"], today["n"])}')
            + box(f"Month so far · {PERIOD}", f'{month["n"]:,}',
                  f'{month["new"]} new · {named_month} companies' + (f' · last month same days {prev_part["n"]:,}' if has_prev else "")
                  + (f'<br><b style="color:#9A6200">&#9888; {E(miss_txt)}</b>' if miss_txt else ""), "30%", True)
@@ -702,7 +719,7 @@ def email_html(mgmt):
     # companies
     out.append(section("Top companies"))
     items = sorted(((k, v) for k, v in co_month.items() if k != "(not filled)"), key=lambda x: -x[1][0])[:25]
-    head = (f'<tr><th {thl}>Company</th><th {th}>Today</th><th {th}>Month</th><th {th}>New</th>'
+    head = (f'<tr><th {thl}>Company</th><th {th}>{E(LBL)}</th><th {th}>Month</th><th {th}>New</th>'
             + (f'<th {th}>vs last month</th>' if has_prev else "")
             + (f'<th {th}>Revenue month</th><th {th}>Per patient</th>' if show_rev else "") + '</tr>')
     body = ""
@@ -720,7 +737,7 @@ def email_html(mgmt):
     out.append(section("Camps and areas"))
     citems = sorted(((k, v) for k, v in camp_month.items() if k != "(not filled)"), key=lambda x: -x[1])[:12]
     out.append(f'<tr><td><table {T} width="100%" bgcolor="#ffffff" style="background:#ffffff;border:1px solid {EDGE};border-collapse:collapse;">'
-               f'<tr><th {thl}>Camp / area</th><th {th}>Today</th><th {th}>Month</th>{f"<th {th}>vs last month</th>" if has_prev else ""}</tr>'
+               f'<tr><th {thl}>Camp / area</th><th {th}>{E(LBL)}</th><th {th}>Month</th>{f"<th {th}>vs last month</th>" if has_prev else ""}</tr>'
                + "".join(f'<tr><td {tdl}><b>{E(k)}</b></td><td {td}>{camp_today.get(k, 0) or "–"}</td><td {td}><b>{v}</b></td>'
                          + (f'<td {td}>{trend_e(v, camp_prev.get(k, 0))}</td>' if has_prev else "") + '</tr>' for k, v in citems)
                + '</table></td></tr>')
@@ -773,7 +790,7 @@ def build_excel(mgmt):
         ws.freeze_panes = "A4"
 
     ws = wb.active; ws.title = "Companies"
-    hdr = ["Company", "Today", f"Month {PERIOD}", "New", "Follow-ups"] + (["Last month same days"] if has_prev else []) \
+    hdr = ["Company", LBL, f"Month {PERIOD}", "New", "Follow-ups"] + (["Last month same days"] if has_prev else []) \
         + (["Revenue today", "Revenue month", "Per patient"] if show_rev else [])
     rows_ = []
     for name, v in sorted(co_month.items(), key=lambda x: (x[0] == "(not filled)", -x[1][0])):
@@ -784,7 +801,7 @@ def build_excel(mgmt):
         rows_.append(r)
     sheet(ws, f"Companies · {PERIOD}", hdr, rows_, [48, 9, 14, 8, 11] + ([16] if has_prev else []) + ([14, 15, 12] if show_rev else []))
     ws2 = wb.create_sheet("Camps and areas")
-    sheet(ws2, f"Camps and areas · {PERIOD}", ["Camp / area", "Today", "Month"] + (["Last month same days"] if has_prev else []),
+    sheet(ws2, f"Camps and areas · {PERIOD}", ["Camp / area", LBL, "Month"] + (["Last month same days"] if has_prev else []),
           [[k, camp_today.get(k, 0), v] + ([camp_prev.get(k, 0)] if has_prev else [])
            for k, v in sorted(camp_month.items(), key=lambda x: -x[1])], [34, 9, 10, 18])
     if has_prev:
@@ -802,7 +819,7 @@ def build_excel(mgmt):
         rows5.append([n] + [per[n].get(k, 0) for k in dk] + [sum(per[n].values())])
     sheet(ws5, f"Day by day · {PERIOD}", hdr5, rows5, [44] + [8] * len(dk) + [9])
     ws4 = wb.create_sheet("Nationality")
-    sheet(ws4, f"Nationality · {PERIOD}", ["Nationality", "Today", "Month"],
+    sheet(ws4, f"Nationality · {PERIOD}", ["Nationality", LBL, "Month"],
           [[k, today["nat"].get(k, 0), v] for k, v in sorted(month["nat"].items(), key=lambda x: -x[1])], [24, 9, 10])
     buf = io.BytesIO(); wb.save(buf)
     return buf.getvalue()
