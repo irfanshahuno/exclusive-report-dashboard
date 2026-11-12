@@ -26,14 +26,15 @@ SKIP_SCORING = {"36415"}    # blood collection: part of the lab, not a ball
 # Full-care targets per day. Consultation base uses real new/established mix from Oct-2026 claims:
 # GP: 5 referrals x 75 + 17 Daman x 80.37 + 12 non-Daman x 46.24 = 2,296 + labs/procedures 1,342 = 3,639
 # FM: 5 referrals x 75 + 15 Daman x 105.95 + 10 non-Daman x 69.01 = 2,654 + 1,342 = 3,997
-TARGETS = {"gp": {"balls": 34, "scoring": 22, "runs": 3639},
-           "fm": {"balls": 30, "scoring": 22, "runs": 3997}}
+TARGETS = {"gp": {"balls": 48, "scoring": 22, "runs": 4548.75},
+           "fm": {"balls": 35, "scoring": 22, "runs": 3997}}
 # The team the clinic plans for. A doctor with no patients in the report still shows (0 · 34 short).
-# "GP vacancy" = the place left by Dr. Mahedi until a new GP joins.
+# 4 GPs and Family Medicine (no vacancy place). To plan for a new GP again, add ("GP vacancy", False) to TEAM.
 TEAM = [("Dr. Sana Ullah Afridi", False), ("Dr. Ershadul Alam", False), ("Dr. Syed Bilal Haider", False),
-        ("Dr. Saad Habib", False), ("GP vacancy", False), ("Dr. Sant Das", True)]
+        ("Dr. Saad Habib", False), ("Dr. Sant Das", True)]
 VACANCY = "GP vacancy"
-# Team target a day: 5 GP x 34 = 170 GP visits + 30 Family Medicine patients who come as GP referrals = 200
+# Team target a day: 4 GP x 48 = 192 GP visits (8-hour shift, 10 min a patient) + 35 Family Medicine = 227 patients;
+# revenue 4 x 4,548.75 + 3,997 = 22,192 a day (665,760 for a 30-day month)
 PACE = {"12 PM": 0.25, "4 PM": 0.50, "8 PM": 0.75, "Closing": 1.00}
 
 # Procedure prices billed to insurers (used to price cash visits)
