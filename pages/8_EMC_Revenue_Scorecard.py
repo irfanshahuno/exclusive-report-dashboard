@@ -418,9 +418,24 @@ ref_matched = L.apply_referrals(visits, refs) if refs else 0
 all_visits, all_dates = visits, dates
 if len(dates) > 1:
     _dk = lambda d_: d_[6:10] + d_[3:5] + d_[:2]
-    _opts = ["All days"] + sorted(dates, key=_dk)
-    day_pick = st.selectbox("Day", _opts, index=0, help="The report covers several days. Pick one day to see it on its own.")
-    if day_pick != "All days":
+    _sorted = sorted(dates, key=_dk)
+    _weeks = {}                                   # week = Monday to Sunday
+    for d_ in _sorted:
+        _dt = datetime.strptime(d_, "%d-%m-%Y")
+        _weeks.setdefault((_dt - timedelta(days=_dt.weekday())).strftime("%Y-%m-%d"), []).append(d_)
+    _wk_label = {}
+    for i_, (wk_, ds_) in enumerate(sorted(_weeks.items()), 1):
+        a_, b_ = datetime.strptime(ds_[0], "%d-%m-%Y"), datetime.strptime(ds_[-1], "%d-%m-%Y")
+        lbl_ = f"Week {i_} · {a_:%a %d} – {b_:%a %d %b} ({len(ds_)} day{'s' if len(ds_) > 1 else ''})"
+        _wk_label[lbl_] = ds_
+    _opts = ["All days"] + (list(_wk_label) if len(_wk_label) > 1 else []) + _sorted
+    day_pick = st.selectbox("Day or week", _opts, index=0,
+                            help="The report covers several days. Pick a week (Monday to Sunday) or one day to see it on its own.")
+    if day_pick in _wk_label:
+        _keep = set(_wk_label[day_pick])
+        visits = [v for v in visits if v["date"] in _keep]
+        dates = [d_ for d_ in dates if d_ in _keep]
+    elif day_pick != "All days":
         visits = [v for v in visits if v["date"] == day_pick]
         dates = [day_pick]
 ddf, idf, itdf, strips = L.summarize(visits, L.PACE[check])
