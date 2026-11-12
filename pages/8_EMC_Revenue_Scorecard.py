@@ -1199,7 +1199,7 @@ with tab_mtd:
         st.markdown('<div class="sec">Patients by day</div>' + mtd_table("pts"), unsafe_allow_html=True)
         st.markdown(f'<div class="note">Green day = target met ({fmt(L.TARGETS["gp"]["runs"])} / {L.TARGETS["gp"]["balls"]} for GP, {fmt(L.TARGETS["fm"]["runs"])} / {L.TARGETS["fm"]["balls"]} for FM, {fmt(C["team_rv"])} / {int(C["team_pt"])} for the clinic) · red = short · '
                     '– = not working that day. A doctor\'s target counts only the days they worked. Forecast = average per day so far × days in the month. '
-                    'Trend compares the last 7 days with the 7 days before.</div>',
+                    'Trend compares the last 7 days with the 7 days before.' + (' The clinic target includes the new GP place.' if L.VACANCY in {n for n, _ in L.TEAM} else '') + '</div>',
                     unsafe_allow_html=True)
 
 
