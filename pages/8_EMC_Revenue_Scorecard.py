@@ -1012,7 +1012,7 @@ with tab1:
                             "% of day", "Status"], money=("Runs", "Runs needed"), total_key="Clinic"),
                 unsafe_allow_html=True)
     st.markdown('<div class="note">Runs = insurance money after copay on corrected prices; cash visits at other-insurer prices. '
-                f'Daily target: GP 34 balls, 22 scoring, {fmt(L.TARGETS["gp"]["runs"])} runs · Family Medicine 30 balls, '
+                f'Daily target: GP {L.TARGETS["gp"]["balls"]} balls, {L.TARGETS["gp"]["scoring"]} scoring, {fmt(L.TARGETS["gp"]["runs"])} runs · Family Medicine {L.TARGETS["fm"]["balls"]} balls, '
                 f'{fmt(L.TARGETS["fm"]["runs"])} runs.</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------- by insurance
@@ -1197,9 +1197,9 @@ with tab_mtd:
 
         st.markdown('<div class="sec">Revenue by day (insurance share)</div>' + mtd_table("rev"), unsafe_allow_html=True)
         st.markdown('<div class="sec">Patients by day</div>' + mtd_table("pts"), unsafe_allow_html=True)
-        st.markdown('<div class="note">Green day = target met (3,639 / 34 for GP, 3,997 / 30 for FM, 22,192 / 200 for the clinic) · red = short · '
+        st.markdown(f'<div class="note">Green day = target met ({fmt(L.TARGETS["gp"]["runs"])} / {L.TARGETS["gp"]["balls"]} for GP, {fmt(L.TARGETS["fm"]["runs"])} / {L.TARGETS["fm"]["balls"]} for FM, {fmt(C["team_rv"])} / {int(C["team_pt"])} for the clinic) · red = short · '
                     '– = not working that day. A doctor\'s target counts only the days they worked. Forecast = average per day so far × days in the month. '
-                    'Trend compares the last 7 days with the 7 days before. The clinic target includes the new GP place.</div>',
+                    'Trend compares the last 7 days with the 7 days before.</div>',
                     unsafe_allow_html=True)
 
 
@@ -1844,7 +1844,7 @@ def _email_html(only=None, safe=False):
                     f'{head}{body_}</table>')
         out.append(section("Day by day · revenue"))
         out.append(f'<tr><td>{day_table("rev")}</td></tr>')
-        out.append(f'<tr><td style="font-size:11.5px;color:{MUT};padding-top:6px;">Green = day target met (3,639 GP · 3,997 FM · '
+        out.append(f'<tr><td style="font-size:11.5px;color:{MUT};padding-top:6px;">Green = day target met ({fmt(L.TARGETS["gp"]["runs"])} GP · {fmt(L.TARGETS["fm"]["runs"])} FM · '
                    f'{fmt(C["team_rv"])} clinic) · red = short · off = not working · '
                    + ("one column per week, today shown on its own. Every day is in the attached Excel. " if len(mtd["days"]) > 10 else "")
                    + 'A doctor\'s target counts only the days they worked.</td></tr>')
