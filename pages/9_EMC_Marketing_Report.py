@@ -94,6 +94,7 @@ details.sp2[open]{display:block; margin:2px 0 0 0;}
 .cgrid .plain .nmc{padding-left:28px;}
 .cgrid .row.sub{background:#F4F7FC; font-size:12.8px;} .cgrid .row.sub .nmc{padding-left:34px; border-left:3px solid #9DB6DA;}
 .cgrid .row.sub .sn{color:#2B3A33;} .cgrid .row.spl .full{grid-column:2 / -1; text-align:left; padding-left:34px;}
+.cgrid .pay{background:#FBF6EA; color:#7A4E00;}
 .cgrid .total{background:#E8EEF8; font-weight:700; border-bottom:0; border-top:2px solid #1F4E8C;}
 .fmline{margin-top:10px; background:#FBF0D9; border-left:4px solid #9A6200; border-radius:8px; padding:8px 10px; color:#5A3A00; font-size:13px; font-weight:600;}
 .fmline b{font-size:17px; color:#9A6200;}
@@ -748,6 +749,35 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 
 
+DEFAULT_RATES = {"Arco": 10, "Qamra": 20, "Exceed": 20, "Hilalco": 10, "Shaporji": 15, "Nmdc": 10}
+RATES = get_json("camp_rates.json", None)
+if RATES is None:
+    RATES = DEFAULT_RATES
+
+
+def pay_rate(name):
+    """Rate per patient for a company / sister group name, matched loosely (Exceed = Exeed, Shaporji = Shapoorji)."""
+    up = name.upper()
+    words = re.sub(r"[^A-Z ]", " ", up).split()
+    for k, r in RATES.items():
+        ku = k.upper().strip()
+        if not ku:
+            continue
+        if ku in words or (len(ku) >= 5 and ku in up.replace(" ", "")):
+            return float(r)
+        if words and difflib.SequenceMatcher(None, ku, _first_word(name)).ratio() >= 0.8:
+            return float(r)
+    return 0.0
+
+
+PAY_ON_FU = False          # set from the Companies tab: pay on all patients (once a day), or without follow-ups
+
+
+def pay_count(ms):
+    v = sum_lists(co_month, ms)
+    return v[0] - (0 if PAY_ON_FU else v[2])
+
+
 def company_table(n=None):
     """Companies grid: one row per sister group; ▸ opens tinted rows for each sister company (same columns)."""
     groups = {}
@@ -759,11 +789,13 @@ def company_table(n=None):
     top = max([sum(co_month[m][0] for m in ms) for g, ms in items if g != "(not filled)"] or [1])
     rev = MGMT and REV_OK
     cols = ["#", "Company", E(LBL), f"Family Med. · {E(LBL)}", "Patients · month", "New · month", "Follow-ups · month", "Family Med. · month", "Insurance · month"] \
-        + (["vs last month"] if has_prev else []) + (["Revenue today", "Revenue month", "Per patient"] if rev else [])
+        + (["vs last month"] if has_prev else []) + (["Revenue today", "Revenue month", "Per patient"] if rev else []) \
+        + (["Pay / patient", "Pay to camp"] if RATES else [])
     tmpl = ("38px minmax(300px,2.6fr) repeat(6,minmax(68px,.8fr)) minmax(170px,1.5fr)" + (" minmax(80px,.8fr)" if has_prev else "")
-            + (" repeat(3,minmax(88px,.9fr))" if rev else ""))
+            + (" repeat(3,minmax(88px,.9fr))" if rev else "") + (" minmax(70px,.7fr) minmax(90px,.9fr)" if RATES else ""))
+    pay_total = [0.0]
 
-    def cells(nm_html, rank, ms, bar_on, cls=""):
+    def cells(nm_html, rank, ms, bar_on, cls="", rate=0.0):
         v, t = sum_lists(co_month, ms), sum_lists(co_today, ms)
         bar = f'<span class="barc" style="width:{max(3, int(40 * v[0] / top))}px"></span>' if bar_on else ""
         out = (f'<div class="c r">{rank}</div><div class="c nmc">{nm_html}</div><div class="c">{t[0] or "–"}</div>'
@@ -774,35 +806,43 @@ def company_table(n=None):
             out += f'<div class="c">{trend(v[0], sum(co_prev.get(m, [0])[0] for m in ms))}</div>'
         if rev:
             out += f'<div class="c">{fmt(t[3]) if t[0] else "–"}</div><div class="c"><b>{fmt(v[3])}</b></div><div class="c">{fmt(v[3] / max(v[0], 1))}</div>'
+        if RATES:
+            amt = rate * pay_count(ms)
+            out += f'<div class="c pay">{fmt(rate) if rate else "–"}</div><div class="c pay"><b>{fmt(amt) if rate else "–"}</b></div>'
+            if rank != "":
+                pay_total[0] += amt
         return out
 
     def spell_html(m):
         sp_ = sorted(SPELL.get(m, []), key=lambda x: -x[1])
         if len(sp_) < 2:
             return ""
-        return (f'<details class="sp2"><summary>{len(sp_)} spellings</summary><div class="sp">'
+        return (f'<details class="sp2"><summary>{len(sp_)} names in HIS</summary><div class="sp">'
                 + "<br>".join(f"{E(_clean(r_).title())} ({c_})" for r_, c_ in sp_) + '</div></details>')
 
-    html = f'<div class="cgrid" style="--cols:{tmpl}"><div class="row hd">' + "".join(f'<div class="c{" l" if k in (1, 8) else ""}">{c}</div>' for k, c in enumerate(cols)) + '</div>'
+    html = f'<div class="cgrid" style="--cols:{tmpl}"><div class="row hd">' + "".join(
+        f'<div class="c{" l" if k in (1, 8) else ""}{" pay" if c in ("Pay / patient", "Pay to camp") else ""}">{c}</div>' for k, c in enumerate(cols)) + '</div>'
     allm = []
     for i, (g, ms) in enumerate(items, 1):
         ms = sorted(ms, key=lambda m: -co_month[m][0]); allm += ms
+        g_rate = pay_rate(g) or max([pay_rate(m) for m in ms] or [0])
         if len(ms) > 1:
-            subs = "".join(f'<div class="row sub">{cells(f"<span class=sn>{E(m)}</span>{spell_html(m)}", "", [m], False)}</div>' for m in ms)
-            html += (f'<details class="grp"><summary class="row">{cells(f"<span class=gn>{E(g)}</span><span class=cnt>{len(ms)} companies</span>", i, ms, g != "(not filled)")}</summary>'
+            subs = "".join(f'<div class="row sub">{cells(f"<span class=sn>{E(m)}</span>{spell_html(m)}", "", [m], False, rate=g_rate)}</div>' for m in ms)
+            html += (f'<details class="grp"><summary class="row">{cells(f"<span class=gn>{E(g)}</span><span class=cnt>{len(ms)} companies</span>", i, ms, g != "(not filled)", rate=g_rate)}</summary>'
                      f'{subs}</details>')
         elif len(SPELL.get(g, [])) > 1:
             sp_ = sorted(SPELL.get(g, []), key=lambda x: -x[1])
-            html += (f'<details class="grp"><summary class="row">{cells(f"<span class=gn>{E(g)}</span><span class=cnt>{len(sp_)} spellings</span>", i, ms, True)}</summary>'
+            html += (f'<details class="grp"><summary class="row">{cells(f"<span class=gn>{E(g)}</span><span class=cnt>{len(sp_)} names in HIS</span>", i, ms, True, rate=g_rate)}</summary>'
                      f'<div class="row sub spl"><div class="c"></div><div class="c sp full">' + " · ".join(f"{E(_clean(r_).title())} ({c_})" for r_, c_ in sp_) + '</div></div></details>')
         else:
-            html += f'<div class="row plain">{cells(f"<span class=gn>{E(g)}</span>", i, ms, g != "(not filled)")}</div>'
+            html += f'<div class="row plain">{cells(f"<span class=gn>{E(g)}</span>", i, ms, g != "(not filled)", rate=g_rate)}</div>'
     v, t = sum_lists(co_month, allm), sum_lists(co_today, allm)
     tot = (f'<div class="c"></div><div class="c nmc"><b>Total · {len([g for g, _ in items if g != "(not filled)"])} companies / groups</b></div>'
            f'<div class="c">{t[0]:,}</div><div class="c">{sum(fm_today.get(k, 0) for k in allm):,}</div><div class="c">{v[0]:,}</div><div class="c">{v[1]:,}</div>'
            f'<div class="c">{v[2]:,}</div><div class="c">{sum(fm_month.get(k, 0) for k in allm):,}</div><div class="c"></div>'
            + ('<div class="c"></div>' if has_prev else "")
-           + (f'<div class="c">{fmt(t[3])}</div><div class="c">{fmt(v[3])}</div><div class="c">{fmt(v[3] / max(v[0], 1))}</div>' if rev else ""))
+           + (f'<div class="c">{fmt(t[3])}</div><div class="c">{fmt(v[3])}</div><div class="c">{fmt(v[3] / max(v[0], 1))}</div>' if rev else "")
+           + (f'<div class="c pay"></div><div class="c pay">{fmt(pay_total[0])}</div>' if RATES else ""))
     return html + f'<div class="row total">{tot}</div></div>'
 
 
@@ -818,10 +858,27 @@ def camp_table():
 
 t1, t8, t7, t2, t9, t3, t4, t5, t6 = st.tabs(["Companies", "Company profile", "Day by day", "Camps and areas", "Insurance", "Growing · dropping · lost", "Nationality", "Data quality", "Email"])
 with t1:
+    if RATES:
+        PAY_ON_FU = st.radio("Pay to camp counts", ["Patients without follow-ups", "All patients (once a day)"], horizontal=True,
+                             key="mk_payon") == "All patients (once a day)"
     st.markdown(f'<div class="note">Month so far {E(PERIOD)}, biggest first. "New" = new patients registered. '
                 + ("Trend compares with the same days of last month. " if has_prev else "Trend starts once last month's data is saved. ")
                 + 'Different spellings of the same company are merged (fix any in Data quality).</div>' + company_table(),
                 unsafe_allow_html=True)
+    with st.expander("Pay-to-camp rates (shown on this page only, not in the email or Excel)"):
+        st.caption("One line per company or sister group: name = AED per patient. Sister companies share the group rate.")
+        rt = st.text_area("Rates", value="\n".join(f"{k} = {float(v):g}" for k, v in RATES.items()), height=150, key="mk_rates")
+        if st.button("Save rates"):
+            newr = {}
+            for line in rt.splitlines():
+                if "=" in line:
+                    a_, b_ = line.split("=", 1)
+                    try:
+                        newr[a_.strip()] = float(b_.strip())
+                    except ValueError:
+                        pass
+            put("camp_rates.json", json.dumps(newr).encode())
+            st.success(f"Saved {len(newr)} rates."); st.rerun()
 with t8:
     asof = datetime.strptime(BASE["asof"], "%Y-%m-%d")
     st.markdown(f"""<div class="kpis">
