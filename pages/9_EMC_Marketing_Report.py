@@ -199,7 +199,8 @@ def read_registration(data, name=""):
                      "new": g(r, "PATIENT TYPE").upper().startswith("NEW"), "fu": "FOLLOW" in g(r, "VISIT TYPE").upper(),
                      "user": g(r, "REG:USER").upper() or "–",
                      "fm": any(x in re.sub(r"[^A-Z]", "", g(r, "DOCTOR").upper()) for x in FM_DOCTORS),
-                     "ins": ins_short(g(r, "INSURANCE NAME"), g(r, "BILL TYPE"))})
+                     "ins": ins_short(g(r, "INSURANCE NAME"), g(r, "BILL TYPE")),
+                     "status": g(r, "STATUS") or "(blank)", "doctor": g(r, "DOCTOR").title()})
     if not rows:
         raise ValueError("No visits found in the Registration List.")
     return rows
@@ -314,11 +315,15 @@ def build_names(raws, keyfn, aliases, threshold=0.84):
 # ---------------------------------------------------------------- daily ledger (per day, per company: counts and revenue)
 def day_totals(rows, rev):
     days = {}
+    billed_keys = set(rev) if rev is not None else None      # (EMR, date) with a bill in ProcedureDetails
     seen = set()
     for r in sorted(rows, key=lambda x: x["fm"]):     # GP visit first, so a referred patient is counted once
         d = days.setdefault(r["date"], {"co": {}, "camp": {}, "nat": {}, "users": {}, "n": 0, "new": 0, "fu": 0,
                                         "blank": 0, "rev": 0.0, "has_rev": rev is not None, "fm": 0, "fm_ref": 0,
                                         "ins": {}, "ins_rev": {}, "co_ins": {}})
+        if r.get("status", "Closed").upper() != "CLOSED":
+            d.setdefault("not_closed", []).append([r["date"], r["status"], r["doctor"], r["employer"],
+                                                   None if billed_keys is None else (r["emr"], r["date"]) in billed_keys])
         if r["fm"]:
             d["fm"] += 1
             fe = r["employer"] if company_key(r["employer"]) else "(not filled)"
@@ -369,7 +374,7 @@ def update_ledger(days):
 
 def sum_days(led, keys):
     tot = {"co": {}, "camp": {}, "nat": {}, "users": {}, "n": 0, "new": 0, "fu": 0, "blank": 0, "rev": 0.0, "days": 0, "rev_days": 0,
-           "fm": 0, "fm_ref": 0, "co_fm": {}, "ins": {}, "ins_rev": {}, "co_ins": {}}
+           "fm": 0, "fm_ref": 0, "co_fm": {}, "ins": {}, "ins_rev": {}, "co_ins": {}, "not_closed": []}
     for k in keys:
         d = led.get(k)
         if not d:
@@ -379,6 +384,7 @@ def sum_days(led, keys):
             tot[f] += d[f]
         for f in ("fm", "fm_ref"):
             tot[f] += d.get(f, 0)
+        tot["not_closed"] += d.get("not_closed", [])
         for f in ("co_fm", "ins", "ins_rev", "co_ins"):
             for name, n in d.get(f, {}).items():
                 tot[f][name] = tot[f].get(name, 0) + n
@@ -467,7 +473,7 @@ def _old_saved(m):
     """True when the saved days were counted before 'one patient a day + Family Medicine' (no 'fm' field)."""
     try:
         d_ = datetime.strptime(m["dates"][-1], "%d-%m-%Y")
-        return "ins" not in get_json(f"ledger/{d_:%Y-%m}.json", {}).get(f"{d_:%Y-%m-%d}", {})
+        return "not_closed" not in get_json(f"ledger/{d_:%Y-%m}.json", {}).get(f"{d_:%Y-%m-%d}", {})
     except Exception:  # noqa: BLE001
         return True
 
@@ -840,6 +846,34 @@ with t5:
                 + "".join(f'<tr><td class="nm">{E(u)}</td><td>{b}</td><td>{a}</td>'
                           f'<td class="{"up" if b and a / b >= 0.95 else "down"}">{pct(a, b)}</td></tr>' for u, (a, b) in users)
                 + '</table>', unsafe_allow_html=True)
+    NC_WHY = {"DOCTOR (PENDING)": "Registered but the doctor has not seen the patient – usually no bill; check if the patient left.",
+              "OPEN": "Patient was seen but the file was not closed in the HIS (doctor or nurse to close it).",
+              "(BLANK)": "No status in the HIS – check with reception / HIS team.",
+              "CASH": "Waiting at the cash counter – bill or payment not finished.",
+              "DOCTOR": "Waiting for or with the doctor – consultation not finished.",
+              "NURSE": "Waiting for or with the nurse.", "NURSE (PENDING)": "Waiting for the nurse.",
+              "REGISTERED": "Registered only – not seen yet.", "BILL": "Bill not finished.", "BILL-CANCELLED": "Bill cancelled."}
+    nc_all = month.get("not_closed", [])
+    nc = [x_ for x_ in nc_all if x_[4] is not True]          # in ProcedureDetails = billed = effectively closed
+    if nc_all and not nc:
+        st.markdown(f'<div class="note">{len(nc_all)} registrations are not "Closed" in the HIS, but all of them are in the ProcedureDetails (billed), so they count as closed.</div>', unsafe_allow_html=True)
+    if nc:
+        cnt = {}
+        for row_ in nc:
+            cnt[row_[1]] = cnt.get(row_[1], 0) + 1
+        summ = "".join(f'<tr><td class="nm">{E(k)}</td><td>{v}</td><td style="text-align:left">{E(NC_WHY.get(k.upper(), "Check in the HIS."))}</td></tr>'
+                       for k, v in sorted(cnt.items(), key=lambda x: -x[1]))
+        st.markdown(f'<div class="sec">Registrations to check in the HIS · {len(nc)}</div><div class="note">Not "Closed" and not found in the ProcedureDetails, so never billed. '
+                    f'They are still counted. ({len(nc_all) - len(nc)} other not-closed registrations are in the ProcedureDetails, so they count as closed.) '
+                    'Without a ProcedureDetails upload every not-closed registration is listed.</div>'
+                    f'<table class="tbl"><tr><th class="l">Status</th><th>Registrations</th><th class="l">What it means</th></tr>{summ}</table>',
+                    unsafe_allow_html=True)
+        with st.expander(f"See the {len(nc)} registrations"):
+            st.markdown('<table class="tbl"><tr><th class="l">Date</th><th class="l">Status</th><th class="l">Doctor</th><th class="l">Company</th><th>Billed</th></tr>'
+                        + "".join(f'<tr><td style="text-align:left">{E(a)}</td><td style="text-align:left">{E(b)}</td><td style="text-align:left">{E(c)}</td>'
+                                  f'<td class="nm">{E(CO.get(e_, e_))}</td><td>{"–" if bl is None else ("Yes" if bl else "<b style=\'color:#B3261E\'>No</b>")}</td></tr>'
+                                  for a, b, c, e_, bl in sorted(nc, key=lambda x: (datetime.strptime(x[0], "%d-%m-%Y"), x[1])))
+                        + '</table>', unsafe_allow_html=True)
     st.markdown('<div class="sec">Company name fixes</div><div class="note">Similar spellings are merged automatically. '
                 'If two companies are merged wrongly, or one company still shows twice, write one line per fix: '
                 '<b>spelling as it shows = name to use</b>.</div>', unsafe_allow_html=True)
@@ -914,22 +948,22 @@ def email_html(mgmt):
     # companies
     out.append(section("Top companies"))
     items = sorted(((k, v) for k, v in co_month.items() if k != "(not filled)"), key=lambda x: -x[1][0])[:25]
-    head = (f'<tr><th {thl}>Company</th><th {th}>{E(LBL)}</th><th {th}>Patients · month</th><th {th}>New · month</th><th {th}>Family Med. · month</th><th {thl}>Insurance</th>'
+    head = (f'<tr><th {thl}>Company</th><th {th}>{E(LBL)}</th><th {th}>Patients · month</th><th {th}>New · month</th><th {th}>Follow-ups · month</th><th {th}>Family Med. · month</th><th {thl}>Insurance</th>'
             + (f'<th {th}>vs last month</th>' if has_prev else "")
             + (f'<th {th}>Revenue month</th><th {th}>Per patient</th>' if show_rev else "") + '</tr>')
     body = ""
     for name, v in items:
         t = co_today.get(name, [0])
-        body += (f'<tr><td {tdl}><b>{E(name)}</b></td><td {td}>{t[0] or "–"}</td><td {td}><b>{v[0]}</b></td><td {td}>{v[1] or "–"}</td><td {td}>{fm_month.get(name, 0) or "–"}</td><td {tdl}>{E(main_ins(name))}</td>'
+        body += (f'<tr><td {tdl}><b>{E(name)}</b></td><td {td}>{t[0] or "–"}</td><td {td}><b>{v[0]}</b></td><td {td}>{v[1] or "–"}</td><td {td}>{v[2] or "–"}</td><td {td}>{fm_month.get(name, 0) or "–"}</td><td {tdl}>{E(main_ins(name))}</td>'
                  + (f'<td {td}>{trend_e(v[0], co_prev.get(name, [0])[0])}</td>' if has_prev else "")
                  + (f'<td {td}><b>{fmt(v[3])}</b></td><td {td}>{fmt(v[3] / max(v[0], 1))}</td>' if show_rev else "") + '</tr>')
     allc = list(co_month.items())
     T0 = sum(co_today.get(k, [0])[0] for k, _ in allc)
-    T1, T2 = sum(v[0] for _, v in allc), sum(v[1] for _, v in allc)
+    T1, T2, T3 = sum(v[0] for _, v in allc), sum(v[1] for _, v in allc), sum(v[2] for _, v in allc)
     TF, TR = sum(fm_month.values()), sum(v[3] for _, v in allc)
     tds = f'style="padding:8px 10px;text-align:right;font-size:13px;font-weight:bold;background:#E8EEF8;border-top:2px solid {BR};"'
     body += (f'<tr><td {tds.replace("text-align:right", "text-align:left")}>Total · all {len([k for k, _ in allc if k != "(not filled)"])} companies'
-             f'{" (top 25 shown)" if len(allc) > 25 else ""}</td><td {tds}>{T0:,}</td><td {tds}>{T1:,}</td><td {tds}>{T2:,}</td><td {tds}>{TF:,}</td><td {tds}></td>'
+             f'{" (top 25 shown)" if len(allc) > 25 else ""}</td><td {tds}>{T0:,}</td><td {tds}>{T1:,}</td><td {tds}>{T2:,}</td><td {tds}>{T3:,}</td><td {tds}>{TF:,}</td><td {tds}></td>'
              + (f'<td {tds}></td>' if has_prev else "")
              + (f'<td {tds}>{fmt(TR)}</td><td {tds}>{fmt(TR / max(T1, 1))}</td>' if show_rev else "") + '</tr>')
     nf = co_month.get("(not filled)", [0])[0]
@@ -964,6 +998,14 @@ def email_html(mgmt):
                          for k, v in ins_m) + '</table></td></tr>')
     out.append(section("Nationality"))
     out.append(f'<tr><td style="font-size:13.5px;color:{INK};">' + " &nbsp;·&nbsp; ".join(f'<b>{E(k)}</b> {v} ({pct(v, month["n"])})' for k, v in nat) + '</td></tr>')
+    nc_ = [x_ for x_ in month.get("not_closed", []) if x_[4] is not True]
+    if nc_:
+        cn_ = {}
+        for row_ in nc_:
+            cn_[row_[1]] = cn_.get(row_[1], 0) + 1
+        out.append(f'<tr><td style="font-size:12.5px;color:#9A6200;padding:14px 0 0;"><b>{len(nc_)} registrations not closed and not billed</b> (still counted, to check in the HIS): '
+                   + ", ".join(f"{v} {E(k)}" for k, v in sorted(cn_.items(), key=lambda x: -x[1]))
+                   + '. Open = seen but file not closed · Doctor (Pending) = not seen by the doctor yet.</td></tr>')
     out.append(f'<tr><td style="font-size:12px;color:{MUT};padding:20px 0 0;">From the HIS Registration List. Company spellings are merged; '
                f'patient names and contact details are not included. Sent {datetime.now(UAE):%d-%m-%Y %I:%M %p}.</td></tr>')
     out.append('</table></td></tr></table>')
