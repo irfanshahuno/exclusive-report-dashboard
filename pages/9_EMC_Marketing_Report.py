@@ -81,6 +81,20 @@ table.sub td.sn{text-align:left; font-weight:600; color:#18211C;} table.sub td.s
 details.sp2{display:inline-block; margin-left:8px;} details.sp2 summary{cursor:pointer; list-style:none; font-size:11px; color:#1F4E8C; font-weight:500;}
 details.sp2 summary::-webkit-details-marker{display:none;} details.sp2 summary:before{content:"▸ ";} details.sp2[open] summary:before{content:"▾ ";}
 details.sp2[open]{display:block; margin:2px 0 0 0;}
+.cgrid{border:1px solid var(--line); border-radius:12px; overflow:hidden; background:#fff; font-size:13.5px; overflow-x:auto;}
+.cgrid .row{display:grid; grid-template-columns:var(--cols); align-items:center; border-bottom:1px solid var(--line); min-width:fit-content;}
+.cgrid .c{padding:9px 10px; text-align:right; white-space:nowrap;}
+.cgrid .nmc,.cgrid .c.l{white-space:normal;} .cgrid .c{ font-variant-numeric:tabular-nums;} .cgrid .c.l,.cgrid .nmc{text-align:left;} .cgrid .r{color:var(--muted);}
+.cgrid .hd{background:var(--soft);} .cgrid .hd .c{white-space:normal;} .cgrid .hd .c{font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:600;}
+.cgrid .gn{font-weight:600; color:var(--ink);} .cgrid .cnt{display:inline-block; margin-left:8px; padding:1px 8px; border-radius:999px; background:#E8EEF8; color:#1F4E8C; font-size:11px; font-weight:600;}
+.cgrid details.grp > summary{list-style:none; cursor:pointer;} .cgrid details.grp > summary::-webkit-details-marker{display:none;}
+.cgrid details.grp > summary .nmc:before{content:"▸"; color:#1F4E8C; margin-right:8px; display:inline-block; transition:transform .15s;}
+.cgrid details.grp[open] > summary .nmc:before{transform:rotate(90deg);}
+.cgrid details.grp > summary:hover{background:#F6F9FD;} .cgrid details.grp[open] > summary{background:#E8EEF8;}
+.cgrid .plain .nmc{padding-left:28px;}
+.cgrid .row.sub{background:#F4F7FC; font-size:12.8px;} .cgrid .row.sub .nmc{padding-left:34px; border-left:3px solid #9DB6DA;}
+.cgrid .row.sub .sn{color:#2B3A33;} .cgrid .row.spl .full{grid-column:2 / -1; text-align:left; padding-left:34px;}
+.cgrid .total{background:#E8EEF8; font-weight:700; border-bottom:0; border-top:2px solid #1F4E8C;}
 .fmline{margin-top:10px; background:#FBF0D9; border-left:4px solid #9A6200; border-radius:8px; padding:8px 10px; color:#5A3A00; font-size:13px; font-weight:600;}
 .fmline b{font-size:17px; color:#9A6200;}
 .tbl tr.total td{background:#E8EEF8; font-weight:700; border-top:2px solid #1F4E8C;}
@@ -735,6 +749,7 @@ st.markdown(f"""
 
 
 def company_table(n=None):
+    """Companies grid: one row per sister group; ▸ opens tinted rows for each sister company (same columns)."""
     groups = {}
     for name in co_month:
         groups.setdefault(SIS.get(name, name), []).append(name)
@@ -742,44 +757,53 @@ def company_table(n=None):
     if n:
         items = items[:n]
     top = max([sum(co_month[m][0] for m in ms) for g, ms in items if g != "(not filled)"] or [1])
-    head = (f"<tr><th>#</th><th class='l'>Company (▶ = sister companies and spellings)</th><th>{E(LBL)}</th><th>Family Med. · {E(LBL)}</th><th>Patients · month</th><th>New · month</th><th>Follow-ups · month</th><th>Family Med. · month</th><th class='l'>Insurance · month</th>"
-            + ("<th>vs last month</th>" if has_prev else "")
-            + ("<th>Revenue today</th><th>Revenue month</th><th>Per patient</th>" if MGMT and REV_OK else "") + "</tr>")
-    body = ""
+    rev = MGMT and REV_OK
+    cols = ["#", "Company", E(LBL), f"Family Med. · {E(LBL)}", "Patients · month", "New · month", "Follow-ups · month", "Family Med. · month", "Insurance · month"] \
+        + (["vs last month"] if has_prev else []) + (["Revenue today", "Revenue month", "Per patient"] if rev else [])
+    tmpl = ("38px minmax(300px,2.6fr) repeat(6,minmax(68px,.8fr)) minmax(170px,1.5fr)" + (" minmax(80px,.8fr)" if has_prev else "")
+            + (" repeat(3,minmax(88px,.9fr))" if rev else ""))
+
+    def cells(nm_html, rank, ms, bar_on, cls=""):
+        v, t = sum_lists(co_month, ms), sum_lists(co_today, ms)
+        bar = f'<span class="barc" style="width:{max(3, int(40 * v[0] / top))}px"></span>' if bar_on else ""
+        out = (f'<div class="c r">{rank}</div><div class="c nmc">{nm_html}</div><div class="c">{t[0] or "–"}</div>'
+               f'<div class="c">{sum(fm_today.get(m, 0) for m in ms) or "–"}</div><div class="c">{bar}<b>{v[0]}</b></div>'
+               f'<div class="c">{v[1] or "–"}</div><div class="c">{v[2] or "–"}</div><div class="c">{sum(fm_month.get(m, 0) for m in ms) or "–"}</div>'
+               f'<div class="c l">{E(group_ins(ms))}</div>')
+        if has_prev:
+            out += f'<div class="c">{trend(v[0], sum(co_prev.get(m, [0])[0] for m in ms))}</div>'
+        if rev:
+            out += f'<div class="c">{fmt(t[3]) if t[0] else "–"}</div><div class="c"><b>{fmt(v[3])}</b></div><div class="c">{fmt(v[3] / max(v[0], 1))}</div>'
+        return out
+
+    def spell_html(m):
+        sp_ = sorted(SPELL.get(m, []), key=lambda x: -x[1])
+        if len(sp_) < 2:
+            return ""
+        return (f'<details class="sp2"><summary>{len(sp_)} spellings</summary><div class="sp">'
+                + "<br>".join(f"{E(_clean(r_).title())} ({c_})" for r_, c_ in sp_) + '</div></details>')
+
+    html = f'<div class="cgrid" style="--cols:{tmpl}"><div class="row hd">' + "".join(f'<div class="c{" l" if k in (1, 8) else ""}">{c}</div>' for k, c in enumerate(cols)) + '</div>'
     allm = []
     for i, (g, ms) in enumerate(items, 1):
         ms = sorted(ms, key=lambda m: -co_month[m][0]); allm += ms
-        v, t = sum_lists(co_month, ms), sum_lists(co_today, ms)
-        fmt_ = sum(fm_today.get(m, 0) for m in ms); fmm = sum(fm_month.get(m, 0) for m in ms)
-        bar = f'<span class="barc" style="width:{int(60 * v[0] / top)}px"></span>' if g != "(not filled)" else ""
-        def _sp(m):
-            sp_ = sorted(SPELL.get(m, []), key=lambda x: -x[1])
-            if len(sp_) < 2:
-                return ""
-            return (f'<details class="sp2"><summary>{len(sp_)} spellings</summary><div class="sp">'
-                    + "<br>".join(f"{E(_clean(r_).title())} ({c_})" for r_, c_ in sp_) + '</div></details>')
         if len(ms) > 1:
-            inner = "".join(f'<tr><td class="sn">{E(m)}{_sp(m)}</td><td class="sv">{co_month[m][0]}</td>'
-                            f'<td class="sv">{co_month[m][2] or "–"}</td><td class="sv">{fm_month.get(m, 0) or "–"}</td></tr>' for m in ms)
-            cell = (f'<details class="dx"><summary>{E(g)} <span class="cnt">{len(ms)} companies</span></summary>'
-                    f'<table class="sub"><tr><th>Company · spellings</th><th>Patients</th><th>FU</th><th>FM</th></tr>{inner}</table></details>')
+            subs = "".join(f'<div class="row sub">{cells(f"<span class=sn>{E(m)}</span>{spell_html(m)}", "", [m], False)}</div>' for m in ms)
+            html += (f'<details class="grp"><summary class="row">{cells(f"<span class=gn>{E(g)}</span><span class=cnt>{len(ms)} companies</span>", i, ms, g != "(not filled)")}</summary>'
+                     f'{subs}</details>')
+        elif len(SPELL.get(g, [])) > 1:
+            sp_ = sorted(SPELL.get(g, []), key=lambda x: -x[1])
+            html += (f'<details class="grp"><summary class="row">{cells(f"<span class=gn>{E(g)}</span><span class=cnt>{len(sp_)} spellings</span>", i, ms, True)}</summary>'
+                     f'<div class="row sub spl"><div class="c"></div><div class="c sp full">' + " · ".join(f"{E(_clean(r_).title())} ({c_})" for r_, c_ in sp_) + '</div></div></details>')
         else:
-            sp = SPELL.get(g, [])
-            cell = (f'<details class="dx"><summary>{E(g)} <span class="cnt">{len(sp)} spellings</span></summary>'
-                    f'<div class="sp" style="padding:4px 0 2px 16px">' + "<br>".join(f"{E(_clean(r_).title())} ({c_})" for r_, c_ in sorted(sp, key=lambda x: -x[1]))
-                    + '</div></details>') if len(sp) > 1 else E(g)
-        prev_ = sum(co_prev.get(m, [0])[0] for m in ms)
-        body += (f'<tr style="vertical-align:top"><td class="rank">{i}</td><td class="nm" style="min-width:380px">{cell}</td><td>{t[0] or "–"}</td><td>{fmt_ or "–"}</td><td>{bar}<b>{v[0]}</b></td>'
-                 f'<td>{v[1] or "–"}</td><td>{v[2] or "–"}</td><td>{fmm or "–"}</td><td style="text-align:left;white-space:nowrap">{E(group_ins(ms))}</td>'
-                 + (f'<td>{trend(v[0], prev_)}</td>' if has_prev else "")
-                 + (f'<td>{fmt(t[3]) if t[0] else "–"}</td><td><b>{fmt(v[3])}</b></td><td>{fmt(v[3] / max(v[0], 1))}</td>' if MGMT and REV_OK else "")
-                 + "</tr>")
+            html += f'<div class="row plain">{cells(f"<span class=gn>{E(g)}</span>", i, ms, g != "(not filled)")}</div>'
     v, t = sum_lists(co_month, allm), sum_lists(co_today, allm)
-    body += (f'<tr class="total"><td></td><td class="nm">Total · {len([g for g, _ in items if g != "(not filled)"])} companies / groups</td>'
-             f'<td>{t[0]:,}</td><td>{sum(fm_today.get(k, 0) for k in allm):,}</td><td>{v[0]:,}</td><td>{v[1]:,}</td><td>{v[2]:,}</td><td>{sum(fm_month.get(k, 0) for k in allm):,}</td><td></td>'
-             + ('<td></td>' if has_prev else "")
-             + (f'<td>{fmt(t[3])}</td><td>{fmt(v[3])}</td><td>{fmt(v[3] / max(v[0], 1))}</td>' if MGMT and REV_OK else "") + '</tr>')
-    return f'<table class="tbl">{head}{body}</table>'
+    tot = (f'<div class="c"></div><div class="c nmc"><b>Total · {len([g for g, _ in items if g != "(not filled)"])} companies / groups</b></div>'
+           f'<div class="c">{t[0]:,}</div><div class="c">{sum(fm_today.get(k, 0) for k in allm):,}</div><div class="c">{v[0]:,}</div><div class="c">{v[1]:,}</div>'
+           f'<div class="c">{v[2]:,}</div><div class="c">{sum(fm_month.get(k, 0) for k in allm):,}</div><div class="c"></div>'
+           + ('<div class="c"></div>' if has_prev else "")
+           + (f'<div class="c">{fmt(t[3])}</div><div class="c">{fmt(v[3])}</div><div class="c">{fmt(v[3] / max(v[0], 1))}</div>' if rev else ""))
+    return html + f'<div class="row total">{tot}</div></div>'
 
 
 def camp_table():
