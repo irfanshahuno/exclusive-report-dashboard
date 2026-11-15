@@ -583,6 +583,75 @@ PERIOD = f"1–{last:%d %b %Y}"
 DAY = f"All days 1–{last:%d %b %Y}" if SEL is None else f"{SEL:%a %d %b %Y}"
 
 
+# ---------------------------------------------------------------- sister companies (same first name = one group)
+GENERIC_FIRST = {"GULF", "EMIRATES", "EMIRATE", "NATIONAL", "UNITED", "ABU", "DHABI", "DUBAI", "GENERAL", "GLOBAL", "ROYAL",
+                 "INTERNATIONAL", "NEW", "MODERN", "STAR", "GOLDEN", "CITY", "FIRST", "BEST", "GREEN", "BLUE", "WHITE", "UAE",
+                 "ARABIAN", "ARAB", "MIDDLE", "EAST", "ASIA", "CHINA", "SKY", "SUN", "PRIME", "SMART", "ADVANCED", "TECHNICAL",
+                 "ENGINEERING", "CONTRACTING", "TRANSPORT", "SECURITY", "FACILITIES", "SERVICES", "ELITE", "ALPHA", "PRO", "SAFE",
+                 "SUPER", "GRAND", "POWER", "OCEAN", "DESERT", "FUTURE", "EXCELLENT", "PREMIER", "MASTER", "UNIVERSAL", "OASIS"}
+SIS_FIX = {k.upper().strip(): v.strip() for k, v in get_json("sisters.json", {}).items()}
+
+
+def _first_word(name):
+    w = [x for x in re.sub(r"[^A-Z ]", " ", name.upper()).split() if x not in ("AL", "EL", "THE")]
+    return w[0] if w else ""
+
+
+def sister_groups(names, sizes):
+    """display company -> sister group name. Same first word (spelling-tolerant) = one group; common words stay separate."""
+    keys, out = {}, {}
+    for n in sorted(names, key=lambda x: -sizes.get(x, 0)):
+        fw = _first_word(n)
+        if n.upper() in SIS_FIX:
+            out[n] = SIS_FIX[n.upper()]; continue
+        if fw in SIS_FIX:
+            out[n] = SIS_FIX[fw]; continue
+        if len(fw) < 4 or fw in GENERIC_FIRST:
+            out[n] = n; continue
+        hit = next((k for k in keys if difflib.SequenceMatcher(None, fw, k).ratio() >= 0.8), None)
+        if hit is None:
+            keys[fw] = fw.title()
+            hit = fw
+        out[n] = keys[hit]
+    members = {}
+    for n, g in out.items():
+        members.setdefault(g, []).append(n)
+    # a group with one company keeps the company's own name
+    return {n: (g if len(members[g]) > 1 else n) for n, g in out.items()}
+
+
+SIS = sister_groups([n for n in co_month if n != "(not filled)"], {k: v[0] for k, v in co_month.items()})
+SIS["(not filled)"] = "(not filled)"
+SPELL = {}
+for _raw, _disp in CO.items():
+    _n = month["co"].get(_raw, [0])[0]
+    if _n:
+        SPELL.setdefault(_disp, []).append((_raw, _n))
+
+
+def sis_members(g):
+    return sorted([n for n, gg in SIS.items() if gg == g and n in co_month], key=lambda n: -co_month[n][0])
+
+
+def sum_lists(d, names, width=4):
+    t = [0] * (width - 1) + [0.0]
+    for n in names:
+        for k_, x_ in enumerate(d.get(n, [0, 0, 0, 0.0])[:width]):
+            t[k_] += x_
+    return t
+
+
+def group_ins(names):
+    tot_ = {}
+    for n in names:
+        for k_, x_ in ins_by_co.get(n, {}).items():
+            tot_[k_] = tot_.get(k_, 0) + x_
+    if not tot_:
+        return "–"
+    top_ = sorted(tot_.items(), key=lambda x: -x[1]); s_ = sum(tot_.values())
+    return f"{top_[0][0]} {top_[0][1] / s_:.0%}" + (f" · {top_[1][0]} {top_[1][1] / s_:.0%}" if len(top_) > 1 else "")
+
+
 def trend(now, before):
     if not has_prev:
         return ""
@@ -645,29 +714,47 @@ st.markdown(f"""
 
 
 def company_table(n=None):
-    items = sorted(((k, v) for k, v in co_month.items()), key=lambda x: (x[0] == "(not filled)", -x[1][0]))
+    groups = {}
+    for name in co_month:
+        groups.setdefault(SIS.get(name, name), []).append(name)
+    items = sorted(groups.items(), key=lambda x: (x[0] == "(not filled)", -sum(co_month[m][0] for m in x[1])))
     if n:
         items = items[:n]
-    top = max([v[0] for k, v in items if k != "(not filled)"] or [1])
-    head = (f"<tr><th>#</th><th class='l'>Company</th><th>{E(LBL)}</th><th>Family Med. · {E(LBL)}</th><th>Patients · month</th><th>New · month</th><th>Follow-ups · month</th><th>Family Med. · month</th><th class='l'>Insurance · month</th>"
+    top = max([sum(co_month[m][0] for m in ms) for g, ms in items if g != "(not filled)"] or [1])
+    head = (f"<tr><th>#</th><th class='l'>Company (▶ = sister companies and spellings)</th><th>{E(LBL)}</th><th>Family Med. · {E(LBL)}</th><th>Patients · month</th><th>New · month</th><th>Follow-ups · month</th><th>Family Med. · month</th><th class='l'>Insurance · month</th>"
             + ("<th>vs last month</th>" if has_prev else "")
             + ("<th>Revenue today</th><th>Revenue month</th><th>Per patient</th>" if MGMT and REV_OK else "") + "</tr>")
     body = ""
-    for i, (name, v) in enumerate(items, 1):
-        t = co_today.get(name, [0, 0, 0, 0.0])
-        bar = f'<span class="barc" style="width:{int(60 * v[0] / top)}px"></span>' if name != "(not filled)" else ""
-        body += (f'<tr><td class="rank">{i}</td><td class="nm">{E(name)}</td><td>{t[0] or "–"}</td><td>{fm_today.get(name, 0) or "–"}</td><td>{bar}<b>{v[0]}</b></td>'
-                 f'<td>{v[1] or "–"}</td><td>{v[2] or "–"}</td><td>{fm_month.get(name, 0) or "–"}</td><td style="text-align:left;white-space:nowrap">{E(main_ins(name))}</td>'
-                 + (f'<td>{trend(v[0], co_prev.get(name, [0])[0])}</td>' if has_prev else "")
+    allm = []
+    for i, (g, ms) in enumerate(items, 1):
+        ms = sorted(ms, key=lambda m: -co_month[m][0]); allm += ms
+        v, t = sum_lists(co_month, ms), sum_lists(co_today, ms)
+        fmt_ = sum(fm_today.get(m, 0) for m in ms); fmm = sum(fm_month.get(m, 0) for m in ms)
+        bar = f'<span class="barc" style="width:{int(60 * v[0] / top)}px"></span>' if g != "(not filled)" else ""
+        if len(ms) > 1:
+            inner = "".join(f'<div style="margin:6px 0 2px"><b>{E(m)}</b> · {co_month[m][0]} patients'
+                            + (f' · {co_today.get(m, [0])[0]} {E(LBL.lower())}' if co_today.get(m, [0])[0] else "")
+                            + f' · {co_month[m][2]} follow-ups · {fm_month.get(m, 0)} family med.</div>'
+                            + "".join(f'<div style="font-size:12px;color:#5D6A62;padding-left:14px">{E(r_)} ({c_})</div>'
+                                      for r_, c_ in sorted(SPELL.get(m, []), key=lambda x: -x[1])) for m in ms)
+            cell = (f'<details><summary><b>{E(g)}</b> <span style="color:#5D6A62;font-weight:400">· {len(ms)} sister companies</span></summary>'
+                    f'<div style="font-weight:400;font-size:13px;padding:4px 0 2px">{inner}</div></details>')
+        else:
+            sp = sorted(SPELL.get(g, []), key=lambda x: -x[1])
+            cell = (f'<details><summary><b>{E(g)}</b> <span style="color:#5D6A62;font-weight:400">· {len(sp)} spellings</span></summary>'
+                    + "".join(f'<div style="font-size:12px;color:#5D6A62;font-weight:400;padding-left:14px">{E(r_)} ({c_})</div>' for r_, c_ in sp)
+                    + '</details>') if len(sp) > 1 else E(g)
+        prev_ = sum(co_prev.get(m, [0])[0] for m in ms)
+        body += (f'<tr><td class="rank">{i}</td><td class="nm">{cell}</td><td>{t[0] or "–"}</td><td>{fmt_ or "–"}</td><td>{bar}<b>{v[0]}</b></td>'
+                 f'<td>{v[1] or "–"}</td><td>{v[2] or "–"}</td><td>{fmm or "–"}</td><td style="text-align:left;white-space:nowrap">{E(group_ins(ms))}</td>'
+                 + (f'<td>{trend(v[0], prev_)}</td>' if has_prev else "")
                  + (f'<td>{fmt(t[3]) if t[0] else "–"}</td><td><b>{fmt(v[3])}</b></td><td>{fmt(v[3] / max(v[0], 1))}</td>' if MGMT and REV_OK else "")
                  + "</tr>")
-    tt = [sum(co_today.get(k, [0])[0] for k, _ in items), sum(v[0] for _, v in items), sum(v[1] for _, v in items),
-          sum(v[2] for _, v in items), sum(fm_month.get(k, 0) for k, _ in items),
-          sum(co_today.get(k, [0, 0, 0, 0.0])[3] for k, _ in items), sum(v[3] for _, v in items)]
-    body += (f'<tr class="total"><td></td><td class="nm">Total · {len([k for k, _ in items if k != "(not filled)"])} companies</td>'
-             f'<td>{tt[0]:,}</td><td>{sum(fm_today.get(k, 0) for k, _ in items):,}</td><td>{tt[1]:,}</td><td>{tt[2]:,}</td><td>{tt[3]:,}</td><td>{tt[4]:,}</td><td></td>'
+    v, t = sum_lists(co_month, allm), sum_lists(co_today, allm)
+    body += (f'<tr class="total"><td></td><td class="nm">Total · {len([g for g, _ in items if g != "(not filled)"])} companies / groups</td>'
+             f'<td>{t[0]:,}</td><td>{sum(fm_today.get(k, 0) for k in allm):,}</td><td>{v[0]:,}</td><td>{v[1]:,}</td><td>{v[2]:,}</td><td>{sum(fm_month.get(k, 0) for k in allm):,}</td><td></td>'
              + ('<td></td>' if has_prev else "")
-             + (f'<td>{fmt(tt[5])}</td><td>{fmt(tt[6])}</td><td>{fmt(tt[6] / max(tt[1], 1))}</td>' if MGMT and REV_OK else "") + '</tr>')
+             + (f'<td>{fmt(t[3])}</td><td>{fmt(v[3])}</td><td>{fmt(v[3] / max(v[0], 1))}</td>' if MGMT and REV_OK else "") + '</tr>')
     return f'<table class="tbl">{head}{body}</table>'
 
 
@@ -874,6 +961,22 @@ with t5:
                                   f'<td class="nm">{E(CO.get(e_, e_))}</td><td>{"–" if bl is None else ("Yes" if bl else "<b style=\'color:#B3261E\'>No</b>")}</td></tr>'
                                   for a, b, c, e_, bl in sorted(nc, key=lambda x: (datetime.strptime(x[0], "%d-%m-%Y"), x[1])))
                         + '</table>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">Sister company fixes</div><div class="note">Companies with the same first name are shown as one group '
+                '(for example all Qamra / Qumra companies). Common first names (Gulf, Emirates, National …) stay separate. '
+                'To join or split, write one line per fix: <b>first name or company = group name</b> '
+                '(e.g. <b>Alkaline = Arco</b> to add Alkaline to the Arco group, or <b>Qamar Transport = Qamar Transport</b> to keep it alone).</div>',
+                unsafe_allow_html=True)
+    sis_txt = st.text_area("Sister fixes", value="\n".join(f"{k.title()} = {v}" for k, v in SIS_FIX.items()), height=90,
+                           placeholder="Alkaline = Arco")
+    if st.button("Save sister fixes"):
+        new_s = {}
+        for line in sis_txt.splitlines():
+            if "=" in line:
+                a, b = line.split("=", 1)
+                if a.strip() and b.strip():
+                    new_s[a.strip()] = b.strip()
+        put("sisters.json", json.dumps(new_s).encode())
+        st.success(f"Saved {len(new_s)} sister fixes."); st.rerun()
     st.markdown('<div class="sec">Company name fixes</div><div class="note">Similar spellings are merged automatically. '
                 'If two companies are merged wrongly, or one company still shows twice, write one line per fix: '
                 '<b>spelling as it shows = name to use</b>.</div>', unsafe_allow_html=True)
@@ -947,15 +1050,22 @@ def email_html(mgmt):
            + '</tr></table></td></tr>']
     # companies
     out.append(section("Top companies"))
-    items = sorted(((k, v) for k, v in co_month.items() if k != "(not filled)"), key=lambda x: -x[1][0])[:25]
+    grp_ = {}
+    for k_ in co_month:
+        if k_ != "(not filled)":
+            grp_.setdefault(SIS.get(k_, k_), []).append(k_)
+    gitems = sorted(grp_.items(), key=lambda x: -sum(co_month[m][0] for m in x[1]))[:25]
     head = (f'<tr><th {thl}>Company</th><th {th}>{E(LBL)}</th><th {th}>Patients · month</th><th {th}>New · month</th><th {th}>Follow-ups · month</th><th {th}>Family Med. · month</th><th {thl}>Insurance</th>'
             + (f'<th {th}>vs last month</th>' if has_prev else "")
             + (f'<th {th}>Revenue month</th><th {th}>Per patient</th>' if show_rev else "") + '</tr>')
     body = ""
-    for name, v in items:
-        t = co_today.get(name, [0])
-        body += (f'<tr><td {tdl}><b>{E(name)}</b></td><td {td}>{t[0] or "–"}</td><td {td}><b>{v[0]}</b></td><td {td}>{v[1] or "–"}</td><td {td}>{v[2] or "–"}</td><td {td}>{fm_month.get(name, 0) or "–"}</td><td {tdl}>{E(main_ins(name))}</td>'
-                 + (f'<td {td}>{trend_e(v[0], co_prev.get(name, [0])[0])}</td>' if has_prev else "")
+    for name, ms in gitems:
+        ms = sorted(ms, key=lambda m: -co_month[m][0])
+        v, t = sum_lists(co_month, ms), sum_lists(co_today, ms)
+        sub_ = (f'<div style="font-size:11px;color:{MUT};font-weight:normal;padding-top:2px;">Sister companies: '
+                + " · ".join(f"{E(m)} ({co_month[m][0]})" for m in ms) + '</div>') if len(ms) > 1 else ""
+        body += (f'<tr><td {tdl}><b>{E(name)}</b>{sub_}</td><td {td}>{t[0] or "–"}</td><td {td}><b>{v[0]}</b></td><td {td}>{v[1] or "–"}</td><td {td}>{v[2] or "–"}</td><td {td}>{sum(fm_month.get(m, 0) for m in ms) or "–"}</td><td {tdl}>{E(group_ins(ms))}</td>'
+                 + (f'<td {td}>{trend_e(v[0], sum(co_prev.get(m, [0])[0] for m in ms))}</td>' if has_prev else "")
                  + (f'<td {td}><b>{fmt(v[3])}</b></td><td {td}>{fmt(v[3] / max(v[0], 1))}</td>' if show_rev else "") + '</tr>')
     allc = list(co_month.items())
     T0 = sum(co_today.get(k, [0])[0] for k, _ in allc)
@@ -1047,22 +1157,40 @@ def build_excel(mgmt):
                 c = ws.cell(len(rows) + 3, j); c.font = Font(bold=True); c.fill = fill("E8EEF8")
 
     ws = wb.active; ws.title = "Companies"
-    hdr = ["Company", LBL, f"Patients · month {PERIOD}", "New · month", "Follow-ups · month", "Family Med. · month", "Main insurance"] + (["Last month same days"] if has_prev else []) \
+    hdr = ["Company", "Sister group", LBL, f"Patients · month {PERIOD}", "New · month", "Follow-ups · month", "Family Med. · month", "Main insurance"] + (["Last month same days"] if has_prev else []) \
         + (["Revenue today", "Revenue month", "Per patient"] if show_rev else [])
     rows_ = []
     for name, v in sorted(co_month.items(), key=lambda x: (x[0] == "(not filled)", -x[1][0])):
         t = co_today.get(name, [0, 0, 0, 0.0])
-        r = [name, t[0], v[0], v[1], v[2], fm_month.get(name, 0), main_ins(name)] + ([co_prev.get(name, [0])[0]] if has_prev else [])
+        r = [name, SIS.get(name, name) if SIS.get(name, name) != name else "", t[0], v[0], v[1], v[2], fm_month.get(name, 0), main_ins(name)] + ([co_prev.get(name, [0])[0]] if has_prev else [])
         if show_rev:
             r += [float(round(t[3])), float(round(v[3])), float(round(v[3] / max(v[0], 1)))]
         rows_.append(r)
     tot_r = ["TOTAL"] + [sum(r[j] for r in rows_) if not isinstance(rows_[0][j], str) else "" for j in range(1, len(hdr))]
     if show_rev:
-        tot_r[-1] = float(round(tot_r[-2] / max(tot_r[2], 1)))
-    if has_prev:
-        tot_r[7] = sum(r[7] for r in rows_)
+        tot_r[-1] = float(round(tot_r[-2] / max(tot_r[3], 1)))
     rows_.append(tot_r)
-    sheet(ws, f"Companies · {PERIOD}", hdr, rows_, [48, 9, 14, 8, 11, 15, 26] + ([16] if has_prev else []) + ([14, 15, 12] if show_rev else []))
+    sheet(ws, f"Companies · {PERIOD}", hdr, rows_, [48, 18, 9, 14, 8, 11, 15, 26] + ([16] if has_prev else []) + ([14, 15, 12] if show_rev else []))
+    wsg = wb.create_sheet("Sister companies")
+    gx = {}
+    for k_ in co_month:
+        if k_ != "(not filled)":
+            gx.setdefault(SIS.get(k_, k_), []).append(k_)
+    rows_g = []
+    for g_, ms in sorted(gx.items(), key=lambda x: -sum(co_month[m][0] for m in x[1])):
+        if len(ms) < 2:
+            continue
+        ms = sorted(ms, key=lambda m: -co_month[m][0])
+        tv = sum_lists(co_month, ms)
+        rows_g.append([f"{g_} (group total)", "", tv[0], tv[1], tv[2], sum(fm_month.get(m, 0) for m in ms)])
+        for m in ms:
+            sp_ = sorted(SPELL.get(m, []), key=lambda x: -x[1])
+            rows_g.append(["", m, co_month[m][0], co_month[m][1], co_month[m][2], fm_month.get(m, 0)])
+            for r_, c_ in sp_:
+                rows_g.append(["", f"      spelling: {r_} ({c_})", "", "", "", ""])
+    if rows_g:
+        sheet(wsg, f"Sister companies · {PERIOD}", ["Group", "Company / spelling", "Patients · month", "New", "Follow-ups", "Family Med."],
+              rows_g, [30, 70, 14, 8, 11, 12])
     ws2 = wb.create_sheet("Camps and areas")
     sheet(ws2, f"Camps and areas · {PERIOD}", ["Camp / area", LBL, "Month"] + (["Last month same days"] if has_prev else []),
           [[k, camp_today.get(k, 0), v] + ([camp_prev.get(k, 0)] if has_prev else [])
