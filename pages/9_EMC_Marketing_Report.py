@@ -70,6 +70,17 @@ h1,h2,h3{font-family:'Barlow Semi Condensed','Arial Narrow',sans-serif !importan
 .tbl th{background:var(--soft); color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; text-align:right; padding:9px 12px; border-bottom:1px solid var(--line);}
 .tbl td{padding:8px 12px; border-bottom:1px solid var(--line); text-align:right; font-variant-numeric:tabular-nums;}
 .tbl th:first-child,.tbl td:first-child{text-align:left;} .tbl tr:last-child td{border-bottom:0;}
+details.dx summary{cursor:pointer; list-style:none; font-weight:600;} details.dx summary::-webkit-details-marker{display:none;}
+details.dx summary:before{content:"▸"; color:#1F4E8C; margin-right:6px;} details.dx[open] summary:before{content:"▾";}
+details.dx .cnt{display:inline-block; margin-left:6px; padding:1px 7px; border-radius:999px; background:#E8EEF8; color:#1F4E8C; font-size:11px; font-weight:600;}
+table.sub{width:100%; margin:6px 0 2px; border-collapse:collapse; font-size:12.5px; font-weight:400;}
+table.sub th{background:none; border:0; border-bottom:1px solid #E1E6E0; padding:3px 6px; font-size:10px; color:#5D6A62; text-align:right;}
+table.sub th:first-child{text-align:left;} table.sub td{border:0; border-bottom:1px dashed #E1E6E0; padding:4px 6px;}
+table.sub td.sn{text-align:left; font-weight:600; color:#18211C;} table.sub td.sv{text-align:right; width:52px;}
+.sp{font-size:11.5px; color:#7A857E; font-weight:400; line-height:1.45; margin-top:2px;}
+details.sp2{display:inline-block; margin-left:8px;} details.sp2 summary{cursor:pointer; list-style:none; font-size:11px; color:#1F4E8C; font-weight:500;}
+details.sp2 summary::-webkit-details-marker{display:none;} details.sp2 summary:before{content:"▸ ";} details.sp2[open] summary:before{content:"▾ ";}
+details.sp2[open]{display:block; margin:2px 0 0 0;}
 .fmline{margin-top:10px; background:#FBF0D9; border-left:4px solid #9A6200; border-radius:8px; padding:8px 10px; color:#5A3A00; font-size:13px; font-weight:600;}
 .fmline b{font-size:17px; color:#9A6200;}
 .tbl tr.total td{background:#E8EEF8; font-weight:700; border-top:2px solid #1F4E8C;}
@@ -257,6 +268,11 @@ def camp_key(s):
     return re.sub(r"\s+", "", s)
 
 
+def _raw_first(raw):
+    w = [x for x in re.sub(r"[^A-Z ]", " ", _clean(raw).upper()).split() if x not in ("AL", "EL", "THE")]
+    return w[0] if w else ""
+
+
 def build_names(raws, keyfn, aliases, threshold=0.84):
     """raw text -> one display name. Similar spellings are merged; the most common spelling is shown.
     'aliases' (raw or display -> chosen name) always wins."""
@@ -276,11 +292,16 @@ def build_names(raws, keyfn, aliases, threshold=0.84):
             continue
         if not k:
             continue
+        fw = _raw_first(r) if keyfn is company_key else ""
         best = None
         for c in clusters:
             ck = c[0]
             if ck.startswith("CANON:"):
                 continue
+            if fw:                                  # companies: the first name must match too (Arco ≠ Aura / Dogma / General)
+                cf = _raw_first(next(iter(c[1])))
+                if not (cf and (cf.startswith(fw) or fw.startswith(cf) or difflib.SequenceMatcher(None, fw, cf).ratio() >= 0.8)):
+                    continue
             if min(len(k), len(ck)) >= 8 and (k.startswith(ck) or ck.startswith(k)):
                 best = c
                 break
@@ -731,21 +752,24 @@ def company_table(n=None):
         v, t = sum_lists(co_month, ms), sum_lists(co_today, ms)
         fmt_ = sum(fm_today.get(m, 0) for m in ms); fmm = sum(fm_month.get(m, 0) for m in ms)
         bar = f'<span class="barc" style="width:{int(60 * v[0] / top)}px"></span>' if g != "(not filled)" else ""
+        def _sp(m):
+            sp_ = sorted(SPELL.get(m, []), key=lambda x: -x[1])
+            if len(sp_) < 2:
+                return ""
+            return (f'<details class="sp2"><summary>{len(sp_)} spellings</summary><div class="sp">'
+                    + "<br>".join(f"{E(_clean(r_).title())} ({c_})" for r_, c_ in sp_) + '</div></details>')
         if len(ms) > 1:
-            inner = "".join(f'<div style="margin:6px 0 2px"><b>{E(m)}</b> · {co_month[m][0]} patients'
-                            + (f' · {co_today.get(m, [0])[0]} {E(LBL.lower())}' if co_today.get(m, [0])[0] else "")
-                            + f' · {co_month[m][2]} follow-ups · {fm_month.get(m, 0)} family med.</div>'
-                            + "".join(f'<div style="font-size:12px;color:#5D6A62;padding-left:14px">{E(r_)} ({c_})</div>'
-                                      for r_, c_ in sorted(SPELL.get(m, []), key=lambda x: -x[1])) for m in ms)
-            cell = (f'<details><summary><b>{E(g)}</b> <span style="color:#5D6A62;font-weight:400">· {len(ms)} sister companies</span></summary>'
-                    f'<div style="font-weight:400;font-size:13px;padding:4px 0 2px">{inner}</div></details>')
+            inner = "".join(f'<tr><td class="sn">{E(m)}{_sp(m)}</td><td class="sv">{co_month[m][0]}</td>'
+                            f'<td class="sv">{co_month[m][2] or "–"}</td><td class="sv">{fm_month.get(m, 0) or "–"}</td></tr>' for m in ms)
+            cell = (f'<details class="dx"><summary>{E(g)} <span class="cnt">{len(ms)} companies</span></summary>'
+                    f'<table class="sub"><tr><th>Company · spellings</th><th>Patients</th><th>FU</th><th>FM</th></tr>{inner}</table></details>')
         else:
-            sp = sorted(SPELL.get(g, []), key=lambda x: -x[1])
-            cell = (f'<details><summary><b>{E(g)}</b> <span style="color:#5D6A62;font-weight:400">· {len(sp)} spellings</span></summary>'
-                    + "".join(f'<div style="font-size:12px;color:#5D6A62;font-weight:400;padding-left:14px">{E(r_)} ({c_})</div>' for r_, c_ in sp)
-                    + '</details>') if len(sp) > 1 else E(g)
+            sp = SPELL.get(g, [])
+            cell = (f'<details class="dx"><summary>{E(g)} <span class="cnt">{len(sp)} spellings</span></summary>'
+                    f'<div class="sp" style="padding:4px 0 2px 16px">' + "<br>".join(f"{E(_clean(r_).title())} ({c_})" for r_, c_ in sorted(sp, key=lambda x: -x[1]))
+                    + '</div></details>') if len(sp) > 1 else E(g)
         prev_ = sum(co_prev.get(m, [0])[0] for m in ms)
-        body += (f'<tr><td class="rank">{i}</td><td class="nm">{cell}</td><td>{t[0] or "–"}</td><td>{fmt_ or "–"}</td><td>{bar}<b>{v[0]}</b></td>'
+        body += (f'<tr style="vertical-align:top"><td class="rank">{i}</td><td class="nm" style="min-width:380px">{cell}</td><td>{t[0] or "–"}</td><td>{fmt_ or "–"}</td><td>{bar}<b>{v[0]}</b></td>'
                  f'<td>{v[1] or "–"}</td><td>{v[2] or "–"}</td><td>{fmm or "–"}</td><td style="text-align:left;white-space:nowrap">{E(group_ins(ms))}</td>'
                  + (f'<td>{trend(v[0], prev_)}</td>' if has_prev else "")
                  + (f'<td>{fmt(t[3]) if t[0] else "–"}</td><td><b>{fmt(v[3])}</b></td><td>{fmt(v[3] / max(v[0], 1))}</td>' if MGMT and REV_OK else "")
