@@ -428,10 +428,22 @@ if len(dates) > 1:
         a_, b_ = datetime.strptime(ds_[0], "%d-%m-%Y"), datetime.strptime(ds_[-1], "%d-%m-%Y")
         lbl_ = f"Week {i_} · {a_:%a %d} – {b_:%a %d %b} ({len(ds_)} day{'s' if len(ds_) > 1 else ''})"
         _wk_label[lbl_] = ds_
-    _opts = ["All days"] + (list(_wk_label) if len(_wk_label) > 1 else []) + _sorted
+    _opts = ["All days", "Choose dates…"] + (list(_wk_label) if len(_wk_label) > 1 else []) + _sorted
     day_pick = st.selectbox("Day or week", _opts, index=0,
-                            help="The report covers several days. Pick a week (Monday to Sunday) or one day to see it on its own.")
-    if day_pick in _wk_label:
+                            help="The report covers several days. Pick a week (Monday to Sunday), one day, or choose any dates.")
+    if day_pick == "Choose dates…":
+        _d0, _d1 = datetime.strptime(_sorted[0], "%d-%m-%Y").date(), datetime.strptime(_sorted[-1], "%d-%m-%Y").date()
+        _rng = st.date_input("From – to", value=(_d0, _d1), min_value=_d0, max_value=_d1, format="DD/MM/YYYY", key="sc_range")
+        if isinstance(_rng, (list, tuple)) and len(_rng) == 2:
+            _a, _b = _rng
+        else:
+            _a = _b = (_rng[0] if isinstance(_rng, (list, tuple)) else _rng)
+        _keep = {d_ for d_ in _sorted if _a <= datetime.strptime(d_, "%d-%m-%Y").date() <= _b}
+        if not _keep:
+            st.warning("No data on those dates."); st.stop()
+        visits = [v for v in visits if v["date"] in _keep]
+        dates = [d_ for d_ in dates if d_ in _keep]
+    elif day_pick in _wk_label:
         _keep = set(_wk_label[day_pick])
         visits = [v for v in visits if v["date"] in _keep]
         dates = [d_ for d_ in dates if d_ in _keep]
@@ -1306,15 +1318,15 @@ def build_excel(only=None):
 
     # ---- Scorecard
     ws = wb.active; ws.title = "Scorecard"; ws.sheet_view.showGridLines = False
-    cols = ["#", "Doctor", "Role", "Patients", "Dots", "Referral", "4s", "6s", "Scoring", "Patients vs target",
-            "Runs", "Runs target", "Revenue vs target", "Runs per ball", "Status"]
+    cols = ["#", "Doctor", "Role", "Patients", "Dots", "Dots %", "Referral", "Referral %", "4s", "4s %", "6s", "6s %", "Scoring",
+            "Patients vs target", "Runs", "Runs target", "Revenue vs target", "Runs per ball", "Status"]
 
     def gap_cell(r_, c_, done, target, bold_bg=None):
         t, ok = gap(done, target)
         fg, bgc = ("1E7A45", "E2F3E8") if ok else ("B3261E", "FBE4E1")
         if bold_bg:
             fg, bgc = ("FFFFFF", bold_bg)
-        body_cell(ws, r_, c_, f"{t} ({int(target):,})" if c_ == 10 else t, color=fg, bold=True, bg=bgc)
+        body_cell(ws, r_, c_, f"{t} ({int(target):,})" if c_ == 14 else t, color=fg, bold=True, bg=bgc)
     banner(ws, 1, "EMC Revenue Scorecard", len(cols), sub)
     header(ws, 4, cols)
     r = 5
@@ -1327,33 +1339,38 @@ def build_excel(only=None):
         body_cell(ws, r, 3, "Family Medicine" if "(FM)" in str(d["Doctor"]) else "General Practice", color="5D6A62", bg=bg)
         body_cell(ws, r, 4, int(d["Balls"]), bg=bg)
         body_cell(ws, r, 5, int(d["Dots"]), bg=bg)
-        body_cell(ws, r, 6, int(d["Referrals"]), color=GREY, bold=True, bg=bg)
-        body_cell(ws, r, 7, int(d["4s"]), color=BLUE, bold=True, bg=bg)
-        body_cell(ws, r, 8, int(d["6s"]), color=G, bold=True, bg=bg)
-        body_cell(ws, r, 9, int(d["Scoring"]), bold=True, bg=bg)
-        gap_cell(r, 10, d["Balls"], d["Balls target"])
-        body_cell(ws, r, 11, float(d["Runs"]), "#,##0", bold=True, bg=bg)
-        body_cell(ws, r, 12, float(d["Runs target (day)"]), "#,##0", color="5D6A62", bg=bg)
-        gap_cell(r, 13, d["Runs"], d["Runs target (day)"])
-        body_cell(ws, r, 14, d["Runs"] / max(d["Balls"], 1), "#,##0", bg=bg)
+        body_cell(ws, r, 6, f"=IFERROR(E{r}/$D{r},0)", "0%", color="5D6A62", bg=bg)
+        body_cell(ws, r, 7, int(d["Referrals"]), color=GREY, bold=True, bg=bg)
+        body_cell(ws, r, 8, f"=IFERROR(G{r}/$D{r},0)", "0%", color=GREY, bg=bg)
+        body_cell(ws, r, 9, int(d["4s"]), color=BLUE, bold=True, bg=bg)
+        body_cell(ws, r, 10, f"=IFERROR(I{r}/$D{r},0)", "0%", color=BLUE, bg=bg)
+        body_cell(ws, r, 11, int(d["6s"]), color=G, bold=True, bg=bg)
+        body_cell(ws, r, 12, f"=IFERROR(K{r}/$D{r},0)", "0%", color=G, bg=bg)
+        body_cell(ws, r, 13, int(d["Scoring"]), bold=True, bg=bg)
+        gap_cell(r, 14, d["Balls"], d["Balls target"])
+        body_cell(ws, r, 15, float(d["Runs"]), "#,##0", bold=True, bg=bg)
+        body_cell(ws, r, 16, float(d["Runs target (day)"]), "#,##0", color="5D6A62", bg=bg)
+        gap_cell(r, 17, d["Runs"], d["Runs target (day)"])
+        body_cell(ws, r, 18, d["Runs"] / max(d["Balls"], 1), "#,##0", bg=bg)
         sk = status_key(d)
         lab, fg, sbg = STF.get(sk, (STATUS_LABEL.get(sk, str(d["Status"])), "5D6A62", "EEF1EF"))
-        body_cell(ws, r, 15, lab, color=fg, bold=True, bg=sbg)
+        body_cell(ws, r, 19, lab, color=fg, bold=True, bg=sbg)
         ws.row_dimensions[r].height = 21
         r += 1
     last = r - 1
     if only:
         vals = None
     else:
-      vals = ["", "Clinic", "", int(clinic["Balls"]), int(clinic["Dots"]), int(clinic["Referrals"]), int(clinic["4s"]), int(clinic["6s"]),
+      vals = ["", "Clinic", "", int(clinic["Balls"]), int(clinic["Dots"]), f"=IFERROR(E{r}/$D{r},0)", int(clinic["Referrals"]),
+            f"=IFERROR(G{r}/$D{r},0)", int(clinic["4s"]), f"=IFERROR(I{r}/$D{r},0)", int(clinic["6s"]), f"=IFERROR(K{r}/$D{r},0)",
             int(clinic["Scoring"]), f'{gap(clinic["Balls"], clinic["Balls target"])[0]} ({int(clinic["Balls target"])})',
             float(clinic["Runs"]), float(clinic["Runs target (day)"]),
             gap(clinic["Runs"], clinic["Runs target (day)"])[0], clinic["Runs"] / max(clinic["Balls"], 1), ""]
-    fmts = {11: "#,##0", 12: "#,##0", 14: "#,##0"}
+    fmts = {6: "0%", 8: "0%", 10: "0%", 12: "0%", 15: "#,##0", 16: "#,##0", 18: "#,##0"}
     for i, v in enumerate(vals or [], 1):
         c = body_cell(ws, r, i, v, fmts.get(i), color="FFFFFF", bold=True, bg=G_DARK, align=left if i == 2 else center)
     ws.row_dimensions[r].height = 22
-    widths = [5, 26, 17, 9, 8, 10, 7, 7, 9, 19, 11, 11, 17, 12, 12]
+    widths = [5, 26, 17, 9, 7, 8, 9, 10, 6, 7, 6, 7, 9, 19, 11, 11, 17, 12, 12]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -1408,7 +1425,8 @@ def build_excel(only=None):
 
     # ---- By insurance
     wi = wb.create_sheet("By insurance"); wi.sheet_view.showGridLines = False
-    icols = ["Insurance", "Balls", "Dots", "Referral", "4s", "What the 4s were", "6s", "What the 6s were", "Runs", "Runs per ball"]
+    icols = ["Insurance", "Balls", "Dots", "Dots %", "Referral", "Referral %", "4s", "4s %", "What the 4s were", "6s", "6s %",
+             "What the 6s were", "Runs", "Runs per ball"]
     banner(wi, 1, "Each doctor by insurance", len(icols), sub)
     r = 4
     for doc in [str(d["Doctor"]).replace(" (FM)", "") for _, d in _rk.iterrows()]:
@@ -1435,16 +1453,20 @@ def build_excel(only=None):
             body_cell(wi, r, 1, ins, color=fc, bold=True, bg=bg, align=left)
             body_cell(wi, r, 2, len(ivs), color=fc, bold=tot, bg=bg)
             body_cell(wi, r, 3, sum(1 for v in ivs if v["ball"] == 0 and not v.get("ref")), color=fc, bold=tot, bg=bg)
-            body_cell(wi, r, 4, sum(1 for v in ivs if v.get("ref")), color=fc or GREY, bold=True, bg=bg)
-            body_cell(wi, r, 5, len(f4), color=fc or BLUE, bold=True, bg=bg)
-            body_cell(wi, r, 6, "" if tot else (agg_names(f4) or "–"), color=fc or "2546A0", bg=bg if tot else (BLUE_SOFT if f4 else bg), align=left)
-            body_cell(wi, r, 7, len(f6), color=fc or G, bold=True, bg=bg)
-            body_cell(wi, r, 8, "" if tot else ("  |  ".join(claim_lines(f6)) or "–"), color=fc or "17553A", bg=bg if tot else (G_SOFT if f6 else bg), align=left)
-            body_cell(wi, r, 9, runs, "#,##0", color=fc, bold=True, bg=bg)
-            body_cell(wi, r, 10, runs / max(len(ivs), 1), "#,##0", color=fc, bg=bg)
+            body_cell(wi, r, 4, f"=IFERROR(C{r}/$B{r},0)", "0%", color=fc or "5D6A62", bold=tot, bg=bg)
+            body_cell(wi, r, 5, sum(1 for v in ivs if v.get("ref")), color=fc or GREY, bold=True, bg=bg)
+            body_cell(wi, r, 6, f"=IFERROR(E{r}/$B{r},0)", "0%", color=fc or GREY, bold=tot, bg=bg)
+            body_cell(wi, r, 7, len(f4), color=fc or BLUE, bold=True, bg=bg)
+            body_cell(wi, r, 8, f"=IFERROR(G{r}/$B{r},0)", "0%", color=fc or BLUE, bold=tot, bg=bg)
+            body_cell(wi, r, 9, "" if tot else (agg_names(f4) or "–"), color=fc or "2546A0", bg=bg if tot else (BLUE_SOFT if f4 else bg), align=left)
+            body_cell(wi, r, 10, len(f6), color=fc or G, bold=True, bg=bg)
+            body_cell(wi, r, 11, f"=IFERROR(J{r}/$B{r},0)", "0%", color=fc or G, bold=tot, bg=bg)
+            body_cell(wi, r, 12, "" if tot else ("  |  ".join(claim_lines(f6)) or "–"), color=fc or "17553A", bg=bg if tot else (G_SOFT if f6 else bg), align=left)
+            body_cell(wi, r, 13, runs, "#,##0", color=fc, bold=True, bg=bg)
+            body_cell(wi, r, 14, runs / max(len(ivs), 1), "#,##0", color=fc, bg=bg)
             r += 1
         r += 1
-    for i, w in enumerate([18, 8, 8, 10, 6, 44, 6, 44, 10, 12], 1):
+    for i, w in enumerate([18, 8, 7, 8, 9, 10, 6, 7, 40, 6, 7, 40, 10, 12], 1):
         wi.column_dimensions[get_column_letter(i)].width = w
 
     # ---- Labs and procedures
